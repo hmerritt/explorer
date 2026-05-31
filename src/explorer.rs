@@ -21,6 +21,13 @@ const NAVBAR_HEIGHT: f32 = 44.0;
 const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
+const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
+const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
+const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
+const KB_BYTES: u64 = 1024;
+const MB_BYTES: u64 = KB_BYTES * 1024;
+const GB_BYTES: u64 = MB_BYTES * 1024;
+const TB_BYTES: u64 = GB_BYTES * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
@@ -206,6 +213,20 @@ impl ExplorerView {
         }
     }
 
+    fn should_show_empty_folder_message(&self) -> bool {
+        self.entries.is_empty() && self.read_error.is_none()
+    }
+
+    fn content_branch(&self) -> ExplorerContentBranch {
+        if self.read_error.is_some() {
+            ExplorerContentBranch::Error
+        } else if self.should_show_empty_folder_message() {
+            ExplorerContentBranch::Empty
+        } else {
+            ExplorerContentBranch::List
+        }
+    }
+
     fn render_navbar(&self, scale_factor: f32, cx: &mut Context<Self>) -> Div {
         let folder_name = self.current_folder_name();
 
@@ -333,12 +354,16 @@ impl Render for ExplorerView {
             .child(self.render_navbar(scale_factor, cx))
             .child(self.render_header())
             .child(
-                div()
-                    .id("explorer-scroll")
-                    .flex_1()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .child(
+                match self.content_branch() {
+                    ExplorerContentBranch::Error => div().child(
+                        div()
+                            .p_4()
+                            .text_size(px(14.0))
+                            .text_color(rgb(0x6f1d1d))
+                            .child(self.read_error.clone().unwrap_or_default()),
+                    ),
+                    ExplorerContentBranch::Empty => div().child(render_empty_folder_message()),
+                    ExplorerContentBranch::List => div().child(
                         uniform_list(
                             "explorer-entries",
                             self.entries.len(),
@@ -352,18 +377,21 @@ impl Render for ExplorerView {
                             }),
                         )
                         .h_full(),
-                    )
-                    .when_some(self.read_error.clone(), |this, error| {
-                        this.child(
-                            div()
-                                .p_4()
-                                .text_size(px(14.0))
-                                .text_color(rgb(0x6f1d1d))
-                                .child(error),
-                        )
-                    }),
+                    ),
+                }
+                .id("explorer-scroll")
+                .flex_1()
+                .w_full()
+                .overflow_y_scroll(),
             )
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExplorerContentBranch {
+    Error,
+    Empty,
+    List,
 }
 
 pub fn default_start_path() -> PathBuf {
@@ -473,8 +501,61 @@ fn format_size(size: Option<u64>) -> String {
         return String::new();
     };
 
-    let kb = if size == 0 { 0 } else { size.div_ceil(1024) };
-    format!("{kb} KB")
+    if size < KB_BYTES {
+        return format!("{} bytes", format_u64_with_commas(size));
+    }
+
+    let (value, precision, unit) = if size < MB_BYTES {
+        (size as f64 / KB_BYTES as f64, 1, "KB")
+    } else if size < GB_BYTES {
+        (size as f64 / MB_BYTES as f64, 2, "MB")
+    } else if size < TB_BYTES {
+        (size as f64 / GB_BYTES as f64, 2, "GB")
+    } else {
+        (size as f64 / TB_BYTES as f64, 2, "TB")
+    };
+
+    format!("{} {unit}", format_decimal_with_commas(value, precision))
+}
+
+fn format_decimal_with_commas(value: f64, precision: usize) -> String {
+    let formatted = format!("{value:.precision$}");
+    let Some((integer, fraction)) = formatted.split_once('.') else {
+        return format_integer_string_with_commas(&formatted);
+    };
+
+    format!(
+        "{}.{}",
+        format_integer_string_with_commas(integer),
+        fraction
+    )
+}
+
+fn format_u64_with_commas(value: u64) -> String {
+    format_integer_string_with_commas(&value.to_string())
+}
+
+fn format_integer_string_with_commas(value: &str) -> String {
+    let mut formatted = String::with_capacity(value.len() + value.len() / 3);
+
+    for (ix, ch) in value.chars().rev().enumerate() {
+        if ix > 0 && ix % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted.chars().rev().collect()
+}
+
+fn render_empty_folder_message() -> Div {
+    div()
+        .w_full()
+        .mt(px(EMPTY_FOLDER_TOP_MARGIN))
+        .text_center()
+        .text_size(px(EMPTY_FOLDER_TEXT_SIZE))
+        .text_color(rgb(0x9a9a9a))
+        .child(EMPTY_FOLDER_MESSAGE)
 }
 
 fn device_px(value: f32, scale_factor: f32) -> Pixels {
@@ -796,11 +877,34 @@ mod tests {
     }
 
     #[test]
-    fn files_render_size_in_kilobytes() {
-        assert_eq!(format_size(Some(0)), "0 KB");
-        assert_eq!(format_size(Some(1)), "1 KB");
-        assert_eq!(format_size(Some(1024)), "1 KB");
-        assert_eq!(format_size(Some(1025)), "2 KB");
+    fn files_below_kilobytes_render_as_bytes() {
+        assert_eq!(format_size(Some(0)), "0 bytes");
+        assert_eq!(format_size(Some(350)), "350 bytes");
+        assert_eq!(format_size(Some(1023)), "1,023 bytes");
+    }
+
+    #[test]
+    fn kilobytes_render_with_one_decimal_place() {
+        assert_eq!(format_size(Some(KB_BYTES)), "1.0 KB");
+        assert_eq!(format_size(Some(KB_BYTES + 512)), "1.5 KB");
+        assert_eq!(format_size(Some(MB_BYTES - 1)), "1,024.0 KB");
+    }
+
+    #[test]
+    fn megabytes_gigabytes_and_terabytes_render_with_two_decimal_places() {
+        assert_eq!(format_size(Some(MB_BYTES)), "1.00 MB");
+        assert_eq!(format_size(Some(MB_BYTES + 512 * KB_BYTES)), "1.50 MB");
+        assert_eq!(format_size(Some(GB_BYTES)), "1.00 GB");
+        assert_eq!(format_size(Some(GB_BYTES + 512 * MB_BYTES)), "1.50 GB");
+        assert_eq!(format_size(Some(TB_BYTES)), "1.00 TB");
+        assert_eq!(format_size(Some(TB_BYTES + 512 * GB_BYTES)), "1.50 TB");
+    }
+
+    #[test]
+    fn large_file_sizes_include_commas_and_stay_capped_at_terabytes() {
+        assert_eq!(format_size(Some(1024 * MB_BYTES)), "1.00 GB");
+        assert_eq!(format_size(Some(1024 * GB_BYTES)), "1.00 TB");
+        assert_eq!(format_size(Some(1024 * TB_BYTES)), "1,024.00 TB");
     }
 
     #[test]
@@ -828,6 +932,55 @@ mod tests {
     fn nav_icon_size_converts_from_physical_pixels() {
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
+    }
+
+    #[test]
+    fn empty_directory_without_error_shows_empty_folder_message() {
+        let mut view = ExplorerView::new(PathBuf::from("empty"));
+        view.entries.clear();
+        view.read_error = None;
+
+        assert!(view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn read_error_suppresses_empty_folder_message() {
+        let mut view = ExplorerView::new(PathBuf::from("missing"));
+        view.entries.clear();
+        view.read_error = Some("missing".to_owned());
+
+        assert!(!view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn non_empty_directory_suppresses_empty_folder_message() {
+        let mut view = ExplorerView::new(PathBuf::from("non-empty"));
+        view.entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        view.read_error = None;
+
+        assert!(!view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn content_branch_prioritizes_error_empty_then_list() {
+        let mut view = ExplorerView::new(PathBuf::from("branch"));
+
+        view.entries.clear();
+        view.read_error = Some("error".to_owned());
+        assert_eq!(view.content_branch(), ExplorerContentBranch::Error);
+
+        view.read_error = None;
+        assert_eq!(view.content_branch(), ExplorerContentBranch::Empty);
+
+        view.entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+    }
+
+    #[test]
+    fn empty_folder_message_uses_compact_text() {
+        assert_eq!(EMPTY_FOLDER_TEXT_SIZE, 12.0);
+        assert_eq!(EMPTY_FOLDER_TOP_MARGIN, 20.0);
+        assert_eq!(EMPTY_FOLDER_MESSAGE, "This folder is empty.");
     }
 
     #[test]
