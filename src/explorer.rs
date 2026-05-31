@@ -9,8 +9,8 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, IntoElement, Pixels, Render, SharedString, Styled,
-    Window, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, FontFallbacks, IntoElement, Pixels, Render,
+    SharedString, Styled, Window, div, font, prelude::*, px, rgb, uniform_list,
 };
 
 const COLUMN_NAME_WIDTH: f32 = 440.0;
@@ -82,6 +82,25 @@ pub struct ExplorerView {
 enum HistoryMode {
     Record,
     Preserve,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavIcon {
+    Back,
+    Forward,
+    Up,
+    Refresh,
+}
+
+impl NavIcon {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Back => "\u{E72B}",
+            Self::Forward => "\u{E72A}",
+            Self::Up => "\u{E74A}",
+            Self::Refresh => "\u{E72C}",
+        }
+    }
 }
 
 impl ExplorerView {
@@ -200,7 +219,7 @@ impl ExplorerView {
             .gap(px(10.0))
             .child(nav_button(
                 "back",
-                "←",
+                NavIcon::Back,
                 self.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_back();
@@ -209,7 +228,7 @@ impl ExplorerView {
             ))
             .child(nav_button(
                 "forward",
-                "→",
+                NavIcon::Forward,
                 self.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_forward();
@@ -218,7 +237,7 @@ impl ExplorerView {
             ))
             .child(nav_button(
                 "up",
-                "↑",
+                NavIcon::Up,
                 self.can_go_up(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_up();
@@ -227,7 +246,7 @@ impl ExplorerView {
             ))
             .child(nav_button(
                 "refresh",
-                "⟳",
+                NavIcon::Refresh,
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reload();
@@ -465,7 +484,7 @@ fn device_px_value(value: f32, scale_factor: f32) -> f32 {
 
 fn nav_button(
     id: &'static str,
-    label: &'static str,
+    icon: NavIcon,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -477,19 +496,28 @@ fn nav_button(
         .w(px(34.0))
         .h(px(34.0))
         .rounded(px(4.0))
-        .text_size(px(22.0))
+        .font(nav_icon_font())
+        .text_size(px(16.0))
         .text_color(if enabled {
-            rgb(0x202020)
+            rgb(0x1f1f1f)
         } else {
-            rgb(0xa6a6a6)
+            rgb(0x9a9a9a)
         })
         .cursor_default()
         .when(enabled, |this| {
             this.hover(|style| style.bg(rgb(0xe8e8e8)))
                 .on_click(on_click)
         })
-        .child(label)
+        .child(icon.glyph())
         .into_any_element()
+}
+
+fn nav_icon_font() -> gpui::Font {
+    let mut font = font("Segoe Fluent Icons");
+    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        "Segoe MDL2 Assets".to_owned(),
+    ]));
+    font
 }
 
 fn directory_bar(folder_name: &str) -> Div {
@@ -778,6 +806,14 @@ mod tests {
     fn device_pixel_conversion_handles_invalid_scale() {
         assert_eq!(device_px_value(22.0, 0.0), 22.0);
         assert_eq!(device_px_value(22.0, -1.0), 22.0);
+    }
+
+    #[test]
+    fn nav_icons_use_windows_explorer_glyphs() {
+        assert_eq!(NavIcon::Back.glyph(), "\u{E72B}");
+        assert_eq!(NavIcon::Forward.glyph(), "\u{E72A}");
+        assert_eq!(NavIcon::Up.glyph(), "\u{E74A}");
+        assert_eq!(NavIcon::Refresh.glyph(), "\u{E72C}");
     }
 
     #[test]
