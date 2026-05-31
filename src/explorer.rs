@@ -13,8 +13,8 @@ use gpui::{
     SharedString, Styled, Window, div, font, prelude::*, px, rgb, uniform_list,
 };
 
-const COLUMN_NAME_WIDTH: f32 = 440.0;
-const COLUMN_DATE_WIDTH: f32 = 244.0;
+const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
+const COLUMN_DATE_WIDTH: f32 = 180.0;
 const COLUMN_TYPE_WIDTH: f32 = 202.0;
 const COLUMN_SIZE_WIDTH: f32 = 124.0;
 const NAVBAR_HEIGHT: f32 = 52.0;
@@ -312,7 +312,7 @@ impl ExplorerView {
             .border_color(rgb(0xf2f2f2))
             .text_size(px(12.0))
             .text_color(rgb(0x1f4e79))
-            .child(header_cell("Name", COLUMN_NAME_WIDTH, true))
+            .child(name_header_cell())
             .child(header_cell("Date modified", COLUMN_DATE_WIDTH, false))
             .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
             .child(header_cell("Size", COLUMN_SIZE_WIDTH, false))
@@ -691,13 +691,29 @@ fn header_cell(label: &'static str, width: f32, first: bool) -> Div {
         .child(label)
 }
 
+fn name_header_cell() -> Div {
+    div()
+        .relative()
+        .flex()
+        .items_start()
+        .h_full()
+        .flex_1()
+        .min_w(px(COLUMN_NAME_MIN_WIDTH))
+        .overflow_hidden()
+        .pl(px(36.0))
+        .pt(px(8.0))
+        .border_r_1()
+        .border_color(rgb(0xe7e7e7))
+        .child("Name")
+}
+
 fn name_cell(entry: &FileEntry, scale_factor: f32) -> Div {
     div()
         .flex()
         .items_center()
         .h_full()
-        .w(px(COLUMN_NAME_WIDTH))
-        .flex_shrink_0()
+        .flex_1()
+        .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(16.0))
         .child(if entry.is_dir {
@@ -707,6 +723,7 @@ fn name_cell(entry: &FileEntry, scale_factor: f32) -> Div {
         })
         .child(
             div()
+                .flex_1()
                 .ml(device_px(8.0, scale_factor))
                 .truncate()
                 .text_size(px(12.0))
