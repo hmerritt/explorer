@@ -27,7 +27,12 @@ jobs:
                       binary: universal-explorer.exe
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
+
+            - name: Install system dependencies
+              run: |
+                  sudo apt update
+                  sudo apt install -y pkg-config libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
 
             - name: Validate tag format
               id: tag_check
