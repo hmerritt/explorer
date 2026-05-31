@@ -6,28 +6,19 @@
 
 Universal File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.rs/).
 
-- [Features](#features-)
-- [Development](#development-)
-- [Download](#download-)
+## Development 🛠️
 
-## Features ⚡
+This repository is currently a Rust/GPUI application skeleton with a stub window. The real file explorer UI and filesystem browsing behavior are intentionally not implemented yet.
 
-- [x] GPU accelerated file explorer
-- [ ] Tabs
-- [ ] Copy/Cut/Paste
-- [ ] Archive compress/decompress support
-
-## Download 💾
-
-#### [➡️ Manually Download The Latest Release Here](https://github.com/hmerritt/universal-explorer/releases/latest)
-
-Or via one of the supported package managers:
-
-#### ➡️ macOS / Linux via [Homebrew](https://brew.sh/)
+This app currently targets Windows, macOS, and Linux. Other platforms compile a small fallback binary that prints a platform support message.
 
 ```sh
-brew install hmerritt/tap/universal-explorer
+cargo check
+cargo test
+cargo run
 ```
+
+The canonical app icon source is `assets/icon.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/icon.ico` is a derived Windows executable resource.
 
 ---
 
