@@ -3,7 +3,7 @@ use std::{
     ffi::OsStr,
     fs,
     ops::Range,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::SystemTime,
 };
 
@@ -11,8 +11,8 @@ use chrono::{DateTime, Local};
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FontFallbacks, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Styled, UniformListScrollHandle, Window, canvas, div, font, point, prelude::*, px, rgb,
-    uniform_list,
+    Styled, TextRun, UniformListScrollHandle, Window, canvas, div, font, point, prelude::*, px,
+    rgb, uniform_list,
 };
 
 const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
@@ -25,8 +25,15 @@ const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
 const NAV_ICON_DISABLED_COLOR: u32 = 0x9a9a9a;
 const NAV_BUTTON_HOVER_BG: u32 = 0xe8e8e8;
 const NAV_BUTTON_ACTIVE_OPACITY: f32 = 0.7;
-const FILEPATH_PC_ICON_FONT: &str = "Segoe MDL2 Assets";
-const FILEPATH_PC_ICON_FALLBACK_FONT: &str = "Segoe Fluent Icons";
+const NAVBAR_HORIZONTAL_PADDING: f32 = 10.0;
+const NAVBAR_ITEM_GAP: f32 = 10.0;
+const NAV_BUTTON_SIZE: f32 = 34.0;
+const DIRECTORY_BAR_HEIGHT: f32 = 34.0;
+const DIRECTORY_BAR_RADIUS: f32 = 6.0;
+const DIRECTORY_BAR_HORIZONTAL_PADDING: f32 = 16.0;
+const DIRECTORY_BAR_TEXT_SIZE: f32 = 15.0;
+const DIRECTORY_BAR_SEPARATOR: &str = " / ";
+const DIRECTORY_BAR_ELLIPSIS: &str = "...";
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
@@ -216,19 +223,6 @@ impl NavIcon {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FilepathIcon {
-    Pc,
-}
-
-impl FilepathIcon {
-    fn glyph(self) -> &'static str {
-        match self {
-            Self::Pc => "\u{E977}",
-        }
-    }
-}
-
 impl ExplorerView {
     pub fn new(initial_path: PathBuf) -> Self {
         let mut view = Self {
@@ -321,15 +315,6 @@ impl ExplorerView {
 
     fn can_go_up(&self) -> bool {
         self.path.parent().is_some()
-    }
-
-    fn current_folder_name(&self) -> String {
-        self.path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .map(str::to_owned)
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.path.display().to_string())
     }
 
     fn handle_entry_click(&mut self, entry: &FileEntry, click_count: usize) -> Option<EntryAction> {
@@ -425,8 +410,12 @@ impl ExplorerView {
         }
     }
 
-    fn render_navbar(&self, scale_factor: f32, cx: &mut Context<Self>) -> Div {
-        let folder_name = self.current_folder_name();
+    fn render_navbar(&self, window: &Window, scale_factor: f32, cx: &mut Context<Self>) -> Div {
+        let breadcrumb = visible_breadcrumb_for_path(
+            &self.path,
+            directory_bar_available_width(f32::from(window.bounds().size.width)),
+            window,
+        );
 
         div()
             .flex()
@@ -435,8 +424,8 @@ impl ExplorerView {
             .h(px(NAVBAR_HEIGHT))
             .w_full()
             .bg(rgb(0xf3f3f3))
-            .px(px(10.0))
-            .gap(px(10.0))
+            .px(px(NAVBAR_HORIZONTAL_PADDING))
+            .gap(px(NAVBAR_ITEM_GAP))
             .child(nav_button(
                 "back",
                 NavIcon::Back,
@@ -477,7 +466,7 @@ impl ExplorerView {
                     cx.notify();
                 }),
             ))
-            .child(directory_bar(&folder_name))
+            .child(directory_bar(breadcrumb))
     }
 
     fn render_header(&self) -> Div {
@@ -706,7 +695,7 @@ impl Render for ExplorerView {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
-            .child(self.render_navbar(scale_factor, cx))
+            .child(self.render_navbar(window, scale_factor, cx))
             .child(self.render_header())
             .when_some(self.open_error.clone(), |this, error| {
                 this.child(render_open_error(&error))
@@ -759,6 +748,156 @@ pub fn default_start_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VisibleBreadcrumb {
+    show_ellipsis: bool,
+    segments: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BreadcrumbVisibility {
+    start_index: usize,
+    show_ellipsis: bool,
+}
+
+fn path_breadcrumb_segments(path: &Path) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut saw_prefix = false;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                saw_prefix = true;
+                let prefix = prefix.as_os_str().to_string_lossy().into_owned();
+                if !prefix.is_empty() {
+                    segments.push(prefix);
+                }
+            }
+            Component::RootDir => {
+                if !saw_prefix {
+                    segments.push("/".to_owned());
+                }
+            }
+            Component::CurDir => segments.push(".".to_owned()),
+            Component::ParentDir => segments.push("..".to_owned()),
+            Component::Normal(component) => {
+                segments.push(component.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    if segments.is_empty() {
+        let fallback = path.display().to_string();
+        segments.push(if fallback.is_empty() {
+            ".".to_owned()
+        } else {
+            fallback
+        });
+    }
+
+    segments
+}
+
+fn directory_bar_available_width(window_width: f32) -> f32 {
+    let navbar_content_width =
+        window_width - (NAVBAR_HORIZONTAL_PADDING * 2.0) - (NAV_BUTTON_SIZE * 4.0);
+    let directory_bar_width = navbar_content_width - (NAVBAR_ITEM_GAP * 4.0);
+    (directory_bar_width - (DIRECTORY_BAR_HORIZONTAL_PADDING * 2.0)).max(0.0)
+}
+
+fn visible_breadcrumb_for_path(
+    path: &Path,
+    available_width: f32,
+    window: &Window,
+) -> VisibleBreadcrumb {
+    let segments = path_breadcrumb_segments(path);
+    let segment_widths = segments
+        .iter()
+        .map(|segment| measure_directory_bar_text(segment, window))
+        .collect::<Vec<_>>();
+    let separator_width = measure_directory_bar_text(DIRECTORY_BAR_SEPARATOR, window);
+    let ellipsis_width = measure_directory_bar_text(DIRECTORY_BAR_ELLIPSIS, window);
+    let visibility = choose_visible_breadcrumb(
+        &segment_widths,
+        separator_width,
+        ellipsis_width,
+        available_width,
+    );
+
+    VisibleBreadcrumb {
+        show_ellipsis: visibility.show_ellipsis,
+        segments: segments[visibility.start_index..].to_vec(),
+    }
+}
+
+fn measure_directory_bar_text(text: &str, window: &Window) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+
+    let run = TextRun {
+        len: text.len(),
+        font: font(".SystemUIFont"),
+        color: rgb(0x1f1f1f).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    f32::from(
+        window
+            .text_system()
+            .layout_line(text, px(DIRECTORY_BAR_TEXT_SIZE), &[run], None)
+            .width,
+    )
+}
+
+fn choose_visible_breadcrumb(
+    segment_widths: &[f32],
+    separator_width: f32,
+    ellipsis_width: f32,
+    available_width: f32,
+) -> BreadcrumbVisibility {
+    if segment_widths.is_empty() {
+        return BreadcrumbVisibility {
+            start_index: 0,
+            show_ellipsis: false,
+        };
+    }
+
+    if breadcrumb_width(segment_widths, separator_width) <= available_width {
+        return BreadcrumbVisibility {
+            start_index: 0,
+            show_ellipsis: false,
+        };
+    }
+
+    for start_index in 1..segment_widths.len() {
+        let width = ellipsis_width
+            + separator_width
+            + breadcrumb_width(&segment_widths[start_index..], separator_width);
+        if width <= available_width {
+            return BreadcrumbVisibility {
+                start_index,
+                show_ellipsis: true,
+            };
+        }
+    }
+
+    BreadcrumbVisibility {
+        start_index: segment_widths.len() - 1,
+        show_ellipsis: segment_widths.len() > 1,
+    }
+}
+
+fn breadcrumb_width(segment_widths: &[f32], separator_width: f32) -> f32 {
+    if segment_widths.is_empty() {
+        return 0.0;
+    }
+
+    segment_widths.iter().sum::<f32>() + separator_width * (segment_widths.len() - 1) as f32
 }
 
 fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
@@ -968,8 +1107,8 @@ fn nav_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(34.0))
-        .h(px(34.0))
+        .w(px(NAV_BUTTON_SIZE))
+        .h(px(NAV_BUTTON_SIZE))
         .rounded(px(4.0))
         .cursor_default()
         .when(enabled, |this| {
@@ -1024,49 +1163,75 @@ fn nav_icon_font() -> gpui::Font {
     font
 }
 
-fn filepath_icon_font() -> gpui::Font {
-    let mut font = font(FILEPATH_PC_ICON_FONT);
-    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
-        FILEPATH_PC_ICON_FALLBACK_FONT.to_owned(),
-    ]));
-    font
-}
-
-fn filepath_pc_icon() -> Div {
-    div()
-        .font(filepath_icon_font())
-        .text_size(px(18.0))
-        .text_color(rgb(0x5b5b5b))
-        .child(FilepathIcon::Pc.glyph())
-}
-
-fn directory_bar(folder_name: &str) -> Div {
+fn directory_bar(breadcrumb: VisibleBreadcrumb) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .h(px(34.0))
+        .h(px(DIRECTORY_BAR_HEIGHT))
         .flex_1()
-        .rounded(px(6.0))
+        .overflow_hidden()
+        .rounded(px(DIRECTORY_BAR_RADIUS))
         .bg(rgb(0xffffff))
-        .px(px(16.0))
-        .gap(px(14.0))
-        .text_size(px(15.0))
+        .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
+        .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
-        .child(filepath_pc_icon())
-        .child(
-            div()
-                .text_size(px(20.0))
-                .text_color(rgb(0x303030))
-                .child("›"),
-        )
-        .child(SharedString::from(folder_name.to_owned()))
-        .child(
-            div()
-                .text_size(px(20.0))
-                .text_color(rgb(0x303030))
-                .child("›"),
-        )
+        .children(directory_bar_children(breadcrumb))
+}
+
+fn directory_bar_children(breadcrumb: VisibleBreadcrumb) -> Vec<AnyElement> {
+    let mut children = Vec::new();
+
+    if breadcrumb.show_ellipsis {
+        children.push(directory_bar_fixed_label(DIRECTORY_BAR_ELLIPSIS).into_any_element());
+        if !breadcrumb.segments.is_empty() {
+            children.push(directory_bar_separator().into_any_element());
+        }
+    }
+
+    let segment_count = breadcrumb.segments.len();
+    for (index, segment) in breadcrumb.segments.into_iter().enumerate() {
+        let is_last = index + 1 == segment_count;
+        children.push(directory_bar_label(segment, is_last).into_any_element());
+        if !is_last {
+            children.push(directory_bar_separator().into_any_element());
+        }
+    }
+
+    children
+}
+
+fn directory_bar_fixed_label(label: &'static str) -> Div {
+    div()
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
+        .text_color(rgb(0x1f1f1f))
+        .child(label)
+}
+
+fn directory_bar_label(label: String, is_last: bool) -> Div {
+    let label = div()
+        .min_w(px(0.0))
+        .whitespace_nowrap()
+        .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
+        .text_color(rgb(0x1f1f1f))
+        .child(SharedString::from(label));
+
+    if is_last {
+        label.flex_1().truncate()
+    } else {
+        label.flex_shrink_0()
+    }
+}
+
+fn directory_bar_separator() -> Div {
+    div()
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
+        .text_color(rgb(0x707070))
+        .child(DIRECTORY_BAR_SEPARATOR)
 }
 
 fn header_cell(label: &'static str, width: f32, first: bool) -> Div {
@@ -1422,15 +1587,68 @@ mod tests {
     }
 
     #[test]
-    fn filepath_pc_icon_uses_windows_glyph_and_font() {
-        assert_eq!(FilepathIcon::Pc.glyph(), "\u{E977}");
-        assert_eq!(FILEPATH_PC_ICON_FONT, "Segoe MDL2 Assets");
-    }
-
-    #[test]
     fn nav_icon_size_converts_from_physical_pixels() {
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_paths_render_drive_as_first_breadcrumb_segment() {
+        assert_eq!(
+            path_breadcrumb_segments(Path::new(r"C:\Users\Ada\Documents")),
+            vec!["C:", "Users", "Ada", "Documents"]
+        );
+    }
+
+    #[test]
+    fn absolute_paths_render_root_as_breadcrumb_segment() {
+        assert_eq!(
+            path_breadcrumb_segments(Path::new("/usr/local/bin")),
+            vec!["/", "usr", "local", "bin"]
+        );
+    }
+
+    #[test]
+    fn relative_paths_keep_relative_breadcrumb_components() {
+        assert_eq!(
+            path_breadcrumb_segments(Path::new("../project/src")),
+            vec!["..", "project", "src"]
+        );
+        assert_eq!(path_breadcrumb_segments(Path::new(".")), vec!["."]);
+    }
+
+    #[test]
+    fn breadcrumb_visibility_keeps_full_path_when_it_fits() {
+        assert_eq!(
+            choose_visible_breadcrumb(&[10.0, 10.0, 10.0], 2.0, 3.0, 34.0),
+            BreadcrumbVisibility {
+                start_index: 0,
+                show_ellipsis: false
+            }
+        );
+    }
+
+    #[test]
+    fn breadcrumb_visibility_removes_leading_items_until_tail_fits() {
+        assert_eq!(
+            choose_visible_breadcrumb(&[20.0, 20.0, 20.0, 20.0], 2.0, 3.0, 47.0),
+            BreadcrumbVisibility {
+                start_index: 2,
+                show_ellipsis: true
+            }
+        );
+    }
+
+    #[test]
+    fn breadcrumb_visibility_preserves_final_segment_when_nothing_fits() {
+        assert_eq!(
+            choose_visible_breadcrumb(&[50.0, 50.0, 50.0], 5.0, 10.0, 1.0),
+            BreadcrumbVisibility {
+                start_index: 2,
+                show_ellipsis: true
+            }
+        );
     }
 
     #[test]
