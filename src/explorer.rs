@@ -19,6 +19,12 @@ const COLUMN_TYPE_WIDTH: f32 = 202.0;
 const COLUMN_SIZE_WIDTH: f32 = 124.0;
 const NAVBAR_HEIGHT: f32 = 44.0;
 const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
+const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
+const NAV_ICON_DISABLED_COLOR: u32 = 0x9a9a9a;
+const NAV_BUTTON_HOVER_BG: u32 = 0xe8e8e8;
+const NAV_BUTTON_ACTIVE_OPACITY: f32 = 0.7;
+const FILEPATH_PC_ICON_FONT: &str = "Segoe MDL2 Assets";
+const FILEPATH_PC_ICON_FALLBACK_FONT: &str = "Segoe Fluent Icons";
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
@@ -107,6 +113,19 @@ impl NavIcon {
             Self::Forward => "\u{E72A}",
             Self::Up => "\u{E74A}",
             Self::Refresh => "\u{E72C}",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FilepathIcon {
+    Pc,
+}
+
+impl FilepathIcon {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Pc => "\u{E977}",
         }
     }
 }
@@ -585,19 +604,23 @@ fn nav_button(
         .w(px(34.0))
         .h(px(34.0))
         .rounded(px(4.0))
-        .font(nav_icon_font())
-        .text_size(device_px(NAV_ICON_SIZE_PHYSICAL, scale_factor))
-        .text_color(if enabled {
-            rgb(0x1f1f1f)
-        } else {
-            rgb(0x9a9a9a)
-        })
         .cursor_default()
         .when(enabled, |this| {
-            this.hover(|style| style.bg(rgb(0xe8e8e8)))
+            this.hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+                .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
                 .on_click(on_click)
         })
-        .child(icon.glyph())
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(device_px(NAV_ICON_SIZE_PHYSICAL, scale_factor))
+                .text_color(if enabled {
+                    rgb(NAV_ICON_ENABLED_COLOR)
+                } else {
+                    rgb(NAV_ICON_DISABLED_COLOR)
+                })
+                .child(icon.glyph()),
+        )
         .into_any_element()
 }
 
@@ -607,6 +630,22 @@ fn nav_icon_font() -> gpui::Font {
         "Segoe MDL2 Assets".to_owned(),
     ]));
     font
+}
+
+fn filepath_icon_font() -> gpui::Font {
+    let mut font = font(FILEPATH_PC_ICON_FONT);
+    font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+        FILEPATH_PC_ICON_FALLBACK_FONT.to_owned(),
+    ]));
+    font
+}
+
+fn filepath_pc_icon() -> Div {
+    div()
+        .font(filepath_icon_font())
+        .text_size(px(18.0))
+        .text_color(rgb(0x5b5b5b))
+        .child(FilepathIcon::Pc.glyph())
 }
 
 fn directory_bar(folder_name: &str) -> Div {
@@ -622,12 +661,7 @@ fn directory_bar(folder_name: &str) -> Div {
         .gap(px(14.0))
         .text_size(px(15.0))
         .text_color(rgb(0x1f1f1f))
-        .child(
-            div()
-                .text_size(px(18.0))
-                .text_color(rgb(0x5b5b5b))
-                .child("▭"),
-        )
+        .child(filepath_pc_icon())
         .child(
             div()
                 .text_size(px(20.0))
@@ -929,9 +963,21 @@ mod tests {
     }
 
     #[test]
+    fn filepath_pc_icon_uses_windows_glyph_and_font() {
+        assert_eq!(FilepathIcon::Pc.glyph(), "\u{E977}");
+        assert_eq!(FILEPATH_PC_ICON_FONT, "Segoe MDL2 Assets");
+    }
+
+    #[test]
     fn nav_icon_size_converts_from_physical_pixels() {
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
+    }
+
+    #[test]
+    fn nav_button_active_opacity_dims_button() {
+        assert_eq!(NAV_BUTTON_ACTIVE_OPACITY, 0.7);
+        assert!(NAV_BUTTON_ACTIVE_OPACITY < 1.0);
     }
 
     #[test]
