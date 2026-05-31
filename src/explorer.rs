@@ -18,6 +18,7 @@ const COLUMN_DATE_WIDTH: f32 = 244.0;
 const COLUMN_TYPE_WIDTH: f32 = 202.0;
 const COLUMN_SIZE_WIDTH: f32 = 124.0;
 const NAVBAR_HEIGHT: f32 = 44.0;
+const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 
@@ -205,7 +206,7 @@ impl ExplorerView {
         }
     }
 
-    fn render_navbar(&self, cx: &mut Context<Self>) -> Div {
+    fn render_navbar(&self, scale_factor: f32, cx: &mut Context<Self>) -> Div {
         let folder_name = self.current_folder_name();
 
         div()
@@ -221,6 +222,7 @@ impl ExplorerView {
                 "back",
                 NavIcon::Back,
                 self.can_go_back(),
+                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_back();
                     cx.notify();
@@ -230,6 +232,7 @@ impl ExplorerView {
                 "forward",
                 NavIcon::Forward,
                 self.can_go_forward(),
+                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_forward();
                     cx.notify();
@@ -239,6 +242,7 @@ impl ExplorerView {
                 "up",
                 NavIcon::Up,
                 self.can_go_up(),
+                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_up();
                     cx.notify();
@@ -248,6 +252,7 @@ impl ExplorerView {
                 "refresh",
                 NavIcon::Refresh,
                 true,
+                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reload();
                     cx.notify();
@@ -315,7 +320,9 @@ impl ExplorerView {
 }
 
 impl Render for ExplorerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale_factor = window.scale_factor();
+
         div()
             .size_full()
             .flex()
@@ -323,7 +330,7 @@ impl Render for ExplorerView {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
-            .child(self.render_navbar(cx))
+            .child(self.render_navbar(scale_factor, cx))
             .child(self.render_header())
             .child(
                 div()
@@ -486,6 +493,7 @@ fn nav_button(
     id: &'static str,
     icon: NavIcon,
     enabled: bool,
+    scale_factor: f32,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
@@ -497,7 +505,7 @@ fn nav_button(
         .h(px(34.0))
         .rounded(px(4.0))
         .font(nav_icon_font())
-        .text_size(px(16.0))
+        .text_size(device_px(NAV_ICON_SIZE_PHYSICAL, scale_factor))
         .text_color(if enabled {
             rgb(0x1f1f1f)
         } else {
@@ -814,6 +822,12 @@ mod tests {
         assert_eq!(NavIcon::Forward.glyph(), "\u{E72A}");
         assert_eq!(NavIcon::Up.glyph(), "\u{E74A}");
         assert_eq!(NavIcon::Refresh.glyph(), "\u{E72C}");
+    }
+
+    #[test]
+    fn nav_icon_size_converts_from_physical_pixels() {
+        assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
+        assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
     }
 
     #[test]
