@@ -17,7 +17,7 @@ const COLUMN_NAME_WIDTH: f32 = 440.0;
 const COLUMN_DATE_WIDTH: f32 = 244.0;
 const COLUMN_TYPE_WIDTH: f32 = 202.0;
 const COLUMN_SIZE_WIDTH: f32 = 124.0;
-const NAVBAR_HEIGHT: f32 = 44.0;
+const NAVBAR_HEIGHT: f32 = 52.0;
 const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
 const NAV_ICON_DISABLED_COLOR: u32 = 0x9a9a9a;
@@ -256,7 +256,7 @@ impl ExplorerView {
             .h(px(NAVBAR_HEIGHT))
             .w_full()
             .bg(rgb(0xf3f3f3))
-            .px(px(14.0))
+            .px(px(10.0))
             .gap(px(10.0))
             .child(nav_button(
                 "back",
@@ -299,7 +299,6 @@ impl ExplorerView {
                 }),
             ))
             .child(directory_bar(&folder_name))
-            .child(search_bar(&folder_name))
     }
 
     fn render_header(&self) -> Div {
@@ -674,29 +673,6 @@ fn directory_bar(folder_name: &str) -> Div {
                 .text_size(px(20.0))
                 .text_color(rgb(0x303030))
                 .child("›"),
-        )
-}
-
-fn search_bar(folder_name: &str) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .h(px(34.0))
-        .w(px(330.0))
-        .flex_shrink_0()
-        .rounded(px(6.0))
-        .bg(rgb(0xffffff))
-        .px(px(14.0))
-        .text_size(px(15.0))
-        .text_color(rgb(0x686868))
-        .child(SharedString::from(format!("Search {folder_name}")))
-        .child(
-            div()
-                .text_size(px(18.0))
-                .text_color(rgb(0x202020))
-                .child("⌕"),
         )
 }
 
