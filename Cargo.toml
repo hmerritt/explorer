@@ -2,6 +2,7 @@
 name = "universal-explorer"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 description = "A GPU-accelerated universal file explorer built with GPUI."
 homepage = "https://github.com/hmerritt/universal-explorer"
 repository = "https://github.com/hmerritt/universal-explorer"
@@ -12,6 +13,8 @@ name = "Universal Explorer"
 identifier = "com.hmerritt.universal-explorer"
 icon = ["assets/icon.png"]
 
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 gpui = "0.2.2"
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3.0.9"
