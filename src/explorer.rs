@@ -9,8 +9,10 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FontFallbacks, IntoElement, Pixels, Render,
-    SharedString, Styled, Window, div, font, prelude::*, px, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, FontFallbacks, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    Styled, UniformListScrollHandle, Window, canvas, div, font, point, prelude::*, px, rgb,
+    uniform_list,
 };
 
 const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
@@ -32,6 +34,17 @@ const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
 const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
 const OPEN_ERROR_VERTICAL_PADDING: f32 = 8.0;
 const OPEN_ERROR_HORIZONTAL_PADDING: f32 = 16.0;
+const SCROLLBAR_GUTTER_WIDTH: f32 = 18.0;
+const SCROLLBAR_THUMB_WIDTH: f32 = 4.0;
+const SCROLLBAR_THUMB_HOVER_WIDTH: f32 = 6.0;
+const SCROLLBAR_ARROW_HEIGHT: f32 = 16.0;
+const SCROLLBAR_MIN_THUMB_HEIGHT: f32 = 32.0;
+const SCROLLBAR_TRACK_BG: u32 = 0xf8f8f8;
+const SCROLLBAR_THUMB_BG: u32 = 0x8a8a8a;
+const SCROLLBAR_THUMB_HOVER_BG: u32 = 0x707070;
+const SCROLLBAR_THUMB_ACTIVE_BG: u32 = 0x5f5f5f;
+const SCROLLBAR_ARROW_COLOR: u32 = 0x606060;
+const SCROLLBAR_ARROW_HOVER_BG: u32 = 0xe8e8e8;
 const KB_BYTES: u64 = 1024;
 const MB_BYTES: u64 = KB_BYTES * 1024;
 const GB_BYTES: u64 = MB_BYTES * 1024;
@@ -93,6 +106,9 @@ pub struct ExplorerView {
     open_error: Option<String>,
     back_stack: Vec<PathBuf>,
     forward_stack: Vec<PathBuf>,
+    scroll_handle: UniformListScrollHandle,
+    scrollbar_hovered: bool,
+    scrollbar_drag: Option<ScrollbarDrag>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +120,81 @@ enum HistoryMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EntryAction {
     OpenFile(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarDrag {
+    pointer_offset_from_thumb_top: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScrollbarMetrics {
+    viewport_height: f32,
+    content_height: f32,
+    scroll_top: f32,
+    scroll_max: f32,
+    track_top: f32,
+    track_height: f32,
+    thumb_top: f32,
+    thumb_height: f32,
+}
+
+impl ScrollbarMetrics {
+    fn new(viewport_height: f32, content_height: f32, scroll_top: f32) -> Option<Self> {
+        if viewport_height <= 0.0 || content_height <= viewport_height {
+            return None;
+        }
+
+        let track_top = SCROLLBAR_ARROW_HEIGHT;
+        let track_height = viewport_height - (SCROLLBAR_ARROW_HEIGHT * 2.0);
+        if track_height <= 0.0 {
+            return None;
+        }
+
+        let scroll_max = content_height - viewport_height;
+        let scroll_top = scroll_top.clamp(0.0, scroll_max);
+        let thumb_height = (track_height * viewport_height / content_height)
+            .clamp(SCROLLBAR_MIN_THUMB_HEIGHT.min(track_height), track_height);
+        let thumb_travel = track_height - thumb_height;
+        let thumb_top = if thumb_travel <= 0.0 {
+            track_top
+        } else {
+            track_top + (scroll_top / scroll_max) * thumb_travel
+        };
+
+        Some(Self {
+            viewport_height,
+            content_height,
+            scroll_top,
+            scroll_max,
+            track_top,
+            track_height,
+            thumb_top,
+            thumb_height,
+        })
+    }
+
+    fn thumb_bottom(self) -> f32 {
+        self.thumb_top + self.thumb_height
+    }
+
+    fn clamp_scroll_top(self, scroll_top: f32) -> f32 {
+        scroll_top.clamp(0.0, self.scroll_max)
+    }
+
+    fn scroll_by(self, delta: f32) -> f32 {
+        self.clamp_scroll_top(self.scroll_top + delta)
+    }
+
+    fn scroll_top_for_thumb_top(self, thumb_top: f32) -> f32 {
+        let thumb_travel = self.track_height - self.thumb_height;
+        if thumb_travel <= 0.0 {
+            return 0.0;
+        }
+
+        let thumb_top = thumb_top.clamp(self.track_top, self.track_top + thumb_travel);
+        ((thumb_top - self.track_top) / thumb_travel) * self.scroll_max
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +239,9 @@ impl ExplorerView {
             open_error: None,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
+            scroll_handle: UniformListScrollHandle::new(),
+            scrollbar_hovered: false,
+            scrollbar_drag: None,
         };
         view.reload();
         view
@@ -193,6 +287,7 @@ impl ExplorerView {
         self.selected_path = None;
         self.read_error = None;
         self.open_error = None;
+        self.scroll_to_top();
         self.reload();
     }
 
@@ -269,6 +364,55 @@ impl ExplorerView {
 
     fn should_show_empty_folder_message(&self) -> bool {
         self.entries.is_empty() && self.read_error.is_none()
+    }
+
+    fn scroll_to_top(&self) {
+        self.set_scroll_offset(0.0);
+    }
+
+    fn set_scroll_offset(&self, scroll_top: f32) {
+        let scroll_handle = self.scroll_handle.0.borrow().base_handle.clone();
+        let offset = scroll_handle.offset();
+        scroll_handle.set_offset(point(offset.x, px(-scroll_top.max(0.0))));
+    }
+
+    fn scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        let scroll_state = self.scroll_handle.0.borrow();
+        let item_size = scroll_state.last_item_size?;
+        let viewport_height = f32::from(item_size.item.height);
+        let content_height = f32::from(item_size.contents.height);
+        let scroll_top = -f32::from(scroll_state.base_handle.offset().y);
+
+        ScrollbarMetrics::new(viewport_height, content_height, scroll_top)
+    }
+
+    fn scrollbar_is_hovered_or_dragged(&self) -> bool {
+        self.scrollbar_hovered || self.scrollbar_drag.is_some()
+    }
+
+    fn handle_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_scroll_offset(metrics.scroll_by(-ROW_HEIGHT));
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_scroll_offset(metrics.scroll_by(ROW_HEIGHT));
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.scrollbar_drag = Some(ScrollbarDrag {
+                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+            });
+        } else if local_y < metrics.thumb_top {
+            self.set_scroll_offset(metrics.scroll_by(-metrics.viewport_height));
+        } else {
+            self.set_scroll_offset(metrics.scroll_by(metrics.viewport_height));
+        }
+    }
+
+    fn handle_scrollbar_drag(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        let Some(drag) = self.scrollbar_drag else {
+            return;
+        };
+
+        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
+        self.set_scroll_offset(metrics.scroll_top_for_thumb_top(thumb_top));
     }
 
     fn content_branch(&self) -> ExplorerContentBranch {
@@ -351,6 +495,7 @@ impl ExplorerView {
             .child(header_cell("Date modified", COLUMN_DATE_WIDTH, false))
             .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
             .child(header_cell("Size", COLUMN_SIZE_WIDTH, false))
+            .child(scrollbar_header_spacer())
     }
 
     fn render_row(&self, ix: usize, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
@@ -395,6 +540,159 @@ impl ExplorerView {
             .child(text_cell(format_size(entry.size), COLUMN_SIZE_WIDTH, true))
             .into_any_element()
     }
+
+    fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                div().flex_1().h_full().overflow_hidden().child(
+                    uniform_list(
+                        "explorer-entries",
+                        self.entries.len(),
+                        cx.processor(|this, range: Range<usize>, window, cx| {
+                            let scale_factor = window.scale_factor();
+                            let mut rows = Vec::with_capacity(range.end - range.start);
+                            for ix in range {
+                                rows.push(this.render_row(ix, scale_factor, cx));
+                            }
+                            rows
+                        }),
+                    )
+                    .size_full()
+                    .track_scroll(self.scroll_handle.clone())
+                    .on_scroll_wheel(cx.listener(
+                        |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .child(self.render_scrollbar(cx))
+    }
+
+    fn render_scrollbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(metrics) = self.scrollbar_metrics() else {
+            return div()
+                .id("explorer-scrollbar")
+                .w(px(SCROLLBAR_GUTTER_WIDTH))
+                .h_full()
+                .flex_shrink_0()
+                .into_any_element();
+        };
+
+        let hovered_or_dragged = self.scrollbar_is_hovered_or_dragged();
+        let thumb_width = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
+        let thumb_color = if self.scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("explorer-scrollbar")
+            .relative()
+            .w(px(SCROLLBAR_GUTTER_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
+                    .child(scrollbar_arrow_button(
+                        bottom_arrow_top,
+                        ScrollbarArrow::Down,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(metrics.thumb_top))
+                    .right(px(thumb_right))
+                    .w(px(thumb_width))
+                    .h(px(metrics.thumb_height))
+                    .rounded(px(thumb_width / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_scrollbar_hit_layer(cx))
+            .into_any_element()
+    }
+
+    fn render_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(metrics) = this.scrollbar_metrics() {
+                                this.handle_scrollbar_mouse_down(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            if let Some(metrics) = this.scrollbar_metrics() {
+                                this.handle_scrollbar_drag(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.scrollbar_drag.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
 }
 
 impl Render for ExplorerView {
@@ -423,27 +721,28 @@ impl Render for ExplorerView {
                             .child(self.read_error.clone().unwrap_or_default()),
                     ),
                     ExplorerContentBranch::Empty => div().child(render_empty_folder_message()),
-                    ExplorerContentBranch::List => div().child(
-                        uniform_list(
-                            "explorer-entries",
-                            self.entries.len(),
-                            cx.processor(|this, range: Range<usize>, window, cx| {
-                                let scale_factor = window.scale_factor();
-                                let mut rows = Vec::with_capacity(range.end - range.start);
-                                for ix in range {
-                                    rows.push(this.render_row(ix, scale_factor, cx));
-                                }
-                                rows
-                            }),
-                        )
-                        .h_full(),
-                    ),
+                    ExplorerContentBranch::List => div().child(self.render_list(cx)),
                 }
                 .id("explorer-scroll")
                 .flex_1()
                 .w_full()
-                .overflow_y_scroll(),
+                .overflow_hidden(),
             )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollbarArrow {
+    Up,
+    Down,
+}
+
+impl ScrollbarArrow {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Up => "\u{E70E}",
+            Self::Down => "\u{E70D}",
+        }
     }
 }
 
@@ -692,6 +991,31 @@ fn nav_button(
         .into_any_element()
 }
 
+fn scrollbar_arrow_button(top: f32, arrow: ScrollbarArrow) -> Div {
+    div()
+        .absolute()
+        .top(px(top))
+        .right(px(0.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(SCROLLBAR_GUTTER_WIDTH))
+        .h(px(SCROLLBAR_ARROW_HEIGHT))
+        .font(nav_icon_font())
+        .text_size(px(8.0))
+        .text_color(rgb(SCROLLBAR_ARROW_COLOR))
+        .hover(|style| style.bg(rgb(SCROLLBAR_ARROW_HOVER_BG)))
+        .child(arrow.glyph())
+}
+
+fn scrollbar_header_spacer() -> Div {
+    div()
+        .h_full()
+        .w(px(SCROLLBAR_GUTTER_WIDTH))
+        .flex_shrink_0()
+        .bg(rgb(0xffffff))
+}
+
 fn nav_icon_font() -> gpui::Font {
     let mut font = font("Segoe Fluent Icons");
     font.fallbacks = Some(FontFallbacks::from_fonts(vec![
@@ -886,6 +1210,13 @@ mod tests {
 
     static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
+    fn assert_approx_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.000_1,
+            "expected {actual} to approximately equal {expected}",
+        );
+    }
+
     struct TempDir {
         path: PathBuf,
     }
@@ -1014,6 +1345,72 @@ mod tests {
     fn device_pixel_conversion_handles_invalid_scale() {
         assert_eq!(device_px_value(22.0, 0.0), 22.0);
         assert_eq!(device_px_value(22.0, -1.0), 22.0);
+    }
+
+    #[test]
+    fn scrollbar_metrics_hide_without_overflow() {
+        assert!(ScrollbarMetrics::new(200.0, 200.0, 0.0).is_none());
+        assert!(ScrollbarMetrics::new(200.0, 180.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn scrollbar_thumb_is_proportional_and_respects_minimum_height() {
+        let proportional = ScrollbarMetrics::new(200.0, 400.0, 0.0).unwrap();
+        assert_approx_eq(proportional.thumb_height, 84.0);
+
+        let minimum = ScrollbarMetrics::new(100.0, 10_000.0, 0.0).unwrap();
+        assert_approx_eq(minimum.thumb_height, SCROLLBAR_MIN_THUMB_HEIGHT);
+    }
+
+    #[test]
+    fn scrollbar_thumb_top_clamps_to_scroll_bounds() {
+        let top = ScrollbarMetrics::new(200.0, 1_000.0, -50.0).unwrap();
+        assert_approx_eq(top.scroll_top, 0.0);
+        assert_approx_eq(top.thumb_top, SCROLLBAR_ARROW_HEIGHT);
+
+        let bottom = ScrollbarMetrics::new(200.0, 1_000.0, 900.0).unwrap();
+        assert_approx_eq(bottom.scroll_top, 800.0);
+        assert_approx_eq(
+            bottom.thumb_bottom(),
+            SCROLLBAR_ARROW_HEIGHT + bottom.track_height,
+        );
+    }
+
+    #[test]
+    fn scrollbar_drag_positions_map_to_scroll_offsets() {
+        let metrics = ScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        let bottom_thumb_top = metrics.track_top + metrics.track_height - metrics.thumb_height;
+        let middle_thumb_top = metrics.track_top + (bottom_thumb_top - metrics.track_top) / 2.0;
+
+        assert_approx_eq(metrics.scroll_top_for_thumb_top(metrics.track_top), 0.0);
+        assert_approx_eq(
+            metrics.scroll_top_for_thumb_top(middle_thumb_top),
+            metrics.scroll_max / 2.0,
+        );
+        assert_approx_eq(
+            metrics.scroll_top_for_thumb_top(bottom_thumb_top),
+            metrics.scroll_max,
+        );
+    }
+
+    #[test]
+    fn scrollbar_line_and_page_deltas_clamp_at_bounds() {
+        let top = ScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        assert_approx_eq(top.scroll_by(-ROW_HEIGHT), 0.0);
+        assert_approx_eq(top.scroll_by(200.0), 200.0);
+
+        let bottom = ScrollbarMetrics::new(200.0, 1_000.0, 800.0).unwrap();
+        assert_approx_eq(bottom.scroll_by(ROW_HEIGHT), bottom.scroll_max);
+        assert_approx_eq(bottom.scroll_by(-200.0), 600.0);
+    }
+
+    #[test]
+    fn scrollbar_widths_match_reserved_layout_behavior() {
+        assert_eq!(SCROLLBAR_THUMB_WIDTH, 6.0);
+        assert_eq!(SCROLLBAR_THUMB_HOVER_WIDTH, 8.0);
+        assert!(SCROLLBAR_THUMB_HOVER_WIDTH > SCROLLBAR_THUMB_WIDTH);
+        assert_eq!(SCROLLBAR_GUTTER_WIDTH, 16.0);
+        assert!(SCROLLBAR_GUTTER_WIDTH > SCROLLBAR_THUMB_HOVER_WIDTH);
     }
 
     #[test]
