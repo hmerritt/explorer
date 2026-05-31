@@ -30,6 +30,8 @@ const ROW_HEIGHT: f32 = 28.0;
 const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
 const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
 const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
+const OPEN_ERROR_VERTICAL_PADDING: f32 = 8.0;
+const OPEN_ERROR_HORIZONTAL_PADDING: f32 = 16.0;
 const KB_BYTES: u64 = 1024;
 const MB_BYTES: u64 = KB_BYTES * 1024;
 const GB_BYTES: u64 = MB_BYTES * 1024;
@@ -88,6 +90,7 @@ pub struct ExplorerView {
     entries: Vec<FileEntry>,
     selected_path: Option<PathBuf>,
     read_error: Option<String>,
+    open_error: Option<String>,
     back_stack: Vec<PathBuf>,
     forward_stack: Vec<PathBuf>,
 }
@@ -96,6 +99,11 @@ pub struct ExplorerView {
 enum HistoryMode {
     Record,
     Preserve,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EntryAction {
+    OpenFile(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +145,7 @@ impl ExplorerView {
             entries: Vec::new(),
             selected_path: None,
             read_error: None,
+            open_error: None,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
         };
@@ -145,6 +154,8 @@ impl ExplorerView {
     }
 
     pub fn reload(&mut self) {
+        self.open_error = None;
+
         match load_entries(&self.path) {
             Ok(entries) => {
                 self.entries = entries;
@@ -181,6 +192,7 @@ impl ExplorerView {
         self.path = path;
         self.selected_path = None;
         self.read_error = None;
+        self.open_error = None;
         self.reload();
     }
 
@@ -225,10 +237,33 @@ impl ExplorerView {
             .unwrap_or_else(|| self.path.display().to_string())
     }
 
-    fn handle_entry_click(&mut self, entry: &FileEntry, click_count: usize) {
+    fn handle_entry_click(&mut self, entry: &FileEntry, click_count: usize) -> Option<EntryAction> {
         self.selected_path = Some(entry.path.clone());
-        if click_count >= 2 && entry.is_dir {
+        self.open_error = None;
+
+        if click_count < 2 {
+            return None;
+        }
+
+        if entry.is_dir {
             self.navigate_to_directory(entry.path.clone(), HistoryMode::Record);
+            None
+        } else {
+            Some(EntryAction::OpenFile(entry.path.clone()))
+        }
+    }
+
+    fn open_file_with_default_app(&mut self, path: &Path) {
+        let result = open_path_with_default_app(path);
+        self.handle_open_file_result(path, result);
+    }
+
+    fn handle_open_file_result(&mut self, path: &Path, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => self.open_error = None,
+            Err(error) => {
+                self.open_error = Some(format_open_error(path, &error));
+            }
         }
     }
 
@@ -343,7 +378,11 @@ impl ExplorerView {
             .border_color(rgb(0xffffff))
             .cursor_default()
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                this.handle_entry_click(&clicked_entry, event.click_count());
+                if let Some(EntryAction::OpenFile(path)) =
+                    this.handle_entry_click(&clicked_entry, event.click_count())
+                {
+                    this.open_file_with_default_app(&path);
+                }
                 cx.notify();
             }))
             .child(name_cell(&entry, scale_factor))
@@ -371,6 +410,9 @@ impl Render for ExplorerView {
             .overflow_hidden()
             .child(self.render_navbar(scale_factor, cx))
             .child(self.render_header())
+            .when_some(self.open_error.clone(), |this, error| {
+                this.child(render_open_error(&error))
+            })
             .child(
                 match self.content_branch() {
                     ExplorerContentBranch::Error => div().child(
@@ -428,6 +470,20 @@ fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
 
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+fn open_path_with_default_app(path: &Path) -> std::io::Result<()> {
+    open::that_detached(path)
+}
+
+fn format_open_error(path: &Path, error: &std::io::Error) -> String {
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+    format!("Could not open {name}: {error}")
 }
 
 fn sort_entries(entries: &mut [FileEntry]) {
@@ -574,6 +630,19 @@ fn render_empty_folder_message() -> Div {
         .text_size(px(EMPTY_FOLDER_TEXT_SIZE))
         .text_color(rgb(0x9a9a9a))
         .child(EMPTY_FOLDER_MESSAGE)
+}
+
+fn render_open_error(error: &str) -> Div {
+    div()
+        .w_full()
+        .py(px(OPEN_ERROR_VERTICAL_PADDING))
+        .px(px(OPEN_ERROR_HORIZONTAL_PADDING))
+        .bg(rgb(0xfff4f4))
+        .border_b_1()
+        .border_color(rgb(0xf1c7c7))
+        .text_size(px(12.0))
+        .text_color(rgb(0x6f1d1d))
+        .child(SharedString::from(error.to_owned()))
 }
 
 fn device_px(value: f32, scale_factor: f32) -> Pixels {
@@ -1037,12 +1106,14 @@ mod tests {
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.selected_path = Some(child.clone());
+        view.open_error = Some("stale error".to_owned());
 
         view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, child);
         assert_eq!(view.selected_path, None);
         assert_eq!(view.read_error, None);
+        assert_eq!(view.open_error, None);
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
@@ -1079,17 +1150,20 @@ mod tests {
             size: None,
         };
         let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.open_error = Some("stale error".to_owned());
 
-        view.handle_entry_click(&entry, 1);
+        let action = view.handle_entry_click(&entry, 1);
 
+        assert_eq!(action, None);
         assert_eq!(view.path, temp.path());
         assert_eq!(view.selected_path, Some(child));
+        assert_eq!(view.open_error, None);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
     }
 
     #[test]
-    fn double_click_navigates_only_directories() {
+    fn double_click_opens_files_and_navigates_directories() {
         let temp = TempDir::new();
         let child = temp.path().join("child");
         let file = temp.path().join("file.txt");
@@ -1112,17 +1186,51 @@ mod tests {
         };
         let mut view = ExplorerView::new(temp.path().to_path_buf());
 
-        view.handle_entry_click(&file_entry, 2);
+        let action = view.handle_entry_click(&file_entry, 2);
+        assert_eq!(action, Some(EntryAction::OpenFile(file.clone())));
         assert_eq!(view.path, temp.path());
-        assert_eq!(view.selected_path, Some(file));
+        assert_eq!(view.selected_path, Some(file.clone()));
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
 
-        view.handle_entry_click(&dir_entry, 2);
+        let action = view.handle_entry_click(&dir_entry, 2);
+        assert_eq!(action, None);
         assert_eq!(view.path, child);
         assert_eq!(view.selected_path, None);
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn open_file_result_sets_and_clears_open_error() {
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.handle_open_file_result(
+            &file,
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+        );
+
+        assert_eq!(
+            view.open_error,
+            Some("Could not open file.txt: missing".to_owned())
+        );
+
+        view.handle_open_file_result(&file, Ok(()));
+
+        assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn refresh_clears_open_error() {
+        let temp = TempDir::new();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.open_error = Some("stale error".to_owned());
+
+        view.reload();
+
+        assert_eq!(view.open_error, None);
     }
 
     #[test]
