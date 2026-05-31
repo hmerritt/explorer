@@ -5,6 +5,8 @@
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod app;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod explorer;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn main() {
