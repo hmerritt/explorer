@@ -9,7 +9,7 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, IntoElement, Pixels, Render, SharedString, Styled,
+    AnyElement, App, ClickEvent, Context, Div, IntoElement, Pixels, Render, SharedString, Styled,
     Window, div, prelude::*, px, rgb, uniform_list,
 };
 
@@ -17,6 +17,7 @@ const COLUMN_NAME_WIDTH: f32 = 440.0;
 const COLUMN_DATE_WIDTH: f32 = 244.0;
 const COLUMN_TYPE_WIDTH: f32 = 202.0;
 const COLUMN_SIZE_WIDTH: f32 = 124.0;
+const NAVBAR_HEIGHT: f32 = 44.0;
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 
@@ -73,6 +74,14 @@ pub struct ExplorerView {
     entries: Vec<FileEntry>,
     selected_path: Option<PathBuf>,
     read_error: Option<String>,
+    back_stack: Vec<PathBuf>,
+    forward_stack: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryMode {
+    Record,
+    Preserve,
 }
 
 impl ExplorerView {
@@ -82,6 +91,8 @@ impl ExplorerView {
             entries: Vec::new(),
             selected_path: None,
             read_error: None,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
         };
         view.reload();
         view
@@ -110,18 +121,121 @@ impl ExplorerView {
         }
     }
 
-    fn navigate_to_directory(&mut self, path: PathBuf) {
+    fn navigate_to_directory(&mut self, path: PathBuf, history_mode: HistoryMode) {
+        if path == self.path {
+            self.reload();
+            return;
+        }
+
+        if matches!(history_mode, HistoryMode::Record) {
+            self.back_stack.push(self.path.clone());
+            self.forward_stack.clear();
+        }
+
         self.path = path;
         self.selected_path = None;
         self.read_error = None;
         self.reload();
     }
 
+    fn navigate_back(&mut self) {
+        if let Some(path) = self.back_stack.pop() {
+            self.forward_stack.push(self.path.clone());
+            self.navigate_to_directory(path, HistoryMode::Preserve);
+        }
+    }
+
+    fn navigate_forward(&mut self) {
+        if let Some(path) = self.forward_stack.pop() {
+            self.back_stack.push(self.path.clone());
+            self.navigate_to_directory(path, HistoryMode::Preserve);
+        }
+    }
+
+    fn navigate_up(&mut self) {
+        if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
+            self.navigate_to_directory(parent, HistoryMode::Record);
+        }
+    }
+
+    fn can_go_back(&self) -> bool {
+        !self.back_stack.is_empty()
+    }
+
+    fn can_go_forward(&self) -> bool {
+        !self.forward_stack.is_empty()
+    }
+
+    fn can_go_up(&self) -> bool {
+        self.path.parent().is_some()
+    }
+
+    fn current_folder_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map(str::to_owned)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+
     fn handle_entry_click(&mut self, entry: &FileEntry, click_count: usize) {
         self.selected_path = Some(entry.path.clone());
         if click_count >= 2 && entry.is_dir {
-            self.navigate_to_directory(entry.path.clone());
+            self.navigate_to_directory(entry.path.clone(), HistoryMode::Record);
         }
+    }
+
+    fn render_navbar(&self, cx: &mut Context<Self>) -> Div {
+        let folder_name = self.current_folder_name();
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(NAVBAR_HEIGHT))
+            .w_full()
+            .bg(rgb(0xf3f3f3))
+            .px(px(14.0))
+            .gap(px(10.0))
+            .child(nav_button(
+                "back",
+                "←",
+                self.can_go_back(),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.navigate_back();
+                    cx.notify();
+                }),
+            ))
+            .child(nav_button(
+                "forward",
+                "→",
+                self.can_go_forward(),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.navigate_forward();
+                    cx.notify();
+                }),
+            ))
+            .child(nav_button(
+                "up",
+                "↑",
+                self.can_go_up(),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.navigate_up();
+                    cx.notify();
+                }),
+            ))
+            .child(nav_button(
+                "refresh",
+                "⟳",
+                true,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.reload();
+                    cx.notify();
+                }),
+            ))
+            .child(directory_bar(&folder_name))
+            .child(search_bar(&folder_name))
     }
 
     fn render_header(&self) -> Div {
@@ -190,6 +304,7 @@ impl Render for ExplorerView {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
+            .child(self.render_navbar(cx))
             .child(self.render_header())
             .child(
                 div()
@@ -346,6 +461,92 @@ fn device_px_value(value: f32, scale_factor: f32) -> f32 {
     } else {
         value / scale_factor
     }
+}
+
+fn nav_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(34.0))
+        .h(px(34.0))
+        .rounded(px(4.0))
+        .text_size(px(22.0))
+        .text_color(if enabled {
+            rgb(0x202020)
+        } else {
+            rgb(0xa6a6a6)
+        })
+        .cursor_default()
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(0xe8e8e8)))
+                .on_click(on_click)
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn directory_bar(folder_name: &str) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(34.0))
+        .flex_1()
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .px(px(16.0))
+        .gap(px(14.0))
+        .text_size(px(15.0))
+        .text_color(rgb(0x1f1f1f))
+        .child(
+            div()
+                .text_size(px(18.0))
+                .text_color(rgb(0x5b5b5b))
+                .child("▭"),
+        )
+        .child(
+            div()
+                .text_size(px(20.0))
+                .text_color(rgb(0x303030))
+                .child("›"),
+        )
+        .child(SharedString::from(folder_name.to_owned()))
+        .child(
+            div()
+                .text_size(px(20.0))
+                .text_color(rgb(0x303030))
+                .child("›"),
+        )
+}
+
+fn search_bar(folder_name: &str) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .h(px(34.0))
+        .w(px(330.0))
+        .flex_shrink_0()
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .px(px(14.0))
+        .text_size(px(15.0))
+        .text_color(rgb(0x686868))
+        .child(SharedString::from(format!("Search {folder_name}")))
+        .child(
+            div()
+                .text_size(px(18.0))
+                .text_color(rgb(0x202020))
+                .child("⌕"),
+        )
 }
 
 fn header_cell(label: &'static str, width: f32, first: bool) -> Div {
@@ -595,11 +796,13 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.selected_path = Some(child.clone());
 
-        view.navigate_to_directory(child.clone());
+        view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, child);
         assert_eq!(view.selected_path, None);
         assert_eq!(view.read_error, None);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].name, "inside.txt");
     }
@@ -611,12 +814,14 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.selected_path = Some(temp.path().join("anything"));
 
-        view.navigate_to_directory(missing.clone());
+        view.navigate_to_directory(missing.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, missing);
         assert_eq!(view.selected_path, None);
         assert!(view.read_error.is_some());
         assert!(view.entries.is_empty());
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
     }
 
     #[test]
@@ -637,6 +842,8 @@ mod tests {
 
         assert_eq!(view.path, temp.path());
         assert_eq!(view.selected_path, Some(child));
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
     }
 
     #[test]
@@ -666,9 +873,84 @@ mod tests {
         view.handle_entry_click(&file_entry, 2);
         assert_eq!(view.path, temp.path());
         assert_eq!(view.selected_path, Some(file));
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
 
         view.handle_entry_click(&dir_entry, 2);
         assert_eq!(view.path, child);
         assert_eq!(view.selected_path, None);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn folder_navigation_records_back_and_clears_forward() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.forward_stack.push(temp.path().join("forward"));
+
+        view.navigate_to_directory(child.clone(), HistoryMode::Record);
+
+        assert_eq!(view.path, child);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn back_and_forward_move_between_paths() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.navigate_to_directory(child.clone(), HistoryMode::Record);
+
+        view.navigate_back();
+        assert_eq!(view.path, temp.path());
+        assert!(view.back_stack.is_empty());
+        assert_eq!(view.forward_stack, vec![child.clone()]);
+
+        view.navigate_forward();
+        assert_eq!(view.path, child);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn up_navigates_to_parent_and_records_history() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        let grandchild = child.join("grandchild");
+        fs::create_dir_all(&grandchild).expect("create nested directories");
+
+        let mut view = ExplorerView::new(grandchild.clone());
+
+        view.navigate_up();
+
+        assert_eq!(view.path, child);
+        assert_eq!(view.back_stack, vec![grandchild]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn refresh_preserves_path_and_history() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+        let back = temp.path().join("back");
+        let forward = temp.path().join("forward");
+
+        let mut view = ExplorerView::new(child.clone());
+        view.back_stack.push(back.clone());
+        view.forward_stack.push(forward.clone());
+
+        view.reload();
+
+        assert_eq!(view.path, child);
+        assert_eq!(view.back_stack, vec![back]);
+        assert_eq!(view.forward_stack, vec![forward]);
     }
 }

@@ -24,6 +24,7 @@ pub fn run() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(400.0), px(120.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some(SharedString::from(APP_TITLE)),
                     ..Default::default()
