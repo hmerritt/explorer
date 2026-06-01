@@ -32,7 +32,3 @@ When navigating to a directory, load in a non-blocking way. Keep the view the sa
 ---
 
 ## Didn't work first try
-
-Explorer columns add ellipsis when text clips the column
-
----

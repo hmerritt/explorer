@@ -33,6 +33,8 @@ use crate::explorer::{
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
+const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
+const TEXT_CELL_TEXT_COLOR: u32 = 0x595959;
 const NAME_TRUNCATION_SUFFIX: &str = "…";
 
 impl ExplorerView {
@@ -157,9 +159,20 @@ impl ExplorerView {
                 format_modified(entry.modified),
                 COLUMN_DATE_WIDTH,
                 false,
+                window,
             ))
-            .child(text_cell(entry.type_label(), COLUMN_TYPE_WIDTH, false))
-            .child(text_cell(format_size(entry.size), COLUMN_SIZE_WIDTH, true))
+            .child(text_cell(
+                entry.type_label(),
+                COLUMN_TYPE_WIDTH,
+                false,
+                window,
+            ))
+            .child(text_cell(
+                format_size(entry.size),
+                COLUMN_SIZE_WIDTH,
+                true,
+                window,
+            ))
             .into_any_element()
     }
 
@@ -459,7 +472,7 @@ fn name_header_cell() -> Div {
 fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
     let text_width =
         available_filename_text_width(f32::from(window.bounds().size.width), scale_factor);
-    let filename = truncated_filename(&entry.name, text_width, window);
+    let filename = truncated_text(&entry.name, text_width, 0x000000, window);
 
     div()
         .flex()
@@ -503,12 +516,17 @@ fn available_filename_text_width(viewport_width: f32, scale_factor: f32) -> f32 
     filename_text_width(effective_name_column_width(viewport_width), scale_factor)
 }
 
-fn truncated_filename(name: &str, available_width: f32, window: &Window) -> SharedString {
+fn truncated_text(
+    text: &str,
+    available_width: f32,
+    text_color: u32,
+    window: &Window,
+) -> SharedString {
     let name_font = font(".SystemUIFont");
     let mut runs = vec![TextRun {
-        len: name.len(),
+        len: text.len(),
         font: name_font.clone(),
-        color: rgb(0x000000).into(),
+        color: rgb(text_color).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -518,14 +536,20 @@ fn truncated_filename(name: &str, available_width: f32, window: &Window) -> Shar
         .text_system()
         .line_wrapper(name_font, px(NAME_TEXT_SIZE))
         .truncate_line(
-            SharedString::from(name.to_owned()),
+            SharedString::from(text.to_owned()),
             px(available_width),
             NAME_TRUNCATION_SUFFIX,
             &mut runs,
         )
 }
 
-fn text_cell(text: String, width: f32, right: bool) -> Div {
+fn text_cell_width(column_width: f32) -> f32 {
+    (column_width - TEXT_CELL_HORIZONTAL_PADDING * 2.0).max(0.0)
+}
+
+fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {
+    let text = truncated_text(&text, text_cell_width(width), TEXT_CELL_TEXT_COLOR, window);
+
     let cell = div()
         .flex()
         .items_center()
@@ -533,10 +557,10 @@ fn text_cell(text: String, width: f32, right: bool) -> Div {
         .w(px(width))
         .flex_shrink_0()
         .overflow_hidden()
-        .px(px(8.0))
+        .px(px(TEXT_CELL_HORIZONTAL_PADDING))
         .text_size(px(12.0))
-        .text_color(rgb(0x595959))
-        .child(SharedString::from(text));
+        .text_color(rgb(TEXT_CELL_TEXT_COLOR))
+        .child(text);
 
     if right {
         cell.justify_end()
@@ -556,7 +580,7 @@ mod tests {
 
     use super::{
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width,
-        filename_text_width,
+        filename_text_width, text_cell_width,
     };
 
     #[test]
@@ -604,5 +628,15 @@ mod tests {
     #[test]
     fn name_text_width_clamps_when_chrome_consumes_column() {
         assert_eq!(filename_text_width(10.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn text_cell_width_subtracts_horizontal_padding() {
+        assert_eq!(text_cell_width(COLUMN_TYPE_WIDTH), COLUMN_TYPE_WIDTH - 16.0);
+    }
+
+    #[test]
+    fn text_cell_width_clamps_when_padding_consumes_column() {
+        assert_eq!(text_cell_width(10.0), 0.0);
     }
 }
