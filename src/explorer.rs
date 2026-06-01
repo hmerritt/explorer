@@ -9,11 +9,32 @@ use std::{
 
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FontFallbacks, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
-    Styled, TextRun, UniformListScrollHandle, Window, canvas, div, font, point, prelude::*, px,
-    rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, FontFallbacks, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Render,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Styled, TextRun, UniformListScrollHandle,
+    Window, actions, canvas, div, font, point, prelude::*, px, rgb, uniform_list,
 };
+
+actions!(
+    explorer,
+    [
+        MoveUp,
+        MoveDown,
+        ExtendUp,
+        ExtendDown,
+        MoveHome,
+        MoveEnd,
+        ExtendHome,
+        ExtendEnd,
+        GoBack,
+        GoForward,
+        GoUp,
+        OpenSelected,
+        EnterSelected,
+        Refresh,
+        SelectAll
+    ]
+);
 
 const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
 const COLUMN_DATE_WIDTH: f32 = 180.0;
@@ -116,20 +137,59 @@ impl FileEntry {
 pub struct ExplorerView {
     path: PathBuf,
     entries: Vec<FileEntry>,
-    selected_path: Option<PathBuf>,
+    selection: SelectionState,
     read_error: Option<String>,
     open_error: Option<String>,
     back_stack: Vec<PathBuf>,
     forward_stack: Vec<PathBuf>,
     scroll_handle: UniformListScrollHandle,
+    focus_handle: Option<FocusHandle>,
     scrollbar_hovered: bool,
     scrollbar_drag: Option<ScrollbarDrag>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SelectionState {
+    anchor_index: Option<usize>,
+    focused_index: Option<usize>,
+    selected_range: Option<SelectionRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectionRange {
+    start: usize,
+    end: usize,
+}
+
+impl SelectionRange {
+    fn new(a: usize, b: usize) -> Self {
+        Self {
+            start: a.min(b),
+            end: a.max(b),
+        }
+    }
+
+    fn contains(self, ix: usize) -> bool {
+        ix >= self.start && ix <= self.end
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HistoryMode {
     Record,
     Preserve,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionEdge {
+    Home,
+    End,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,16 +292,26 @@ impl NavIcon {
 }
 
 impl ExplorerView {
+    #[cfg(test)]
     pub fn new(initial_path: PathBuf) -> Self {
+        Self::new_inner(initial_path, None)
+    }
+
+    pub fn new_with_focus_handle(initial_path: PathBuf, focus_handle: FocusHandle) -> Self {
+        Self::new_inner(initial_path, Some(focus_handle))
+    }
+
+    fn new_inner(initial_path: PathBuf, focus_handle: Option<FocusHandle>) -> Self {
         let mut view = Self {
             path: initial_path,
             entries: Vec::new(),
-            selected_path: None,
+            selection: SelectionState::default(),
             read_error: None,
             open_error: None,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
+            focus_handle,
             scrollbar_hovered: false,
             scrollbar_drag: None,
         };
@@ -251,26 +321,140 @@ impl ExplorerView {
 
     pub fn reload(&mut self) {
         self.open_error = None;
+        let selected_paths = self.selected_paths();
 
         match load_entries(&self.path) {
             Ok(entries) => {
                 self.entries = entries;
                 self.read_error = None;
-                if let Some(selected_path) = &self.selected_path {
-                    if !self
-                        .entries
-                        .iter()
-                        .any(|entry| &entry.path == selected_path)
-                    {
-                        self.selected_path = None;
-                    }
-                }
+                self.restore_selection_from_paths(&selected_paths);
             }
             Err(error) => {
                 self.entries.clear();
-                self.selected_path = None;
+                self.clear_selection();
                 self.read_error = Some(error.to_string());
             }
+        }
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let Some(range) = self.selection.selected_range else {
+            return Vec::new();
+        };
+
+        (range.start..=range.end)
+            .filter_map(|ix| self.entries.get(ix).map(|entry| entry.path.clone()))
+            .collect()
+    }
+
+    fn restore_selection_from_paths(&mut self, paths: &[PathBuf]) {
+        let mut indices = paths
+            .iter()
+            .filter_map(|path| self.entry_index_by_path(path))
+            .collect::<Vec<_>>();
+
+        indices.sort_unstable();
+        indices.dedup();
+
+        let Some(first) = indices.first().copied() else {
+            self.clear_selection();
+            return;
+        };
+
+        let last = indices.last().copied().unwrap_or(first);
+        self.selection = SelectionState {
+            anchor_index: Some(first),
+            focused_index: Some(last),
+            selected_range: Some(SelectionRange::new(first, last)),
+        };
+    }
+
+    fn entry_index_by_path(&self, path: &Path) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.path.as_path() == path)
+    }
+
+    fn entry_is_selected(&self, ix: usize) -> bool {
+        self.selection
+            .selected_range
+            .is_some_and(|range| range.contains(ix))
+    }
+
+    fn focused_entry(&self) -> Option<&FileEntry> {
+        self.selection
+            .focused_index
+            .and_then(|ix| self.entries.get(ix))
+    }
+
+    fn select_single_index(&mut self, ix: usize) {
+        if ix >= self.entries.len() {
+            self.clear_selection();
+            return;
+        }
+
+        self.selection = SelectionState {
+            anchor_index: Some(ix),
+            focused_index: Some(ix),
+            selected_range: Some(SelectionRange::new(ix, ix)),
+        };
+        self.scroll_index_into_view(ix);
+    }
+
+    fn select_single_path(&mut self, path: &Path) {
+        if let Some(ix) = self.entry_index_by_path(path) {
+            self.select_single_index(ix);
+        } else {
+            self.clear_selection();
+        }
+    }
+
+    fn extend_selection_to_index(&mut self, ix: usize) {
+        if ix >= self.entries.len() {
+            return;
+        }
+
+        let anchor = self
+            .selection
+            .anchor_index
+            .or(self.selection.focused_index)
+            .unwrap_or(ix);
+        self.selection = SelectionState {
+            anchor_index: Some(anchor),
+            focused_index: Some(ix),
+            selected_range: Some(SelectionRange::new(anchor, ix)),
+        };
+        self.scroll_index_into_view(ix);
+    }
+
+    fn select_all_entries(&mut self) {
+        if self.entries.is_empty() {
+            self.clear_selection();
+            return;
+        }
+
+        let last = self.entries.len() - 1;
+        self.selection = SelectionState {
+            anchor_index: Some(0),
+            focused_index: Some(last),
+            selected_range: Some(SelectionRange::new(0, last)),
+        };
+        self.scroll_index_into_view(last);
+    }
+
+    fn scroll_index_into_view(&self, ix: usize) {
+        let row_top = ix as f32 * ROW_HEIGHT;
+        let row_bottom = row_top + ROW_HEIGHT;
+
+        if let Some(metrics) = self.scrollbar_metrics() {
+            let viewport_bottom = metrics.scroll_top + metrics.viewport_height;
+            if row_top < metrics.scroll_top {
+                self.set_scroll_offset(row_top);
+            } else if row_bottom > viewport_bottom {
+                self.set_scroll_offset(row_bottom - metrics.viewport_height);
+            }
+        } else {
+            self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
         }
     }
 
@@ -286,7 +470,7 @@ impl ExplorerView {
         }
 
         self.path = path;
-        self.selected_path = None;
+        self.clear_selection();
         self.read_error = None;
         self.open_error = None;
         self.scroll_to_top();
@@ -326,7 +510,7 @@ impl ExplorerView {
     }
 
     fn handle_entry_click(&mut self, entry: &FileEntry, click_count: usize) -> Option<EntryAction> {
-        self.selected_path = Some(entry.path.clone());
+        self.select_single_path(&entry.path);
         self.open_error = None;
 
         if click_count < 2 {
@@ -342,7 +526,160 @@ impl ExplorerView {
     }
 
     fn clear_selection(&mut self) {
-        self.selected_path = None;
+        self.selection = SelectionState::default();
+    }
+
+    fn move_selection(&mut self, direction: SelectionDirection) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            self.clear_selection();
+            return;
+        };
+
+        let target = match (self.selection.focused_index, direction) {
+            (Some(ix), SelectionDirection::Up) => ix.saturating_sub(1),
+            (Some(ix), SelectionDirection::Down) => (ix + 1).min(last),
+            (None, SelectionDirection::Up) => last,
+            (None, SelectionDirection::Down) => 0,
+        };
+
+        self.select_single_index(target);
+    }
+
+    fn extend_selection(&mut self, direction: SelectionDirection) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            self.clear_selection();
+            return;
+        };
+
+        let Some(focused) = self.selection.focused_index else {
+            self.move_selection(direction);
+            return;
+        };
+
+        let target = match direction {
+            SelectionDirection::Up if focused > 0 => focused - 1,
+            SelectionDirection::Down if focused < last => focused + 1,
+            _ => return,
+        };
+
+        self.extend_selection_to_index(target);
+    }
+
+    fn select_edge(&mut self, edge: SelectionEdge) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            self.clear_selection();
+            return;
+        };
+
+        let target = match edge {
+            SelectionEdge::Home => 0,
+            SelectionEdge::End => last,
+        };
+        self.select_single_index(target);
+    }
+
+    fn extend_selection_to_edge(&mut self, edge: SelectionEdge) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            self.clear_selection();
+            return;
+        };
+
+        let target = match edge {
+            SelectionEdge::Home => 0,
+            SelectionEdge::End => last,
+        };
+        self.extend_selection_to_index(target);
+    }
+
+    fn activate_focused_entry(&mut self, open_files: bool) -> Option<EntryAction> {
+        let entry = self.focused_entry()?.clone();
+        self.open_error = None;
+
+        if entry.is_dir {
+            self.navigate_to_directory(entry.path, HistoryMode::Record);
+            None
+        } else if open_files {
+            Some(EntryAction::OpenFile(entry.path))
+        } else {
+            None
+        }
+    }
+
+    fn handle_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(SelectionDirection::Up);
+        cx.notify();
+    }
+
+    fn handle_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(SelectionDirection::Down);
+        cx.notify();
+    }
+
+    fn handle_extend_up(&mut self, _: &ExtendUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_selection(SelectionDirection::Up);
+        cx.notify();
+    }
+
+    fn handle_extend_down(&mut self, _: &ExtendDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_selection(SelectionDirection::Down);
+        cx.notify();
+    }
+
+    fn handle_move_home(&mut self, _: &MoveHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_edge(SelectionEdge::Home);
+        cx.notify();
+    }
+
+    fn handle_move_end(&mut self, _: &MoveEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_edge(SelectionEdge::End);
+        cx.notify();
+    }
+
+    fn handle_extend_home(&mut self, _: &ExtendHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_selection_to_edge(SelectionEdge::Home);
+        cx.notify();
+    }
+
+    fn handle_extend_end(&mut self, _: &ExtendEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_selection_to_edge(SelectionEdge::End);
+        cx.notify();
+    }
+
+    fn handle_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_back();
+        cx.notify();
+    }
+
+    fn handle_go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_forward();
+        cx.notify();
+    }
+
+    fn handle_go_up(&mut self, _: &GoUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_up();
+        cx.notify();
+    }
+
+    fn handle_open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.activate_focused_entry(false);
+        cx.notify();
+    }
+
+    fn handle_enter_selected(&mut self, _: &EnterSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(EntryAction::OpenFile(path)) = self.activate_focused_entry(true) {
+            self.open_file_with_default_app(&path);
+        }
+        cx.notify();
+    }
+
+    fn handle_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.reload();
+        cx.notify();
+    }
+
+    fn handle_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all_entries();
+        cx.notify();
     }
 
     fn open_file_with_default_app(&mut self, path: &Path) {
@@ -501,7 +838,7 @@ impl ExplorerView {
 
     fn render_row(&self, ix: usize, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
-        let is_selected = self.selected_path.as_ref() == Some(&entry.path);
+        let is_selected = self.entry_is_selected(ix);
         let clicked_entry = entry.clone();
 
         div()
@@ -709,8 +1046,40 @@ impl ExplorerView {
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale_factor = window.scale_factor();
+        let focus_handle = self.focus_handle(cx);
 
         div()
+            .key_context("Explorer")
+            .track_focus(&focus_handle)
+            .on_action(cx.listener(Self::handle_move_up))
+            .on_action(cx.listener(Self::handle_move_down))
+            .on_action(cx.listener(Self::handle_extend_up))
+            .on_action(cx.listener(Self::handle_extend_down))
+            .on_action(cx.listener(Self::handle_move_home))
+            .on_action(cx.listener(Self::handle_move_end))
+            .on_action(cx.listener(Self::handle_extend_home))
+            .on_action(cx.listener(Self::handle_extend_end))
+            .on_action(cx.listener(Self::handle_go_back))
+            .on_action(cx.listener(Self::handle_go_forward))
+            .on_action(cx.listener(Self::handle_go_up))
+            .on_action(cx.listener(Self::handle_open_selected))
+            .on_action(cx.listener(Self::handle_enter_selected))
+            .on_action(cx.listener(Self::handle_refresh))
+            .on_action(cx.listener(Self::handle_select_all))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.navigate_back();
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.navigate_forward();
+                    cx.notify();
+                }),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -739,6 +1108,14 @@ impl Render for ExplorerView {
                 .w_full()
                 .overflow_hidden(),
             )
+    }
+}
+
+impl Focusable for ExplorerView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle
+            .clone()
+            .expect("ExplorerView must be constructed with a FocusHandle before rendering")
     }
 }
 
@@ -1483,6 +1860,27 @@ mod tests {
         );
     }
 
+    fn selected_names(view: &ExplorerView) -> Vec<String> {
+        view.selected_paths()
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    fn test_view_with_entries(names: &[&str]) -> ExplorerView {
+        let mut view = ExplorerView::new(PathBuf::from("selection"));
+        view.entries = names
+            .iter()
+            .map(|name| FileEntry::test(name, false, Some(1), None))
+            .collect();
+        view.read_error = None;
+        view.clear_selection();
+        view
+    }
+
     struct TempDir {
         path: PathBuf,
     }
@@ -1884,13 +2282,13 @@ mod tests {
         fs::write(child.join("inside.txt"), b"data").expect("create child file");
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.selected_path = Some(child.clone());
+        view.select_single_path(&child);
         view.open_error = Some("stale error".to_owned());
 
         view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, child);
-        assert_eq!(view.selected_path, None);
+        assert!(view.selected_paths().is_empty());
         assert_eq!(view.read_error, None);
         assert_eq!(view.open_error, None);
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
@@ -1904,12 +2302,12 @@ mod tests {
         let temp = TempDir::new();
         let missing = temp.path().join("missing");
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.selected_path = Some(temp.path().join("anything"));
+        view.select_single_index(0);
 
         view.navigate_to_directory(missing.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, missing);
-        assert_eq!(view.selected_path, None);
+        assert!(view.selected_paths().is_empty());
         assert!(view.read_error.is_some());
         assert!(view.entries.is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
@@ -1935,24 +2333,23 @@ mod tests {
 
         assert_eq!(action, None);
         assert_eq!(view.path, temp.path());
-        assert_eq!(view.selected_path, Some(child));
+        assert_eq!(view.selected_paths(), vec![child]);
         assert_eq!(view.open_error, None);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
     }
 
     #[test]
-    fn clear_selection_removes_selected_path() {
+    fn clear_selection_removes_selected_paths() {
         let temp = TempDir::new();
-        let selected = temp.path().join("file.txt");
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.selected_path = Some(selected);
+        view.select_single_index(0);
 
         view.clear_selection();
-        assert_eq!(view.selected_path, None);
+        assert!(view.selected_paths().is_empty());
 
         view.clear_selection();
-        assert_eq!(view.selected_path, None);
+        assert!(view.selected_paths().is_empty());
     }
 
     #[test]
@@ -1982,14 +2379,14 @@ mod tests {
         let action = view.handle_entry_click(&file_entry, 2);
         assert_eq!(action, Some(EntryAction::OpenFile(file.clone())));
         assert_eq!(view.path, temp.path());
-        assert_eq!(view.selected_path, Some(file.clone()));
+        assert_eq!(view.selected_paths(), vec![file.clone()]);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
 
         let action = view.handle_entry_click(&dir_entry, 2);
         assert_eq!(action, None);
         assert_eq!(view.path, child);
-        assert_eq!(view.selected_path, None);
+        assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
     }
@@ -2024,6 +2421,130 @@ mod tests {
         view.reload();
 
         assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn up_down_selection_initializes_and_clamps_at_bounds() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        view.move_selection(SelectionDirection::Down);
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+
+        view.move_selection(SelectionDirection::Down);
+        assert_eq!(selected_names(&view), vec!["b.txt"]);
+
+        view.move_selection(SelectionDirection::Down);
+        view.move_selection(SelectionDirection::Down);
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+
+        view.clear_selection();
+        view.move_selection(SelectionDirection::Up);
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+
+        view.move_selection(SelectionDirection::Up);
+        view.move_selection(SelectionDirection::Up);
+        view.move_selection(SelectionDirection::Up);
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn shift_up_down_extends_selection_and_stops_at_bounds() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        view.select_single_index(1);
+        view.extend_selection(SelectionDirection::Down);
+        assert_eq!(selected_names(&view), vec!["b.txt", "c.txt"]);
+
+        view.extend_selection(SelectionDirection::Down);
+        assert_eq!(selected_names(&view), vec!["b.txt", "c.txt"]);
+
+        view.select_single_index(1);
+        view.extend_selection(SelectionDirection::Up);
+        assert_eq!(selected_names(&view), vec!["a.txt", "b.txt"]);
+
+        view.extend_selection(SelectionDirection::Up);
+        assert_eq!(selected_names(&view), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn home_end_and_shift_home_end_update_selection_ranges() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+        view.select_edge(SelectionEdge::End);
+        assert_eq!(selected_names(&view), vec!["d.txt"]);
+
+        view.select_edge(SelectionEdge::Home);
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+
+        view.select_single_index(2);
+        view.extend_selection_to_edge(SelectionEdge::Home);
+        assert_eq!(selected_names(&view), vec!["a.txt", "b.txt", "c.txt"]);
+
+        view.select_single_index(1);
+        view.extend_selection_to_edge(SelectionEdge::End);
+        assert_eq!(selected_names(&view), vec!["b.txt", "c.txt", "d.txt"]);
+    }
+
+    #[test]
+    fn select_all_entries_selects_every_entry() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        view.select_all_entries();
+
+        assert_eq!(selected_names(&view), vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn reload_preserves_surviving_selected_paths() {
+        let temp = TempDir::new();
+        let a = temp.path().join("a.txt");
+        let b = temp.path().join("b.txt");
+        let c = temp.path().join("c.txt");
+        fs::write(&a, b"a").expect("create a");
+        fs::write(&b, b"b").expect("create b");
+        fs::write(&c, b"c").expect("create c");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&b);
+        view.extend_selection_to_index(view.entry_index_by_path(&c).expect("c entry"));
+        fs::remove_file(&b).expect("remove b");
+
+        view.reload();
+
+        assert_eq!(view.selected_paths(), vec![c]);
+    }
+
+    #[test]
+    fn focused_activation_enters_directories_and_opens_files_on_enter() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("file.txt", false, Some(4), None),
+        ];
+
+        view.select_single_index(0);
+        assert_eq!(view.activate_focused_entry(true), None);
+        assert_eq!(view.path, PathBuf::from("folder"));
+
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("file.txt", false, Some(4), None)];
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry(true),
+            Some(EntryAction::OpenFile(PathBuf::from("file.txt")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn right_arrow_activation_ignores_files() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("file.txt", false, Some(4), None)];
+        view.select_single_index(0);
+
+        assert_eq!(view.activate_focused_entry(false), None);
+        assert_eq!(view.path, PathBuf::from("root"));
     }
 
     #[test]
