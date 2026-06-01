@@ -477,7 +477,7 @@ impl ExplorerView {
                     cx.notify();
                 }),
             ))
-            .child(directory_bar(breadcrumb))
+            .child(directory_bar(breadcrumb, cx))
     }
 
     fn render_header(&self) -> Div {
@@ -774,7 +774,13 @@ pub fn default_start_path() -> PathBuf {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VisibleBreadcrumb {
     show_ellipsis: bool,
-    segments: Vec<String>,
+    segments: Vec<BreadcrumbSegment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BreadcrumbSegment {
+    label: String,
+    target: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -783,42 +789,88 @@ struct BreadcrumbVisibility {
     show_ellipsis: bool,
 }
 
-fn path_breadcrumb_segments(path: &Path) -> Vec<String> {
+fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
     let mut segments = Vec::new();
     let mut saw_prefix = false;
+    let mut target = PathBuf::new();
+    let components = path.components().collect::<Vec<_>>();
 
-    for component in path.components() {
+    for (index, component) in components.iter().copied().enumerate() {
         match component {
             Component::Prefix(prefix) => {
                 saw_prefix = true;
+                target.push(prefix.as_os_str());
                 let prefix = prefix.as_os_str().to_string_lossy().into_owned();
                 if !prefix.is_empty() {
-                    segments.push(prefix);
+                    let mut segment_target = target.clone();
+                    if matches!(components.get(index + 1), Some(Component::RootDir)) {
+                        segment_target.push(Component::RootDir.as_os_str());
+                    }
+                    segments.push(BreadcrumbSegment {
+                        label: prefix,
+                        target: segment_target,
+                    });
                 }
             }
             Component::RootDir => {
+                target.push(component.as_os_str());
                 if !saw_prefix {
-                    segments.push("/".to_owned());
+                    segments.push(BreadcrumbSegment {
+                        label: "/".to_owned(),
+                        target: target.clone(),
+                    });
                 }
             }
-            Component::CurDir => segments.push(".".to_owned()),
-            Component::ParentDir => segments.push("..".to_owned()),
+            Component::CurDir => {
+                target.push(component.as_os_str());
+                segments.push(BreadcrumbSegment {
+                    label: ".".to_owned(),
+                    target: target.clone(),
+                });
+            }
+            Component::ParentDir => {
+                target.push(component.as_os_str());
+                segments.push(BreadcrumbSegment {
+                    label: "..".to_owned(),
+                    target: target.clone(),
+                });
+            }
             Component::Normal(component) => {
-                segments.push(component.to_string_lossy().into_owned());
+                target.push(component);
+                segments.push(BreadcrumbSegment {
+                    label: component.to_string_lossy().into_owned(),
+                    target: target.clone(),
+                });
             }
         }
     }
 
     if segments.is_empty() {
         let fallback = path.display().to_string();
-        segments.push(if fallback.is_empty() {
-            ".".to_owned()
+        let target = if path.as_os_str().is_empty() {
+            PathBuf::from(".")
         } else {
-            fallback
+            path.to_path_buf()
+        };
+        segments.push(BreadcrumbSegment {
+            label: if fallback.is_empty() {
+                ".".to_owned()
+            } else {
+                fallback
+            },
+            target,
         });
     }
 
     segments
+}
+
+#[cfg(test)]
+fn breadcrumb_labels(segments: &[BreadcrumbSegment]) -> Vec<String> {
+    segments
+        .iter()
+        .map(|segment| segment.label.clone())
+        .collect()
 }
 
 fn directory_bar_available_width(window_width: f32) -> f32 {
@@ -836,7 +888,7 @@ fn visible_breadcrumb_for_path(
     let segments = path_breadcrumb_segments(path);
     let segment_widths = segments
         .iter()
-        .map(|segment| measure_directory_bar_text(segment, window))
+        .map(|segment| measure_directory_bar_text(&segment.label, window))
         .collect::<Vec<_>>();
     let separator_width = measure_directory_bar_text(DIRECTORY_BAR_SEPARATOR, window);
     let ellipsis_width = measure_directory_bar_text(DIRECTORY_BAR_ELLIPSIS, window);
@@ -1184,7 +1236,7 @@ fn nav_icon_font() -> gpui::Font {
     font
 }
 
-fn directory_bar(breadcrumb: VisibleBreadcrumb) -> Div {
+fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> Div {
     div()
         .flex()
         .flex_row()
@@ -1197,10 +1249,13 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb) -> Div {
         .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
-        .children(directory_bar_children(breadcrumb))
+        .children(directory_bar_children(breadcrumb, cx))
 }
 
-fn directory_bar_children(breadcrumb: VisibleBreadcrumb) -> Vec<AnyElement> {
+fn directory_bar_children(
+    breadcrumb: VisibleBreadcrumb,
+    cx: &mut Context<ExplorerView>,
+) -> Vec<AnyElement> {
     let mut children = Vec::new();
 
     if breadcrumb.show_ellipsis {
@@ -1213,7 +1268,7 @@ fn directory_bar_children(breadcrumb: VisibleBreadcrumb) -> Vec<AnyElement> {
     let segment_count = breadcrumb.segments.len();
     for (index, segment) in breadcrumb.segments.into_iter().enumerate() {
         let is_last = index + 1 == segment_count;
-        children.push(directory_bar_label(segment, is_last).into_any_element());
+        children.push(directory_bar_label(segment, index, is_last, cx));
         if !is_last {
             children.push(directory_bar_separator().into_any_element());
         }
@@ -1231,18 +1286,31 @@ fn directory_bar_fixed_label(label: &'static str) -> Div {
         .child(label)
 }
 
-fn directory_bar_label(label: String, is_last: bool) -> Div {
+fn directory_bar_label(
+    segment: BreadcrumbSegment,
+    index: usize,
+    is_last: bool,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let target = segment.target;
     let label = div()
+        .id(("breadcrumb-segment", index))
         .min_w(px(0.0))
         .whitespace_nowrap()
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
-        .child(SharedString::from(label));
+        .cursor_default()
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.navigate_to_directory(target.clone(), HistoryMode::Record);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .child(SharedString::from(segment.label));
 
     if is_last {
-        label.flex_1().truncate()
+        label.flex_1().truncate().into_any_element()
     } else {
-        label.flex_shrink_0()
+        label.flex_shrink_0().into_any_element()
     }
 }
 
@@ -1639,27 +1707,76 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_paths_render_drive_as_first_breadcrumb_segment() {
+        let segments = path_breadcrumb_segments(Path::new(r"C:\Users\Ada\Documents"));
+
         assert_eq!(
-            path_breadcrumb_segments(Path::new(r"C:\Users\Ada\Documents")),
+            breadcrumb_labels(&segments),
             vec!["C:", "Users", "Ada", "Documents"]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("C:\\"),
+                PathBuf::from(r"C:\Users"),
+                PathBuf::from(r"C:\Users\Ada"),
+                PathBuf::from(r"C:\Users\Ada\Documents"),
+            ]
         );
     }
 
     #[test]
     fn absolute_paths_render_root_as_breadcrumb_segment() {
+        let segments = path_breadcrumb_segments(Path::new("/usr/local/bin"));
+
         assert_eq!(
-            path_breadcrumb_segments(Path::new("/usr/local/bin")),
+            breadcrumb_labels(&segments),
             vec!["/", "usr", "local", "bin"]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/usr"),
+                PathBuf::from("/usr/local"),
+                PathBuf::from("/usr/local/bin"),
+            ]
         );
     }
 
     #[test]
     fn relative_paths_keep_relative_breadcrumb_components() {
+        let segments = path_breadcrumb_segments(Path::new("../project/src"));
+
+        assert_eq!(breadcrumb_labels(&segments), vec!["..", "project", "src"]);
         assert_eq!(
-            path_breadcrumb_segments(Path::new("../project/src")),
-            vec!["..", "project", "src"]
+            segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from(".."),
+                PathBuf::from("../project"),
+                PathBuf::from("../project/src"),
+            ]
         );
-        assert_eq!(path_breadcrumb_segments(Path::new(".")), vec!["."]);
+
+        let current_dir_segments = path_breadcrumb_segments(Path::new("."));
+        assert_eq!(breadcrumb_labels(&current_dir_segments), vec!["."]);
+        assert_eq!(current_dir_segments[0].target, PathBuf::from("."));
+    }
+
+    #[test]
+    fn empty_paths_fall_back_to_current_directory_breadcrumb() {
+        let segments = path_breadcrumb_segments(Path::new(""));
+
+        assert_eq!(breadcrumb_labels(&segments), vec!["."]);
+        assert_eq!(segments[0].target, PathBuf::from("."));
     }
 
     #[test]
