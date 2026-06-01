@@ -79,6 +79,43 @@ pub(super) fn folder_icon(scale_factor: f32) -> Div {
         )
 }
 
+pub(super) fn drive_icon(scale_factor: f32) -> Div {
+    div()
+        .relative()
+        .w(device_px(22.0, scale_factor))
+        .h(device_px(18.0, scale_factor))
+        .flex_shrink_0()
+        .child(
+            div()
+                .absolute()
+                .left(device_px(1.0, scale_factor))
+                .top(device_px(4.0, scale_factor))
+                .w(device_px(20.0, scale_factor))
+                .h(device_px(11.0, scale_factor))
+                .bg(rgb(0xe9eef5))
+                .border_1()
+                .border_color(rgb(0x8a95a3)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(device_px(3.0, scale_factor))
+                .top(device_px(12.0, scale_factor))
+                .w(device_px(16.0, scale_factor))
+                .h(device_px(2.0, scale_factor))
+                .bg(rgb(0xc9d3df)),
+        )
+        .child(
+            div()
+                .absolute()
+                .right(device_px(4.0, scale_factor))
+                .top(device_px(11.0, scale_factor))
+                .w(device_px(3.0, scale_factor))
+                .h(device_px(3.0, scale_factor))
+                .bg(rgb(0x2aa7ff)),
+        )
+}
+
 pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
     div()
         .relative()
@@ -204,5 +241,11 @@ mod tests {
     fn nav_icon_size_converts_from_physical_pixels() {
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
         assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
+    }
+
+    #[test]
+    fn drive_icon_uses_fixed_explorer_list_slot() {
+        assert_eq!(device_px_value(22.0, 1.0), 22.0);
+        assert_eq!(device_px_value(18.0, 1.0), 18.0);
     }
 }

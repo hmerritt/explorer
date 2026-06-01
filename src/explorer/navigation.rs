@@ -45,6 +45,10 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn navigate_to_sidebar_path(&mut self, path: PathBuf) {
+        self.navigate_to_directory(path, HistoryMode::Record);
+    }
+
     pub(super) fn navigate_back(&mut self) {
         if let Some(path) = self.back_stack.pop() {
             self.forward_stack.push(self.path.clone());
@@ -339,6 +343,24 @@ mod tests {
         view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, child);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn sidebar_navigation_records_history_and_clears_selection() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.entries = vec![FileEntry::test("selected.txt", false, Some(1), None)];
+        view.select_single_index(0);
+
+        view.navigate_to_sidebar_path(child.clone());
+
+        assert_eq!(view.path, child);
+        assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
     }

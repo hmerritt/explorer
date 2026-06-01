@@ -21,19 +21,21 @@ use crate::explorer::{
         NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
         NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
         NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
-        SCROLLBAR_GUTTER_WIDTH,
+        SCROLLBAR_GUTTER_WIDTH, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL,
+        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
     },
     drag_drop::{DragPreview, DraggedEntries, DropDestination},
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        NavIcon, device_px, device_px_value, directory_shortcut_icon, file_icon, folder_icon,
-        nav_icon_font,
+        NavIcon, device_px, device_px_value, directory_shortcut_icon, drive_icon, file_icon,
+        folder_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
+    sidebar::{SidebarItem, SidebarItemKind, sidebar_sections},
     view::{ExplorerContentBranch, ExplorerView},
 };
 
@@ -120,6 +122,87 @@ impl ExplorerView {
             .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
             .child(header_cell("Size", COLUMN_SIZE_WIDTH, false))
             .child(scrollbar_header_spacer())
+    }
+
+    fn render_sidebar(&self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
+        let sections = sidebar_sections();
+        let mut children = Vec::new();
+
+        for (index, item) in sections.user_directories.into_iter().enumerate() {
+            children.push(self.render_sidebar_row(index, item, scale_factor, cx));
+        }
+
+        if !children.is_empty() && !sections.drives.is_empty() {
+            children.push(sidebar_separator().into_any_element());
+        }
+
+        for (index, item) in sections.drives.into_iter().enumerate() {
+            children.push(self.render_sidebar_row(index + 1_000, item, scale_factor, cx));
+        }
+
+        div()
+            .id("explorer-sidebar")
+            .flex()
+            .flex_col()
+            .h_full()
+            .w(px(SIDEBAR_WIDTH))
+            .flex_shrink_0()
+            .bg(rgb(0xf7f7f7))
+            .border_r_1()
+            .border_color(rgb(0xe5e5e5))
+            .pt(px(8.0))
+            .overflow_hidden()
+            .children(children)
+            .into_any_element()
+    }
+
+    fn render_sidebar_row(
+        &self,
+        id: usize,
+        item: SidebarItem,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_current = item.path == self.path;
+        let label = item.label.clone();
+        let path = item.path.clone();
+
+        div()
+            .id(("explorer-sidebar-row", id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .mx(px(4.0))
+            .px(px(SIDEBAR_HORIZONTAL_PADDING))
+            .rounded(px(4.0))
+            .cursor_default()
+            .bg(if is_current {
+                rgb(0xe5f3ff)
+            } else {
+                rgb(0xf7f7f7)
+            })
+            .when(!is_current, |this| {
+                this.hover(|style| style.bg(rgb(0xebebeb)))
+            })
+            .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.navigate_to_sidebar_path(path.clone());
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(sidebar_item_icon(item.kind, scale_factor))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .ml(device_px(SIDEBAR_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+                    .truncate()
+                    .text_size(px(SIDEBAR_TEXT_SIZE))
+                    .text_color(rgb(0x1f1f1f))
+                    .child(SharedString::from(label)),
+            )
+            .into_any_element()
     }
 
     fn render_row(
@@ -596,27 +679,65 @@ impl Render for ExplorerView {
             .text_color(rgb(0x000000))
             .overflow_hidden()
             .child(self.render_navbar(window, scale_factor, cx))
-            .child(self.render_header())
-            .when_some(self.open_error.clone(), |this, error| {
-                this.child(render_open_error(&error))
-            })
             .child(
-                match self.content_branch() {
-                    ExplorerContentBranch::Error => div().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(self.render_sidebar(scale_factor, cx))
+                    .child(
                         div()
-                            .p_4()
-                            .text_size(px(14.0))
-                            .text_color(rgb(0x6f1d1d))
-                            .child(self.read_error.clone().unwrap_or_default()),
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_hidden()
+                            .child(self.render_header())
+                            .when_some(self.open_error.clone(), |this, error| {
+                                this.child(render_open_error(&error))
+                            })
+                            .child(
+                                match self.content_branch() {
+                                    ExplorerContentBranch::Error => div().child(
+                                        div()
+                                            .p_4()
+                                            .text_size(px(14.0))
+                                            .text_color(rgb(0x6f1d1d))
+                                            .child(self.read_error.clone().unwrap_or_default()),
+                                    ),
+                                    ExplorerContentBranch::Empty => {
+                                        div().child(self.render_empty_folder(cx))
+                                    }
+                                    ExplorerContentBranch::List => {
+                                        div().child(self.render_list(cx))
+                                    }
+                                }
+                                .id("explorer-scroll")
+                                .flex_1()
+                                .w_full()
+                                .overflow_hidden(),
+                            ),
                     ),
-                    ExplorerContentBranch::Empty => div().child(self.render_empty_folder(cx)),
-                    ExplorerContentBranch::List => div().child(self.render_list(cx)),
-                }
-                .id("explorer-scroll")
-                .flex_1()
-                .w_full()
-                .overflow_hidden(),
             )
+    }
+}
+
+fn sidebar_separator() -> Div {
+    div()
+        .h(px(1.0))
+        .mx(px(12.0))
+        .my(px(6.0))
+        .bg(rgb(0xe5e5e5))
+        .flex_shrink_0()
+}
+
+fn sidebar_item_icon(kind: SidebarItemKind, scale_factor: f32) -> AnyElement {
+    match kind {
+        SidebarItemKind::UserDirectory(_) => folder_icon(scale_factor).into_any_element(),
+        SidebarItemKind::Drive => drive_icon(scale_factor).into_any_element(),
     }
 }
 
@@ -873,8 +994,8 @@ fn name_header_cell() -> Div {
 }
 
 fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
-    let text_width =
-        available_filename_text_width(f32::from(window.bounds().size.width), scale_factor);
+    let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
+    let text_width = available_filename_text_width(list_viewport_width, scale_factor);
     let filename = truncated_text(&entry.name, text_width, 0x000000, window);
 
     div()

@@ -11,6 +11,7 @@ mod navigation;
 mod render;
 mod scrollbar;
 mod selection;
+mod sidebar;
 mod sorting;
 #[cfg(test)]
 mod test_support;

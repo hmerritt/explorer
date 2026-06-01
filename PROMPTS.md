@@ -29,16 +29,6 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 ---
 
-Implement a permanent left side-bar.
-
-Segments (separated via a separator line):
-
-- User pinned programs (first implementation, ignore/skip this)
-- User area directories (user home directory "home", desktop "desktop", downloads "downloads")
-- List of all local drives
-
----
-
 Left side-bar drag re-sizable
 
 ## Specific / for-later

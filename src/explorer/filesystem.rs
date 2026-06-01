@@ -26,31 +26,86 @@ fn preferred_start_path(
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn user_home_dir() -> Option<PathBuf> {
+pub(super) fn user_home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
 }
 
 #[cfg(target_os = "windows")]
-fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+fn known_folder_path(folder_id: &windows::core::GUID) -> Option<PathBuf> {
     use windows::Win32::{
         System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_Downloads, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath},
+        UI::Shell::{KNOWN_FOLDER_FLAG, SHGetKnownFolderPath},
     };
 
     unsafe {
-        let downloads =
-            SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None).ok()?;
-        let path = downloads.to_string().ok().map(PathBuf::from);
-        CoTaskMemFree(Some(downloads.as_ptr().cast()));
+        let known_folder = SHGetKnownFolderPath(folder_id, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let path = known_folder.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(known_folder.as_ptr().cast()));
         path
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(super) fn user_desktop_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Desktop;
+
+    known_folder_path(&FOLDERID_Desktop)
+}
+
 #[cfg(not(target_os = "windows"))]
-fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn user_desktop_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Desktop"))
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Downloads;
+
+    known_folder_path(&FOLDERID_Downloads)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Downloads"))
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn local_drive_roots() -> Vec<PathBuf> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows::core::PCWSTR;
+
+    let mask = unsafe { GetLogicalDrives() };
+    let mut roots = Vec::new();
+
+    for drive_index in 0..26 {
+        if mask & (1 << drive_index) == 0 {
+            continue;
+        }
+
+        let letter = char::from(b'A' + drive_index as u8);
+        let root = format!("{letter}:\\");
+        let mut encoded = root.encode_utf16().collect::<Vec<_>>();
+        encoded.push(0);
+
+        let drive_type = unsafe { GetDriveTypeW(PCWSTR(encoded.as_ptr())) };
+        if windows_drive_type_is_explorer_local(drive_type) {
+            roots.push(PathBuf::from(root));
+        }
+    }
+
+    roots
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
+    matches!(drive_type, 2 | 3 | 5 | 6)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn local_drive_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("/")]
 }
 
 pub(super) fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
@@ -299,6 +354,24 @@ mod tests {
             current
         );
         assert_eq!(preferred_start_path(None, None, None), PathBuf::from("."));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn local_drive_roots_falls_back_to_unix_root() {
+        assert_eq!(local_drive_roots(), vec![PathBuf::from("/")]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_filter_includes_this_pc_local_drive_types() {
+        assert!(windows_drive_type_is_explorer_local(3));
+        assert!(windows_drive_type_is_explorer_local(2));
+        assert!(windows_drive_type_is_explorer_local(5));
+        assert!(windows_drive_type_is_explorer_local(6));
+        assert!(!windows_drive_type_is_explorer_local(4));
+        assert!(!windows_drive_type_is_explorer_local(1));
+        assert!(!windows_drive_type_is_explorer_local(0));
     }
 
     #[test]
