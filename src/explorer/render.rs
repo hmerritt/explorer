@@ -184,7 +184,7 @@ impl ExplorerView {
                 }
             });
 
-        if let Some(drag_payload) = drag_payload {
+        if is_selected && let Some(drag_payload) = drag_payload {
             row = row.on_drag(drag_payload, {
                 let entity = entity.clone();
                 move |dragged: &DraggedEntries, cursor_offset, _, cx| {
@@ -242,16 +242,18 @@ impl ExplorerView {
                 .can_drop(|dragged_value, _, _| {
                     dragged_value.is::<DraggedEntries>() || dragged_value.is::<ExternalPaths>()
                 })
-                .on_drop(cx.listener(|this, _: &DraggedEntries, _: &mut Window, cx| {
-                    this.open_error = Some("This drop target is not valid.".to_owned());
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .on_drop(cx.listener(|this, _: &ExternalPaths, _: &mut Window, cx| {
-                    this.open_error = Some("This drop target is not valid.".to_owned());
-                    cx.stop_propagation();
-                    cx.notify();
-                }));
+                .on_drop(
+                    cx.listener(|_: &mut Self, _: &DraggedEntries, _: &mut Window, cx| {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .on_drop(
+                    cx.listener(|_: &mut Self, _: &ExternalPaths, _: &mut Window, cx| {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                );
         }
 
         row.child(name_cell(&entry, scale_factor, window))

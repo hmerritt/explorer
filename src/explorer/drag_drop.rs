@@ -72,7 +72,7 @@ impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let origin = drag_preview_origin(self.cursor_offset);
         let root_width = f32::from(self.cursor_offset.x) + (DRAG_PREVIEW_WIDTH / 2.0);
-        let root_height = f32::from(self.cursor_offset.y) + DRAG_PREVIEW_HEIGHT;
+        let root_height = f32::from(self.cursor_offset.y);
 
         div().relative().w(px(root_width)).h(px(root_height)).child(
             div()
@@ -106,7 +106,7 @@ impl Render for DragPreview {
 pub(super) fn drag_preview_origin(cursor_offset: Point<Pixels>) -> (f32, f32) {
     (
         f32::from(cursor_offset.x) - (DRAG_PREVIEW_WIDTH / 2.0),
-        f32::from(cursor_offset.y),
+        f32::from(cursor_offset.y) - DRAG_PREVIEW_HEIGHT,
     )
 }
 
@@ -201,6 +201,10 @@ impl ExplorerView {
         }
 
         let destination = destination.resolve(&self.path);
+        if dragged.paths.iter().any(|path| path == &destination) {
+            return;
+        }
+
         self.perform_file_drop(&dragged.paths, &destination, modifiers);
     }
 
@@ -267,11 +271,14 @@ fn resolve_dragged_value_drop(
     destination: &Path,
     modifiers: Modifiers,
 ) -> ResolvedDrop {
-    let valid_target = destination.is_dir()
-        && (dragged_value.is::<DraggedEntries>()
-            || dragged_value
+    let valid_target = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+        destination.is_dir() && !dragged.paths.iter().any(|path| path == destination)
+    } else {
+        destination.is_dir()
+            && dragged_value
                 .downcast_ref::<gpui::ExternalPaths>()
-                .is_some_and(|paths| !paths.paths().is_empty()));
+                .is_some_and(|paths| !paths.paths().is_empty())
+    };
 
     resolve_drop_operation(modifiers, valid_target)
 }
@@ -287,9 +294,12 @@ fn path_display_name(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::{
+        constants::ROW_HEIGHT,
+        entry::FileEntry,
         selection::SelectionModifiers,
-        test_support::{selected_names, test_view_with_entries},
+        test_support::{TempDir, selected_names, test_view_with_entries},
     };
+    use std::fs;
 
     #[test]
     fn modifiers_resolve_drag_operation() {
@@ -382,6 +392,80 @@ mod tests {
     }
 
     #[test]
+    fn unselected_file_row_starts_rubber_band_instead_of_dnd_payload() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+
+        assert!(view.test_dragged_entries_for_index(1).is_none());
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(view.mouse_selection_drag.is_some());
+        assert!(selected_names(&view).is_empty());
+    }
+
+    #[test]
+    fn unselected_folder_row_starts_rubber_band_instead_of_dnd_payload() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("file.txt", false, Some(1), None),
+        ];
+        view.select_single_index(1);
+
+        assert!(view.test_dragged_entries_for_index(0).is_none());
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(view.mouse_selection_drag.is_some());
+        assert!(selected_names(&view).is_empty());
+    }
+
+    #[test]
+    fn selected_single_row_drag_produces_payload() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(1);
+
+        let dragged = view.test_dragged_entries_for_index(1).expect("dragged row");
+
+        assert_eq!(dragged.paths, vec![PathBuf::from("b.txt")]);
+        assert_eq!(dragged.display_name, "b.txt");
+        assert_eq!(dragged.count, 1);
+    }
+
+    #[test]
+    fn every_selected_row_drag_uses_same_multi_selection_payload() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+        view.apply_click_selection(
+            2,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        let first_drag = view.test_dragged_entries_for_index(0).expect("first row");
+        let second_drag = view
+            .test_dragged_entries_for_index(2)
+            .expect("second selected row");
+
+        assert_eq!(
+            first_drag.paths,
+            vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]
+        );
+        assert_eq!(second_drag.paths, first_drag.paths);
+        assert_eq!(second_drag.source_dir, first_drag.source_dir);
+        assert_eq!(second_drag.count, first_drag.count);
+    }
+
+    #[test]
     fn drag_preview_origin_centers_preview_on_cursor_offset() {
         let cursor_offset = gpui::point(px(120.0), px(32.0));
 
@@ -391,11 +475,80 @@ mod tests {
     }
 
     #[test]
-    fn drag_preview_origin_keeps_top_at_cursor_offset() {
+    fn drag_preview_origin_keeps_bottom_at_cursor_offset() {
         let cursor_offset = gpui::point(px(120.0), px(32.0));
 
         let origin = drag_preview_origin(cursor_offset);
 
-        assert_eq!(origin.1, 32.0);
+        assert_eq!(origin.1, 32.0 - DRAG_PREVIEW_HEIGHT);
+    }
+
+    #[test]
+    fn selected_directory_cannot_be_internal_drop_target() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&folder);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert!(!view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory(folder),
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
+    fn all_selected_directories_are_rejected_as_internal_drop_targets() {
+        let temp = TempDir::new();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let target = temp.path().join("target");
+        fs::create_dir(&first).expect("create first folder");
+        fs::create_dir(&second).expect("create second folder");
+        fs::create_dir(&target).expect("create target folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.restore_selection_from_paths(&[first.clone(), second.clone()]);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert!(!view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory(first),
+            Modifiers::default(),
+        ));
+        assert!(!view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory(second),
+            Modifiers::default(),
+        ));
+        assert!(view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory(target),
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
+    fn selected_directory_drop_is_no_op() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&folder);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+        view.open_error = Some("stale error".to_owned());
+
+        view.drop_internal_entries(
+            &dragged,
+            DropDestination::Directory(folder.clone()),
+            Modifiers::default(),
+        );
+
+        assert_eq!(view.open_error, Some("stale error".to_owned()));
+        assert!(folder.is_dir());
     }
 }
