@@ -18,6 +18,12 @@ pub(super) struct MouseSelectionDrag {
     pub(super) active: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PointerDragIntent {
+    ItemDrag,
+    RubberBand,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SelectionBox {
     pub(super) left: f32,
@@ -48,6 +54,40 @@ impl SelectionBox {
 }
 
 impl ExplorerView {
+    pub(super) fn pointer_drag_intent(
+        &self,
+        local_position: Point<Pixels>,
+    ) -> Option<PointerDragIntent> {
+        let scroll_top = self
+            .scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.scroll_top);
+        pointer_drag_intent_at(
+            f32::from(local_position.y),
+            scroll_top,
+            self.entries.len(),
+            &self.selection.selected_indices,
+        )
+    }
+
+    pub(super) fn begin_mouse_selection_drag_for_intent(
+        &mut self,
+        local_position: Point<Pixels>,
+        modifiers: SelectionModifiers,
+    ) {
+        match self.pointer_drag_intent(local_position) {
+            Some(PointerDragIntent::RubberBand) => {
+                if !modifiers.toggle {
+                    self.clear_selection();
+                }
+                self.begin_mouse_selection_drag(local_position, modifiers);
+            }
+            Some(PointerDragIntent::ItemDrag) => {
+                self.cancel_mouse_selection_drag();
+            }
+            None => {}
+        }
+    }
+
     pub(super) fn begin_mouse_selection_drag(
         &mut self,
         local_position: Point<Pixels>,
@@ -65,6 +105,10 @@ impl ExplorerView {
             initial_selection: self.selection.selected_indices.clone(),
             active: false,
         });
+    }
+
+    pub(super) fn cancel_mouse_selection_drag(&mut self) -> bool {
+        self.mouse_selection_drag.take().is_some()
     }
 
     pub(super) fn update_mouse_selection_drag(
@@ -216,6 +260,27 @@ pub(super) fn row_indices_intersecting_box(
     row_indices_intersecting_content_box(selection_box.translated_y(scroll_top), entry_count)
 }
 
+pub(super) fn pointer_drag_intent_at(
+    local_y: f32,
+    scroll_top: f32,
+    entry_count: usize,
+    selected_indices: &BTreeSet<usize>,
+) -> Option<PointerDragIntent> {
+    if local_y < 0.0 {
+        return None;
+    }
+
+    let Some(ix) = row_index_at_content_y(local_y + scroll_top, entry_count) else {
+        return Some(PointerDragIntent::RubberBand);
+    };
+
+    if selected_indices.contains(&ix) {
+        Some(PointerDragIntent::ItemDrag)
+    } else {
+        Some(PointerDragIntent::RubberBand)
+    }
+}
+
 pub(super) fn toggle_indices(
     mut selected_indices: BTreeSet<usize>,
     toggled_indices: &BTreeSet<usize>,
@@ -242,6 +307,15 @@ fn drag_distance(start: Point<Pixels>, current: Point<Pixels>) -> f32 {
     dx.abs().max(dy.abs())
 }
 
+fn row_index_at_content_y(content_y: f32, entry_count: usize) -> Option<usize> {
+    if content_y < 0.0 || entry_count == 0 {
+        return None;
+    }
+
+    let ix = (content_y / ROW_HEIGHT).floor() as usize;
+    (ix < entry_count).then_some(ix)
+}
+
 pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels> {
     Bounds::new(
         gpui::point(px(selection_box.left), px(selection_box.top)),
@@ -252,6 +326,7 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::test_support::{selected_names, test_view_with_entries};
 
     #[test]
     fn selection_box_normalizes_reverse_drags() {
@@ -283,6 +358,143 @@ mod tests {
             row_indices_intersecting_box(SelectionBox::new(0.0, 0.0, 20.0, 30.0), 56.0, 5);
 
         assert_eq!(indices, BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn selected_row_resolves_to_item_drag_with_scroll_offset() {
+        assert_eq!(
+            pointer_drag_intent_at(1.0, ROW_HEIGHT * 2.0, 5, &BTreeSet::from([2])),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn unselected_row_resolves_to_rubber_band_with_scroll_offset() {
+        assert_eq!(
+            pointer_drag_intent_at(1.0, ROW_HEIGHT * 2.0, 5, &BTreeSet::from([1])),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn whitespace_resolves_to_rubber_band() {
+        assert_eq!(
+            pointer_drag_intent_at(ROW_HEIGHT * 5.0, 0.0, 5, &BTreeSet::from([4])),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn empty_list_resolves_to_rubber_band() {
+        assert_eq!(
+            pointer_drag_intent_at(1.0, 0.0, 0, &BTreeSet::new()),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn outside_list_bounds_resolves_to_no_drag_intent() {
+        assert_eq!(
+            pointer_drag_intent_at(-1.0, 0.0, 5, &BTreeSet::from([0])),
+            None
+        );
+    }
+
+    #[test]
+    fn item_drag_intent_does_not_create_mouse_selection_drag() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(view.mouse_selection_drag.is_none());
+    }
+
+    #[test]
+    fn rubber_band_intent_creates_mouse_selection_drag() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(view.mouse_selection_drag.is_some());
+    }
+
+    #[test]
+    fn plain_rubber_band_start_clears_existing_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(selected_names(&view).is_empty());
+        assert_eq!(
+            view.mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag")
+                .initial_selection,
+            BTreeSet::new()
+        );
+    }
+
+    #[test]
+    fn ctrl_rubber_band_start_preserves_initial_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+        assert_eq!(
+            view.mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag")
+                .initial_selection,
+            BTreeSet::from([0])
+        );
+    }
+
+    #[test]
+    fn cancel_mouse_selection_drag_removes_active_selection_box() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(1.0)),
+            SelectionModifiers::default(),
+        );
+        view.update_mouse_selection_drag(
+            gpui::point(px(40.0), px(ROW_HEIGHT * 2.0)),
+            size(px(100.0), px(100.0)),
+        );
+        assert!(view.active_selection_box().is_some());
+
+        assert!(view.cancel_mouse_selection_drag());
+
+        assert!(view.mouse_selection_drag.is_none());
+        assert!(view.active_selection_box().is_none());
+    }
+
+    #[test]
+    fn cancel_mouse_selection_drag_is_no_op_without_drag() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+
+        assert!(!view.cancel_mouse_selection_drag());
+        assert!(view.mouse_selection_drag.is_none());
     }
 
     #[test]

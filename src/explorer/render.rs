@@ -129,7 +129,6 @@ impl ExplorerView {
         let entry = self.entries[ix].clone();
         let is_selected = self.entry_is_selected(ix);
         let clicked_entry = entry.clone();
-        let drag_source_entry = entry.clone();
         let drag_payload = self.dragged_entries_for_index(ix);
         let destination = DropDestination::Directory(entry.path.clone());
         let entity = cx.entity();
@@ -188,12 +187,11 @@ impl ExplorerView {
         if let Some(drag_payload) = drag_payload {
             row = row.on_drag(drag_payload, {
                 let entity = entity.clone();
-                move |dragged: &DraggedEntries, _, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.select_drag_source_if_needed(&drag_source_entry);
-                        cx.notify();
+                move |dragged: &DraggedEntries, cursor_offset, _, cx| {
+                    entity.update(cx, |this, _| {
+                        this.cancel_mouse_selection_drag();
                     });
-                    cx.new(|_| DragPreview::new(dragged))
+                    cx.new(|_| DragPreview::new(dragged, cursor_offset))
                 }
             });
         }
@@ -491,7 +489,7 @@ impl ExplorerView {
                         let local_position = local_point(event.position, &bounds);
                         let modifiers = SelectionModifiers::from_gpui(event.modifiers);
                         let _ = entity.update(cx, |this, _| {
-                            this.begin_mouse_selection_drag(local_position, modifiers);
+                            this.begin_mouse_selection_drag_for_intent(local_position, modifiers);
                         });
                     }
                 });
@@ -556,6 +554,7 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_go_back))
             .on_action(cx.listener(Self::handle_go_forward))
             .on_action(cx.listener(Self::handle_go_up))
+            .on_action(cx.listener(Self::handle_cancel_drag))
             .on_action(cx.listener(Self::handle_open_selected))
             .on_action(cx.listener(Self::handle_enter_selected))
             .on_action(cx.listener(Self::handle_refresh))

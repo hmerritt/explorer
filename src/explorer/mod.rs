@@ -17,8 +17,8 @@ mod test_support;
 mod view;
 
 pub use actions::{
-    EnterSelected, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown,
-    MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
+    CancelDrag, EnterSelected, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward,
+    GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
 };
 #[allow(unused_imports)]
 pub use entry::FileEntry;

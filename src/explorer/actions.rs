@@ -20,6 +20,7 @@ actions!(
         GoBack,
         GoForward,
         GoUp,
+        CancelDrag,
         OpenSelected,
         EnterSelected,
         Refresh,
@@ -116,6 +117,21 @@ impl ExplorerView {
     pub(super) fn handle_go_up(&mut self, _: &GoUp, _: &mut Window, cx: &mut Context<Self>) {
         self.navigate_up();
         cx.notify();
+    }
+
+    pub(super) fn handle_cancel_drag(
+        &mut self,
+        _: &CancelDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stopped_drag = cx.stop_active_drag(window);
+        let stopped_mouse_selection_drag = self.cancel_mouse_selection_drag();
+
+        if stopped_drag || stopped_mouse_selection_drag {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     pub(super) fn handle_open_selected(

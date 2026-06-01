@@ -372,10 +372,10 @@ mod tests {
 
     #[test]
     fn scrollbar_widths_match_reserved_layout_behavior() {
-        assert_eq!(SCROLLBAR_THUMB_WIDTH, 6.0);
-        assert_eq!(SCROLLBAR_THUMB_HOVER_WIDTH, 8.0);
+        assert_eq!(SCROLLBAR_THUMB_WIDTH, 4.0);
+        assert_eq!(SCROLLBAR_THUMB_HOVER_WIDTH, 6.0);
         assert!(SCROLLBAR_THUMB_HOVER_WIDTH > SCROLLBAR_THUMB_WIDTH);
-        assert_eq!(SCROLLBAR_GUTTER_WIDTH, 16.0);
+        assert_eq!(SCROLLBAR_GUTTER_WIDTH, 18.0);
         assert!(SCROLLBAR_GUTTER_WIDTH > SCROLLBAR_THUMB_HOVER_WIDTH);
     }
 }

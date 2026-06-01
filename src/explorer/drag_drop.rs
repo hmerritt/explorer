@@ -5,11 +5,11 @@ use std::{
 };
 
 use gpui::{
-    Context, CursorStyle, Modifiers, Render, SharedString, Window, div, prelude::*, px, rgb,
+    Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, Window, div, prelude::*,
+    px, rgb,
 };
 
 use crate::explorer::{
-    entry::FileEntry,
     filesystem::{copy_paths_to_directory, move_paths_to_directory},
     view::ExplorerView,
 };
@@ -45,10 +45,16 @@ pub(super) enum ResolvedDrop {
 #[derive(Clone, Debug)]
 pub(super) struct DragPreview {
     label: SharedString,
+    cursor_offset: Point<Pixels>,
 }
 
+const DRAG_PREVIEW_WIDTH: f32 = 160.0;
+const DRAG_PREVIEW_HEIGHT: f32 = 24.0;
+const DRAG_PREVIEW_VERTICAL_PADDING: f32 = 4.0;
+const DRAG_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
+
 impl DragPreview {
-    pub(super) fn new(dragged: &DraggedEntries) -> Self {
+    pub(super) fn new(dragged: &DraggedEntries, cursor_offset: Point<Pixels>) -> Self {
         let label = if dragged.count == 1 {
             dragged.display_name.clone()
         } else {
@@ -57,24 +63,51 @@ impl DragPreview {
 
         Self {
             label: SharedString::from(label),
+            cursor_offset,
         }
     }
 }
 
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(3.0))
-            .bg(rgb(0xffffff))
-            .border_1()
-            .border_color(rgb(0x8a8a8a))
-            .shadow_md()
-            .text_size(px(12.0))
-            .text_color(rgb(0x1f1f1f))
-            .child(self.label.clone())
+        let origin = drag_preview_origin(self.cursor_offset);
+        let root_width = f32::from(self.cursor_offset.x) + (DRAG_PREVIEW_WIDTH / 2.0);
+        let root_height = f32::from(self.cursor_offset.y) + DRAG_PREVIEW_HEIGHT;
+
+        div().relative().w(px(root_width)).h(px(root_height)).child(
+            div()
+                .absolute()
+                .left(px(origin.0))
+                .top(px(origin.1))
+                .w(px(DRAG_PREVIEW_WIDTH))
+                .h(px(DRAG_PREVIEW_HEIGHT))
+                .flex()
+                .items_center()
+                .px(px(DRAG_PREVIEW_HORIZONTAL_PADDING))
+                .py(px(DRAG_PREVIEW_VERTICAL_PADDING))
+                .rounded(px(3.0))
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0x8a8a8a))
+                .shadow_md()
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .truncate()
+                        .child(self.label.clone()),
+                ),
+        )
     }
+}
+
+pub(super) fn drag_preview_origin(cursor_offset: Point<Pixels>) -> (f32, f32) {
+    (
+        f32::from(cursor_offset.x) - (DRAG_PREVIEW_WIDTH / 2.0),
+        f32::from(cursor_offset.y),
+    )
 }
 
 impl DropDestination {
@@ -121,27 +154,17 @@ impl DraggedEntries {
 
 impl ExplorerView {
     pub(super) fn dragged_entries_for_index(&self, ix: usize) -> Option<DraggedEntries> {
-        let entry = self.entries.get(ix)?;
-        let paths = if self.entry_is_selected(ix) {
-            self.selected_paths()
-        } else {
-            vec![entry.path.clone()]
-        };
+        self.entries.get(ix)?;
+        if !self.entry_is_selected(ix) {
+            return None;
+        }
 
-        DraggedEntries::new(paths, self.path.clone())
+        DraggedEntries::new(self.selected_paths(), self.path.clone())
     }
 
     #[cfg(test)]
     pub(super) fn test_dragged_entries_for_index(&self, ix: usize) -> Option<DraggedEntries> {
         self.dragged_entries_for_index(ix)
-    }
-
-    pub(super) fn select_drag_source_if_needed(&mut self, entry: &FileEntry) {
-        if let Some(ix) = self.entry_index_by_path(&entry.path)
-            && !self.entry_is_selected(ix)
-        {
-            self.select_single_index(ix);
-        }
     }
 
     pub(super) fn drag_cursor_for_value(
@@ -348,16 +371,31 @@ mod tests {
     }
 
     #[test]
-    fn unselected_row_drag_uses_only_that_row() {
+    fn unselected_row_drag_has_no_dnd_payload() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
         view.select_single_index(0);
 
-        let dragged = view.test_dragged_entries_for_index(1).expect("dragged row");
+        let dragged = view.test_dragged_entries_for_index(1);
 
-        assert_eq!(dragged.paths, vec![PathBuf::from("b.txt")]);
-        assert_eq!(dragged.source_dir, PathBuf::from("selection"));
-        assert_eq!(dragged.display_name, "b.txt");
-        assert_eq!(dragged.count, 1);
+        assert!(dragged.is_none());
         assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn drag_preview_origin_centers_preview_on_cursor_offset() {
+        let cursor_offset = gpui::point(px(120.0), px(32.0));
+
+        let origin = drag_preview_origin(cursor_offset);
+
+        assert_eq!(origin.0, 120.0 - (DRAG_PREVIEW_WIDTH / 2.0));
+    }
+
+    #[test]
+    fn drag_preview_origin_keeps_top_at_cursor_offset() {
+        let cursor_offset = gpui::point(px(120.0), px(32.0));
+
+        let origin = drag_preview_origin(cursor_offset);
+
+        assert_eq!(origin.1, 32.0);
     }
 }

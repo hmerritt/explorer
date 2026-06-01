@@ -6,8 +6,8 @@ use gpui::{
 };
 
 use crate::explorer::{
-    EnterSelected, ExplorerView, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward,
-    GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
+    CancelDrag, EnterSelected, ExplorerView, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack,
+    GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
     default_start_path,
 };
 
@@ -55,6 +55,7 @@ pub fn run() {
             KeyBinding::new("f5", Refresh, None),
             KeyBinding::new("backspace", GoUp, None),
             KeyBinding::new("alt-up", GoUp, None),
+            KeyBinding::new("escape", CancelDrag, None),
             KeyBinding::new("ctrl-a", SelectAll, None),
         ]);
 
