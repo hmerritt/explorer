@@ -73,18 +73,20 @@ impl ExplorerView {
         &mut self,
         local_position: Point<Pixels>,
         modifiers: SelectionModifiers,
-    ) {
+    ) -> bool {
         match self.pointer_drag_intent(local_position) {
             Some(PointerDragIntent::RubberBand) => {
                 if !modifiers.toggle {
                     self.clear_selection();
                 }
                 self.begin_mouse_selection_drag(local_position, modifiers);
+                true
             }
             Some(PointerDragIntent::ItemDrag) => {
                 self.cancel_mouse_selection_drag();
+                false
             }
-            None => {}
+            None => false,
         }
     }
 

@@ -129,7 +129,10 @@ impl ExplorerView {
         let entry = self.entries[ix].clone();
         let is_selected = self.entry_is_selected(ix);
         let clicked_entry = entry.clone();
-        let drag_payload = self.dragged_entries_for_index(ix);
+        let drag_payload = self
+            .can_start_item_drag_for_index(ix)
+            .then(|| self.dragged_entries_for_index(ix))
+            .flatten();
         let destination = DropDestination::Directory(entry.path.clone());
         let entity = cx.entity();
 
@@ -162,7 +165,7 @@ impl ExplorerView {
                 if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click(
                     &clicked_entry,
                     event.click_count(),
-                    SelectionModifiers::from_gpui(event.modifiers()),
+                    selection_modifiers_for_click(event),
                 ) {
                     this.open_file_with_default_app(&path);
                 }
@@ -184,12 +187,14 @@ impl ExplorerView {
                 }
             });
 
-        if is_selected && let Some(drag_payload) = drag_payload {
+        if let Some(drag_payload) = drag_payload {
             row = row.on_drag(drag_payload, {
                 let entity = entity.clone();
                 move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                     entity.update(cx, |this, _| {
-                        this.cancel_mouse_selection_drag();
+                        if this.mouse_selection_drag.is_none() {
+                            this.cancel_mouse_selection_drag();
+                        }
                     });
                     cx.new(|_| DragPreview::new(dragged, cursor_offset))
                 }
@@ -490,8 +495,11 @@ impl ExplorerView {
 
                         let local_position = local_point(event.position, &bounds);
                         let modifiers = SelectionModifiers::from_gpui(event.modifiers);
-                        let _ = entity.update(cx, |this, _| {
-                            this.begin_mouse_selection_drag_for_intent(local_position, modifiers);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.begin_mouse_selection_drag_for_intent(local_position, modifiers)
+                            {
+                                cx.notify();
+                            }
                         });
                     }
                 });
@@ -933,6 +941,13 @@ fn text_cell_width(column_width: f32) -> f32 {
     (column_width - TEXT_CELL_HORIZONTAL_PADDING * 2.0).max(0.0)
 }
 
+fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
+    match event {
+        ClickEvent::Mouse(event) => SelectionModifiers::from_gpui(event.down.modifiers),
+        ClickEvent::Keyboard(_) => SelectionModifiers::default(),
+    }
+}
+
 fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {
     let text = truncated_text(&text, text_cell_width(width), TEXT_CELL_TEXT_COLOR, window);
 
@@ -958,15 +973,22 @@ fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {
 #[cfg(test)]
 mod tests {
 
-    use crate::explorer::constants::{
-        COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
-        EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-        FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
+    use gpui::{
+        ClickEvent, KeyboardClickEvent, Modifiers, MouseClickEvent, MouseDownEvent, MouseUpEvent,
+    };
+
+    use crate::explorer::{
+        constants::{
+            COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
+            EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
+            FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
+        },
+        selection::SelectionModifiers,
     };
 
     use super::{
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width,
-        filename_text_width, text_cell_width,
+        filename_text_width, selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -1024,5 +1046,60 @@ mod tests {
     #[test]
     fn text_cell_width_clamps_when_padding_consumes_column() {
         assert_eq!(text_cell_width(10.0), 0.0);
+    }
+
+    #[test]
+    fn click_selection_modifiers_use_mouse_down_shift() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+
+        assert_eq!(
+            selection_modifiers_for_click(&event),
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            }
+        );
+    }
+
+    #[test]
+    fn click_selection_modifiers_use_mouse_down_secondary_modifier() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                modifiers: Modifiers {
+                    control: true,
+                    platform: cfg!(target_os = "macos"),
+                    ..Modifiers::default()
+                },
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+
+        assert_eq!(
+            selection_modifiers_for_click(&event),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            }
+        );
+    }
+
+    #[test]
+    fn keyboard_click_selection_modifiers_are_default() {
+        let event = ClickEvent::Keyboard(KeyboardClickEvent::default());
+
+        assert_eq!(
+            selection_modifiers_for_click(&event),
+            SelectionModifiers::default()
+        );
     }
 }

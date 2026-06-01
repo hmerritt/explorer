@@ -1,9 +1,5 @@
 ## New
 
-Implement file/directory drag-and-drop to move. Plan details and mirror Windows Explorer behaviour.
-
----
-
 Implement standard keybindings for:
 
 - Copy

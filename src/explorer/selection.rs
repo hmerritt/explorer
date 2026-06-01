@@ -310,6 +310,7 @@ mod tests {
 
     use super::*;
     use crate::explorer::{
+        entry::FileEntry,
         test_support::{TempDir, selected_names, test_view_with_entries},
         view::ExplorerView,
     };
@@ -413,6 +414,75 @@ mod tests {
         assert_eq!(selected_names(&view), vec!["b.txt", "c.txt", "d.txt"]);
         assert_eq!(view.selection.anchor_index, Some(1));
         assert_eq!(view.selection.focused_index, Some(3));
+    }
+
+    #[test]
+    fn shift_click_below_selected_file_selects_inclusive_range() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+
+        view.select_single_index(1);
+        view.apply_click_selection(
+            4,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(
+            selected_names(&view),
+            vec!["b.txt", "c.txt", "d.txt", "e.txt"]
+        );
+        assert_eq!(view.selection.anchor_index, Some(1));
+        assert_eq!(view.selection.focused_index, Some(4));
+    }
+
+    #[test]
+    fn shift_click_above_selected_file_selects_inclusive_range() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+
+        view.select_single_index(3);
+        view.apply_click_selection(
+            0,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(
+            selected_names(&view),
+            vec!["a.txt", "b.txt", "c.txt", "d.txt"]
+        );
+        assert_eq!(view.selection.anchor_index, Some(3));
+        assert_eq!(view.selection.focused_index, Some(0));
+    }
+
+    #[test]
+    fn shift_click_from_selected_folder_selects_range_across_entry_types() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder-a", true, None, None),
+            FileEntry::test("file-b.txt", false, Some(1), None),
+            FileEntry::test("folder-c", true, None, None),
+            FileEntry::test("file-d.txt", false, Some(1), None),
+        ];
+
+        view.select_single_index(0);
+        view.apply_click_selection(
+            2,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(
+            selected_names(&view),
+            vec!["folder-a", "file-b.txt", "folder-c"]
+        );
+        assert_eq!(view.selection.anchor_index, Some(0));
+        assert_eq!(view.selection.focused_index, Some(2));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub(super) struct DragPreview {
 }
 
 const DRAG_PREVIEW_WIDTH: f32 = 160.0;
-const DRAG_PREVIEW_HEIGHT: f32 = 24.0;
+const DRAG_PREVIEW_HEIGHT: f32 = 28.0;
 const DRAG_PREVIEW_VERTICAL_PADDING: f32 = 4.0;
 const DRAG_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
 
@@ -160,6 +160,10 @@ impl ExplorerView {
         }
 
         DraggedEntries::new(self.selected_paths(), self.path.clone())
+    }
+
+    pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
+        self.mouse_selection_drag.is_none() && self.dragged_entries_for_index(ix).is_some()
     }
 
     #[cfg(test)]
@@ -388,7 +392,29 @@ mod tests {
         let dragged = view.test_dragged_entries_for_index(1);
 
         assert!(dragged.is_none());
+        assert!(!view.can_start_item_drag_for_index(1));
         assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn selected_row_can_start_item_drag_without_rubber_band() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+
+        assert!(view.can_start_item_drag_for_index(0));
+    }
+
+    #[test]
+    fn selected_row_cannot_start_item_drag_while_rubber_band_exists() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+        view.begin_mouse_selection_drag(
+            gpui::point(px(1.0), px(1.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert!(view.test_dragged_entries_for_index(0).is_some());
+        assert!(!view.can_start_item_drag_for_index(0));
     }
 
     #[test]
@@ -397,13 +423,15 @@ mod tests {
         view.select_single_index(0);
 
         assert!(view.test_dragged_entries_for_index(1).is_none());
+        assert!(!view.can_start_item_drag_for_index(1));
 
-        view.begin_mouse_selection_drag_for_intent(
+        assert!(view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
             SelectionModifiers::default(),
-        );
+        ));
 
         assert!(view.mouse_selection_drag.is_some());
+        assert!(!view.can_start_item_drag_for_index(0));
         assert!(selected_names(&view).is_empty());
     }
 
@@ -417,13 +445,15 @@ mod tests {
         view.select_single_index(1);
 
         assert!(view.test_dragged_entries_for_index(0).is_none());
+        assert!(!view.can_start_item_drag_for_index(0));
 
-        view.begin_mouse_selection_drag_for_intent(
+        assert!(view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(1.0)),
             SelectionModifiers::default(),
-        );
+        ));
 
         assert!(view.mouse_selection_drag.is_some());
+        assert!(!view.can_start_item_drag_for_index(1));
         assert!(selected_names(&view).is_empty());
     }
 
