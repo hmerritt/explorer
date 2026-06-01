@@ -23,7 +23,7 @@ const NAVBAR_HEIGHT: f32 = 52.0;
 const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
 const NAV_ICON_DISABLED_COLOR: u32 = 0x9a9a9a;
-const NAV_BUTTON_HOVER_BG: u32 = 0xe8e8e8;
+const NAV_BUTTON_HOVER_BG: u32 = 0xf4f4f4;
 const NAV_BUTTON_ACTIVE_OPACITY: f32 = 0.7;
 const NAVBAR_HORIZONTAL_PADDING: f32 = 10.0;
 const NAVBAR_ITEM_GAP: f32 = 10.0;
@@ -1268,7 +1268,7 @@ fn directory_bar_children(
     let segment_count = breadcrumb.segments.len();
     for (index, segment) in breadcrumb.segments.into_iter().enumerate() {
         let is_last = index + 1 == segment_count;
-        children.push(directory_bar_label(segment, index, is_last, cx));
+        children.push(directory_bar_label(segment, index, cx));
         if !is_last {
             children.push(directory_bar_separator().into_any_element());
         }
@@ -1289,29 +1289,27 @@ fn directory_bar_fixed_label(label: &'static str) -> Div {
 fn directory_bar_label(
     segment: BreadcrumbSegment,
     index: usize,
-    is_last: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     let target = segment.target;
-    let label = div()
+    div()
         .id(("breadcrumb-segment", index))
         .min_w(px(0.0))
         .whitespace_nowrap()
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
+        .rounded(px(4.0))
         .cursor_default()
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.navigate_to_directory(target.clone(), HistoryMode::Record);
             cx.stop_propagation();
             cx.notify();
         }))
-        .child(SharedString::from(segment.label));
-
-    if is_last {
-        label.flex_1().truncate().into_any_element()
-    } else {
-        label.flex_shrink_0().into_any_element()
-    }
+        .child(SharedString::from(segment.label))
+        .flex_shrink_0()
+        .into_any_element()
 }
 
 fn directory_bar_separator() -> Div {
