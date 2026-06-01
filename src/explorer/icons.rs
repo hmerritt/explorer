@@ -79,6 +79,50 @@ pub(super) fn folder_icon(scale_factor: f32) -> Div {
         )
 }
 
+pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
+    div()
+        .relative()
+        .w(device_px(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor))
+        .h(device_px(FILE_ICON_SLOT_HEIGHT_PHYSICAL, scale_factor))
+        .flex_shrink_0()
+        .child(
+            div()
+                .absolute()
+                .left(device_px(0.0, scale_factor))
+                .top(device_px(1.0, scale_factor))
+                .child(folder_icon(scale_factor)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(device_px(0.0, scale_factor))
+                .top(device_px(11.0, scale_factor))
+                .w(device_px(11.0, scale_factor))
+                .h(device_px(9.0, scale_factor))
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0xb7b7b7)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(device_px(2.0, scale_factor))
+                .top(device_px(14.0, scale_factor))
+                .w(device_px(6.0, scale_factor))
+                .h(device_px(2.0, scale_factor))
+                .bg(rgb(0x1f1f1f)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(device_px(5.0, scale_factor))
+                .top(device_px(12.0, scale_factor))
+                .w(device_px(2.0, scale_factor))
+                .h(device_px(6.0, scale_factor))
+                .bg(rgb(0x1f1f1f)),
+        )
+}
+
 pub(super) fn file_icon(scale_factor: f32) -> Div {
     div()
         .relative()

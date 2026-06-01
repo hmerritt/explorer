@@ -94,8 +94,8 @@ impl ExplorerView {
             return None;
         }
 
-        if entry.is_dir {
-            self.navigate_to_directory(entry.path.clone(), HistoryMode::Record);
+        if entry.is_directory_like() {
+            self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
             None
         } else {
             Some(EntryAction::OpenFile(entry.path.clone()))
@@ -106,8 +106,8 @@ impl ExplorerView {
         let entry = self.focused_entry()?.clone();
         self.open_error = None;
 
-        if entry.is_dir {
-            self.navigate_to_directory(entry.path, HistoryMode::Record);
+        if entry.is_directory_like() {
+            self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
             None
         } else if open_files {
             Some(EntryAction::OpenFile(entry.path))
@@ -135,7 +135,11 @@ impl ExplorerView {
 mod tests {
 
     use super::*;
-    use crate::explorer::{entry::FileEntry, test_support::TempDir, view::ExplorerView};
+    use crate::explorer::{
+        entry::{DirectoryLinkKind, EntryKind, FileEntry},
+        test_support::TempDir,
+        view::ExplorerView,
+    };
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -186,7 +190,7 @@ mod tests {
         let entry = FileEntry {
             path: child.clone(),
             name: "child".to_owned(),
-            is_dir: true,
+            kind: EntryKind::Directory,
             modified: None,
             size: None,
         };
@@ -214,14 +218,14 @@ mod tests {
         let file_entry = FileEntry {
             path: file.clone(),
             name: "file.txt".to_owned(),
-            is_dir: false,
+            kind: EntryKind::File,
             modified: None,
             size: Some(4),
         };
         let dir_entry = FileEntry {
             path: child.clone(),
             name: "child".to_owned(),
-            is_dir: true,
+            kind: EntryKind::Directory,
             modified: None,
             size: None,
         };
@@ -295,6 +299,22 @@ mod tests {
             Some(EntryAction::OpenFile(PathBuf::from("file.txt")))
         );
         assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn directory_shortcut_activation_navigates_to_target() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test_directory_link(
+            "shortcut.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target"),
+            },
+        )];
+
+        view.select_single_index(0);
+
+        assert_eq!(view.activate_focused_entry(true), None);
+        assert_eq!(view.path, PathBuf::from("target"));
     }
 
     #[test]

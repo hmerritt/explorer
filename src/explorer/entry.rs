@@ -1,26 +1,45 @@
-use std::{ffi::OsStr, fs, path::PathBuf, time::SystemTime};
+use std::{
+    ffi::OsStr,
+    fs::{self, Metadata},
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub(super) path: PathBuf,
     pub(super) name: String,
-    pub(super) is_dir: bool,
+    pub(super) kind: EntryKind,
     pub(super) modified: Option<SystemTime>,
     pub(super) size: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum EntryKind {
+    Directory,
+    File,
+    DirectoryLink(DirectoryLinkKind),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum DirectoryLinkKind {
+    FilesystemLink,
+    ShellShortcut { target: PathBuf },
+}
+
 impl FileEntry {
     pub(super) fn from_path(path: PathBuf) -> Option<Self> {
+        let link_metadata = fs::symlink_metadata(&path).ok()?;
         let metadata = fs::metadata(&path).ok()?;
         let name = path.file_name()?.to_string_lossy().into_owned();
-        let is_dir = metadata.is_dir();
+        let kind = entry_kind(&path, &link_metadata, &metadata);
 
         Some(Self {
             path,
             name,
-            is_dir,
-            modified: metadata.modified().ok(),
-            size: (!is_dir).then_some(metadata.len()),
+            size: display_size(&kind, &link_metadata),
+            modified: link_metadata.modified().ok(),
+            kind,
         })
     }
 
@@ -34,15 +53,65 @@ impl FileEntry {
         Self {
             path: PathBuf::from(name),
             name: name.to_owned(),
-            is_dir,
+            kind: if is_dir {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
             modified,
             size,
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_directory_link(name: &str, link_kind: DirectoryLinkKind) -> Self {
+        Self {
+            path: PathBuf::from(name),
+            name: name.to_owned(),
+            kind: EntryKind::DirectoryLink(link_kind),
+            modified: None,
+            size: None,
+        }
+    }
+
+    pub(super) fn is_directory_like(&self) -> bool {
+        matches!(
+            self.kind,
+            EntryKind::Directory | EntryKind::DirectoryLink(_)
+        )
+    }
+
+    pub(super) fn sorts_as_directory(&self) -> bool {
+        matches!(
+            self.kind,
+            EntryKind::Directory | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink)
+        )
+    }
+
+    pub(super) fn uses_directory_shortcut_icon(&self) -> bool {
+        matches!(self.kind, EntryKind::DirectoryLink(_))
+    }
+
+    pub(super) fn navigation_path(&self) -> &Path {
+        match &self.kind {
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target }) => target,
+            EntryKind::Directory | EntryKind::DirectoryLink(_) | EntryKind::File => &self.path,
+        }
+    }
+
+    pub(super) fn drop_target_path(&self) -> &Path {
+        self.navigation_path()
+    }
+
     pub(super) fn type_label(&self) -> String {
-        if self.is_dir {
-            return "File folder".to_owned();
+        match self.kind {
+            EntryKind::Directory | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink) => {
+                return "File folder".to_owned();
+            }
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { .. }) => {
+                return "Shortcut".to_owned();
+            }
+            EntryKind::File => {}
         }
 
         let Some(extension) = self.path.extension().and_then(OsStr::to_str) else {
@@ -50,5 +119,269 @@ impl FileEntry {
         };
 
         format!("{} File", extension.to_uppercase())
+    }
+}
+
+fn entry_kind(path: &Path, link_metadata: &Metadata, metadata: &Metadata) -> EntryKind {
+    if metadata.is_dir() {
+        if is_filesystem_directory_link(link_metadata) {
+            EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink)
+        } else {
+            EntryKind::Directory
+        }
+    } else if let Some(target) = shell_shortcut_directory_target(path) {
+        EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target })
+    } else {
+        EntryKind::File
+    }
+}
+
+fn display_size(kind: &EntryKind, link_metadata: &Metadata) -> Option<u64> {
+    match kind {
+        EntryKind::Directory | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink) => None,
+        EntryKind::File | EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { .. }) => {
+            Some(link_metadata.len())
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_filesystem_directory_link(link_metadata: &Metadata) -> bool {
+    link_metadata.file_type().is_symlink()
+}
+
+#[cfg(target_os = "windows")]
+fn is_filesystem_directory_link(link_metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    link_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_shortcut_directory_target(_: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn shell_shortcut_directory_target(path: &Path) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+
+    if !path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        return None;
+    }
+
+    unsafe {
+        let initialized_com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let target = resolve_shell_shortcut_target(path);
+        if initialized_com {
+            CoUninitialize();
+        }
+        target.filter(|target| target.is_dir())
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn resolve_shell_shortcut_target(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            Storage::FileSystem::WIN32_FIND_DATAW,
+            System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ},
+            UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink},
+        },
+        core::{Interface, PCWSTR},
+    };
+
+    let shell_link: IShellLinkW =
+        unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.ok()?;
+    let persist_file: IPersistFile = shell_link.cast().ok()?;
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    unsafe {
+        persist_file
+            .Load(PCWSTR::from_raw(wide_path.as_ptr()), STGM_READ)
+            .ok()?;
+    }
+
+    let mut target_buffer = vec![0u16; 32_768];
+    let mut find_data = WIN32_FIND_DATAW::default();
+    unsafe {
+        shell_link
+            .GetPath(&mut target_buffer, &mut find_data, SLGP_RAWPATH.0 as u32)
+            .ok()?;
+    }
+
+    let end = target_buffer.iter().position(|ch| *ch == 0)?;
+    (end > 0).then(|| PathBuf::from(String::from_utf16_lossy(&target_buffer[..end])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::explorer::test_support::TempDir;
+    use std::fs;
+
+    #[test]
+    fn directory_links_get_folder_type_labels() {
+        let entry = FileEntry::test_directory_link("linked", DirectoryLinkKind::FilesystemLink);
+
+        assert_eq!(entry.type_label(), "File folder");
+        assert!(entry.is_directory_like());
+        assert!(entry.sorts_as_directory());
+        assert!(entry.uses_directory_shortcut_icon());
+    }
+
+    #[test]
+    fn shell_directory_shortcuts_get_shortcut_type_labels() {
+        let target = PathBuf::from("target");
+        let entry = FileEntry::test_directory_link(
+            "target.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: target.clone(),
+            },
+        );
+
+        assert_eq!(entry.type_label(), "Shortcut");
+        assert!(entry.is_directory_like());
+        assert!(!entry.sorts_as_directory());
+        assert_eq!(entry.navigation_path(), target.as_path());
+        assert!(entry.uses_directory_shortcut_icon());
+    }
+
+    #[test]
+    fn file_entries_keep_extension_type_labels() {
+        let entry = FileEntry::test("readme.md", false, Some(10), None);
+
+        assert_eq!(entry.type_label(), "MD File");
+        assert!(!entry.is_directory_like());
+        assert!(!entry.sorts_as_directory());
+        assert!(!entry.uses_directory_shortcut_icon());
+    }
+
+    #[test]
+    fn directory_symlink_is_classified_as_filesystem_directory_link() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        let link = temp.path().join("linked");
+        fs::create_dir(&target).expect("create target");
+
+        if create_directory_symlink(&target, &link).is_err() {
+            return;
+        }
+
+        let entry = FileEntry::from_path(link).expect("entry");
+
+        assert!(matches!(
+            entry.kind,
+            EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink)
+        ));
+        assert_eq!(entry.type_label(), "File folder");
+        assert_eq!(entry.size, None);
+        assert_eq!(entry.navigation_path(), entry.path.as_path());
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn directory_shortcut_is_classified_as_shell_directory_link() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        let shortcut = temp.path().join("target.lnk");
+        fs::create_dir(&target).expect("create target");
+        create_shell_shortcut(&shortcut, &target).expect("create shortcut");
+
+        let entry = FileEntry::from_path(shortcut.clone()).expect("entry");
+
+        assert!(matches!(
+            entry.kind,
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target: ref actual_target })
+                if actual_target == &target
+        ));
+        assert_eq!(entry.type_label(), "Shortcut");
+        assert_eq!(entry.navigation_path(), target.as_path());
+        assert_eq!(
+            entry.size,
+            fs::metadata(shortcut).ok().map(|metadata| metadata.len())
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn non_directory_shortcuts_remain_files() {
+        let temp = TempDir::new();
+        let target_file = temp.path().join("target.txt");
+        let file_shortcut = temp.path().join("target-file.lnk");
+        let broken_shortcut = temp.path().join("broken.lnk");
+        fs::write(&target_file, b"data").expect("create target");
+        create_shell_shortcut(&file_shortcut, &target_file).expect("create file shortcut");
+        create_shell_shortcut(&broken_shortcut, &temp.path().join("missing"))
+            .expect("create broken shortcut");
+
+        let file_entry = FileEntry::from_path(file_shortcut).expect("file shortcut");
+        let broken_entry = FileEntry::from_path(broken_shortcut).expect("broken shortcut");
+
+        assert!(matches!(file_entry.kind, EntryKind::File));
+        assert!(matches!(broken_entry.kind, EntryKind::File));
+        assert_eq!(file_entry.type_label(), "LNK File");
+        assert_eq!(broken_entry.type_label(), "LNK File");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn create_shell_shortcut(shortcut: &Path, target: &Path) -> windows::core::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::{
+            Win32::{
+                System::Com::{
+                    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance,
+                    CoInitializeEx, CoUninitialize, IPersistFile,
+                },
+                UI::Shell::{IShellLinkW, ShellLink},
+            },
+            core::{Interface, PCWSTR},
+        };
+
+        unsafe {
+            let initialized_com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+            let result = (|| {
+                let shell_link: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+                let target_path = target
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>();
+                shell_link.SetPath(PCWSTR::from_raw(target_path.as_ptr()))?;
+
+                let persist_file: IPersistFile = shell_link.cast()?;
+                let shortcut_path = shortcut
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>();
+                persist_file.Save(PCWSTR::from_raw(shortcut_path.as_ptr()), true)
+            })();
+            if initialized_com {
+                CoUninitialize();
+            }
+            result
+        }
     }
 }

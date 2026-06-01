@@ -26,7 +26,10 @@ use crate::explorer::{
     drag_drop::{DragPreview, DraggedEntries, DropDestination},
     entry::FileEntry,
     formatting::{format_modified, format_size},
-    icons::{NavIcon, device_px, device_px_value, file_icon, folder_icon, nav_icon_font},
+    icons::{
+        NavIcon, device_px, device_px_value, directory_shortcut_icon, file_icon, folder_icon,
+        nav_icon_font,
+    },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
@@ -133,7 +136,10 @@ impl ExplorerView {
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
             .flatten();
-        let destination = DropDestination::Directory(entry.path.clone());
+        let destination = DropDestination::Directory {
+            item_path: entry.path.clone(),
+            target_path: entry.drop_target_path().to_path_buf(),
+        };
         let entity = cx.entity();
 
         let mut row = div()
@@ -201,7 +207,7 @@ impl ExplorerView {
             });
         }
 
-        if entry.is_dir {
+        if entry.is_directory_like() {
             row = row
                 .can_drop({
                     let destination = destination.clone();
@@ -737,7 +743,10 @@ fn directory_bar_label(
 ) -> AnyElement {
     let target = segment.target;
     let navigation_target = target.clone();
-    let destination = DropDestination::Directory(target);
+    let destination = DropDestination::Directory {
+        item_path: target.clone(),
+        target_path: target,
+    };
     let entity = cx.entity();
 
     div()
@@ -876,7 +885,9 @@ fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(if entry.is_dir {
+        .child(if entry.uses_directory_shortcut_icon() {
+            directory_shortcut_icon(scale_factor)
+        } else if entry.is_directory_like() {
             folder_icon(scale_factor)
         } else {
             file_icon(scale_factor)

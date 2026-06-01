@@ -7,7 +7,7 @@ pub(super) fn sort_entries(entries: &mut [FileEntry]) {
 }
 
 fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
-    match (a.is_dir, b.is_dir) {
+    match (a.sorts_as_directory(), b.sorts_as_directory()) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
         _ => compare_names(&a.name, &b.name),
@@ -81,7 +81,8 @@ fn natural_key(value: &str) -> Vec<NaturalPart> {
 mod tests {
 
     use super::*;
-    use crate::explorer::entry::FileEntry;
+    use crate::explorer::entry::{DirectoryLinkKind, FileEntry};
+    use std::path::PathBuf;
 
     #[test]
     fn sorts_directories_before_files() {
@@ -99,6 +100,45 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a", "c", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn sorts_filesystem_directory_links_with_directories() {
+        let mut entries = vec![
+            FileEntry::test("b.txt", false, Some(1), None),
+            FileEntry::test_directory_link("linked", DirectoryLinkKind::FilesystemLink),
+            FileEntry::test("a", true, None, None),
+        ];
+
+        sort_entries(&mut entries);
+
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "linked", "b.txt"]);
+    }
+
+    #[test]
+    fn sorts_shell_directory_shortcuts_with_files() {
+        let mut entries = vec![
+            FileEntry::test("z.txt", false, Some(1), None),
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test_directory_link(
+                "a shortcut.lnk",
+                DirectoryLinkKind::ShellShortcut {
+                    target: PathBuf::from("target"),
+                },
+            ),
+        ];
+
+        sort_entries(&mut entries);
+
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["folder", "a shortcut.lnk", "z.txt"]);
     }
 
     #[test]

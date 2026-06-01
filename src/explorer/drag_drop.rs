@@ -25,7 +25,10 @@ pub(super) struct DraggedEntries {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DropDestination {
     CurrentDirectory,
-    Directory(PathBuf),
+    Directory {
+        item_path: PathBuf,
+        target_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,7 +117,14 @@ impl DropDestination {
     pub(super) fn resolve(&self, current_directory: &Path) -> PathBuf {
         match self {
             Self::CurrentDirectory => current_directory.to_path_buf(),
-            Self::Directory(path) => path.clone(),
+            Self::Directory { target_path, .. } => target_path.clone(),
+        }
+    }
+
+    pub(super) fn item_path(&self, current_directory: &Path) -> PathBuf {
+        match self {
+            Self::CurrentDirectory => current_directory.to_path_buf(),
+            Self::Directory { item_path, .. } => item_path.clone(),
         }
     }
 }
@@ -177,8 +187,10 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> CursorStyle {
+        let destination_item = destination.item_path(&self.path);
         let destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(dragged_value, &destination, modifiers).cursor_style()
+        resolve_dragged_value_drop(dragged_value, &destination_item, &destination, modifiers)
+            .cursor_style()
     }
 
     pub(super) fn can_drop_value(
@@ -187,8 +199,9 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> bool {
+        let destination_item = destination.item_path(&self.path);
         let destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(dragged_value, &destination, modifiers)
+        resolve_dragged_value_drop(dragged_value, &destination_item, &destination, modifiers)
             .operation()
             .is_some()
     }
@@ -204,8 +217,9 @@ impl ExplorerView {
             return;
         }
 
+        let destination_item = destination.item_path(&self.path);
         let destination = destination.resolve(&self.path);
-        if dragged.paths.iter().any(|path| path == &destination) {
+        if dragged.paths.iter().any(|path| path == &destination_item) {
             return;
         }
 
@@ -272,11 +286,12 @@ pub(super) fn resolve_drop_operation(modifiers: Modifiers, valid_target: bool) -
 
 fn resolve_dragged_value_drop(
     dragged_value: &dyn Any,
+    destination_item: &Path,
     destination: &Path,
     modifiers: Modifiers,
 ) -> ResolvedDrop {
     let valid_target = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
-        destination.is_dir() && !dragged.paths.iter().any(|path| path == destination)
+        destination.is_dir() && !dragged.paths.iter().any(|path| path == destination_item)
     } else {
         destination.is_dir()
             && dragged_value
@@ -525,7 +540,10 @@ mod tests {
 
         assert!(!view.can_drop_value(
             &dragged,
-            &DropDestination::Directory(folder),
+            &DropDestination::Directory {
+                item_path: folder.clone(),
+                target_path: folder,
+            },
             Modifiers::default(),
         ));
     }
@@ -546,17 +564,26 @@ mod tests {
 
         assert!(!view.can_drop_value(
             &dragged,
-            &DropDestination::Directory(first),
+            &DropDestination::Directory {
+                item_path: first.clone(),
+                target_path: first,
+            },
             Modifiers::default(),
         ));
         assert!(!view.can_drop_value(
             &dragged,
-            &DropDestination::Directory(second),
+            &DropDestination::Directory {
+                item_path: second.clone(),
+                target_path: second,
+            },
             Modifiers::default(),
         ));
         assert!(view.can_drop_value(
             &dragged,
-            &DropDestination::Directory(target),
+            &DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target,
+            },
             Modifiers::default(),
         ));
     }
@@ -574,11 +601,68 @@ mod tests {
 
         view.drop_internal_entries(
             &dragged,
-            DropDestination::Directory(folder.clone()),
+            DropDestination::Directory {
+                item_path: folder.clone(),
+                target_path: folder.clone(),
+            },
             Modifiers::default(),
         );
 
         assert_eq!(view.open_error, Some("stale error".to_owned()));
         assert!(folder.is_dir());
+    }
+
+    #[test]
+    fn selected_directory_shortcut_cannot_be_its_own_drop_target() {
+        let temp = TempDir::new();
+        let shortcut = temp.path().join("target.lnk");
+        let target = temp.path().join("target");
+        fs::write(&shortcut, b"shortcut").expect("create shortcut placeholder");
+        fs::create_dir(&target).expect("create target folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.restore_selection_from_paths(std::slice::from_ref(&shortcut));
+        let ix = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == shortcut)
+            .expect("shortcut entry");
+        let dragged = view
+            .test_dragged_entries_for_index(ix)
+            .expect("dragged row");
+
+        assert!(!view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory {
+                item_path: shortcut,
+                target_path: target,
+            },
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
+    fn external_drop_on_directory_shortcut_uses_resolved_target() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let shortcut = temp.path().join("target.lnk");
+        let target = temp.path().join("target");
+        fs::write(&source, b"data").expect("create source");
+        fs::write(&shortcut, b"shortcut").expect("create shortcut placeholder");
+        fs::create_dir(&target).expect("create target folder");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.drop_external_paths(
+            std::slice::from_ref(&source),
+            DropDestination::Directory {
+                item_path: shortcut.clone(),
+                target_path: target.clone(),
+            },
+            Modifiers::default(),
+        );
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(target.join("file.txt")).unwrap(), b"data");
+        assert!(shortcut.exists());
     }
 }
