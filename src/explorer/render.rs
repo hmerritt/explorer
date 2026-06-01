@@ -1,9 +1,10 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent,
-    SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window, canvas, div,
+    font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::explorer::{
@@ -22,6 +23,7 @@ use crate::explorer::{
         NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
         SCROLLBAR_GUTTER_WIDTH,
     },
+    drag_drop::{DragPreview, DraggedEntries, DropDestination},
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{NavIcon, device_px, device_px_value, file_icon, folder_icon, nav_icon_font},
@@ -127,8 +129,12 @@ impl ExplorerView {
         let entry = self.entries[ix].clone();
         let is_selected = self.entry_is_selected(ix);
         let clicked_entry = entry.clone();
+        let drag_source_entry = entry.clone();
+        let drag_payload = self.dragged_entries_for_index(ix);
+        let destination = DropDestination::Directory(entry.path.clone());
+        let entity = cx.entity();
 
-        div()
+        let mut row = div()
             .id(("explorer-entry", ix))
             .relative()
             .flex()
@@ -164,7 +170,93 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(name_cell(&entry, scale_factor, window))
+            .on_drag_move::<DraggedEntries>({
+                let destination = destination.clone();
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+                }
+            })
+            .on_drag_move::<ExternalPaths>({
+                let destination = destination.clone();
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+                }
+            });
+
+        if let Some(drag_payload) = drag_payload {
+            row = row.on_drag(drag_payload, {
+                let entity = entity.clone();
+                move |dragged: &DraggedEntries, _, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.select_drag_source_if_needed(&drag_source_entry);
+                        cx.notify();
+                    });
+                    cx.new(|_| DragPreview::new(dragged))
+                }
+            });
+        }
+
+        if entry.is_dir {
+            row = row
+                .can_drop({
+                    let destination = destination.clone();
+                    let entity = entity.clone();
+                    move |dragged_value, window, cx| {
+                        entity.update(cx, |this, _| {
+                            this.can_drop_value(dragged_value, &destination, window.modifiers())
+                        })
+                    }
+                })
+                .drag_over::<DraggedEntries>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .drag_over::<ExternalPaths>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, dragged: &DraggedEntries, window, cx| {
+                        this.drop_internal_entries(
+                            dragged,
+                            destination.clone(),
+                            window.modifiers(),
+                        );
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, paths: &ExternalPaths, window, cx| {
+                        this.drop_external_paths(
+                            paths.paths(),
+                            destination.clone(),
+                            window.modifiers(),
+                        );
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }));
+        } else {
+            row = row
+                .can_drop(|dragged_value, _, _| {
+                    dragged_value.is::<DraggedEntries>() || dragged_value.is::<ExternalPaths>()
+                })
+                .on_drop(cx.listener(|this, _: &DraggedEntries, _: &mut Window, cx| {
+                    this.open_error = Some("This drop target is not valid.".to_owned());
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_drop(cx.listener(|this, _: &ExternalPaths, _: &mut Window, cx| {
+                    this.open_error = Some("This drop target is not valid.".to_owned());
+                    cx.stop_propagation();
+                    cx.notify();
+                }));
+        }
+
+        row.child(name_cell(&entry, scale_factor, window))
             .child(text_cell(
                 format_modified(entry.modified),
                 COLUMN_DATE_WIDTH,
@@ -187,6 +279,9 @@ impl ExplorerView {
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
+        let entity = cx.entity();
+        let current_directory = DropDestination::CurrentDirectory;
+
         div()
             .flex()
             .flex_row()
@@ -199,6 +294,71 @@ impl ExplorerView {
                     .flex_1()
                     .h_full()
                     .overflow_hidden()
+                    .can_drop({
+                        let current_directory = current_directory.clone();
+                        let entity = entity.clone();
+                        move |dragged_value, window, cx| {
+                            entity.update(cx, |this, _| {
+                                this.can_drop_value(
+                                    dragged_value,
+                                    &current_directory,
+                                    window.modifiers(),
+                                )
+                            })
+                        }
+                    })
+                    .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                    .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                    .on_drag_move::<DraggedEntries>({
+                        let current_directory = current_directory.clone();
+                        let entity = entity.clone();
+                        move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                            update_drag_cursor_if_hovered(
+                                &entity,
+                                event,
+                                &current_directory,
+                                window,
+                                cx,
+                            );
+                        }
+                    })
+                    .on_drag_move::<ExternalPaths>({
+                        let current_directory = current_directory.clone();
+                        let entity = entity.clone();
+                        move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                            update_drag_cursor_if_hovered(
+                                &entity,
+                                event,
+                                &current_directory,
+                                window,
+                                cx,
+                            );
+                        }
+                    })
+                    .on_drop(cx.listener({
+                        let current_directory = current_directory.clone();
+                        move |this, dragged: &DraggedEntries, window, cx| {
+                            this.drop_internal_entries(
+                                dragged,
+                                current_directory.clone(),
+                                window.modifiers(),
+                            );
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .on_drop(cx.listener({
+                        let current_directory = current_directory.clone();
+                        move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_external_paths(
+                                paths.paths(),
+                                current_directory.clone(),
+                                window.modifiers(),
+                            );
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if this.suppress_next_click() {
                             cx.stop_propagation();
@@ -234,6 +394,66 @@ impl ExplorerView {
                     .child(self.render_mouse_selection_box()),
             )
             .child(self.render_scrollbar(cx))
+    }
+
+    fn render_empty_folder(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+        let current_directory = DropDestination::CurrentDirectory;
+
+        div()
+            .id("explorer-empty-folder-drop-target")
+            .size_full()
+            .can_drop({
+                let current_directory = current_directory.clone();
+                let entity = entity.clone();
+                move |dragged_value, window, cx| {
+                    entity.update(cx, |this, _| {
+                        this.can_drop_value(dragged_value, &current_directory, window.modifiers())
+                    })
+                }
+            })
+            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+            .on_drag_move::<DraggedEntries>({
+                let current_directory = current_directory.clone();
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                    update_drag_cursor_if_hovered(&entity, event, &current_directory, window, cx);
+                }
+            })
+            .on_drag_move::<ExternalPaths>({
+                let current_directory = current_directory.clone();
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                    update_drag_cursor_if_hovered(&entity, event, &current_directory, window, cx);
+                }
+            })
+            .on_drop(cx.listener({
+                let current_directory = current_directory.clone();
+                move |this, dragged: &DraggedEntries, window, cx| {
+                    this.drop_internal_entries(
+                        dragged,
+                        current_directory.clone(),
+                        window.modifiers(),
+                    );
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_drop(cx.listener({
+                let current_directory = current_directory.clone();
+                move |this, paths: &ExternalPaths, window, cx| {
+                    this.drop_external_paths(
+                        paths.paths(),
+                        current_directory.clone(),
+                        window.modifiers(),
+                    );
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(render_empty_folder_message())
+            .into_any_element()
     }
 
     fn render_mouse_selection_box(&self) -> AnyElement {
@@ -374,7 +594,7 @@ impl Render for ExplorerView {
                             .text_color(rgb(0x6f1d1d))
                             .child(self.read_error.clone().unwrap_or_default()),
                     ),
-                    ExplorerContentBranch::Empty => div().child(render_empty_folder_message()),
+                    ExplorerContentBranch::Empty => div().child(self.render_empty_folder(cx)),
                     ExplorerContentBranch::List => div().child(self.render_list(cx)),
                 }
                 .id("explorer-scroll")
@@ -507,6 +727,10 @@ fn directory_bar_label(
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     let target = segment.target;
+    let navigation_target = target.clone();
+    let destination = DropDestination::Directory(target);
+    let entity = cx.entity();
+
     div()
         .id(("breadcrumb-segment", index))
         .min_w(px(0.0))
@@ -518,14 +742,76 @@ fn directory_bar_label(
         .cursor_default()
         .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
         .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .can_drop({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |dragged_value, window, cx| {
+                entity.update(cx, |this, _| {
+                    this.can_drop_value(dragged_value, &destination, window.modifiers())
+                })
+            }
+        })
+        .drag_over::<DraggedEntries>(|style, _, _, _| {
+            style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+        })
+        .drag_over::<ExternalPaths>(|style, _, _, _| {
+            style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+        })
+        .on_drag_move::<DraggedEntries>({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+            }
+        })
+        .on_drag_move::<ExternalPaths>({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+            }
+        })
+        .on_drop(cx.listener({
+            let destination = destination.clone();
+            move |this, dragged: &DraggedEntries, window, cx| {
+                this.drop_internal_entries(dragged, destination.clone(), window.modifiers());
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_drop(cx.listener({
+            let destination = destination.clone();
+            move |this, paths: &ExternalPaths, window, cx| {
+                this.drop_external_paths(paths.paths(), destination.clone(), window.modifiers());
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.navigate_to_directory(target.clone(), HistoryMode::Record);
+            this.navigate_to_directory(navigation_target.clone(), HistoryMode::Record);
             cx.stop_propagation();
             cx.notify();
         }))
         .child(SharedString::from(segment.label))
         .flex_shrink_0()
         .into_any_element()
+}
+
+fn update_drag_cursor_if_hovered<T: 'static>(
+    entity: &Entity<ExplorerView>,
+    event: &DragMoveEvent<T>,
+    destination: &DropDestination,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !event.bounds.contains(&event.event.position) {
+        return;
+    }
+
+    let cursor = entity.update(cx, |this, _| {
+        this.drag_cursor_for_value(event.dragged_item(), destination, window.modifiers())
+    });
+    cx.set_active_drag_cursor_style(cursor, window);
 }
 
 fn directory_bar_separator() -> Div {

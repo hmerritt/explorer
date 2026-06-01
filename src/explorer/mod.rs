@@ -1,6 +1,7 @@
 mod actions;
 mod breadcrumb;
 mod constants;
+mod drag_drop;
 mod entry;
 mod filesystem;
 mod formatting;
