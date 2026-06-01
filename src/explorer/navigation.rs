@@ -24,6 +24,9 @@ impl ExplorerView {
             return;
         }
 
+        let select_entry_after_reload =
+            (self.path.parent() == Some(path.as_path())).then(|| self.path.clone());
+
         if matches!(history_mode, HistoryMode::Record) {
             self.back_stack.push(self.path.clone());
             self.forward_stack.clear();
@@ -35,6 +38,10 @@ impl ExplorerView {
         self.open_error = None;
         self.scroll_to_top();
         self.reload();
+
+        if let Some(path) = select_entry_after_reload {
+            self.select_single_path(&path);
+        }
     }
 
     pub(super) fn navigate_back(&mut self) {
@@ -321,17 +328,19 @@ mod tests {
 
         view.navigate_back();
         assert_eq!(view.path, temp.path());
+        assert_eq!(view.selected_paths(), vec![child.clone()]);
         assert!(view.back_stack.is_empty());
         assert_eq!(view.forward_stack, vec![child.clone()]);
 
         view.navigate_forward();
         assert_eq!(view.path, child);
+        assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
     }
 
     #[test]
-    fn up_navigates_to_parent_and_records_history() {
+    fn up_navigates_to_parent_selects_origin_and_records_history() {
         let temp = TempDir::new();
         let child = temp.path().join("child");
         let grandchild = child.join("grandchild");
@@ -342,6 +351,7 @@ mod tests {
         view.navigate_up();
 
         assert_eq!(view.path, child);
+        assert_eq!(view.selected_paths(), vec![grandchild.clone()]);
         assert_eq!(view.back_stack, vec![grandchild]);
         assert!(view.forward_stack.is_empty());
     }

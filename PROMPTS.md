@@ -1,11 +1,5 @@
 ## New
 
-File explorer navigation feature:
-
-When going back into the parent directory, automatically select the directory you just came from (Windows Explorer does this)
-
----
-
 Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 - New
