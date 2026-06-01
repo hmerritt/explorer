@@ -147,9 +147,9 @@ impl ExplorerView {
             .h_full()
             .w(px(SIDEBAR_WIDTH))
             .flex_shrink_0()
-            .bg(rgb(0xf7f7f7))
+            .bg(rgb(0xffffff))
             .border_r_1()
-            .border_color(rgb(0xe5e5e5))
+            .border_color(rgb(0xe7e7e7))
             .pt(px(8.0))
             .overflow_hidden()
             .children(children)
@@ -179,12 +179,12 @@ impl ExplorerView {
             .rounded(px(4.0))
             .cursor_default()
             .bg(if is_current {
-                rgb(0xe5f3ff)
+                rgb(0xcce8ff)
             } else {
-                rgb(0xf7f7f7)
+                rgb(0xffffff)
             })
             .when(!is_current, |this| {
-                this.hover(|style| style.bg(rgb(0xebebeb)))
+                this.hover(|style| style.bg(rgb(0xe5f3ff)))
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -730,7 +730,7 @@ fn sidebar_separator() -> Div {
     div()
         .h(px(1.0))
         .mx(px(12.0))
-        .my(px(6.0))
+        .my(px(12.0))
         .bg(rgb(0xe5e5e5))
         .flex_shrink_0()
 }
