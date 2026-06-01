@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::explorer::{
+    entry::FileEntry,
     filesystem::{copy_paths_to_directory, move_paths_to_directory},
     view::ExplorerView,
 };
@@ -20,6 +21,8 @@ pub(super) struct DraggedEntries {
     pub(super) source_dir: PathBuf,
     pub(super) display_name: String,
     pub(super) count: usize,
+    pub(super) folder_count: usize,
+    pub(super) file_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,14 +61,8 @@ const DRAG_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
 
 impl DragPreview {
     pub(super) fn new(dragged: &DraggedEntries, cursor_offset: Point<Pixels>) -> Self {
-        let label = if dragged.count == 1 {
-            dragged.display_name.clone()
-        } else {
-            format!("{} items", dragged.count)
-        };
-
         Self {
-            label: SharedString::from(label),
+            label: SharedString::from(drag_preview_label(dragged)),
             cursor_offset,
         }
     }
@@ -148,16 +145,27 @@ impl ResolvedDrop {
 }
 
 impl DraggedEntries {
-    fn new(paths: Vec<PathBuf>, source_dir: PathBuf) -> Option<Self> {
-        let first = paths.first()?;
-        let display_name = path_display_name(first);
-        let count = paths.len();
+    fn new(entries: Vec<&FileEntry>, source_dir: PathBuf) -> Option<Self> {
+        let first = entries.first()?;
+        let display_name = path_display_name(&first.path);
+        let count = entries.len();
+        let folder_count = entries
+            .iter()
+            .filter(|entry| entry.is_directory_like())
+            .count();
+        let file_count = count - folder_count;
+        let paths = entries
+            .into_iter()
+            .map(|entry| entry.path.clone())
+            .collect();
 
         Some(Self {
             paths,
             source_dir,
             display_name,
             count,
+            folder_count,
+            file_count,
         })
     }
 }
@@ -169,7 +177,13 @@ impl ExplorerView {
             return None;
         }
 
-        DraggedEntries::new(self.selected_paths(), self.path.clone())
+        let entries = self
+            .selection
+            .selected_indices
+            .iter()
+            .filter_map(|ix| self.entries.get(*ix))
+            .collect();
+        DraggedEntries::new(entries, self.path.clone())
     }
 
     pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
@@ -309,6 +323,26 @@ fn path_display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+fn drag_preview_label(dragged: &DraggedEntries) -> String {
+    if dragged.count == 1 {
+        return dragged.display_name.clone();
+    }
+
+    let mut parts = Vec::new();
+    if dragged.folder_count > 0 {
+        parts.push(count_label(dragged.folder_count, "folder", "folders"));
+    }
+    if dragged.file_count > 0 {
+        parts.push(count_label(dragged.file_count, "file", "files"));
+    }
+    parts.join(", ")
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    let name = if count == 1 { singular } else { plural };
+    format!("{count} {name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +430,9 @@ mod tests {
         assert_eq!(dragged.source_dir, PathBuf::from("selection"));
         assert_eq!(dragged.display_name, "a.txt");
         assert_eq!(dragged.count, 2);
+        assert_eq!(dragged.folder_count, 0);
+        assert_eq!(dragged.file_count, 2);
+        assert_eq!(drag_preview_label(&dragged), "2 files");
         assert_eq!(selected_names(&view), vec!["a.txt", "c.txt"]);
     }
 
@@ -482,6 +519,89 @@ mod tests {
         assert_eq!(dragged.paths, vec![PathBuf::from("b.txt")]);
         assert_eq!(dragged.display_name, "b.txt");
         assert_eq!(dragged.count, 1);
+        assert_eq!(dragged.folder_count, 0);
+        assert_eq!(dragged.file_count, 1);
+        assert_eq!(drag_preview_label(&dragged), "b.txt");
+    }
+
+    #[test]
+    fn selected_single_folder_drag_preview_uses_folder_name() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("file.txt", false, Some(1), None),
+        ];
+        view.select_single_index(0);
+
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert_eq!(dragged.paths, vec![PathBuf::from("folder")]);
+        assert_eq!(dragged.display_name, "folder");
+        assert_eq!(dragged.count, 1);
+        assert_eq!(dragged.folder_count, 1);
+        assert_eq!(dragged.file_count, 0);
+        assert_eq!(drag_preview_label(&dragged), "folder");
+    }
+
+    #[test]
+    fn multi_file_drag_preview_counts_files() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_all_entries();
+
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert_eq!(
+            dragged.paths,
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt")
+            ]
+        );
+        assert_eq!(dragged.count, 3);
+        assert_eq!(dragged.folder_count, 0);
+        assert_eq!(dragged.file_count, 3);
+        assert_eq!(drag_preview_label(&dragged), "3 files");
+    }
+
+    #[test]
+    fn multi_folder_drag_preview_counts_folders() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder-a", true, None, None),
+            FileEntry::test("folder-b", true, None, None),
+            FileEntry::test("folder-c", true, None, None),
+            FileEntry::test("folder-d", true, None, None),
+        ];
+        view.select_all_entries();
+
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert_eq!(dragged.count, 4);
+        assert_eq!(dragged.folder_count, 4);
+        assert_eq!(dragged.file_count, 0);
+        assert_eq!(drag_preview_label(&dragged), "4 folders");
+    }
+
+    #[test]
+    fn mixed_multi_selection_drag_preview_counts_folders_and_files() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("file.txt", false, Some(1), None),
+        ];
+        view.select_all_entries();
+
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert_eq!(
+            dragged.paths,
+            vec![PathBuf::from("folder"), PathBuf::from("file.txt")]
+        );
+        assert_eq!(dragged.count, 2);
+        assert_eq!(dragged.folder_count, 1);
+        assert_eq!(dragged.file_count, 1);
+        assert_eq!(drag_preview_label(&dragged), "1 folder, 1 file");
     }
 
     #[test]
@@ -508,6 +628,8 @@ mod tests {
         assert_eq!(second_drag.paths, first_drag.paths);
         assert_eq!(second_drag.source_dir, first_drag.source_dir);
         assert_eq!(second_drag.count, first_drag.count);
+        assert_eq!(second_drag.folder_count, first_drag.folder_count);
+        assert_eq!(second_drag.file_count, first_drag.file_count);
     }
 
     #[test]

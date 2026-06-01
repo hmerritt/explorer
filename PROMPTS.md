@@ -1,12 +1,14 @@
 ## New
 
-Implement standard keybindings for:
+Implement standard keybindings once a selection is made (either singular or multiple):
 
-- Copy
-- Cut
-- Paste
-- Delete (trash)
-- Perma delete
+- Copy (Ctrl+C)
+- Cut (Ctrl+X)
+- Paste (Ctrl+V)
+- Delete / trash (Del)
+- Delete / perma (Shift+Del)
+
+After a cut (Ctrl+X), reduce opacity of selected items to 0.7
 
 ---
 
@@ -27,19 +29,19 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 ---
 
-Implement a perminent left side-bar.
+Implement a permanent left side-bar.
 
 Segments (separated via a separator line):
 
 - User pinned programs (first implementation, ignore/skip this)
-- User area directories (user directory, desktop)
-- List all local drives (main OS drive listed first)
-
-## Specific / for-later
-
-Support shortcut/simlinks directories as a special built-in type (with a directory-shortcut icon)
+- User area directories (user home directory "home", desktop "desktop", downloads "downloads")
+- List of all local drives
 
 ---
+
+Left side-bar drag re-sizable
+
+## Specific / for-later
 
 Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
 
