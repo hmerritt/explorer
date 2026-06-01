@@ -28,14 +28,14 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        NavIcon, device_px, device_px_value, directory_shortcut_icon, drive_icon, file_icon,
-        folder_icon, nav_icon_font,
+        NavIcon, desktop_folder_icon, device_px, device_px_value, directory_shortcut_icon,
+        downloads_folder_icon, drive_icon, file_icon, folder_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
-    sidebar::{SidebarItem, SidebarItemKind, sidebar_sections},
+    sidebar::{SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections},
     view::{ExplorerContentBranch, ExplorerView},
 };
 
@@ -166,6 +166,7 @@ impl ExplorerView {
         let is_current = item.path == self.path;
         let label = item.label.clone();
         let path = item.path.clone();
+        let icon_item = item.clone();
 
         div()
             .id(("explorer-sidebar-row", id))
@@ -191,7 +192,7 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(sidebar_item_icon(item.kind, scale_factor))
+            .child(sidebar_item_icon(icon_item, scale_factor))
             .child(
                 div()
                     .flex_1()
@@ -734,9 +735,17 @@ fn sidebar_separator() -> Div {
         .flex_shrink_0()
 }
 
-fn sidebar_item_icon(kind: SidebarItemKind, scale_factor: f32) -> AnyElement {
-    match kind {
-        SidebarItemKind::UserDirectory(_) => folder_icon(scale_factor).into_any_element(),
+fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
+    match item.kind {
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop) => {
+            desktop_folder_icon(item.path, scale_factor)
+        }
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads) => {
+            downloads_folder_icon(item.path, scale_factor)
+        }
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
+            folder_icon(scale_factor).into_any_element()
+        }
         SidebarItemKind::Drive => drive_icon(scale_factor).into_any_element(),
     }
 }
