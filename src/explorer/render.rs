@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString, Window, div,
-    prelude::*, px, rgb, uniform_list,
+    MouseDownEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window,
+    div, font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::explorer::{
@@ -16,18 +16,24 @@ use crate::explorer::{
         DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
         DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
         DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
-        EMPTY_FOLDER_TOP_MARGIN, HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG,
-        NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL,
-        NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING,
-        OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
+        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_WIDTH_PHYSICAL, HEADER_HEIGHT,
+        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
+        NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
+        NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
+        SCROLLBAR_GUTTER_WIDTH,
     },
     entry::FileEntry,
     formatting::{format_modified, format_size},
-    icons::{NavIcon, device_px, file_icon, folder_icon, nav_icon_font},
+    icons::{NavIcon, device_px, device_px_value, file_icon, folder_icon, nav_icon_font},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
     view::{ExplorerContentBranch, ExplorerView},
 };
+
+const NAME_CELL_LEFT_PADDING: f32 = 16.0;
+const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
+const NAME_TEXT_SIZE: f32 = 12.0;
+const NAME_TRUNCATION_SUFFIX: &str = "…";
 
 impl ExplorerView {
     fn render_navbar(&self, window: &Window, scale_factor: f32, cx: &mut Context<Self>) -> Div {
@@ -107,7 +113,13 @@ impl ExplorerView {
             .child(scrollbar_header_spacer())
     }
 
-    fn render_row(&self, ix: usize, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &self,
+        ix: usize,
+        scale_factor: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entry = self.entries[ix].clone();
         let is_selected = self.entry_is_selected(ix);
         let clicked_entry = entry.clone();
@@ -140,7 +152,7 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(name_cell(&entry, scale_factor))
+            .child(name_cell(&entry, scale_factor, window))
             .child(text_cell(
                 format_modified(entry.modified),
                 COLUMN_DATE_WIDTH,
@@ -175,7 +187,7 @@ impl ExplorerView {
                                 let scale_factor = window.scale_factor();
                                 let mut rows = Vec::with_capacity(range.end - range.start);
                                 for ix in range {
-                                    rows.push(this.render_row(ix, scale_factor, cx));
+                                    rows.push(this.render_row(ix, scale_factor, window, cx));
                                 }
                                 rows
                             }),
@@ -444,7 +456,11 @@ fn name_header_cell() -> Div {
         .child("Name")
 }
 
-fn name_cell(entry: &FileEntry, scale_factor: f32) -> Div {
+fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
+    let text_width =
+        available_filename_text_width(f32::from(window.bounds().size.width), scale_factor);
+    let filename = truncated_filename(&entry.name, text_width, window);
+
     div()
         .flex()
         .items_center()
@@ -452,7 +468,7 @@ fn name_cell(entry: &FileEntry, scale_factor: f32) -> Div {
         .flex_1()
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
-        .pl(px(16.0))
+        .pl(px(NAME_CELL_LEFT_PADDING))
         .child(if entry.is_dir {
             folder_icon(scale_factor)
         } else {
@@ -461,10 +477,51 @@ fn name_cell(entry: &FileEntry, scale_factor: f32) -> Div {
         .child(
             div()
                 .flex_1()
-                .ml(device_px(8.0, scale_factor))
+                .min_w(px(0.0))
+                .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
                 .truncate()
-                .text_size(px(12.0))
-                .child(SharedString::from(entry.name.clone())),
+                .text_size(px(NAME_TEXT_SIZE))
+                .child(filename),
+        )
+}
+
+fn effective_name_column_width(viewport_width: f32) -> f32 {
+    let fixed_columns_width =
+        COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH + SCROLLBAR_GUTTER_WIDTH;
+
+    (viewport_width - fixed_columns_width).max(COLUMN_NAME_MIN_WIDTH)
+}
+
+fn filename_text_width(name_column_width: f32, scale_factor: f32) -> f32 {
+    let icon_width = device_px_value(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor);
+    let gap_width = device_px_value(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor);
+
+    (name_column_width - NAME_CELL_LEFT_PADDING - icon_width - gap_width).max(0.0)
+}
+
+fn available_filename_text_width(viewport_width: f32, scale_factor: f32) -> f32 {
+    filename_text_width(effective_name_column_width(viewport_width), scale_factor)
+}
+
+fn truncated_filename(name: &str, available_width: f32, window: &Window) -> SharedString {
+    let name_font = font(".SystemUIFont");
+    let mut runs = vec![TextRun {
+        len: name.len(),
+        font: name_font.clone(),
+        color: rgb(0x000000).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+
+    window
+        .text_system()
+        .line_wrapper(name_font, px(NAME_TEXT_SIZE))
+        .truncate_line(
+            SharedString::from(name.to_owned()),
+            px(available_width),
+            NAME_TRUNCATION_SUFFIX,
+            &mut runs,
         )
 }
 
@@ -492,8 +549,14 @@ fn text_cell(text: String, width: f32, right: bool) -> Div {
 mod tests {
 
     use crate::explorer::constants::{
+        COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
         EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-        NAV_BUTTON_ACTIVE_OPACITY,
+        FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
+    };
+
+    use super::{
+        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width,
+        filename_text_width,
     };
 
     #[test]
@@ -507,5 +570,39 @@ mod tests {
         assert_eq!(EMPTY_FOLDER_TEXT_SIZE, 12.0);
         assert_eq!(EMPTY_FOLDER_TOP_MARGIN, 20.0);
         assert_eq!(EMPTY_FOLDER_MESSAGE, "This folder is empty.");
+    }
+
+    #[test]
+    fn name_text_width_uses_remaining_viewport_width() {
+        let name_column_width = 400.0;
+        let viewport_width = name_column_width
+            + COLUMN_DATE_WIDTH
+            + COLUMN_TYPE_WIDTH
+            + COLUMN_SIZE_WIDTH
+            + SCROLLBAR_GUTTER_WIDTH;
+
+        assert_eq!(
+            available_filename_text_width(viewport_width, 1.0),
+            name_column_width
+                - NAME_CELL_LEFT_PADDING
+                - FILE_ICON_SLOT_WIDTH_PHYSICAL
+                - NAME_ICON_TEXT_GAP_PHYSICAL
+        );
+    }
+
+    #[test]
+    fn name_text_width_respects_name_column_minimum() {
+        assert_eq!(
+            available_filename_text_width(100.0, 1.0),
+            COLUMN_NAME_MIN_WIDTH
+                - NAME_CELL_LEFT_PADDING
+                - FILE_ICON_SLOT_WIDTH_PHYSICAL
+                - NAME_ICON_TEXT_GAP_PHYSICAL
+        );
+    }
+
+    #[test]
+    fn name_text_width_clamps_when_chrome_consumes_column() {
+        assert_eq!(filename_text_width(10.0, 1.0), 0.0);
     }
 }
