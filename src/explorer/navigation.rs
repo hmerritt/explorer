@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::explorer::{
     entry::FileEntry,
     filesystem::{format_open_error, open_path_with_default_app},
+    selection::SelectionModifiers,
     view::ExplorerView,
 };
 
@@ -80,8 +81,13 @@ impl ExplorerView {
         &mut self,
         entry: &FileEntry,
         click_count: usize,
+        modifiers: SelectionModifiers,
     ) -> Option<EntryAction> {
-        self.select_single_path(&entry.path);
+        if let Some(ix) = self.entry_index_by_path(&entry.path) {
+            self.apply_click_selection(ix, modifiers);
+        } else {
+            self.clear_selection();
+        }
         self.open_error = None;
 
         if click_count < 2 {
@@ -187,7 +193,7 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.open_error = Some("stale error".to_owned());
 
-        let action = view.handle_entry_click(&entry, 1);
+        let action = view.handle_entry_click(&entry, 1, SelectionModifiers::default());
 
         assert_eq!(action, None);
         assert_eq!(view.path, temp.path());
@@ -221,14 +227,14 @@ mod tests {
         };
         let mut view = ExplorerView::new(temp.path().to_path_buf());
 
-        let action = view.handle_entry_click(&file_entry, 2);
+        let action = view.handle_entry_click(&file_entry, 2, SelectionModifiers::default());
         assert_eq!(action, Some(EntryAction::OpenFile(file.clone())));
         assert_eq!(view.path, temp.path());
         assert_eq!(view.selected_paths(), vec![file.clone()]);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
 
-        let action = view.handle_entry_click(&dir_entry, 2);
+        let action = view.handle_entry_click(&dir_entry, 2, SelectionModifiers::default());
         assert_eq!(action, None);
         assert_eq!(view.path, child);
         assert!(view.selected_paths().is_empty());

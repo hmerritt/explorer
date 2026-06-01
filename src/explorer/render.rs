@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window,
-    div, font, prelude::*, px, rgb, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent,
+    SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::explorer::{
@@ -25,8 +25,10 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{NavIcon, device_px, device_px_value, file_icon, folder_icon, nav_icon_font},
+    mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
+    selection::SelectionModifiers,
     view::{ExplorerContentBranch, ExplorerView},
 };
 
@@ -146,9 +148,17 @@ impl ExplorerView {
             .border_color(rgb(0xffffff))
             .cursor_default()
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                if let Some(EntryAction::OpenFile(path)) =
-                    this.handle_entry_click(&clicked_entry, event.click_count())
-                {
+                if this.suppress_next_click() {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
+                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click(
+                    &clicked_entry,
+                    event.click_count(),
+                    SelectionModifiers::from_gpui(event.modifiers()),
+                ) {
                     this.open_file_with_default_app(&path);
                 }
                 cx.stop_propagation();
@@ -185,13 +195,21 @@ impl ExplorerView {
             .child(
                 div()
                     .id("explorer-list-background")
+                    .relative()
                     .flex_1()
                     .h_full()
                     .overflow_hidden()
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if this.suppress_next_click() {
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+
                         this.clear_selection();
                         cx.notify();
                     }))
+                    .child(self.render_mouse_selection_hit_layer(cx))
                     .child(
                         uniform_list(
                             "explorer-entries",
@@ -212,9 +230,90 @@ impl ExplorerView {
                                 cx.notify();
                             },
                         )),
-                    ),
+                    )
+                    .child(self.render_mouse_selection_box()),
             )
             .child(self.render_scrollbar(cx))
+    }
+
+    fn render_mouse_selection_box(&self) -> AnyElement {
+        let Some(selection_box) = self.active_selection_box() else {
+            return div().into_any_element();
+        };
+
+        let bounds = selection_box_bounds(selection_box);
+        div()
+            .absolute()
+            .left(bounds.origin.x)
+            .top(bounds.origin.y)
+            .w(bounds.size.width)
+            .h(bounds.size.height)
+            .bg(rgb(0x2B80D5))
+            .opacity(0.5)
+            .border_2()
+            .border_color(rgb(0x0078d7))
+            .into_any_element()
+    }
+
+    fn render_mouse_selection_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_position = local_point(event.position, &bounds);
+                        let modifiers = SelectionModifiers::from_gpui(event.modifiers);
+                        let _ = entity.update(cx, |this, _| {
+                            this.begin_mouse_selection_drag(local_position, modifiers);
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_position = local_point(event.position, &bounds);
+                        let viewport_size = viewport_size(&bounds);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.mouse_selection_drag.is_none() {
+                                return;
+                            }
+
+                            this.update_mouse_selection_drag(local_position, viewport_size);
+                            cx.notify();
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        this.end_mouse_selection_drag();
+                        cx.notify();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w_full()
+        .h_full()
+        .into_any_element()
     }
 }
 

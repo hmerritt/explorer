@@ -1,14 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
-use gpui::ScrollStrategy;
+use gpui::{Modifiers, ScrollStrategy};
 
 use crate::explorer::{constants::ROW_HEIGHT, entry::FileEntry, view::ExplorerView};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SelectionState {
     pub(super) anchor_index: Option<usize>,
     pub(super) focused_index: Option<usize>,
-    pub(super) selected_range: Option<SelectionRange>,
+    pub(super) selected_indices: BTreeSet<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,10 +27,6 @@ impl SelectionRange {
             end: a.max(b),
         }
     }
-
-    pub(super) fn contains(self, ix: usize) -> bool {
-        ix >= self.start && ix <= self.end
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,14 +41,27 @@ pub(super) enum SelectionEdge {
     End,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct SelectionModifiers {
+    pub(super) toggle: bool,
+    pub(super) extend: bool,
+}
+
+impl SelectionModifiers {
+    pub(super) fn from_gpui(modifiers: Modifiers) -> Self {
+        Self {
+            toggle: modifiers.secondary(),
+            extend: modifiers.shift,
+        }
+    }
+}
+
 impl ExplorerView {
     pub(super) fn selected_paths(&self) -> Vec<PathBuf> {
-        let Some(range) = self.selection.selected_range else {
-            return Vec::new();
-        };
-
-        (range.start..=range.end)
-            .filter_map(|ix| self.entries.get(ix).map(|entry| entry.path.clone()))
+        self.selection
+            .selected_indices
+            .iter()
+            .filter_map(|ix| self.entries.get(*ix).map(|entry| entry.path.clone()))
             .collect()
     }
 
@@ -62,16 +74,16 @@ impl ExplorerView {
         indices.sort_unstable();
         indices.dedup();
 
-        let Some(first) = indices.first().copied() else {
+        let Some(anchor) = indices.first().copied() else {
             self.clear_selection();
             return;
         };
 
-        let last = indices.last().copied().unwrap_or(first);
+        let focused = indices.last().copied().unwrap_or(anchor);
         self.selection = SelectionState {
-            anchor_index: Some(first),
-            focused_index: Some(last),
-            selected_range: Some(SelectionRange::new(first, last)),
+            anchor_index: Some(anchor),
+            focused_index: Some(focused),
+            selected_indices: indices.into_iter().collect(),
         };
     }
 
@@ -82,9 +94,7 @@ impl ExplorerView {
     }
 
     pub(super) fn entry_is_selected(&self, ix: usize) -> bool {
-        self.selection
-            .selected_range
-            .is_some_and(|range| range.contains(ix))
+        self.selection.selected_indices.contains(&ix)
     }
 
     pub(super) fn focused_entry(&self) -> Option<&FileEntry> {
@@ -102,7 +112,7 @@ impl ExplorerView {
         self.selection = SelectionState {
             anchor_index: Some(ix),
             focused_index: Some(ix),
-            selected_range: Some(SelectionRange::new(ix, ix)),
+            selected_indices: BTreeSet::from([ix]),
         };
         self.scroll_index_into_view(ix);
     }
@@ -128,9 +138,68 @@ impl ExplorerView {
         self.selection = SelectionState {
             anchor_index: Some(anchor),
             focused_index: Some(ix),
-            selected_range: Some(SelectionRange::new(anchor, ix)),
+            selected_indices: indices_in_range(anchor, ix).collect(),
         };
         self.scroll_index_into_view(ix);
+    }
+
+    pub(super) fn add_selection_range_to_index(&mut self, ix: usize) {
+        if ix >= self.entries.len() {
+            return;
+        }
+
+        let anchor = self
+            .selection
+            .anchor_index
+            .or(self.selection.focused_index)
+            .unwrap_or(ix);
+        self.selection
+            .selected_indices
+            .extend(indices_in_range(anchor, ix));
+        self.selection.anchor_index = Some(anchor);
+        self.selection.focused_index = Some(ix);
+        self.scroll_index_into_view(ix);
+    }
+
+    pub(super) fn toggle_selection_index(&mut self, ix: usize) {
+        if ix >= self.entries.len() {
+            return;
+        }
+
+        if !self.selection.selected_indices.remove(&ix) {
+            self.selection.selected_indices.insert(ix);
+        }
+        self.selection.anchor_index = Some(ix);
+        self.selection.focused_index = Some(ix);
+        self.scroll_index_into_view(ix);
+    }
+
+    pub(super) fn apply_click_selection(&mut self, ix: usize, modifiers: SelectionModifiers) {
+        if ix >= self.entries.len() {
+            self.clear_selection();
+            return;
+        }
+
+        match (modifiers.toggle, modifiers.extend) {
+            (false, false) => self.select_single_index(ix),
+            (true, false) => self.toggle_selection_index(ix),
+            (false, true) => self.extend_selection_to_index(ix),
+            (true, true) => self.add_selection_range_to_index(ix),
+        }
+    }
+
+    pub(super) fn replace_selection_with_indices(&mut self, selected_indices: BTreeSet<usize>) {
+        let Some(anchor) = selected_indices.first().copied() else {
+            self.clear_selection();
+            return;
+        };
+
+        let focused = selected_indices.last().copied().unwrap_or(anchor);
+        self.selection = SelectionState {
+            anchor_index: Some(anchor),
+            focused_index: Some(focused),
+            selected_indices,
+        };
     }
 
     pub(super) fn select_all_entries(&mut self) {
@@ -143,7 +212,7 @@ impl ExplorerView {
         self.selection = SelectionState {
             anchor_index: Some(0),
             focused_index: Some(last),
-            selected_range: Some(SelectionRange::new(0, last)),
+            selected_indices: (0..=last).collect(),
         };
         self.scroll_index_into_view(last);
     }
@@ -231,6 +300,11 @@ impl ExplorerView {
     }
 }
 
+fn indices_in_range(a: usize, b: usize) -> impl Iterator<Item = usize> {
+    let range = SelectionRange::new(a, b);
+    range.start..=range.end
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -298,6 +372,92 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_click_toggles_discontiguous_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        view.select_single_index(0);
+        view.apply_click_selection(
+            2,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+        assert_eq!(selected_names(&view), vec!["a.txt", "c.txt"]);
+
+        view.apply_click_selection(
+            0,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+        assert_eq!(view.selection.anchor_index, Some(0));
+        assert_eq!(view.selection.focused_index, Some(0));
+    }
+
+    #[test]
+    fn shift_click_replaces_with_anchor_range() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+        view.select_single_index(1);
+        view.apply_click_selection(
+            3,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(selected_names(&view), vec!["b.txt", "c.txt", "d.txt"]);
+        assert_eq!(view.selection.anchor_index, Some(1));
+        assert_eq!(view.selection.focused_index, Some(3));
+    }
+
+    #[test]
+    fn ctrl_shift_click_adds_anchor_range() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+
+        view.select_single_index(1);
+        view.apply_click_selection(
+            4,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+        view.apply_click_selection(
+            3,
+            SelectionModifiers {
+                toggle: true,
+                extend: true,
+            },
+        );
+
+        assert_eq!(selected_names(&view), vec!["b.txt", "d.txt", "e.txt"]);
+        assert_eq!(view.selection.anchor_index, Some(4));
+        assert_eq!(view.selection.focused_index, Some(3));
+    }
+
+    #[test]
+    fn keyboard_move_replaces_discontiguous_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+        view.select_single_index(0);
+        view.apply_click_selection(
+            3,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+        view.move_selection(SelectionDirection::Up);
+
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+    }
+
+    #[test]
     fn home_end_and_shift_home_end_update_selection_ranges() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
 
@@ -336,12 +496,18 @@ mod tests {
         fs::write(&c, b"c").expect("create c");
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.select_single_path(&b);
-        view.extend_selection_to_index(view.entry_index_by_path(&c).expect("c entry"));
+        view.select_single_path(&a);
+        view.apply_click_selection(
+            view.entry_index_by_path(&c).expect("c entry"),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
         fs::remove_file(&b).expect("remove b");
 
         view.reload();
 
-        assert_eq!(view.selected_paths(), vec![c]);
+        assert_eq!(view.selected_paths(), vec![a, c]);
     }
 }

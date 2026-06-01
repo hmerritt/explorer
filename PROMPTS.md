@@ -1,5 +1,9 @@
 ## New
 
+Implement file/directory drag-and-drop to move. Plan details and mirror Windows Explorer behaviour.
+
+---
+
 Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 - New
@@ -26,6 +30,10 @@ Segments (separated via a separator line):
 - List all local drives (main OS drive listed first)
 
 ## Specific / for-later
+
+Support shortcut files / simlinks
+
+---
 
 When navigating to a directory, load in a non-blocking way. Keep the view the same initially, but if after 100ms it is still loading, preload the UI in the directory and display a loading spinner until completion. Since this is happening in a non-blocking thread, a user can choose to navigate away, in which case when the thread returns the result is simpily discarded
 

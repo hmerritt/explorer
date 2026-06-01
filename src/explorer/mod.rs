@@ -5,6 +5,7 @@ mod entry;
 mod filesystem;
 mod formatting;
 mod icons;
+mod mouse_selection;
 mod navigation;
 mod render;
 mod scrollbar;

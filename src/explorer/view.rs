@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use gpui::{FocusHandle, UniformListScrollHandle};
 
 use crate::explorer::{
-    entry::FileEntry, filesystem::load_entries, scrollbar::ScrollbarDrag, selection::SelectionState,
+    entry::FileEntry, filesystem::load_entries, mouse_selection::MouseSelectionDrag,
+    scrollbar::ScrollbarDrag, selection::SelectionState,
 };
 
 pub struct ExplorerView {
@@ -18,6 +19,8 @@ pub struct ExplorerView {
     pub(super) focus_handle: Option<FocusHandle>,
     pub(super) scrollbar_hovered: bool,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
+    pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
+    pub(super) suppress_next_click: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +53,8 @@ impl ExplorerView {
             focus_handle,
             scrollbar_hovered: false,
             scrollbar_drag: None,
+            mouse_selection_drag: None,
+            suppress_next_click: false,
         };
         view.reload();
         view
