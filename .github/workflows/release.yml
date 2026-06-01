@@ -19,20 +19,18 @@ jobs:
                     - name: linux-amd64
                       target: x86_64-unknown-linux-gnu
                       binary: universal-explorer
+                      use_cross: true
                     - name: linux-arm64
                       target: aarch64-unknown-linux-gnu
                       binary: universal-explorer
+                      use_cross: true
                     - name: windows-amd64
-                      target: x86_64-pc-windows-gnu
+                      target: x86_64-pc-windows-msvc
                       binary: universal-explorer.exe
+                      use_cross: false # cargo-xwin handles this
         steps:
             - name: Checkout
-              uses: actions/checkout@v6
-
-            - name: Install system dependencies
-              run: |
-                  sudo apt update
-                  sudo apt install -y pkg-config libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
+              uses: actions/checkout@v4
 
             - name: Validate tag format
               id: tag_check
@@ -48,25 +46,47 @@ jobs:
             - name: Install Rust
               if: steps.tag_check.outputs.valid == 'true'
               uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
 
             - name: Cache Cargo
               if: steps.tag_check.outputs.valid == 'true'
               uses: Swatinem/rust-cache@v2
+              with:
+                  key: ${{ matrix.target }}
 
             - name: Install release tools
               if: steps.tag_check.outputs.valid == 'true'
               run: |
                   sudo apt-get update
                   sudo apt-get install -y unzip upx-ucl zip
-                  cargo install cross --git https://github.com/cross-rs/cross
 
-            - name: Build
-              if: steps.tag_check.outputs.valid == 'true'
+            - name: Install cross (Linux targets)
+              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
+              run: cargo install cross --git https://github.com/cross-rs/cross
+
+            - name: Install cargo-xwin (Windows target)
+              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
+              run: |
+                  cargo install cargo-xwin
+                  # cargo-xwin auto-downloads the Windows SDK and MSVC headers,
+                  # which includes DXC — required for gpui's shader compilation
+
+            - name: Build (Linux via cross)
+              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
               run: cross build --release --locked --target ${{ matrix.target }}
+
+            - name: Build (Windows via cargo-xwin)
+              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
+              run: cargo xwin build --release --locked --target ${{ matrix.target }}
 
             - name: Compress binary with UPX
               if: steps.tag_check.outputs.valid == 'true'
-              run: upx --best --lzma "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+              # UPX doesn't support ARM64 Linux or all Windows PE formats well — guard it
+              run: |
+                  if [[ "${{ matrix.target }}" != "aarch64-unknown-linux-gnu" ]]; then
+                    upx --best --lzma "target/${{ matrix.target }}/release/${{ matrix.binary }}" || true
+                  fi
 
             - name: Package artifact
               if: steps.tag_check.outputs.valid == 'true'
