@@ -36,6 +36,13 @@ const DIRECTORY_BAR_SEPARATOR: &str = " / ";
 const DIRECTORY_BAR_ELLIPSIS: &str = "...";
 const HEADER_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
+const FILE_ICON_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
+const FILE_ICON_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
+const FILE_ICON_PAGE_WIDTH_PHYSICAL: f32 = 16.0;
+const FILE_ICON_PAGE_HEIGHT_PHYSICAL: f32 = 20.0;
+const FILE_ICON_PAGE_LEFT_PHYSICAL: f32 =
+    (FILE_ICON_SLOT_WIDTH_PHYSICAL - FILE_ICON_PAGE_WIDTH_PHYSICAL) / 2.0;
+const FILE_ICON_FOLD_SIZE_PHYSICAL: f32 = 5.0;
 const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
 const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
 const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
@@ -1361,23 +1368,32 @@ fn folder_icon(scale_factor: f32) -> Div {
 fn file_icon(scale_factor: f32) -> Div {
     div()
         .relative()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(17.0, scale_factor))
+        .w(device_px(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor))
+        .h(device_px(FILE_ICON_SLOT_HEIGHT_PHYSICAL, scale_factor))
         .flex_shrink_0()
-        .border_1()
-        .border_color(rgb(0x9a9a9a))
-        .bg(rgb(0xffffff))
         .child(
             div()
+                .relative()
                 .absolute()
-                .right(device_px(0.0, scale_factor))
+                .left(device_px(FILE_ICON_PAGE_LEFT_PHYSICAL, scale_factor))
                 .top(device_px(0.0, scale_factor))
-                .w(device_px(5.0, scale_factor))
-                .h(device_px(5.0, scale_factor))
-                .border_l_1()
-                .border_b_1()
-                .border_color(rgb(0xc8c8c8))
-                .bg(rgb(0xf4f4f4)),
+                .w(device_px(FILE_ICON_PAGE_WIDTH_PHYSICAL, scale_factor))
+                .h(device_px(FILE_ICON_PAGE_HEIGHT_PHYSICAL, scale_factor))
+                .border_1()
+                .border_color(rgb(0x9a9a9a))
+                .bg(rgb(0xffffff))
+                .child(
+                    div()
+                        .absolute()
+                        .right(device_px(0.0, scale_factor))
+                        .top(device_px(0.0, scale_factor))
+                        .w(device_px(FILE_ICON_FOLD_SIZE_PHYSICAL, scale_factor))
+                        .h(device_px(FILE_ICON_FOLD_SIZE_PHYSICAL, scale_factor))
+                        .border_l_1()
+                        .border_b_1()
+                        .border_color(rgb(0xc8c8c8))
+                        .bg(rgb(0xf4f4f4)),
+                ),
         )
 }
 
@@ -1518,6 +1534,20 @@ mod tests {
         assert_eq!(device_px_value(22.0, 1.0), 22.0);
         assert!((device_px_value(22.0, 1.5) - 14.666_667).abs() < 0.000_01);
         assert!((device_px_value(17.0, 1.5) - 11.333_333).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn default_file_icon_uses_portrait_page_in_fixed_slot() {
+        assert!(FILE_ICON_PAGE_HEIGHT_PHYSICAL > FILE_ICON_PAGE_WIDTH_PHYSICAL);
+        assert_eq!(FILE_ICON_SLOT_WIDTH_PHYSICAL, 22.0);
+        assert_eq!(
+            FILE_ICON_PAGE_HEIGHT_PHYSICAL,
+            FILE_ICON_SLOT_HEIGHT_PHYSICAL
+        );
+        assert_eq!(
+            FILE_ICON_PAGE_LEFT_PHYSICAL,
+            (FILE_ICON_SLOT_WIDTH_PHYSICAL - FILE_ICON_PAGE_WIDTH_PHYSICAL) / 2.0
+        );
     }
 
     #[test]
