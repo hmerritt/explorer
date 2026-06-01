@@ -333,6 +333,10 @@ impl ExplorerView {
         }
     }
 
+    fn clear_selection(&mut self) {
+        self.selected_path = None;
+    }
+
     fn open_file_with_default_app(&mut self, path: &Path) {
         let result = open_path_with_default_app(path);
         self.handle_open_file_result(path, result);
@@ -517,6 +521,7 @@ impl ExplorerView {
                 {
                     this.open_file_with_default_app(&path);
                 }
+                cx.stop_propagation();
                 cx.notify();
             }))
             .child(name_cell(&entry, scale_factor))
@@ -537,27 +542,36 @@ impl ExplorerView {
             .size_full()
             .overflow_hidden()
             .child(
-                div().flex_1().h_full().overflow_hidden().child(
-                    uniform_list(
-                        "explorer-entries",
-                        self.entries.len(),
-                        cx.processor(|this, range: Range<usize>, window, cx| {
-                            let scale_factor = window.scale_factor();
-                            let mut rows = Vec::with_capacity(range.end - range.start);
-                            for ix in range {
-                                rows.push(this.render_row(ix, scale_factor, cx));
-                            }
-                            rows
-                        }),
-                    )
-                    .size_full()
-                    .track_scroll(self.scroll_handle.clone())
-                    .on_scroll_wheel(cx.listener(
-                        |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
-                            cx.notify();
-                        },
-                    )),
-                ),
+                div()
+                    .id("explorer-list-background")
+                    .flex_1()
+                    .h_full()
+                    .overflow_hidden()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.clear_selection();
+                        cx.notify();
+                    }))
+                    .child(
+                        uniform_list(
+                            "explorer-entries",
+                            self.entries.len(),
+                            cx.processor(|this, range: Range<usize>, window, cx| {
+                                let scale_factor = window.scale_factor();
+                                let mut rows = Vec::with_capacity(range.end - range.start);
+                                for ix in range {
+                                    rows.push(this.render_row(ix, scale_factor, cx));
+                                }
+                                rows
+                            }),
+                        )
+                        .size_full()
+                        .track_scroll(self.scroll_handle.clone())
+                        .on_scroll_wheel(cx.listener(
+                            |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                                cx.notify();
+                            },
+                        )),
+                    ),
             )
             .child(self.render_scrollbar(cx))
     }
@@ -1775,6 +1789,20 @@ mod tests {
         assert_eq!(view.open_error, None);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn clear_selection_removes_selected_path() {
+        let temp = TempDir::new();
+        let selected = temp.path().join("file.txt");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.selected_path = Some(selected);
+
+        view.clear_selection();
+        assert_eq!(view.selected_path, None);
+
+        view.clear_selection();
+        assert_eq!(view.selected_path, None);
     }
 
     #[test]
