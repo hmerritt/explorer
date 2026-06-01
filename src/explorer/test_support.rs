@@ -43,10 +43,7 @@ pub(super) struct TempDir {
 impl TempDir {
     pub(super) fn new() -> Self {
         let id = TEST_DIR_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "universal-explorer-test-{}-{id}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("explorer-test-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create temp test directory");
         Self { path }

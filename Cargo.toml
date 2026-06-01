@@ -1,16 +1,16 @@
 [package]
-name = "universal-explorer"
+name = "explorer"
 version = "0.2.0"
 edition = "2024"
 build = "build.rs"
-description = "A GPU-accelerated universal file explorer built with GPUI."
-homepage = "https://github.com/hmerritt/universal-explorer"
-repository = "https://github.com/hmerritt/universal-explorer"
+description = "A GPU-accelerated file explorer built with GPUI."
+homepage = "https://github.com/hmerritt/explorer"
+repository = "https://github.com/hmerritt/explorer"
 license = "MIT"
 
 [package.metadata.bundle]
-name = "Universal Explorer"
-identifier = "com.hmerritt.universal-explorer"
+name = "Explorer"
+identifier = "com.hmerritt.explorer"
 icon = ["assets/icon.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]

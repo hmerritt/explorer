@@ -15,6 +15,6 @@ fn main() {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn main() {
-    eprintln!("Universal Explorer's GPUI app currently targets Windows, macOS, and Linux.");
+    eprintln!("Explorer's GPUI app currently targets Windows, macOS, and Linux.");
     std::process::exit(1);
 }

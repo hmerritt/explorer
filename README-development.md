@@ -1,10 +1,10 @@
 <img src="./assets/icon.png" draggable="false" width="100px" />
 
-# Universal Explorer
+# Explorer
 
-[![Release](https://img.shields.io/github/v/release/hmerritt/universal-explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Funiversal-explorer%2Freleases%2Flatest)](https://github.com/hmerritt/universal-explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/universal-explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Funiversal-explorer%2Freleases%2Flatest)](https://github.com/hmerritt/universal-explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/universal-explorer)](https://coveralls.io/github/hmerritt/universal-explorer?branch=master)
+[![Release](https://img.shields.io/github/v/release/hmerritt/explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%explorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%explorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master)
 
-Universal File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.rs/).
+File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.rs/).
 
 ## Development 🛠️
 

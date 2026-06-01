@@ -2,7 +2,7 @@
 
 ## Project Mission
 
-Universal Explorer is a cross-platform file explorer written in Rust with GPUI.
+Explorer is a cross-platform file explorer written in Rust with GPUI.
 Its product goal is faithful Windows Explorer parity: UI, behavior, workflows,
 keyboard and mouse interactions, and file-management functionality should match
 Windows Explorer as closely as possible.

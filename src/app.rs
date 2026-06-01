@@ -11,16 +11,16 @@ use crate::explorer::{
     default_start_path,
 };
 
-const APP_ID: &str = "com.hmerritt.universal-explorer";
-const APP_TITLE: &str = "Universal Explorer";
+const APP_ID: &str = "com.hmerritt.explorer";
+const APP_TITLE: &str = "Explorer";
 const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/Segoe Fluent Icons.ttf");
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/Segoe MDL2 Assets.ttf");
 
-struct UniversalExplorer {
+struct Explorer {
     explorer: gpui::Entity<ExplorerView>,
 }
 
-impl Render for UniversalExplorer {
+impl Render for Explorer {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.explorer.clone()
     }
@@ -79,10 +79,10 @@ pub fn run() {
                     ExplorerView::new_with_focus_handle(default_start_path(), focus_handle)
                 });
 
-                cx.new(|_| UniversalExplorer { explorer })
+                cx.new(|_| Explorer { explorer })
             },
         )
-        .expect("failed to open Universal Explorer window");
+        .expect("failed to open Explorer window");
 
         cx.activate(true);
     });
