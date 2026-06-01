@@ -30,7 +30,7 @@ jobs:
                       use_cross: false # cargo-xwin handles this
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Validate tag format
               id: tag_check
