@@ -8,11 +8,49 @@ use std::{
 use crate::explorer::{entry::FileEntry, sorting::sort_entries};
 
 pub fn default_start_path() -> PathBuf {
+    let home_dir = user_home_dir();
+    let downloads_dir = user_downloads_dir(home_dir.as_deref());
+
+    preferred_start_path(downloads_dir, home_dir, std::env::current_dir().ok())
+}
+
+fn preferred_start_path(
+    downloads_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+) -> PathBuf {
+    downloads_dir
+        .filter(|path| path.is_dir())
+        .or(home_dir)
+        .or(current_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn user_home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(target_os = "windows")]
+fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_Downloads, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath},
+    };
+
+    unsafe {
+        let downloads =
+            SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let path = downloads.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(downloads.as_ptr().cast()));
+        path
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Downloads"))
 }
 
 pub(super) fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
@@ -216,6 +254,52 @@ fn path_display_name(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
+
+    #[test]
+    fn default_start_path_prefers_existing_downloads_directory() {
+        let temp = TempDir::new();
+        let home = temp.path().join("home");
+        let downloads = home.join("Downloads");
+        let current = temp.path().join("current");
+        fs::create_dir_all(&downloads).expect("create downloads");
+        fs::create_dir(&current).expect("create current directory");
+
+        let start_path = preferred_start_path(
+            Some(downloads.clone()),
+            Some(home.clone()),
+            Some(current.clone()),
+        );
+
+        assert_eq!(start_path, downloads);
+    }
+
+    #[test]
+    fn default_start_path_falls_back_to_home_when_downloads_is_missing() {
+        let temp = TempDir::new();
+        let home = temp.path().join("home");
+        let downloads = home.join("Downloads");
+        let current = temp.path().join("current");
+        fs::create_dir(&home).expect("create home");
+        fs::create_dir(&current).expect("create current directory");
+
+        let start_path =
+            preferred_start_path(Some(downloads), Some(home.clone()), Some(current.clone()));
+
+        assert_eq!(start_path, home);
+    }
+
+    #[test]
+    fn default_start_path_falls_back_to_current_directory_or_dot_without_home() {
+        let temp = TempDir::new();
+        let current = temp.path().join("current");
+        fs::create_dir(&current).expect("create current directory");
+
+        assert_eq!(
+            preferred_start_path(None, None, Some(current.clone())),
+            current
+        );
+        assert_eq!(preferred_start_path(None, None, None), PathBuf::from("."));
+    }
 
     #[test]
     fn move_file_to_directory() {
