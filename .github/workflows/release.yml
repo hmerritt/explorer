@@ -59,7 +59,7 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true'
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y unzip upx-ucl zip
+                  sudo apt-get install -y unzip zip
 
             - name: Install cross (Linux targets)
               if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
@@ -80,14 +80,6 @@ jobs:
             - name: Build (Windows via cargo-xwin)
               if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
               run: cargo xwin build --release --locked --target ${{ matrix.target }}
-
-            - name: Compress binary with UPX
-              if: steps.tag_check.outputs.valid == 'true'
-              # UPX doesn't support ARM64 Linux or all Windows PE formats well — guard it
-              run: |
-                  if [[ "${{ matrix.target }}" != "aarch64-unknown-linux-gnu" ]]; then
-                    upx --best --lzma "target/${{ matrix.target }}/release/${{ matrix.binary }}" || true
-                  fi
 
             - name: Package artifact
               if: steps.tag_check.outputs.valid == 'true'
@@ -140,18 +132,9 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true'
               uses: Swatinem/rust-cache@v2
 
-            - name: Install release tools
-              if: steps.tag_check.outputs.valid == 'true'
-              run: brew install upx
-
             - name: Build
               if: steps.tag_check.outputs.valid == 'true'
               run: cargo build --release --locked --target ${{ matrix.target }}
-
-            - name: Compress binary with UPX
-              if: steps.tag_check.outputs.valid == 'true'
-              continue-on-error: true
-              run: upx --best --lzma --force-macos "target/${{ matrix.target }}/release/universal-explorer"
 
             - name: Package artifact
               if: steps.tag_check.outputs.valid == 'true'
