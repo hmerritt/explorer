@@ -23,7 +23,7 @@ const NAVBAR_HEIGHT: f32 = 52.0;
 const NAV_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
 const NAV_ICON_DISABLED_COLOR: u32 = 0x9a9a9a;
-const NAV_BUTTON_HOVER_BG: u32 = 0xf4f4f4;
+const NAV_BUTTON_HOVER_BG: u32 = 0xefefef;
 const NAV_BUTTON_ACTIVE_OPACITY: f32 = 0.7;
 const NAVBAR_HORIZONTAL_PADDING: f32 = 10.0;
 const NAVBAR_ITEM_GAP: f32 = 10.0;
@@ -31,6 +31,7 @@ const NAV_BUTTON_SIZE: f32 = 34.0;
 const DIRECTORY_BAR_HEIGHT: f32 = 34.0;
 const DIRECTORY_BAR_RADIUS: f32 = 6.0;
 const DIRECTORY_BAR_HORIZONTAL_PADDING: f32 = 16.0;
+const DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING: f32 = 4.0;
 const DIRECTORY_BAR_TEXT_SIZE: f32 = 15.0;
 const DIRECTORY_BAR_SEPARATOR: &str = " / ";
 const DIRECTORY_BAR_ELLIPSIS: &str = "...";
@@ -434,7 +435,7 @@ impl ExplorerView {
             .items_center()
             .h(px(NAVBAR_HEIGHT))
             .w_full()
-            .bg(rgb(0xf3f3f3))
+            .bg(rgb(0xf8f8f8))
             .px(px(NAVBAR_HORIZONTAL_PADDING))
             .gap(px(NAVBAR_ITEM_GAP))
             .child(nav_button(
@@ -888,7 +889,10 @@ fn visible_breadcrumb_for_path(
     let segments = path_breadcrumb_segments(path);
     let segment_widths = segments
         .iter()
-        .map(|segment| measure_directory_bar_text(&segment.label, window))
+        .map(|segment| {
+            measure_directory_bar_text(&segment.label, window)
+                + DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING * 2.0
+        })
         .collect::<Vec<_>>();
     let separator_width = measure_directory_bar_text(DIRECTORY_BAR_SEPARATOR, window);
     let ellipsis_width = measure_directory_bar_text(DIRECTORY_BAR_ELLIPSIS, window);
@@ -1245,7 +1249,7 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) 
         .flex_1()
         .overflow_hidden()
         .rounded(px(DIRECTORY_BAR_RADIUS))
-        .bg(rgb(0xffffff))
+        .bg(rgb(0xfdfdfd))
         .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
@@ -1298,7 +1302,8 @@ fn directory_bar_label(
         .whitespace_nowrap()
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
-        .rounded(px(4.0))
+        .px(px(DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING))
+        .rounded(px(6.0))
         .cursor_default()
         .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
         .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
