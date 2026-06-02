@@ -63,6 +63,40 @@ class Explorer < Formula
     end
   end
 
+  def post_install
+    return unless OS.linux?
+
+    desktop_file = libexec/"explorer.app/share/applications/com.hmerritt.explorer.desktop"
+    return unless desktop_file.exist?
+
+    xdg_applications = Pathname.new(Dir.home)/".local/share/applications"
+    xdg_desktop_file = xdg_applications/"com.hmerritt.explorer.desktop"
+
+    mkdir_p xdg_applications
+    cp desktop_file, xdg_desktop_file
+
+    inreplace xdg_desktop_file do |s|
+      s.gsub!(/^Exec=.*/, "Exec=#{bin}/explorer %F")
+      s.gsub!(/^Icon=.*/, "Icon=#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png")
+    end
+  end
+
+  def caveats
+    return unless OS.linux?
+
+    <<~EOS
+      Explorer was registered in your app launcher at:
+        ~/.local/share/applications/com.hmerritt.explorer.desktop
+
+      If it does not appear immediately, refresh your desktop shell or log out
+      and back in.
+
+      If you move Homebrew or change desktop sessions, refresh the launcher
+      registration with:
+        brew postinstall hmerritt/tap/explorer
+    EOS
+  end
+
   test do
     assert_predicate bin/"explorer", :exist?
 
