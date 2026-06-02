@@ -5,8 +5,8 @@ use std::{
 };
 
 use gpui::{
-    Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, Window, div, prelude::*,
-    px, rgb,
+    Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, TextRun, Window, div,
+    font, prelude::*, px, rgb,
 };
 
 use crate::explorer::{
@@ -58,6 +58,9 @@ const DRAG_PREVIEW_WIDTH: f32 = 160.0;
 const DRAG_PREVIEW_HEIGHT: f32 = 28.0;
 const DRAG_PREVIEW_VERTICAL_PADDING: f32 = 4.0;
 const DRAG_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
+const DRAG_PREVIEW_TEXT_SIZE: f32 = 12.0;
+const DRAG_PREVIEW_TEXT_COLOR: u32 = 0x1f1f1f;
+const DRAG_PREVIEW_TRUNCATION_SUFFIX: &str = "…";
 
 impl DragPreview {
     pub(super) fn new(dragged: &DraggedEntries, cursor_offset: Point<Pixels>) -> Self {
@@ -69,10 +72,11 @@ impl DragPreview {
 }
 
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let origin = drag_preview_origin(self.cursor_offset);
         let root_width = f32::from(self.cursor_offset.x) + (DRAG_PREVIEW_WIDTH / 2.0);
         let root_height = f32::from(self.cursor_offset.y);
+        let label = truncated_drag_preview_label(&self.label, window);
 
         div().relative().w(px(root_width)).h(px(root_height)).child(
             div()
@@ -90,17 +94,37 @@ impl Render for DragPreview {
                 .border_1()
                 .border_color(rgb(0x8a8a8a))
                 .shadow_md()
-                .text_size(px(12.0))
-                .text_color(rgb(0x1f1f1f))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .w_full()
-                        .truncate()
-                        .child(self.label.clone()),
-                ),
+                .text_size(px(DRAG_PREVIEW_TEXT_SIZE))
+                .text_color(rgb(DRAG_PREVIEW_TEXT_COLOR))
+                .child(div().min_w(px(0.0)).w_full().truncate().child(label)),
         )
     }
+}
+
+fn truncated_drag_preview_label(label: &str, window: &Window) -> SharedString {
+    let label_font = font(".SystemUIFont");
+    let mut runs = vec![TextRun {
+        len: label.len(),
+        font: label_font.clone(),
+        color: rgb(DRAG_PREVIEW_TEXT_COLOR).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+
+    window
+        .text_system()
+        .line_wrapper(label_font, px(DRAG_PREVIEW_TEXT_SIZE))
+        .truncate_line(
+            SharedString::from(label.to_owned()),
+            px(drag_preview_text_width()),
+            DRAG_PREVIEW_TRUNCATION_SUFFIX,
+            &mut runs,
+        )
+}
+
+fn drag_preview_text_width() -> f32 {
+    (DRAG_PREVIEW_WIDTH - (DRAG_PREVIEW_HORIZONTAL_PADDING * 2.0)).max(0.0)
 }
 
 pub(super) fn drag_preview_origin(cursor_offset: Point<Pixels>) -> (f32, f32) {
@@ -705,6 +729,14 @@ mod tests {
         let origin = drag_preview_origin(cursor_offset);
 
         assert_eq!(origin.1, 32.0 - DRAG_PREVIEW_HEIGHT);
+    }
+
+    #[test]
+    fn drag_preview_text_width_subtracts_horizontal_padding() {
+        assert_eq!(
+            drag_preview_text_width(),
+            DRAG_PREVIEW_WIDTH - (DRAG_PREVIEW_HORIZONTAL_PADDING * 2.0)
+        );
     }
 
     #[test]
