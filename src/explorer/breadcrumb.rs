@@ -53,7 +53,7 @@ pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
                 target.push(component.as_os_str());
                 if !saw_prefix {
                     segments.push(BreadcrumbSegment {
-                        label: "/".to_owned(),
+                        label: root_breadcrumb_label().to_owned(),
                         target: target.clone(),
                     });
                 }
@@ -100,6 +100,18 @@ pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
     }
 
     segments
+}
+
+fn root_breadcrumb_label() -> &'static str {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        "Filesystem"
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "/"
+    }
 }
 
 #[cfg(test)]
@@ -248,7 +260,7 @@ mod tests {
 
         assert_eq!(
             breadcrumb_labels(&segments),
-            vec!["/", "usr", "local", "bin"]
+            vec![root_breadcrumb_label(), "usr", "local", "bin"]
         );
         assert_eq!(
             segments

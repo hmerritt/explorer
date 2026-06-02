@@ -147,7 +147,7 @@ pub(super) fn drop_indicator_origin(mouse_position: Point<Pixels>) -> (f32, f32)
     let drag_origin = drag_preview_origin(mouse_position);
     (
         f32::from(mouse_position.x),
-        drag_origin.1 + DRAG_PREVIEW_HEIGHT - 1.0, // - 1.0 so there is not a double-border fore each drop ui box
+        drag_origin.1 + DRAG_PREVIEW_HEIGHT - 1.0, // - 1.0 so there is not a double-border for each drop ui box
     )
 }
 

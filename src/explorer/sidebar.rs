@@ -85,11 +85,22 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
     roots
         .into_iter()
         .map(|path| SidebarItem {
-            label: drive_display_label(&path),
+            label: sidebar_drive_label(&path),
             path,
             kind: SidebarItemKind::Drive,
         })
         .collect()
+}
+
+fn sidebar_drive_label(path: &Path) -> String {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if path == Path::new("/") {
+            return "Filesystem".to_owned();
+        }
+    }
+
+    drive_display_label(path)
 }
 
 #[cfg(test)]
@@ -161,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_items_use_local_disk_labels_on_windows_and_path_labels_elsewhere() {
+    fn drive_items_use_local_disk_labels_on_windows_and_filesystem_for_unix_root_elsewhere() {
         let items = drive_items_from_roots(vec![PathBuf::from(if cfg!(target_os = "windows") {
             r"C:\"
         } else {
@@ -175,7 +186,7 @@ mod tests {
             let fallback_items = drive_items_from_roots(vec![PathBuf::from(r"?:\")]);
             assert_eq!(fallback_items[0].label, "Local Disk (?:)");
         } else {
-            assert_eq!(items[0].label, "/");
+            assert_eq!(items[0].label, "Filesystem");
         }
     }
 }
