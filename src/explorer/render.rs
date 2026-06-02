@@ -55,7 +55,7 @@ const NAME_TRUNCATION_SUFFIX: &str = "…";
 const DROP_INDICATOR_TEXT_SIZE: f32 = 12.0;
 const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
-const DROP_INDICATOR_TARGET_WIDTH: f32 = 180.0;
+const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 
 impl ExplorerView {
     fn render_navbar(&self, window: &Window, scale_factor: f32, cx: &mut Context<Self>) -> Div {
@@ -858,12 +858,12 @@ fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElemen
         FileOperationKind::Move => (NavIcon::Forward.glyph(), "Move to"),
         FileOperationKind::Copy => ("\u{E710}", "Copy to"),
     };
-    let target_label = truncated_text(
+    let target_width = drop_indicator_target_width(measure_drop_indicator_target_text(
         &indicator.target_label,
-        DROP_INDICATOR_TARGET_WIDTH,
-        DROP_INDICATOR_TEXT_COLOR,
         window,
-    );
+    ));
+    let target_label =
+        truncated_drop_indicator_target_label(&indicator.target_label, target_width, window);
 
     div()
         .absolute()
@@ -895,13 +895,65 @@ fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElemen
         )
         .child(
             div()
-                .w(px(DROP_INDICATOR_TARGET_WIDTH))
+                .w(px(target_width))
                 .min_w(px(0.0))
                 .truncate()
                 .text_color(rgb(DROP_INDICATOR_TEXT_COLOR))
                 .child(target_label),
         )
         .into_any_element()
+}
+
+fn measure_drop_indicator_target_text(text: &str, window: &Window) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+
+    let run = TextRun {
+        len: text.len(),
+        font: font(".SystemUIFont"),
+        color: rgb(DROP_INDICATOR_TEXT_COLOR).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    f32::from(
+        window
+            .text_system()
+            .layout_line(text, px(DROP_INDICATOR_TEXT_SIZE), &[run], None)
+            .width,
+    )
+}
+
+fn drop_indicator_target_width(natural_width: f32) -> f32 {
+    natural_width.min(DROP_INDICATOR_TARGET_MAX_WIDTH).max(0.0)
+}
+
+fn truncated_drop_indicator_target_label(
+    text: &str,
+    available_width: f32,
+    window: &Window,
+) -> SharedString {
+    let target_font = font(".SystemUIFont");
+    let mut runs = vec![TextRun {
+        len: text.len(),
+        font: target_font.clone(),
+        color: rgb(DROP_INDICATOR_TEXT_COLOR).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+
+    window
+        .text_system()
+        .line_wrapper(target_font, px(DROP_INDICATOR_TEXT_SIZE))
+        .truncate_line(
+            SharedString::from(text.to_owned()),
+            px(available_width),
+            NAME_TRUNCATION_SUFFIX,
+            &mut runs,
+        )
 }
 
 fn render_file_conflict_dialog(
@@ -1603,9 +1655,9 @@ mod tests {
     };
 
     use super::{
-        CUT_ITEM_OPACITY, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL,
-        available_filename_text_width, filename_text_width, folder_status_summary,
-        selection_modifiers_for_click, text_cell_width,
+        CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
+        NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width, drop_indicator_target_width,
+        filename_text_width, folder_status_summary, selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -1669,6 +1721,24 @@ mod tests {
     #[test]
     fn text_cell_width_clamps_when_padding_consumes_column() {
         assert_eq!(text_cell_width(10.0), 0.0);
+    }
+
+    #[test]
+    fn drop_indicator_target_width_uses_natural_width_under_max() {
+        assert_eq!(drop_indicator_target_width(72.0), 72.0);
+    }
+
+    #[test]
+    fn drop_indicator_target_width_caps_at_max() {
+        assert_eq!(
+            drop_indicator_target_width(DROP_INDICATOR_TARGET_MAX_WIDTH + 20.0),
+            DROP_INDICATOR_TARGET_MAX_WIDTH
+        );
+    }
+
+    #[test]
+    fn drop_indicator_target_width_clamps_empty_width() {
+        assert_eq!(drop_indicator_target_width(0.0), 0.0);
     }
 
     #[test]
