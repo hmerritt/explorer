@@ -21,6 +21,10 @@ Left side-bar drag re-sizable
 
 ## Specific / for-later
 
+Unsigned app bundle for macOS
+
+---
+
 Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
 
 Alt-drag should create a shortcut or simlink of the selected file/directory

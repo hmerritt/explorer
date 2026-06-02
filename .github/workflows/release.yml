@@ -58,8 +58,8 @@ jobs:
             - name: Install release tools
               if: steps.tag_check.outputs.valid == 'true'
               run: |
-                  sudo apt-get update
-                  sudo apt-get install -y unzip zip
+                  sudo apt update
+                  sudo apt install -y unzip zip
 
             - name: Install cross (Linux targets)
               if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
@@ -140,8 +140,28 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true'
               run: |
                   mkdir -p dist package
-                  cp "target/${{ matrix.target }}/release/explorer" package/explorer
-                  (cd package && zip -9 "../dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" explorer)
+                  install -m 755 "target/${{ matrix.target }}/release/explorer" package/explorer
+                  cat > package/explorer-readme.md <<'EOF'
+                  To run the current macOS release artifact:
+
+                  ```sh
+                  unzip explorer-*-macos-*.zip
+                  chmod +x explorer
+                  xattr -d com.apple.quarantine explorer
+                  ./explorer
+                  ```
+
+                  If macOS still refuses to launch it, these commands can help diagnose whether
+                  the issue is quarantine, Gatekeeper, code signing, or the wrong CPU artifact:
+
+                  ```sh
+                  xattr -l explorer
+                  spctl --assess --type execute -vv ./explorer
+                  codesign --verify --verbose ./explorer
+                  file ./explorer
+                  ```
+                  EOF
+                  (cd package && zip -9 "../dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" explorer explorer-readme.md)
 
             - name: Upload release asset
               if: steps.tag_check.outputs.valid == 'true'

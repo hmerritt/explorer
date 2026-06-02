@@ -22,6 +22,17 @@ The canonical app icon source is `assets/icon.png`. It is referenced as package/
 
 ---
 
+### macOS
+
+A better long-term macOS distribution should ship `Explorer.app`, signed with a
+Developer ID certificate, notarized by Apple, stapled, and packaged as a `.dmg`
+or `.app.zip`. Apple documents this flow in
+[Distributing software on macOS](https://developer.apple.com/macos/distribution/),
+[Developer ID](https://developer.apple.com/developer-id/), and
+[Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution).
+
+---
+
 <small>
     <a href="https://www.flaticon.com/free-icons/folder" title="folder icons">Folder icons created by kmg design - Flaticon</a>
 </small>
