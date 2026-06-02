@@ -1407,7 +1407,7 @@ fn name_header_cell() -> Div {
 fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
     let text_width = available_filename_text_width(list_viewport_width, scale_factor);
-    let filename = truncated_text(&entry.name, text_width, 0x000000, window);
+    let filename = truncated_text(entry.display_name(), text_width, 0x000000, window);
 
     div()
         .flex()

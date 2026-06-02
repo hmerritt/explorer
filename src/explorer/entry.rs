@@ -92,6 +92,20 @@ impl FileEntry {
         matches!(self.kind, EntryKind::DirectoryLink(_))
     }
 
+    pub(super) fn display_name(&self) -> &str {
+        let suffix_start = self.name.len().saturating_sub(4);
+
+        if self
+            .name
+            .get(suffix_start..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lnk"))
+        {
+            &self.name[..suffix_start]
+        } else {
+            &self.name
+        }
+    }
+
     pub(super) fn navigation_path(&self) -> &Path {
         match &self.kind {
             EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target }) => target,
@@ -265,6 +279,30 @@ mod tests {
         assert!(!entry.is_directory_like());
         assert!(!entry.sorts_as_directory());
         assert!(!entry.uses_directory_shortcut_icon());
+    }
+
+    #[test]
+    fn display_name_hides_shortcut_extension_case_insensitively() {
+        assert_eq!(
+            FileEntry::test("target.lnk", false, Some(1), None).display_name(),
+            "target"
+        );
+        assert_eq!(
+            FileEntry::test("target.LNK", false, Some(1), None).display_name(),
+            "target"
+        );
+    }
+
+    #[test]
+    fn display_name_keeps_non_shortcut_names() {
+        assert_eq!(
+            FileEntry::test("archive.lnk.backup", false, Some(1), None).display_name(),
+            "archive.lnk.backup"
+        );
+        assert_eq!(
+            FileEntry::test("readme.md", false, Some(1), None).display_name(),
+            "readme.md"
+        );
     }
 
     #[test]
