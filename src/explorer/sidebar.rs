@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::explorer::filesystem::{
     drive_display_label, local_drive_roots, user_desktop_dir, user_downloads_dir, user_home_dir,
@@ -48,19 +48,37 @@ fn user_directory_items_from_paths(
     downloads: Option<PathBuf>,
 ) -> Vec<SidebarItem> {
     [
-        ("Home", home, UserDirectoryKind::Home),
-        ("Desktop", desktop, UserDirectoryKind::Desktop),
-        ("Downloads", downloads, UserDirectoryKind::Downloads),
+        (
+            home.as_deref()
+                .map(home_sidebar_label)
+                .unwrap_or_else(|| "Home".to_owned()),
+            home,
+            UserDirectoryKind::Home,
+        ),
+        ("Desktop".to_owned(), desktop, UserDirectoryKind::Desktop),
+        (
+            "Downloads".to_owned(),
+            downloads,
+            UserDirectoryKind::Downloads,
+        ),
     ]
     .into_iter()
     .filter_map(|(label, path, kind)| {
         path.filter(|path| path.is_dir()).map(|path| SidebarItem {
-            label: label.to_owned(),
+            label,
             path,
             kind: SidebarItemKind::UserDirectory(kind),
         })
     })
     .collect()
+}
+
+fn home_sidebar_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Home")
+        .to_owned()
 }
 
 fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
@@ -99,7 +117,7 @@ mod tests {
             items,
             vec![
                 SidebarItem {
-                    label: "Home".to_owned(),
+                    label: "home".to_owned(),
                     path: home,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Home),
                 },
@@ -129,6 +147,17 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Downloads");
+    }
+
+    #[test]
+    fn home_sidebar_label_falls_back_when_path_has_no_file_name() {
+        let path = Path::new(if cfg!(target_os = "windows") {
+            r"C:\"
+        } else {
+            "/"
+        });
+
+        assert_eq!(home_sidebar_label(path), "Home");
     }
 
     #[test]
