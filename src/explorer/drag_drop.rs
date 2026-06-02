@@ -58,6 +58,7 @@ const DRAG_PREVIEW_WIDTH: f32 = 160.0;
 const DRAG_PREVIEW_HEIGHT: f32 = 28.0;
 const DRAG_PREVIEW_VERTICAL_PADDING: f32 = 4.0;
 const DRAG_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
+const DRAG_PREVIEW_CURSOR_OVERLAP: f32 = 10.0;
 const DRAG_PREVIEW_TEXT_SIZE: f32 = 12.0;
 const DRAG_PREVIEW_TEXT_COLOR: u32 = 0x1f1f1f;
 const DRAG_PREVIEW_TRUNCATION_SUFFIX: &str = "…";
@@ -75,7 +76,7 @@ impl Render for DragPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         let origin = drag_preview_origin(self.cursor_offset);
         let root_width = f32::from(self.cursor_offset.x) + (DRAG_PREVIEW_WIDTH / 2.0);
-        let root_height = f32::from(self.cursor_offset.y);
+        let root_height = f32::from(self.cursor_offset.y) + DRAG_PREVIEW_CURSOR_OVERLAP;
         let label = truncated_drag_preview_label(&self.label, window);
 
         div().relative().w(px(root_width)).h(px(root_height)).child(
@@ -130,7 +131,7 @@ fn drag_preview_text_width() -> f32 {
 pub(super) fn drag_preview_origin(cursor_offset: Point<Pixels>) -> (f32, f32) {
     (
         f32::from(cursor_offset.x) - (DRAG_PREVIEW_WIDTH / 2.0),
-        f32::from(cursor_offset.y) - DRAG_PREVIEW_HEIGHT,
+        f32::from(cursor_offset.y) - DRAG_PREVIEW_HEIGHT + DRAG_PREVIEW_CURSOR_OVERLAP,
     )
 }
 
@@ -723,12 +724,15 @@ mod tests {
     }
 
     #[test]
-    fn drag_preview_origin_keeps_bottom_at_cursor_offset() {
+    fn drag_preview_origin_overlaps_cursor_offset() {
         let cursor_offset = gpui::point(px(120.0), px(32.0));
 
         let origin = drag_preview_origin(cursor_offset);
 
-        assert_eq!(origin.1, 32.0 - DRAG_PREVIEW_HEIGHT);
+        assert_eq!(
+            origin.1,
+            32.0 - DRAG_PREVIEW_HEIGHT + DRAG_PREVIEW_CURSOR_OVERLAP
+        );
     }
 
     #[test]
