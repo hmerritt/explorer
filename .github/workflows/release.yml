@@ -9,7 +9,7 @@ permissions:
     contents: write
 
 jobs:
-    release_cross:
+    release_linux:
         name: Release ${{ matrix.name }}
         runs-on: ubuntu-latest
         strategy:
@@ -19,15 +19,9 @@ jobs:
                     - name: linux-amd64
                       target: x86_64-unknown-linux-gnu
                       binary: explorer
-                      use_cross: true
                     - name: linux-arm64
                       target: aarch64-unknown-linux-gnu
                       binary: explorer
-                      use_cross: true
-                    - name: windows-amd64
-                      target: x86_64-pc-windows-msvc
-                      binary: explorer.exe
-                      use_cross: false # cargo-xwin handles this
         steps:
             - name: Checkout
               uses: actions/checkout@v6
@@ -62,39 +56,12 @@ jobs:
                   sudo apt install -y unzip zip
 
             - name: Install cross (Linux targets)
-              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
+              if: steps.tag_check.outputs.valid == 'true'
               run: cargo install cross --git https://github.com/cross-rs/cross
 
-            - name: Install cargo-xwin (Windows target)
-              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y clang llvm lld
-
-                  # Download DXC Linux binaries from Microsoft's releases
-                  DXC_VERSION="v1.9.2602"
-                  DXC_DATE="2026_02_20"
-                  curl -L "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_VERSION}/linux_dxc_${DXC_DATE}.x86_64.tar.gz" \
-                    -o /tmp/dxc.tar.gz
-                  mkdir /tmp/dxc && tar -xzf /tmp/dxc.tar.gz -C /tmp/dxc
-                  sudo cp /tmp/dxc/bin/dxc /usr/local/bin/
-                  sudo cp /tmp/dxc/lib/libdxcompiler.so* /usr/local/lib/
-                  sudo cp /tmp/dxc/lib/libdxil.so* /usr/local/lib/ 2>/dev/null || true
-                  sudo ldconfig
-
-                  rustup component add llvm-tools
-                  cargo install --locked cargo-xwin
-
-            - name: Build (Linux via cross)
-              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == true
+            - name: Build
+              if: steps.tag_check.outputs.valid == 'true'
               run: cross build --release --locked --target ${{ matrix.target }}
-
-            - name: Build (Windows via cargo-xwin)
-              if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
-              env:
-                  LD_LIBRARY_PATH: /usr/local/lib:/usr/lib/x86_64-linux-gnu
-              run: |
-                  cargo xwin build --release --locked --target ${{ matrix.target }} -vv 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
 
             - name: Dump gpui build script output on failure
               if: failure()
@@ -110,6 +77,63 @@ jobs:
                   mkdir -p dist package
                   cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.binary }}"
                   (cd package && zip -9 "../dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" "${{ matrix.binary }}")
+
+            - name: Upload release asset
+              if: steps.tag_check.outputs.valid == 'true'
+              uses: softprops/action-gh-release@v3
+              with:
+                  draft: true
+                  generate_release_notes: true
+                  files: dist/*.zip
+
+    release_windows:
+        name: Release ${{ matrix.name }}
+        runs-on: windows-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: windows-amd64
+                      target: x86_64-pc-windows-msvc
+                      binary: explorer.exe
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Validate tag format
+              id: tag_check
+              shell: pwsh
+              run: |
+                  if ("${{ github.ref_name }}" -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
+                    "valid=true" >> $env:GITHUB_OUTPUT
+                  } else {
+                    "valid=false" >> $env:GITHUB_OUTPUT
+                    Write-Host "Tag '${{ github.ref_name }}' does not match numeric semver (e.g. 1.2.3). Skipping release."
+                  }
+
+            - name: Install Rust
+              if: steps.tag_check.outputs.valid == 'true'
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - name: Cache Cargo
+              if: steps.tag_check.outputs.valid == 'true'
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: ${{ matrix.target }}
+
+            - name: Build
+              if: steps.tag_check.outputs.valid == 'true'
+              run: cargo build --release --locked --target ${{ matrix.target }}
+
+            - name: Package artifact
+              if: steps.tag_check.outputs.valid == 'true'
+              shell: pwsh
+              run: |
+                  New-Item -ItemType Directory -Force -Path dist, package | Out-Null
+                  Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.binary }}"
+                  Compress-Archive -Path "package/${{ matrix.binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
 
             - name: Upload release asset
               if: steps.tag_check.outputs.valid == 'true'
