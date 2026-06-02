@@ -216,7 +216,7 @@ pub fn run() {
             KeyBinding::new("end", MoveEnd, None),
             KeyBinding::new("shift-home", ExtendHome, None),
             KeyBinding::new("shift-end", ExtendEnd, None),
-            KeyBinding::new("left", GoBack, None),
+            KeyBinding::new("left", GoUp, None),
             KeyBinding::new("alt-left", GoBack, None),
             KeyBinding::new("right", OpenSelected, None),
             KeyBinding::new("alt-right", GoForward, None),
