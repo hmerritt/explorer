@@ -69,7 +69,18 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y clang llvm lld directx-shader-compiler
+                  sudo apt-get install -y clang llvm lld
+
+                  # Download DXC Linux binaries from Microsoft's releases
+                  DXC_VERSION="v1.9.2602"
+                  curl -L "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_VERSION}/linux_dxc_${DXC_VERSION#v}.x86_64.tar.gz" \
+                    -o /tmp/dxc.tar.gz
+                  mkdir /tmp/dxc && tar -xzf /tmp/dxc.tar.gz -C /tmp/dxc
+                  sudo cp /tmp/dxc/bin/dxc /usr/local/bin/
+                  sudo cp /tmp/dxc/lib/libdxcompiler.so* /usr/local/lib/
+                  sudo cp /tmp/dxc/lib/libdxil.so* /usr/local/lib/ 2>/dev/null || true
+                  sudo ldconfig
+
                   rustup component add llvm-tools
                   cargo install --locked cargo-xwin
 
