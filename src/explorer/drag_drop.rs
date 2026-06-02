@@ -40,6 +40,13 @@ pub(super) enum FileOperationKind {
     Copy,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct DropIndicator {
+    pub(super) operation: FileOperationKind,
+    pub(super) target_label: String,
+    pub(super) mouse_position: Point<Pixels>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ResolvedDrop {
     Move,
@@ -132,6 +139,14 @@ pub(super) fn drag_preview_origin(cursor_offset: Point<Pixels>) -> (f32, f32) {
     (
         f32::from(cursor_offset.x) - (DRAG_PREVIEW_WIDTH / 2.0),
         f32::from(cursor_offset.y) - DRAG_PREVIEW_HEIGHT + DRAG_PREVIEW_CURSOR_OVERLAP,
+    )
+}
+
+pub(super) fn drop_indicator_origin(mouse_position: Point<Pixels>) -> (f32, f32) {
+    let drag_origin = drag_preview_origin(mouse_position);
+    (
+        f32::from(mouse_position.x),
+        drag_origin.1 + DRAG_PREVIEW_HEIGHT - 1.0, // - 1.0 so there is not a double-border fore each drop ui box
     )
 }
 
@@ -247,9 +262,16 @@ impl ExplorerView {
         modifiers: Modifiers,
     ) -> CursorStyle {
         let destination_item = destination.item_path(&self.path);
-        let destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(dragged_value, &destination_item, &destination, modifiers)
-            .cursor_style()
+        let resolved_destination = destination.resolve(&self.path);
+        resolve_dragged_value_drop(
+            dragged_value,
+            destination,
+            &self.path,
+            &destination_item,
+            &resolved_destination,
+            modifiers,
+        )
+        .cursor_style()
     }
 
     pub(super) fn can_drop_value(
@@ -259,10 +281,78 @@ impl ExplorerView {
         modifiers: Modifiers,
     ) -> bool {
         let destination_item = destination.item_path(&self.path);
-        let destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(dragged_value, &destination_item, &destination, modifiers)
-            .operation()
-            .is_some()
+        let resolved_destination = destination.resolve(&self.path);
+        resolve_dragged_value_drop(
+            dragged_value,
+            destination,
+            &self.path,
+            &destination_item,
+            &resolved_destination,
+            modifiers,
+        )
+        .operation()
+        .is_some()
+    }
+
+    pub(super) fn drop_indicator_for_value(
+        &self,
+        dragged_value: &dyn Any,
+        destination: &DropDestination,
+        modifiers: Modifiers,
+        mouse_position: Point<Pixels>,
+    ) -> Option<DropIndicator> {
+        let destination_item = destination.item_path(&self.path);
+        let resolved_destination = destination.resolve(&self.path);
+        let operation = resolve_dragged_value_drop(
+            dragged_value,
+            destination,
+            &self.path,
+            &destination_item,
+            &resolved_destination,
+            modifiers,
+        )
+        .operation()?;
+
+        Some(DropIndicator {
+            operation,
+            target_label: drop_target_display_name(destination, &self.path),
+            mouse_position,
+        })
+    }
+
+    pub(super) fn clear_drop_indicator(&mut self) -> bool {
+        self.active_drop_indicator.take().is_some()
+    }
+
+    pub(super) fn clear_stale_drop_indicator(&mut self, mouse_position: Point<Pixels>) -> bool {
+        let Some(indicator) = &self.active_drop_indicator else {
+            return false;
+        };
+
+        if indicator.mouse_position == mouse_position {
+            false
+        } else {
+            self.active_drop_indicator = None;
+            true
+        }
+    }
+
+    pub(super) fn update_drop_indicator_modifiers(&mut self, modifiers: Modifiers) -> bool {
+        let Some(indicator) = self.active_drop_indicator.as_mut() else {
+            return false;
+        };
+
+        let Some(operation) = resolve_drop_operation(modifiers, true).operation() else {
+            self.active_drop_indicator = None;
+            return true;
+        };
+
+        if indicator.operation == operation {
+            false
+        } else {
+            indicator.operation = operation;
+            true
+        }
     }
 
     pub(super) fn drop_internal_entries(
@@ -271,8 +361,9 @@ impl ExplorerView {
         destination: DropDestination,
         modifiers: Modifiers,
     ) {
-        if matches!(destination, DropDestination::CurrentDirectory) {
-            self.open_error = None;
+        if matches!(destination, DropDestination::CurrentDirectory)
+            && dragged.source_dir == self.path
+        {
             return;
         }
 
@@ -291,6 +382,10 @@ impl ExplorerView {
         destination: DropDestination,
         modifiers: Modifiers,
     ) {
+        if current_directory_contains_all_external_paths(&destination, &self.path, paths) {
+            return;
+        }
+
         let destination = destination.resolve(&self.path);
         self.perform_file_drop(paths, &destination, modifiers);
     }
@@ -331,20 +426,55 @@ pub(super) fn resolve_drop_operation(modifiers: Modifiers, valid_target: bool) -
 
 fn resolve_dragged_value_drop(
     dragged_value: &dyn Any,
+    destination_kind: &DropDestination,
+    current_directory: &Path,
     destination_item: &Path,
     destination: &Path,
     modifiers: Modifiers,
 ) -> ResolvedDrop {
     let valid_target = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
-        destination.is_dir() && !dragged.paths.iter().any(|path| path == destination_item)
+        destination.is_dir()
+            && !dragged.paths.iter().any(|path| path == destination_item)
+            && !current_directory_contains_all_internal_dragged_entries(
+                destination_kind,
+                current_directory,
+                dragged,
+            )
     } else {
         destination.is_dir()
             && dragged_value
                 .downcast_ref::<gpui::ExternalPaths>()
-                .is_some_and(|paths| !paths.paths().is_empty())
+                .is_some_and(|paths| {
+                    !paths.paths().is_empty()
+                        && !current_directory_contains_all_external_paths(
+                            destination_kind,
+                            current_directory,
+                            paths.paths(),
+                        )
+                })
     };
 
     resolve_drop_operation(modifiers, valid_target)
+}
+
+fn current_directory_contains_all_internal_dragged_entries(
+    destination: &DropDestination,
+    current_directory: &Path,
+    dragged: &DraggedEntries,
+) -> bool {
+    matches!(destination, DropDestination::CurrentDirectory)
+        && dragged.source_dir == current_directory
+}
+
+fn current_directory_contains_all_external_paths(
+    destination: &DropDestination,
+    current_directory: &Path,
+    paths: &[PathBuf],
+) -> bool {
+    matches!(destination, DropDestination::CurrentDirectory)
+        && paths
+            .iter()
+            .all(|path| path.parent() == Some(current_directory))
 }
 
 fn path_display_name(path: &Path) -> String {
@@ -352,6 +482,10 @@ fn path_display_name(path: &Path) -> String {
         .and_then(OsStr::to_str)
         .map(str::to_owned)
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn drop_target_display_name(destination: &DropDestination, current_directory: &Path) -> String {
+    path_display_name(&destination.item_path(current_directory))
 }
 
 fn drag_preview_label(dragged: &DraggedEntries) -> String {
@@ -744,6 +878,245 @@ mod tests {
     }
 
     #[test]
+    fn default_drop_indicator_uses_move_operation() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let target = temp.path().join("target");
+        fs::write(&source, b"data").expect("create source");
+        fs::create_dir(&target).expect("create target folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let ix = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry");
+        let dragged = view
+            .test_dragged_entries_for_index(ix)
+            .expect("dragged row");
+
+        let indicator = view
+            .drop_indicator_for_value(
+                &dragged,
+                &DropDestination::Directory {
+                    item_path: target.clone(),
+                    target_path: target,
+                },
+                Modifiers::default(),
+                gpui::point(px(32.0), px(48.0)),
+            )
+            .expect("drop indicator");
+
+        assert_eq!(indicator.operation, FileOperationKind::Move);
+        assert_eq!(indicator.target_label, "target");
+    }
+
+    #[test]
+    fn secondary_modifier_drop_indicator_uses_copy_operation() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let target = temp.path().join("target");
+        fs::write(&source, b"data").expect("create source");
+        fs::create_dir(&target).expect("create target folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let ix = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry");
+        let dragged = view
+            .test_dragged_entries_for_index(ix)
+            .expect("dragged row");
+
+        let indicator = view
+            .drop_indicator_for_value(
+                &dragged,
+                &DropDestination::Directory {
+                    item_path: target.clone(),
+                    target_path: target,
+                },
+                Modifiers::secondary_key(),
+                gpui::point(px(32.0), px(48.0)),
+            )
+            .expect("drop indicator");
+
+        assert_eq!(indicator.operation, FileOperationKind::Copy);
+        assert_eq!(indicator.target_label, "target");
+    }
+
+    #[test]
+    fn active_drop_indicator_updates_operation_when_modifiers_change() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Move,
+            target_label: "target".to_owned(),
+            mouse_position: gpui::point(px(32.0), px(48.0)),
+        });
+
+        assert!(view.update_drop_indicator_modifiers(Modifiers::secondary_key()));
+
+        assert_eq!(
+            view.active_drop_indicator.as_ref().unwrap().operation,
+            FileOperationKind::Copy
+        );
+    }
+
+    #[test]
+    fn unsupported_modifier_combination_clears_active_drop_indicator() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Move,
+            target_label: "target".to_owned(),
+            mouse_position: gpui::point(px(32.0), px(48.0)),
+        });
+
+        assert!(view.update_drop_indicator_modifiers(Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        }));
+
+        assert_eq!(view.active_drop_indicator, None);
+    }
+
+    #[test]
+    fn stale_drop_indicator_clears_when_drag_position_changes() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Move,
+            target_label: "target".to_owned(),
+            mouse_position: gpui::point(px(32.0), px(48.0)),
+        });
+
+        assert!(view.clear_stale_drop_indicator(gpui::point(px(33.0), px(48.0))));
+
+        assert_eq!(view.active_drop_indicator, None);
+    }
+
+    #[test]
+    fn current_position_drop_indicator_is_not_stale() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        let mouse_position = gpui::point(px(32.0), px(48.0));
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Move,
+            target_label: "target".to_owned(),
+            mouse_position,
+        });
+
+        assert!(!view.clear_stale_drop_indicator(mouse_position));
+
+        assert!(view.active_drop_indicator.is_some());
+    }
+
+    #[test]
+    fn invalid_drop_has_no_drop_indicator() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&folder);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert_eq!(
+            view.drop_indicator_for_value(
+                &dragged,
+                &DropDestination::Directory {
+                    item_path: folder.clone(),
+                    target_path: folder,
+                },
+                Modifiers::default(),
+                gpui::point(px(32.0), px(48.0)),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn same_folder_current_directory_drop_has_no_indicator() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let ix = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry");
+        let dragged = view
+            .test_dragged_entries_for_index(ix)
+            .expect("dragged row");
+
+        assert_eq!(
+            view.drop_indicator_for_value(
+                &dragged,
+                &DropDestination::CurrentDirectory,
+                Modifiers::default(),
+                gpui::point(px(32.0), px(48.0)),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_folder_current_directory_drop_indicator_uses_current_folder_name() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        fs::create_dir(&source_dir).expect("create source folder");
+
+        let view = ExplorerView::new(temp.path().to_path_buf());
+        let dragged = DraggedEntries {
+            paths: vec![source_dir.join("file.txt")],
+            source_dir,
+            display_name: "file.txt".to_owned(),
+            count: 1,
+            folder_count: 0,
+            file_count: 1,
+        };
+
+        let indicator = view
+            .drop_indicator_for_value(
+                &dragged,
+                &DropDestination::CurrentDirectory,
+                Modifiers::default(),
+                gpui::point(px(32.0), px(48.0)),
+            )
+            .expect("drop indicator");
+
+        assert_eq!(indicator.operation, FileOperationKind::Move);
+        assert_eq!(
+            indicator.target_label,
+            temp.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+    }
+
+    #[test]
+    fn drop_indicator_origin_uses_mouse_position() {
+        let mouse_position = gpui::point(px(120.0), px(32.0));
+        let indicator_origin = drop_indicator_origin(mouse_position);
+
+        assert_eq!(indicator_origin.0, 120.0);
+    }
+
+    #[test]
+    fn drop_indicator_top_aligns_with_drag_preview_bottom() {
+        let mouse_position = gpui::point(px(120.0), px(32.0));
+        let drag_origin = drag_preview_origin(mouse_position);
+        let indicator_origin = drop_indicator_origin(mouse_position);
+        let drag_bottom = drag_origin.1 + DRAG_PREVIEW_HEIGHT;
+
+        assert_eq!(indicator_origin.1, drag_bottom);
+    }
+
+    #[test]
     fn selected_directory_cannot_be_internal_drop_target() {
         let temp = TempDir::new();
         let folder = temp.path().join("folder");
@@ -761,6 +1134,108 @@ mod tests {
             },
             Modifiers::default(),
         ));
+    }
+
+    #[test]
+    fn same_folder_internal_drop_cannot_target_current_directory() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        assert!(!view.can_drop_value(
+            &dragged,
+            &DropDestination::CurrentDirectory,
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
+    fn cross_folder_internal_drop_can_target_current_directory() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        fs::create_dir(&source_dir).expect("create source folder");
+
+        let view = ExplorerView::new(temp.path().to_path_buf());
+        let dragged = DraggedEntries {
+            paths: vec![source_dir.join("file.txt")],
+            source_dir,
+            display_name: "file.txt".to_owned(),
+            count: 1,
+            folder_count: 0,
+            file_count: 1,
+        };
+
+        assert!(view.can_drop_value(
+            &dragged,
+            &DropDestination::CurrentDirectory,
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
+    fn same_folder_external_paths_are_current_directory_sources() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+
+        assert!(current_directory_contains_all_external_paths(
+            &DropDestination::CurrentDirectory,
+            temp.path(),
+            &[source],
+        ));
+    }
+
+    #[test]
+    fn external_paths_from_other_folder_are_not_current_directory_sources() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let source = source_dir.join("file.txt");
+
+        assert!(!current_directory_contains_all_external_paths(
+            &DropDestination::CurrentDirectory,
+            temp.path(),
+            &[source],
+        ));
+    }
+
+    #[test]
+    fn current_directory_external_drop_from_same_folder_is_no_op() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.open_error = Some("stale error".to_owned());
+
+        view.drop_external_paths(
+            std::slice::from_ref(&source),
+            DropDestination::CurrentDirectory,
+            Modifiers::default(),
+        );
+
+        assert_eq!(fs::read(&source).unwrap(), b"data");
+        assert_eq!(view.open_error, Some("stale error".to_owned()));
+    }
+
+    #[test]
+    fn current_directory_external_drop_from_other_folder_moves_to_current_directory() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        fs::create_dir(&source_dir).expect("create source folder");
+        let source = source_dir.join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.drop_external_paths(
+            std::slice::from_ref(&source),
+            DropDestination::CurrentDirectory,
+            Modifiers::default(),
+        );
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(temp.path().join("file.txt")).unwrap(), b"data");
     }
 
     #[test]

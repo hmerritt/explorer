@@ -132,8 +132,9 @@ impl ExplorerView {
     ) {
         let stopped_drag = cx.stop_active_drag(window);
         let stopped_mouse_selection_drag = self.cancel_mouse_selection_drag();
+        let cleared_drop_indicator = self.clear_drop_indicator();
 
-        if stopped_drag || stopped_mouse_selection_drag {
+        if stopped_drag || stopped_mouse_selection_drag || cleared_drop_indicator {
             cx.stop_propagation();
             cx.notify();
         }

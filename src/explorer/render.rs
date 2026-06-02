@@ -2,9 +2,9 @@ use std::{collections::BTreeSet, ops::Range};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
-    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window, canvas, div,
-    font, prelude::*, px, rgb, uniform_list,
+    Focusable, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window,
+    canvas, div, font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::explorer::{
@@ -26,7 +26,10 @@ use crate::explorer::{
         STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
         effective_name_column_width,
     },
-    drag_drop::{DragPreview, DraggedEntries, DropDestination},
+    drag_drop::{
+        DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
+        drop_indicator_origin,
+    },
     entry::FileEntry,
     filesystem::FileConflictBatch,
     formatting::{format_modified, format_size},
@@ -49,6 +52,10 @@ const CUT_ITEM_OPACITY: f32 = 0.7;
 const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_CELL_TEXT_COLOR: u32 = 0x595959;
 const NAME_TRUNCATION_SUFFIX: &str = "…";
+const DROP_INDICATOR_TEXT_SIZE: f32 = 12.0;
+const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
+const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
+const DROP_INDICATOR_TARGET_WIDTH: f32 = 180.0;
 
 impl ExplorerView {
     fn render_navbar(&self, window: &Window, scale_factor: f32, cx: &mut Context<Self>) -> Div {
@@ -321,6 +328,7 @@ impl ExplorerView {
                 .on_drop(cx.listener({
                     let destination = destination.clone();
                     move |this, dragged: &DraggedEntries, window, cx| {
+                        this.clear_drop_indicator();
                         this.drop_internal_entries(
                             dragged,
                             destination.clone(),
@@ -333,6 +341,7 @@ impl ExplorerView {
                 .on_drop(cx.listener({
                     let destination = destination.clone();
                     move |this, paths: &ExternalPaths, window, cx| {
+                        this.clear_drop_indicator();
                         this.drop_external_paths(
                             paths.paths(),
                             destination.clone(),
@@ -348,13 +357,15 @@ impl ExplorerView {
                     dragged_value.is::<DraggedEntries>() || dragged_value.is::<ExternalPaths>()
                 })
                 .on_drop(
-                    cx.listener(|_: &mut Self, _: &DraggedEntries, _: &mut Window, cx| {
+                    cx.listener(|this: &mut Self, _: &DraggedEntries, _: &mut Window, cx| {
+                        this.clear_drop_indicator();
                         cx.stop_propagation();
                         cx.notify();
                     }),
                 )
                 .on_drop(
-                    cx.listener(|_: &mut Self, _: &ExternalPaths, _: &mut Window, cx| {
+                    cx.listener(|this: &mut Self, _: &ExternalPaths, _: &mut Window, cx| {
+                        this.clear_drop_indicator();
                         cx.stop_propagation();
                         cx.notify();
                     }),
@@ -467,6 +478,7 @@ impl ExplorerView {
                     .on_drop(cx.listener({
                         let current_directory = current_directory.clone();
                         move |this, dragged: &DraggedEntries, window, cx| {
+                            this.clear_drop_indicator();
                             this.drop_internal_entries(
                                 dragged,
                                 current_directory.clone(),
@@ -479,6 +491,7 @@ impl ExplorerView {
                     .on_drop(cx.listener({
                         let current_directory = current_directory.clone();
                         move |this, paths: &ExternalPaths, window, cx| {
+                            this.clear_drop_indicator();
                             this.drop_external_paths(
                                 paths.paths(),
                                 current_directory.clone(),
@@ -560,6 +573,7 @@ impl ExplorerView {
             .on_drop(cx.listener({
                 let current_directory = current_directory.clone();
                 move |this, dragged: &DraggedEntries, window, cx| {
+                    this.clear_drop_indicator();
                     this.drop_internal_entries(
                         dragged,
                         current_directory.clone(),
@@ -572,6 +586,7 @@ impl ExplorerView {
             .on_drop(cx.listener({
                 let current_directory = current_directory.clone();
                 move |this, paths: &ExternalPaths, window, cx| {
+                    this.clear_drop_indicator();
                     this.drop_external_paths(
                         paths.paths(),
                         current_directory.clone(),
@@ -756,6 +771,23 @@ impl Render for ExplorerView {
                     cx.notify();
                 }),
             )
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if this.update_drop_indicator_modifiers(event.modifiers) {
+                    cx.notify();
+                }
+            }))
+            .on_drag_move::<DraggedEntries>({
+                let entity = cx.entity();
+                move |event: &DragMoveEvent<DraggedEntries>, _, cx| {
+                    clear_stale_drop_indicator(&entity, event, cx);
+                }
+            })
+            .on_drag_move::<ExternalPaths>({
+                let entity = cx.entity();
+                move |event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    clear_stale_drop_indicator(&entity, event, cx);
+                }
+            })
             .size_full()
             .relative()
             .flex()
@@ -814,7 +846,62 @@ impl Render for ExplorerView {
             .when_some(self.pending_file_conflict.clone(), |this, conflicts| {
                 this.child(render_file_conflict_dialog(conflicts, cx))
             })
+            .when_some(self.active_drop_indicator.clone(), |this, indicator| {
+                this.child(render_drop_indicator(indicator, window))
+            })
     }
+}
+
+fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElement {
+    let origin = drop_indicator_origin(indicator.mouse_position);
+    let (icon, action_label) = match indicator.operation {
+        FileOperationKind::Move => (NavIcon::Forward.glyph(), "Move to"),
+        FileOperationKind::Copy => ("\u{E710}", "Copy to"),
+    };
+    let target_label = truncated_text(
+        &indicator.target_label,
+        DROP_INDICATOR_TARGET_WIDTH,
+        DROP_INDICATOR_TEXT_COLOR,
+        window,
+    );
+
+    div()
+        .absolute()
+        .left(px(origin.0))
+        .top(px(origin.1))
+        .flex()
+        .items_center()
+        .h(px(26.0))
+        .px(px(8.0))
+        .gap(px(4.0))
+        .rounded(px(3.0))
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0x8a8a8a))
+        .shadow_md()
+        .text_size(px(DROP_INDICATOR_TEXT_SIZE))
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(px(DROP_INDICATOR_TEXT_SIZE))
+                .text_color(rgb(DROP_INDICATOR_BLUE))
+                .child(icon),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(rgb(DROP_INDICATOR_BLUE))
+                .child(action_label),
+        )
+        .child(
+            div()
+                .w(px(DROP_INDICATOR_TARGET_WIDTH))
+                .min_w(px(0.0))
+                .truncate()
+                .text_color(rgb(DROP_INDICATOR_TEXT_COLOR))
+                .child(target_label),
+        )
+        .into_any_element()
 }
 
 fn render_file_conflict_dialog(
@@ -1210,6 +1297,7 @@ fn directory_bar_label(
         .on_drop(cx.listener({
             let destination = destination.clone();
             move |this, dragged: &DraggedEntries, window, cx| {
+                this.clear_drop_indicator();
                 this.drop_internal_entries(dragged, destination.clone(), window.modifiers());
                 cx.stop_propagation();
                 cx.notify();
@@ -1218,6 +1306,7 @@ fn directory_bar_label(
         .on_drop(cx.listener({
             let destination = destination.clone();
             move |this, paths: &ExternalPaths, window, cx| {
+                this.clear_drop_indicator();
                 this.drop_external_paths(paths.paths(), destination.clone(), window.modifiers());
                 cx.stop_propagation();
                 cx.notify();
@@ -1248,6 +1337,31 @@ fn update_drag_cursor_if_hovered<T: 'static>(
         this.drag_cursor_for_value(event.dragged_item(), destination, window.modifiers())
     });
     cx.set_active_drag_cursor_style(cursor, window);
+
+    entity.update(cx, |this, cx| {
+        let indicator = this.drop_indicator_for_value(
+            event.dragged_item(),
+            destination,
+            window.modifiers(),
+            event.event.position,
+        );
+        if this.active_drop_indicator != indicator {
+            this.active_drop_indicator = indicator;
+            cx.notify();
+        }
+    });
+}
+
+fn clear_stale_drop_indicator<T: 'static>(
+    entity: &Entity<ExplorerView>,
+    event: &DragMoveEvent<T>,
+    cx: &mut App,
+) {
+    entity.update(cx, |this, cx| {
+        if this.clear_stale_drop_indicator(event.event.position) {
+            cx.notify();
+        }
+    });
 }
 
 fn directory_bar_separator() -> Div {
