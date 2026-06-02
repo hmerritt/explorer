@@ -52,6 +52,48 @@ class Explorer < Formula
           s.gsub!(/^Exec=.*/, "Exec=#{bin}/explorer %F")
           s.gsub!(/^Icon=.*/, "Icon=#{share}/icons/hicolor/512x512/apps/explorer.png")
         end
+
+        (bin/"explorer-register-desktop").write <<~SH
+          #!/usr/bin/env sh
+          set -eu
+
+          desktop_source="#{libexec}/explorer.app/share/applications/com.hmerritt.explorer.desktop"
+          icon_path="#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
+
+          if [ -z "${HOME:-}" ]; then
+            echo "Explorer desktop registration skipped because HOME is not set."
+            echo "Run explorer-register-desktop from your user session after install."
+            exit 0
+          fi
+
+          if [ ! -f "$desktop_source" ]; then
+            echo "Explorer desktop registration skipped because $desktop_source is missing."
+            exit 0
+          fi
+
+          data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+          applications_dir="$data_home/applications"
+          desktop_file="$applications_dir/com.hmerritt.explorer.desktop"
+
+          mkdir -p "$applications_dir"
+          cp "$desktop_source" "$desktop_file"
+
+          sed -i \\
+            -e "s|^Exec=.*|Exec=#{bin}/explorer %F|" \\
+            -e "s|^Icon=.*|Icon=$icon_path|" \\
+            "$desktop_file"
+
+          if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "$applications_dir" >/dev/null 2>&1 || true
+          fi
+
+          if command -v xdg-desktop-menu >/dev/null 2>&1; then
+            xdg-desktop-menu forceupdate --mode user >/dev/null 2>&1 || true
+          fi
+
+          echo "Explorer desktop launcher registered at $desktop_file"
+        SH
+        chmod 0755, bin/"explorer-register-desktop"
       end
     else
       bin.install "explorer"
@@ -66,34 +108,26 @@ class Explorer < Formula
   def post_install
     return unless OS.linux?
 
-    desktop_file = libexec/"explorer.app/share/applications/com.hmerritt.explorer.desktop"
-    return unless desktop_file.exist?
-
-    xdg_applications = Pathname.new(Dir.home)/".local/share/applications"
-    xdg_desktop_file = xdg_applications/"com.hmerritt.explorer.desktop"
-
-    mkdir_p xdg_applications
-    cp desktop_file, xdg_desktop_file
-
-    inreplace xdg_desktop_file do |s|
-      s.gsub!(/^Exec=.*/, "Exec=#{bin}/explorer %F")
-      s.gsub!(/^Icon=.*/, "Icon=#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png")
-    end
+    register_desktop = bin/"explorer-register-desktop"
+    system register_desktop if register_desktop.exist?
   end
 
   def caveats
     return unless OS.linux?
 
     <<~EOS
-      Explorer was registered in your app launcher at:
-        ~/.local/share/applications/com.hmerritt.explorer.desktop
+      Explorer registers a launcher entry at:
+        ${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.hmerritt.explorer.desktop
 
-      If it does not appear immediately, refresh your desktop shell or log out
-      and back in.
+      If it does not appear immediately, refresh your desktop shell or run:
+        explorer-register-desktop
 
       If you move Homebrew or change desktop sessions, refresh the launcher
       registration with:
-        brew postinstall hmerritt/tap/explorer
+        explorer-register-desktop
+
+      To remove the launcher entry, delete:
+        ~/.local/share/applications/com.hmerritt.explorer.desktop
     EOS
   end
 
@@ -104,6 +138,7 @@ class Explorer < Formula
       if File.directory?(libexec/"explorer.app")
         assert_predicate libexec/"explorer.app/bin/explorer", :exist?
         assert_predicate libexec/"explorer.app/bin/explorer.bin", :exist?
+        assert_predicate bin/"explorer-register-desktop", :exist?
         assert_predicate share/"applications/com.hmerritt.explorer.desktop", :exist?
         assert_predicate share/"icons/hicolor/512x512/apps/explorer.png", :exist?
       end
