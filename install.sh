@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
+EXPLORER_VERSION="0.3.0"
+
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
-    EXPLORER_VERSION="${EXPLORER_VERSION:-latest}"
 
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
         temp="$(mktemp -d "$TMPDIR/explorer-XXXXXX")"
@@ -70,18 +71,19 @@ main() {
     fi
 }
 
+release_url() {
+    printf "https://github.com/hmerritt/explorer/releases/download/%s/explorer-%s-linux-%s.tar.gz" \
+        "$EXPLORER_VERSION" "$EXPLORER_VERSION" "$asset_arch"
+}
+
 linux() {
     bundle="$temp/explorer-linux-$asset_arch.tar.gz"
 
     if [ -n "${EXPLORER_BUNDLE_PATH:-}" ]; then
         cp "$EXPLORER_BUNDLE_PATH" "$bundle"
     else
-        echo "Downloading Explorer version: $EXPLORER_VERSION"
-        if [ "$EXPLORER_VERSION" = "latest" ]; then
-            url="https://github.com/hmerritt/explorer/releases/latest/download/explorer-linux-$asset_arch.tar.gz"
-        else
-            url="https://github.com/hmerritt/explorer/releases/download/$EXPLORER_VERSION/explorer-$EXPLORER_VERSION-linux-$asset_arch.tar.gz"
-        fi
+        url="$(release_url)"
+        echo "Downloading Explorer $EXPLORER_VERSION from GitHub"
         download "$url" > "$bundle"
     fi
 
