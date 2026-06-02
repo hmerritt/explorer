@@ -98,6 +98,61 @@ pub(super) fn local_drive_roots() -> Vec<PathBuf> {
     roots
 }
 
+pub(super) fn drive_display_label(path: &Path) -> String {
+    let display = path.display().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_drive_display_label(&display, windows_volume_label(path).as_deref());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        display
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_volume_label(path: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+    use windows::core::PCWSTR;
+
+    let root = path.display().to_string();
+    let mut encoded = root.encode_utf16().collect::<Vec<_>>();
+    encoded.push(0);
+
+    let mut volume_name = [0u16; 261];
+    unsafe {
+        GetVolumeInformationW(
+            PCWSTR(encoded.as_ptr()),
+            Some(&mut volume_name),
+            None,
+            None,
+            None,
+            None,
+        )
+        .ok()?;
+    }
+
+    let length = volume_name
+        .iter()
+        .position(|code_unit| *code_unit == 0)
+        .unwrap_or(volume_name.len());
+
+    String::from_utf16(&volume_name[..length]).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_display_label(path_display: &str, volume_label: Option<&str>) -> String {
+    let drive = path_display.trim_end_matches(['\\', '/']);
+    let label = volume_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Local Disk");
+
+    format!("{label} ({drive})")
+}
+
 #[cfg(target_os = "windows")]
 fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
     matches!(drive_type, 2 | 3 | 5 | 6)
@@ -698,6 +753,31 @@ mod tests {
         assert!(!windows_drive_type_is_explorer_local(4));
         assert!(!windows_drive_type_is_explorer_local(1));
         assert!(!windows_drive_type_is_explorer_local(0));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_label_uses_custom_volume_name() {
+        assert_eq!(
+            windows_drive_display_label(r"C:\", Some("Work")),
+            "Work (C:)"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_label_falls_back_for_empty_volume_name() {
+        assert_eq!(
+            windows_drive_display_label(r"C:\", Some("")),
+            "Local Disk (C:)"
+        );
+        assert_eq!(windows_drive_display_label(r"C:\", None), "Local Disk (C:)");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn drive_display_label_uses_path_label_on_non_windows() {
+        assert_eq!(drive_display_label(Path::new("/")), "/");
     }
 
     fn finished_summary(result: Result<FileOperationOutcome, String>) -> FileOperationSummary {

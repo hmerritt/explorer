@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::explorer::filesystem::{
-    local_drive_roots, user_desktop_dir, user_downloads_dir, user_home_dir,
+    drive_display_label, local_drive_roots, user_desktop_dir, user_downloads_dir, user_home_dir,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,25 +67,11 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
     roots
         .into_iter()
         .map(|path| SidebarItem {
-            label: drive_label(&path),
+            label: drive_display_label(&path),
             path,
             kind: SidebarItemKind::Drive,
         })
         .collect()
-}
-
-fn drive_label(path: &std::path::Path) -> String {
-    let display = path.display().to_string();
-
-    #[cfg(target_os = "windows")]
-    {
-        return format!("Local Disk ({})", display.trim_end_matches('\\'));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        display
-    }
 }
 
 #[cfg(test)]
@@ -157,7 +143,8 @@ mod tests {
         assert_eq!(items[0].kind, SidebarItemKind::Drive);
 
         if cfg!(target_os = "windows") {
-            assert_eq!(items[0].label, "Local Disk (C:)");
+            let fallback_items = drive_items_from_roots(vec![PathBuf::from(r"?:\")]);
+            assert_eq!(fallback_items[0].label, "Local Disk (?:)");
         } else {
             assert_eq!(items[0].label, "/");
         }
