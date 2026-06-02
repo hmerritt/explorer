@@ -21,6 +21,12 @@ File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.
 
 #### [➡️ Manually Download The Latest Release Here](https://github.com/hmerritt/explorer/releases/latest)
 
+#### ➡️ Linux installer
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh | sh
+```
+
 Or via one of the supported package managers:
 
 #### ➡️ macOS / Linux via [Homebrew](https://brew.sh/)
