@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -361,19 +362,20 @@ impl ExplorerView {
         destination: DropDestination,
         modifiers: Modifiers,
     ) {
-        if matches!(destination, DropDestination::CurrentDirectory)
-            && dragged.source_dir == self.path
+        let destination_item = destination.item_path(&self.path);
+        let resolved_destination = destination.resolve(&self.path);
+        if dragged.paths.iter().any(|path| path == &destination_item)
+            || destination_contains_internal_drag_source(
+                &destination,
+                &self.path,
+                &resolved_destination,
+                dragged,
+            )
         {
             return;
         }
 
-        let destination_item = destination.item_path(&self.path);
-        let destination = destination.resolve(&self.path);
-        if dragged.paths.iter().any(|path| path == &destination_item) {
-            return;
-        }
-
-        self.perform_file_drop(&dragged.paths, &destination, modifiers);
+        self.perform_file_drop(&dragged.paths, &resolved_destination, modifiers);
     }
 
     pub(super) fn drop_external_paths(
@@ -382,12 +384,17 @@ impl ExplorerView {
         destination: DropDestination,
         modifiers: Modifiers,
     ) {
-        if current_directory_contains_all_external_paths(&destination, &self.path, paths) {
+        let resolved_destination = destination.resolve(&self.path);
+        if destination_contains_all_external_path_sources(
+            &destination,
+            &self.path,
+            &resolved_destination,
+            paths,
+        ) {
             return;
         }
 
-        let destination = destination.resolve(&self.path);
-        self.perform_file_drop(paths, &destination, modifiers);
+        self.perform_file_drop(paths, &resolved_destination, modifiers);
     }
 
     fn perform_file_drop(&mut self, paths: &[PathBuf], destination: &Path, modifiers: Modifiers) {
@@ -435,9 +442,10 @@ fn resolve_dragged_value_drop(
     let valid_target = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
         destination.is_dir()
             && !dragged.paths.iter().any(|path| path == destination_item)
-            && !current_directory_contains_all_internal_dragged_entries(
+            && !destination_contains_internal_drag_source(
                 destination_kind,
                 current_directory,
+                destination,
                 dragged,
             )
     } else {
@@ -446,9 +454,10 @@ fn resolve_dragged_value_drop(
                 .downcast_ref::<gpui::ExternalPaths>()
                 .is_some_and(|paths| {
                     !paths.paths().is_empty()
-                        && !current_directory_contains_all_external_paths(
+                        && !destination_contains_all_external_path_sources(
                             destination_kind,
                             current_directory,
+                            destination,
                             paths.paths(),
                         )
                 })
@@ -457,24 +466,43 @@ fn resolve_dragged_value_drop(
     resolve_drop_operation(modifiers, valid_target)
 }
 
-fn current_directory_contains_all_internal_dragged_entries(
+fn destination_contains_internal_drag_source(
     destination: &DropDestination,
     current_directory: &Path,
+    resolved_destination: &Path,
     dragged: &DraggedEntries,
 ) -> bool {
-    matches!(destination, DropDestination::CurrentDirectory)
-        && dragged.source_dir == current_directory
+    let target_directory = match destination {
+        DropDestination::CurrentDirectory => current_directory,
+        DropDestination::Directory { .. } => resolved_destination,
+    };
+
+    paths_match_for_drop(&dragged.source_dir, target_directory)
 }
 
-fn current_directory_contains_all_external_paths(
+fn destination_contains_all_external_path_sources(
     destination: &DropDestination,
     current_directory: &Path,
+    resolved_destination: &Path,
     paths: &[PathBuf],
 ) -> bool {
-    matches!(destination, DropDestination::CurrentDirectory)
-        && paths
-            .iter()
-            .all(|path| path.parent() == Some(current_directory))
+    let target_directory = match destination {
+        DropDestination::CurrentDirectory => current_directory,
+        DropDestination::Directory { .. } => resolved_destination,
+    };
+
+    !paths.is_empty()
+        && paths.iter().all(|path| {
+            path.parent()
+                .is_some_and(|parent| paths_match_for_drop(parent, target_directory))
+        })
+}
+
+fn paths_match_for_drop(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn path_display_name(path: &Path) -> String {
@@ -1063,6 +1091,68 @@ mod tests {
     }
 
     #[test]
+    fn same_folder_internal_drop_cannot_target_resolved_directory() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target folder");
+        let source = target.join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+
+        let view = ExplorerView::new(temp.path().to_path_buf());
+        let dragged = DraggedEntries {
+            paths: vec![source],
+            source_dir: target.clone(),
+            display_name: "file.txt".to_owned(),
+            count: 1,
+            folder_count: 0,
+            file_count: 1,
+        };
+        let destination = DropDestination::Directory {
+            item_path: target.clone(),
+            target_path: target,
+        };
+
+        assert!(!view.can_drop_value(&dragged, &destination, Modifiers::default()));
+        assert_eq!(
+            view.drop_indicator_for_value(
+                &dragged,
+                &destination,
+                Modifiers::default(),
+                gpui::point(px(32.0), px(48.0)),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_folder_internal_drop_can_target_resolved_directory() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&source_dir).expect("create source folder");
+        fs::create_dir(&target).expect("create target folder");
+
+        let view = ExplorerView::new(temp.path().to_path_buf());
+        let dragged = DraggedEntries {
+            paths: vec![source_dir.join("file.txt")],
+            source_dir,
+            display_name: "file.txt".to_owned(),
+            count: 1,
+            folder_count: 0,
+            file_count: 1,
+        };
+
+        assert!(view.can_drop_value(
+            &dragged,
+            &DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target,
+            },
+            Modifiers::default(),
+        ));
+    }
+
+    #[test]
     fn cross_folder_current_directory_drop_indicator_uses_current_folder_name() {
         let temp = TempDir::new();
         let source_dir = temp.path().join("source");
@@ -1107,13 +1197,13 @@ mod tests {
     }
 
     #[test]
-    fn drop_indicator_top_aligns_with_drag_preview_bottom() {
+    fn drop_indicator_top_overlaps_drag_preview_bottom_by_one_pixel() {
         let mouse_position = gpui::point(px(120.0), px(32.0));
         let drag_origin = drag_preview_origin(mouse_position);
         let indicator_origin = drop_indicator_origin(mouse_position);
         let drag_bottom = drag_origin.1 + DRAG_PREVIEW_HEIGHT;
 
-        assert_eq!(indicator_origin.1, drag_bottom);
+        assert_eq!(indicator_origin.1, drag_bottom - 1.0);
     }
 
     #[test]
@@ -1181,8 +1271,9 @@ mod tests {
         let temp = TempDir::new();
         let source = temp.path().join("file.txt");
 
-        assert!(current_directory_contains_all_external_paths(
+        assert!(destination_contains_all_external_path_sources(
             &DropDestination::CurrentDirectory,
+            temp.path(),
             temp.path(),
             &[source],
         ));
@@ -1194,10 +1285,68 @@ mod tests {
         let source_dir = temp.path().join("source");
         let source = source_dir.join("file.txt");
 
-        assert!(!current_directory_contains_all_external_paths(
+        assert!(!destination_contains_all_external_path_sources(
             &DropDestination::CurrentDirectory,
             temp.path(),
+            temp.path(),
             &[source],
+        ));
+    }
+
+    #[test]
+    fn same_folder_external_paths_are_resolved_directory_sources() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target folder");
+        let source = target.join("file.txt");
+
+        assert!(destination_contains_all_external_path_sources(
+            &DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target.clone(),
+            },
+            temp.path(),
+            &target,
+            &[source],
+        ));
+    }
+
+    #[test]
+    fn external_paths_from_other_folder_are_not_resolved_directory_sources() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target folder");
+        let source = source_dir.join("file.txt");
+
+        assert!(!destination_contains_all_external_path_sources(
+            &DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target.clone(),
+            },
+            temp.path(),
+            &target,
+            &[source],
+        ));
+    }
+
+    #[test]
+    fn mixed_external_paths_do_not_make_resolved_directory_source_no_op() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target folder");
+        let same_folder_source = target.join("same.txt");
+        let other_folder_source = source_dir.join("other.txt");
+
+        assert!(!destination_contains_all_external_path_sources(
+            &DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target.clone(),
+            },
+            temp.path(),
+            &target,
+            &[same_folder_source, other_folder_source],
         ));
     }
 
@@ -1236,6 +1385,58 @@ mod tests {
 
         assert!(!source.exists());
         assert_eq!(fs::read(temp.path().join("file.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn resolved_directory_external_drop_from_same_folder_is_no_op() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target folder");
+        let source = target.join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.open_error = Some("stale error".to_owned());
+
+        view.drop_external_paths(
+            std::slice::from_ref(&source),
+            DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target.clone(),
+            },
+            Modifiers::default(),
+        );
+
+        assert_eq!(fs::read(&source).unwrap(), b"data");
+        assert_eq!(view.open_error, Some("stale error".to_owned()));
+        assert!(target.join("file.txt").exists());
+    }
+
+    #[test]
+    fn resolved_directory_drop_from_other_folder_preserves_conflict_dialog() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&source_dir).expect("create source folder");
+        fs::create_dir(&target).expect("create target folder");
+        let source = source_dir.join("file.txt");
+        let existing = target.join("file.txt");
+        fs::write(&source, b"source").expect("create source");
+        fs::write(&existing, b"existing").expect("create existing");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.drop_external_paths(
+            std::slice::from_ref(&source),
+            DropDestination::Directory {
+                item_path: target.clone(),
+                target_path: target,
+            },
+            Modifiers::default(),
+        );
+
+        assert!(view.pending_file_conflict.is_some());
+        assert_eq!(view.open_error, None);
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&existing).unwrap(), b"existing");
     }
 
     #[test]

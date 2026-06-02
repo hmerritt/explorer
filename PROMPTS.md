@@ -21,10 +21,6 @@ Left side-bar drag re-sizable
 
 ---
 
-Unsigned app bundle for macOS
-
----
-
 Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
 
 Alt-drag should create a shortcut or simlink of the selected file/directory
@@ -42,3 +38,13 @@ Drag-and-drop — Should the plan include a local GPUI patch/vendor to expose na
 Vendor GPUI for native OS behaviour
 
 ## Didn't work first try
+
+Signed app bundle for macOS
+
+## Ideas
+
+- Split-screen (Zed style)
+- Shell-extension system
+- 7zip built-in
+- rsync copy/sync builtin
+- Network drives (rclone builtin)

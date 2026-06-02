@@ -178,8 +178,14 @@ impl ExplorerView {
         let label = item.label.clone();
         let path = item.path.clone();
         let icon_item = item.clone();
+        let is_user_directory = matches!(item.kind, SidebarItemKind::UserDirectory(_));
+        let destination = DropDestination::Directory {
+            item_path: path.clone(),
+            target_path: path.clone(),
+        };
+        let entity = cx.entity();
 
-        div()
+        let mut row = div()
             .id(("explorer-sidebar-row", id))
             .flex()
             .flex_row()
@@ -213,8 +219,68 @@ impl ExplorerView {
                     .text_size(px(SIDEBAR_TEXT_SIZE))
                     .text_color(rgb(0x1f1f1f))
                     .child(SharedString::from(label)),
-            )
-            .into_any_element()
+            );
+
+        if is_user_directory {
+            row = row
+                .can_drop({
+                    let destination = destination.clone();
+                    let entity = entity.clone();
+                    move |dragged_value, window, cx| {
+                        entity.update(cx, |this, _| {
+                            this.can_drop_value(dragged_value, &destination, window.modifiers())
+                        })
+                    }
+                })
+                .drag_over::<DraggedEntries>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .drag_over::<ExternalPaths>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .on_drag_move::<DraggedEntries>({
+                    let destination = destination.clone();
+                    let entity = entity.clone();
+                    move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                        update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+                    }
+                })
+                .on_drag_move::<ExternalPaths>({
+                    let destination = destination.clone();
+                    let entity = entity.clone();
+                    move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                        update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+                    }
+                })
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, dragged: &DraggedEntries, window, cx| {
+                        this.clear_drop_indicator();
+                        this.drop_internal_entries(
+                            dragged,
+                            destination.clone(),
+                            window.modifiers(),
+                        );
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, paths: &ExternalPaths, window, cx| {
+                        this.clear_drop_indicator();
+                        this.drop_external_paths(
+                            paths.paths(),
+                            destination.clone(),
+                            window.modifiers(),
+                        );
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }));
+        }
+
+        row.into_any_element()
     }
 
     fn render_row(
