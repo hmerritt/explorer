@@ -91,7 +91,18 @@ jobs:
 
             - name: Build (Windows via cargo-xwin)
               if: steps.tag_check.outputs.valid == 'true' && matrix.use_cross == false
-              run: cargo xwin build --release --locked --target ${{ matrix.target }}
+              env:
+                  LD_LIBRARY_PATH: /usr/local/lib:/usr/lib/x86_64-linux-gnu
+              run: |
+                  # Verify DXC is accessible before building
+                  echo "=== DXC check ==="
+                  which dxc || echo "dxc not in PATH"
+                  dxc --version || echo "dxc failed to run"
+                  ls /usr/local/lib/libdxcompiler* || echo "libdxcompiler not found in /usr/local/lib"
+                  ldconfig -p | grep dxcompiler || echo "libdxcompiler not in ldconfig cache"
+                  echo "=================="
+
+                  cargo xwin build --release --locked --target ${{ matrix.target }}
 
             - name: Package artifact
               if: steps.tag_check.outputs.valid == 'true'
