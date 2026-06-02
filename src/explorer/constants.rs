@@ -57,3 +57,10 @@ pub(super) const KB_BYTES: u64 = 1024;
 pub(super) const MB_BYTES: u64 = KB_BYTES * 1024;
 pub(super) const GB_BYTES: u64 = MB_BYTES * 1024;
 pub(super) const TB_BYTES: u64 = GB_BYTES * 1024;
+
+pub(super) fn effective_name_column_width(viewport_width: f32) -> f32 {
+    let fixed_columns_width =
+        COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH + SCROLLBAR_GUTTER_WIDTH;
+
+    (viewport_width - fixed_columns_width).max(COLUMN_NAME_MIN_WIDTH)
+}

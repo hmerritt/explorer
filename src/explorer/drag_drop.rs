@@ -186,13 +186,33 @@ impl ExplorerView {
         DraggedEntries::new(entries, self.path.clone())
     }
 
+    pub(super) fn dragged_entry_for_index(&self, ix: usize) -> Option<DraggedEntries> {
+        DraggedEntries::new(vec![self.entries.get(ix)?], self.path.clone())
+    }
+
     pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
         self.mouse_selection_drag.is_none() && self.dragged_entries_for_index(ix).is_some()
+    }
+
+    pub(super) fn can_start_individual_item_drag_for_index(&self, ix: usize) -> bool {
+        self.mouse_selection_drag.is_none()
+            && !self.entry_is_selected(ix)
+            && self.dragged_entry_for_index(ix).is_some()
+    }
+
+    pub(super) fn begin_individual_item_drag(&mut self, dragged: &DraggedEntries) {
+        self.cancel_mouse_selection_drag();
+        self.restore_selection_from_paths(&dragged.paths);
     }
 
     #[cfg(test)]
     pub(super) fn test_dragged_entries_for_index(&self, ix: usize) -> Option<DraggedEntries> {
         self.dragged_entries_for_index(ix)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_dragged_entry_for_index(&self, ix: usize) -> Option<DraggedEntries> {
+        self.dragged_entry_for_index(ix)
     }
 
     pub(super) fn drag_cursor_for_value(
@@ -435,6 +455,55 @@ mod tests {
     }
 
     #[test]
+    fn unselected_individual_row_drag_payload_uses_only_that_row() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+
+        let dragged = view
+            .test_dragged_entry_for_index(1)
+            .expect("individual dragged row");
+
+        assert_eq!(dragged.paths, vec![PathBuf::from("b.txt")]);
+        assert_eq!(dragged.source_dir, PathBuf::from("selection"));
+        assert_eq!(dragged.display_name, "b.txt");
+        assert_eq!(dragged.count, 1);
+        assert_eq!(dragged.folder_count, 0);
+        assert_eq!(dragged.file_count, 1);
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn unselected_individual_row_drag_can_start_without_mutating_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+
+        assert!(view.can_start_individual_item_drag_for_index(1));
+        assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn individual_row_drag_replaces_existing_selection_with_dragged_row() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+        let dragged = view
+            .test_dragged_entry_for_index(1)
+            .expect("individual dragged row");
+
+        view.begin_individual_item_drag(&dragged);
+
+        assert_eq!(selected_names(&view), vec!["b.txt"]);
+    }
+
+    #[test]
+    fn selected_row_does_not_use_individual_drag_payload() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+
+        assert!(!view.can_start_individual_item_drag_for_index(0));
+        assert!(view.can_start_item_drag_for_index(0));
+    }
+
+    #[test]
     fn selected_row_can_start_item_drag_without_rubber_band() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
         view.select_single_index(0);
@@ -465,6 +534,7 @@ mod tests {
 
         assert!(view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            gpui::size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         ));
 
@@ -487,6 +557,7 @@ mod tests {
 
         assert!(view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(1.0)),
+            gpui::size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         ));
 

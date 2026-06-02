@@ -21,10 +21,10 @@ use crate::explorer::{
         NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
         NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
         NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
-        SCROLLBAR_GUTTER_WIDTH, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL,
-        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
-        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
-        STATUS_BAR_TEXT_SIZE,
+        SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
+        SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
+        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
+        effective_name_column_width,
     },
     drag_drop::{DragPreview, DraggedEntries, DropDestination},
     entry::FileEntry,
@@ -221,9 +221,13 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
-        let drag_payload = self
+        let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
+            .flatten();
+        let individual_drag_payload = self
+            .can_start_individual_item_drag_for_index(ix)
+            .then(|| self.dragged_entry_for_index(ix))
             .flatten();
         let destination = DropDestination::Directory {
             item_path: entry.path.clone(),
@@ -283,7 +287,7 @@ impl ExplorerView {
                 }
             });
 
-        if let Some(drag_payload) = drag_payload {
+        if let Some(drag_payload) = selected_drag_payload {
             row = row.on_drag(drag_payload, {
                 let entity = entity.clone();
                 move |dragged: &DraggedEntries, cursor_offset, _, cx| {
@@ -357,25 +361,49 @@ impl ExplorerView {
                 );
         }
 
+        let date_cell = text_cell(
+            format_modified(entry.modified),
+            COLUMN_DATE_WIDTH,
+            false,
+            window,
+        );
+        let type_cell = text_cell(entry.type_label(), COLUMN_TYPE_WIDTH, false, window);
+        let size_cell = text_cell(format_size(entry.size), COLUMN_SIZE_WIDTH, true, window);
+
+        let (date_cell, type_cell, size_cell) = if let Some(drag_payload) = individual_drag_payload
+        {
+            (
+                add_item_drag(
+                    date_cell,
+                    ("explorer-entry-date-drag", ix),
+                    drag_payload.clone(),
+                    entity.clone(),
+                ),
+                add_item_drag(
+                    type_cell,
+                    ("explorer-entry-type-drag", ix),
+                    drag_payload.clone(),
+                    entity.clone(),
+                ),
+                add_item_drag(
+                    size_cell,
+                    ("explorer-entry-size-drag", ix),
+                    drag_payload,
+                    entity.clone(),
+                ),
+            )
+        } else {
+            (
+                date_cell.into_any_element(),
+                type_cell.into_any_element(),
+                size_cell.into_any_element(),
+            )
+        };
+
         row.child(name_cell(&entry, scale_factor, window))
-            .child(text_cell(
-                format_modified(entry.modified),
-                COLUMN_DATE_WIDTH,
-                false,
-                window,
-            ))
-            .child(text_cell(
-                entry.type_label(),
-                COLUMN_TYPE_WIDTH,
-                false,
-                window,
-            ))
-            .child(text_cell(
-                format_size(entry.size),
-                COLUMN_SIZE_WIDTH,
-                true,
-                window,
-            ))
+            .child(date_cell)
+            .child(type_cell)
+            .child(size_cell)
             .into_any_element()
     }
 
@@ -630,10 +658,14 @@ impl ExplorerView {
                         }
 
                         let local_position = local_point(event.position, &bounds);
+                        let viewport_size = viewport_size(&bounds);
                         let modifiers = SelectionModifiers::from_gpui(event.modifiers);
                         let _ = entity.update(cx, |this, cx| {
-                            if this.begin_mouse_selection_drag_for_intent(local_position, modifiers)
-                            {
+                            if this.begin_mouse_selection_drag_for_intent(
+                                local_position,
+                                viewport_size,
+                                modifiers,
+                            ) {
                                 cx.notify();
                             }
                         });
@@ -1289,13 +1321,6 @@ fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
         )
 }
 
-fn effective_name_column_width(viewport_width: f32) -> f32 {
-    let fixed_columns_width =
-        COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH + SCROLLBAR_GUTTER_WIDTH;
-
-    (viewport_width - fixed_columns_width).max(COLUMN_NAME_MIN_WIDTH)
-}
-
 fn filename_text_width(name_column_width: f32, scale_factor: f32) -> f32 {
     let icon_width = device_px_value(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor);
     let gap_width = device_px_value(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor);
@@ -1343,6 +1368,25 @@ fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
         ClickEvent::Mouse(event) => SelectionModifiers::from_gpui(event.down.modifiers),
         ClickEvent::Keyboard(_) => SelectionModifiers::default(),
     }
+}
+
+fn add_item_drag(
+    cell: Div,
+    id: impl Into<gpui::ElementId>,
+    drag_payload: DraggedEntries,
+    entity: Entity<ExplorerView>,
+) -> AnyElement {
+    cell.id(id)
+        .on_drag(
+            drag_payload,
+            move |dragged: &DraggedEntries, cursor_offset, _, cx| {
+                entity.update(cx, |this, _| {
+                    this.begin_individual_item_drag(dragged);
+                });
+                cx.new(|_| DragPreview::new(dragged, cursor_offset))
+            },
+        )
+        .into_any_element()
 }
 
 fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {

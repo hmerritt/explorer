@@ -2,7 +2,11 @@ use std::collections::BTreeSet;
 
 use gpui::{Bounds, Pixels, Point, px, size};
 
-use crate::explorer::{constants::ROW_HEIGHT, selection::SelectionModifiers, view::ExplorerView};
+use crate::explorer::{
+    constants::{ROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, effective_name_column_width},
+    selection::SelectionModifiers,
+    view::ExplorerView,
+};
 
 const DRAG_ACTIVATION_DISTANCE: f32 = 3.0;
 const DRAG_AUTOSCROLL_MARGIN: f32 = 24.0;
@@ -57,13 +61,16 @@ impl ExplorerView {
     pub(super) fn pointer_drag_intent(
         &self,
         local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
     ) -> Option<PointerDragIntent> {
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
         pointer_drag_intent_at(
+            f32::from(local_position.x),
             f32::from(local_position.y),
             scroll_top,
+            f32::from(viewport_size.width),
             self.entries.len(),
             &self.selection.selected_indices,
         )
@@ -72,9 +79,10 @@ impl ExplorerView {
     pub(super) fn begin_mouse_selection_drag_for_intent(
         &mut self,
         local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
         modifiers: SelectionModifiers,
     ) -> bool {
-        match self.pointer_drag_intent(local_position) {
+        match self.pointer_drag_intent(local_position, viewport_size) {
             Some(PointerDragIntent::RubberBand) => {
                 if !modifiers.toggle {
                     self.clear_selection();
@@ -263,12 +271,14 @@ pub(super) fn row_indices_intersecting_box(
 }
 
 pub(super) fn pointer_drag_intent_at(
+    local_x: f32,
     local_y: f32,
     scroll_top: f32,
+    viewport_width: f32,
     entry_count: usize,
     selected_indices: &BTreeSet<usize>,
 ) -> Option<PointerDragIntent> {
-    if local_y < 0.0 {
+    if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
         return None;
     }
 
@@ -278,8 +288,10 @@ pub(super) fn pointer_drag_intent_at(
 
     if selected_indices.contains(&ix) {
         Some(PointerDragIntent::ItemDrag)
-    } else {
+    } else if local_x < effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH) {
         Some(PointerDragIntent::RubberBand)
+    } else {
+        Some(PointerDragIntent::ItemDrag)
     }
 }
 
@@ -365,23 +377,68 @@ mod tests {
     #[test]
     fn selected_row_resolves_to_item_drag_with_scroll_offset() {
         assert_eq!(
-            pointer_drag_intent_at(1.0, ROW_HEIGHT * 2.0, 5, &BTreeSet::from([2])),
+            pointer_drag_intent_at(1.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([2])),
             Some(PointerDragIntent::ItemDrag)
         );
     }
 
     #[test]
-    fn unselected_row_resolves_to_rubber_band_with_scroll_offset() {
+    fn selected_row_resolves_to_item_drag_outside_name_column() {
         assert_eq!(
-            pointer_drag_intent_at(1.0, ROW_HEIGHT * 2.0, 5, &BTreeSet::from([1])),
+            pointer_drag_intent_at(500.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([2])),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn unselected_row_in_name_column_resolves_to_rubber_band() {
+        assert_eq!(
+            pointer_drag_intent_at(1.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([1])),
             Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn unselected_row_outside_name_column_resolves_to_item_drag() {
+        assert_eq!(
+            pointer_drag_intent_at(500.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([1])),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn unselected_row_uses_rendered_name_column_boundary() {
+        let list_width = 800.0;
+        let name_column_right = effective_name_column_width(list_width + SCROLLBAR_GUTTER_WIDTH);
+
+        assert_eq!(
+            pointer_drag_intent_at(
+                name_column_right - 1.0,
+                1.0,
+                0.0,
+                list_width,
+                5,
+                &BTreeSet::new()
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            pointer_drag_intent_at(
+                name_column_right + 1.0,
+                1.0,
+                0.0,
+                list_width,
+                5,
+                &BTreeSet::new()
+            ),
+            Some(PointerDragIntent::ItemDrag)
         );
     }
 
     #[test]
     fn whitespace_resolves_to_rubber_band() {
         assert_eq!(
-            pointer_drag_intent_at(ROW_HEIGHT * 5.0, 0.0, 5, &BTreeSet::from([4])),
+            pointer_drag_intent_at(1.0, ROW_HEIGHT * 5.0, 0.0, 800.0, 5, &BTreeSet::from([4])),
             Some(PointerDragIntent::RubberBand)
         );
     }
@@ -389,7 +446,7 @@ mod tests {
     #[test]
     fn empty_list_resolves_to_rubber_band() {
         assert_eq!(
-            pointer_drag_intent_at(1.0, 0.0, 0, &BTreeSet::new()),
+            pointer_drag_intent_at(1.0, 1.0, 0.0, 800.0, 0, &BTreeSet::new()),
             Some(PointerDragIntent::RubberBand)
         );
     }
@@ -397,7 +454,15 @@ mod tests {
     #[test]
     fn outside_list_bounds_resolves_to_no_drag_intent() {
         assert_eq!(
-            pointer_drag_intent_at(-1.0, 0.0, 5, &BTreeSet::from([0])),
+            pointer_drag_intent_at(1.0, -1.0, 0.0, 800.0, 5, &BTreeSet::from([0])),
+            None
+        );
+        assert_eq!(
+            pointer_drag_intent_at(-1.0, 1.0, 0.0, 800.0, 5, &BTreeSet::from([0])),
+            None
+        );
+        assert_eq!(
+            pointer_drag_intent_at(801.0, 1.0, 0.0, 800.0, 5, &BTreeSet::from([0])),
             None
         );
     }
@@ -409,6 +474,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(1.0)),
+            size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         );
 
@@ -422,6 +488,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         );
 
@@ -435,6 +502,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         );
 
@@ -455,6 +523,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
             SelectionModifiers {
                 toggle: true,
                 extend: false,
@@ -477,6 +546,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             gpui::point(px(1.0), px(1.0)),
+            size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         );
         view.update_mouse_selection_drag(
