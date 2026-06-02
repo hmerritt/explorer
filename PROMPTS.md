@@ -1,17 +1,5 @@
 ## New
 
-Implement standard keybindings once a selection is made (either singular or multiple):
-
-- Copy (Ctrl+C)
-- Cut (Ctrl+X)
-- Paste (Ctrl+V)
-- Delete / trash (Del)
-- Delete / perma (Shift+Del)
-
-After a cut (Ctrl+X), reduce opacity of selected items to 0.7
-
----
-
 Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 - New

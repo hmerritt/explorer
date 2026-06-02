@@ -3,17 +3,19 @@
 ## Project Mission
 
 Explorer is a cross-platform file explorer written in Rust with GPUI.
-Its product goal is faithful Windows Explorer parity: UI, behavior, workflows,
-keyboard and mouse interactions, and file-management functionality should match
-Windows Explorer as closely as possible.
+Its product goal is to be Windows Explorer in all user-visible behavior: UI,
+workflows, keyboard and mouse interactions, and file-management semantics should
+match Windows Explorer as closely as possible.
 
 Do not redesign, simplify, or "fix" Windows Explorer behavior unless the user
 explicitly asks for that. Other explorers may add features or intentionally
 change the experience; this project should preserve the Windows Explorer model.
 
-On macOS and Linux, Windows Explorer remains the UX source of truth. Use
-platform-appropriate filesystem APIs where required, but keep the visible
-behavior and interaction model aligned with Windows Explorer.
+macOS and Linux are the core support systems for implementation decisions.
+Windows is supported too, but when platform behavior or filesystem APIs differ,
+think about robust macOS and Linux behavior first while preserving the Windows
+Explorer UX model. On every platform, Windows Explorer remains the source of
+truth for visible behavior and interaction design.
 
 ## Repository Orientation
 

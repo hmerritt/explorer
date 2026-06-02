@@ -36,12 +36,13 @@ use crate::explorer::{
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections},
-    view::{ExplorerContentBranch, ExplorerView},
+    view::{ExplorerContentBranch, ExplorerView, PendingPermanentDelete},
 };
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
+const CUT_ITEM_OPACITY: f32 = 0.7;
 const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_CELL_TEXT_COLOR: u32 = 0x595959;
 const NAME_TRUNCATION_SUFFIX: &str = "…";
@@ -215,6 +216,7 @@ impl ExplorerView {
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
         let is_selected = self.entry_is_selected(ix);
+        let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
         let drag_payload = self
             .can_start_item_drag_for_index(ix)
@@ -245,6 +247,7 @@ impl ExplorerView {
             .border_1()
             .border_color(rgb(0xffffff))
             .cursor_default()
+            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if this.suppress_next_click() {
                     cx.stop_propagation();
@@ -659,6 +662,11 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_enter_selected))
             .on_action(cx.listener(Self::handle_refresh))
             .on_action(cx.listener(Self::handle_select_all))
+            .on_action(cx.listener(Self::handle_copy_selected))
+            .on_action(cx.listener(Self::handle_cut_selected))
+            .on_action(cx.listener(Self::handle_paste_clipboard))
+            .on_action(cx.listener(Self::handle_trash_selected))
+            .on_action(cx.listener(Self::handle_permanently_delete_selected))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -674,6 +682,7 @@ impl Render for ExplorerView {
                 }),
             )
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(0xffffff))
@@ -723,7 +732,99 @@ impl Render for ExplorerView {
                             ),
                     ),
             )
+            .when_some(self.pending_permanent_delete.clone(), |this, pending| {
+                this.child(render_permanent_delete_confirmation(pending, cx))
+            })
     }
+}
+
+fn render_permanent_delete_confirmation(
+    pending: PendingPermanentDelete,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let message = if pending.paths.len() == 1 {
+        "Are you sure you want to permanently delete this item?".to_owned()
+    } else {
+        format!(
+            "Are you sure you want to permanently delete these {} items?",
+            pending.paths.len()
+        )
+    };
+
+    div()
+        .id("permanent-delete-confirmation")
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w_full()
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(380.0))
+                .rounded(px(4.0))
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0x8a8a8a))
+                .shadow_md()
+                .p(px(16.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(div().child(SharedString::from(message)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .mt(px(18.0))
+                        .child(
+                            div()
+                                .id("permanent-delete-yes")
+                                .min_w(px(76.0))
+                                .h(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(3.0))
+                                .border_1()
+                                .border_color(rgb(0xadadad))
+                                .bg(rgb(0xf5f5f5))
+                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
+                                .cursor_default()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.confirm_pending_permanent_delete();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .child("Yes"),
+                        )
+                        .child(
+                            div()
+                                .id("permanent-delete-no")
+                                .min_w(px(76.0))
+                                .h(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(3.0))
+                                .border_1()
+                                .border_color(rgb(0xadadad))
+                                .bg(rgb(0xf5f5f5))
+                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
+                                .cursor_default()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.cancel_pending_permanent_delete();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .child("No"),
+                        ),
+                ),
+        )
+        .into_any_element()
 }
 
 fn sidebar_separator() -> Div {
@@ -1128,14 +1229,21 @@ mod tests {
     };
 
     use super::{
-        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width,
-        filename_text_width, selection_modifiers_for_click, text_cell_width,
+        CUT_ITEM_OPACITY, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL,
+        available_filename_text_width, filename_text_width, selection_modifiers_for_click,
+        text_cell_width,
     };
 
     #[test]
     fn nav_button_active_opacity_dims_button() {
         assert_eq!(NAV_BUTTON_ACTIVE_OPACITY, 0.7);
         assert!(NAV_BUTTON_ACTIVE_OPACITY < 1.0);
+    }
+
+    #[test]
+    fn cut_item_opacity_dims_rows() {
+        assert_eq!(CUT_ITEM_OPACITY, 0.7);
+        assert!(CUT_ITEM_OPACITY < 1.0);
     }
 
     #[test]

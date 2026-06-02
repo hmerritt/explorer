@@ -24,7 +24,12 @@ actions!(
         OpenSelected,
         EnterSelected,
         Refresh,
-        SelectAll
+        SelectAll,
+        CopySelected,
+        CutSelected,
+        PasteClipboard,
+        TrashSelected,
+        PermanentlyDeleteSelected
     ]
 );
 
@@ -168,6 +173,56 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.select_all_entries();
+        cx.notify();
+    }
+
+    pub(super) fn handle_copy_selected(
+        &mut self,
+        _: &CopySelected,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_selected_to_clipboard(cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_cut_selected(
+        &mut self,
+        _: &CutSelected,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cut_selected_to_clipboard(cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_paste_clipboard(
+        &mut self,
+        _: &PasteClipboard,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.paste_clipboard_files(cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_trash_selected(
+        &mut self,
+        _: &TrashSelected,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.trash_selected_paths();
+        cx.notify();
+    }
+
+    pub(super) fn handle_permanently_delete_selected(
+        &mut self,
+        _: &PermanentlyDeleteSelected,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_permanent_delete_selected();
         cx.notify();
     }
 }

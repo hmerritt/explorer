@@ -6,8 +6,9 @@ use gpui::{
 };
 
 use crate::explorer::{
-    CancelDrag, EnterSelected, ExplorerView, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack,
-    GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
+    CancelDrag, CopySelected, CutSelected, EnterSelected, ExplorerView, ExtendDown, ExtendEnd,
+    ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
+    OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
     default_start_path,
 };
 
@@ -57,6 +58,11 @@ pub fn run() {
             KeyBinding::new("alt-up", GoUp, None),
             KeyBinding::new("escape", CancelDrag, None),
             KeyBinding::new("ctrl-a", SelectAll, None),
+            KeyBinding::new("ctrl-c", CopySelected, None),
+            KeyBinding::new("ctrl-x", CutSelected, None),
+            KeyBinding::new("ctrl-v", PasteClipboard, None),
+            KeyBinding::new("delete", TrashSelected, None),
+            KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1064.0), px(506.0)), cx);

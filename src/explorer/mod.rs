@@ -1,8 +1,10 @@
 mod actions;
 mod breadcrumb;
+mod clipboard;
 mod constants;
 mod drag_drop;
 mod entry;
+mod file_commands;
 mod filesystem;
 mod formatting;
 mod icons;
@@ -18,8 +20,9 @@ mod test_support;
 mod view;
 
 pub use actions::{
-    CancelDrag, EnterSelected, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward,
-    GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected, Refresh, SelectAll,
+    CancelDrag, CopySelected, CutSelected, EnterSelected, ExtendDown, ExtendEnd, ExtendHome,
+    ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected,
+    PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
 };
 #[allow(unused_imports)]
 pub use entry::FileEntry;

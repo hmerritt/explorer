@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use gpui::{FocusHandle, UniformListScrollHandle};
 
@@ -21,6 +21,14 @@ pub struct ExplorerView {
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
     pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
     pub(super) suppress_next_click: bool,
+    pub(super) cut_paths: BTreeSet<PathBuf>,
+    pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingPermanentDelete {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) fallback_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +63,8 @@ impl ExplorerView {
             scrollbar_drag: None,
             mouse_selection_drag: None,
             suppress_next_click: false,
+            cut_paths: BTreeSet::new(),
+            pending_permanent_delete: None,
         };
         view.reload();
         view

@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
 };
@@ -177,6 +177,108 @@ pub(super) fn copy_paths_to_directory(
     Ok(copied_paths)
 }
 
+pub(super) fn copy_paths_to_directory_for_paste(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        return Err("No items were selected for paste.".to_owned());
+    }
+
+    if !destination.is_dir() {
+        return Err(format!(
+            "{} is not a folder.",
+            path_display_name(destination)
+        ));
+    }
+
+    let destination_canonical = canonicalize_for_operation(destination)?;
+    let mut reserved_destinations = HashSet::new();
+    let mut copied_paths = Vec::new();
+
+    for source in paths {
+        if !source.exists() {
+            return Err(format!("Could not find {}.", path_display_name(source)));
+        }
+
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| format!("{} cannot be copied.", path_display_name(source)))?;
+        let source_parent = source
+            .parent()
+            .ok_or_else(|| format!("{} cannot be copied.", path_display_name(source)))?;
+        let source_parent_canonical = canonicalize_for_operation(source_parent)?;
+        let same_directory = source_parent_canonical == destination_canonical;
+        let planned_destination = if same_directory {
+            paste_copy_destination(destination, file_name, &mut reserved_destinations)
+        } else {
+            let planned_destination = destination.join(file_name);
+            if !reserved_destinations.insert(planned_destination.clone()) {
+                return Err(format!(
+                    "Multiple selected items are named {}.",
+                    file_name.to_string_lossy()
+                ));
+            }
+            if planned_destination.exists() {
+                return Err(format!(
+                    "{} already contains {}.",
+                    path_display_name(destination),
+                    file_name.to_string_lossy()
+                ));
+            }
+            planned_destination
+        };
+
+        if source.is_dir() {
+            let source_canonical = canonicalize_for_operation(source)?;
+            let canonical_planned_destination = destination_canonical.join(
+                planned_destination
+                    .file_name()
+                    .unwrap_or_else(|| OsStr::new("")),
+            );
+            if canonical_planned_destination.starts_with(source_canonical) {
+                return Err(format!(
+                    "Cannot copy {} into itself.",
+                    path_display_name(source)
+                ));
+            }
+        }
+
+        copy_path_recursively(source, &planned_destination)
+            .map_err(|error| format_path_error("copy", source, error))?;
+        copied_paths.push(planned_destination);
+    }
+
+    Ok(copied_paths)
+}
+
+pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("No items were selected to delete.".to_owned());
+    }
+
+    trash::delete_all(paths)
+        .map_err(|error| format!("Could not move selected items to the Recycle Bin: {error}"))
+}
+
+pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("No items were selected to delete.".to_owned());
+    }
+
+    for path in paths {
+        if !path.exists() {
+            return Err(format!("Could not find {}.", path_display_name(path)));
+        }
+    }
+
+    for path in paths {
+        remove_source(path).map_err(|error| format_path_error("delete", path, error))?;
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlannedOperation {
     Move,
@@ -283,6 +385,42 @@ fn remove_source(source: &Path) -> std::io::Result<()> {
         fs::remove_dir_all(source)
     } else {
         fs::remove_file(source)
+    }
+}
+
+fn paste_copy_destination(
+    destination: &Path,
+    file_name: &OsStr,
+    reserved_destinations: &mut HashSet<PathBuf>,
+) -> PathBuf {
+    let mut copy_number = 1;
+
+    loop {
+        let candidate = destination.join(copy_file_name(file_name, copy_number));
+        if !candidate.exists() && reserved_destinations.insert(candidate.clone()) {
+            return candidate;
+        }
+        copy_number += 1;
+    }
+}
+
+fn copy_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
+    let file_name = file_name.to_string_lossy();
+    let path = Path::new(file_name.as_ref());
+    let stem = path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or(file_name.as_ref());
+    let extension = path.extension().and_then(OsStr::to_str);
+    let suffix = if copy_number == 1 {
+        " - Copy".to_owned()
+    } else {
+        format!(" - Copy ({copy_number})")
+    };
+
+    match extension {
+        Some(extension) => OsString::from(format!("{stem}{suffix}.{extension}")),
+        None => OsString::from(format!("{stem}{suffix}")),
     }
 }
 
@@ -512,5 +650,71 @@ mod tests {
         assert!(error.contains("Cannot move folder into itself"));
         assert!(source.exists());
         assert!(descendant.exists());
+    }
+
+    #[test]
+    fn paste_copy_in_same_directory_uses_windows_copy_names() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+        fs::write(temp.path().join("file - Copy.txt"), b"existing").expect("create first copy");
+
+        let copied = copy_paths_to_directory_for_paste(std::slice::from_ref(&source), temp.path())
+            .expect("paste copy");
+
+        assert_eq!(copied, vec![temp.path().join("file - Copy (2).txt")]);
+        assert_eq!(fs::read(&source).unwrap(), b"data");
+        assert_eq!(
+            fs::read(temp.path().join("file - Copy (2).txt")).unwrap(),
+            b"data"
+        );
+    }
+
+    #[test]
+    fn paste_copy_directory_in_same_directory_uses_copy_name() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        fs::create_dir(&source).expect("create source directory");
+        fs::write(source.join("nested.txt"), b"data").expect("create nested file");
+
+        let copied = copy_paths_to_directory_for_paste(std::slice::from_ref(&source), temp.path())
+            .expect("paste copy");
+
+        let copied_folder = temp.path().join("folder - Copy");
+        assert_eq!(copied, vec![copied_folder.clone()]);
+        assert_eq!(fs::read(copied_folder.join("nested.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn paste_copy_directory_into_descendant_fails() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let descendant = source.join("child");
+        fs::create_dir_all(&descendant).expect("create descendant directory");
+
+        let error = copy_paths_to_directory_for_paste(std::slice::from_ref(&source), &descendant)
+            .expect_err("descendant copy should fail");
+
+        assert!(error.contains("Cannot copy folder into itself"));
+    }
+
+    #[test]
+    fn permanent_delete_removes_files_and_directories() {
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        let folder = temp.path().join("folder");
+        fs::write(&file, b"data").expect("create file");
+        fs::create_dir(&folder).expect("create folder");
+        fs::write(folder.join("nested.txt"), b"data").expect("create nested file");
+
+        remove_paths_permanently(&[file.clone(), folder.clone()]).expect("delete paths");
+
+        assert!(!file.exists());
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn trash_delete_missing_selection_errors() {
+        assert!(trash_paths(&[]).is_err());
     }
 }
