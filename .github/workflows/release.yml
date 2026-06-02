@@ -73,7 +73,8 @@ jobs:
 
                   # Download DXC Linux binaries from Microsoft's releases
                   DXC_VERSION="v1.9.2602"
-                  curl -L "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_VERSION}/linux_dxc_${DXC_VERSION#v}.x86_64.tar.gz" \
+                  DXC_DATE="2026_02_20"
+                  curl -L "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_VERSION}/linux_dxc_${DXC_VERSION}.x86_64.tar.gz" \
                     -o /tmp/dxc.tar.gz
                   mkdir /tmp/dxc && tar -xzf /tmp/dxc.tar.gz -C /tmp/dxc
                   sudo cp /tmp/dxc/bin/dxc /usr/local/bin/
