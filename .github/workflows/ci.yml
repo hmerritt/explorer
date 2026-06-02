@@ -18,7 +18,7 @@ jobs:
             - name: Install system dependencies
               run: |
                   sudo apt update
-                  sudo apt install -y pkg-config libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
+                  sudo apt install -y pkg-config libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
 
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable

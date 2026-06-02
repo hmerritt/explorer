@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
     env,
@@ -29,6 +31,8 @@ const MIN_WINDOW_WIDTH: f32 = 400.0;
 const MIN_WINDOW_HEIGHT: f32 = 120.0;
 const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/Segoe Fluent Icons.ttf");
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/Segoe MDL2 Assets.ttf");
+#[cfg(any(target_os = "linux", test))]
+const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfigPlatform {
@@ -99,6 +103,29 @@ struct Explorer {
     explorer: gpui::Entity<ExplorerView>,
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LinuxDisplayBackend {
+    Wayland { display: OsString },
+    X11,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LinuxDisplaySelection {
+    Backend(LinuxDisplayBackend),
+    FatalNoDisplay,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Default)]
+struct LinuxDisplayEnv {
+    wayland_display: Option<OsString>,
+    xdg_runtime_dir: Option<OsString>,
+    x11_display: Option<OsString>,
+    zed_headless: Option<OsString>,
+}
+
 impl Render for Explorer {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.explorer.clone()
@@ -130,6 +157,94 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 fn non_empty_path(value: OsString) -> Option<PathBuf> {
     (!value.as_os_str().is_empty()).then(|| PathBuf::from(value))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.as_os_str().is_empty())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn wayland_display_path(display: &OsString, xdg_runtime_dir: Option<&OsString>) -> Option<PathBuf> {
+    let display_path = PathBuf::from(display);
+    if display_path.is_absolute() {
+        Some(display_path)
+    } else {
+        xdg_runtime_dir.map(|runtime_dir| PathBuf::from(runtime_dir).join(display))
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn select_linux_display_backend(
+    env: LinuxDisplayEnv,
+    mut can_connect_to_wayland: impl FnMut(&Path) -> bool,
+) -> LinuxDisplaySelection {
+    let wayland_display = non_empty_os(env.wayland_display);
+    let xdg_runtime_dir = non_empty_os(env.xdg_runtime_dir);
+    let x11_display = non_empty_os(env.x11_display);
+    let _zed_headless = non_empty_os(env.zed_headless);
+
+    if let Some(display) = wayland_display {
+        if wayland_display_path(&display, xdg_runtime_dir.as_ref())
+            .is_some_and(|path| can_connect_to_wayland(&path))
+        {
+            return LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland { display });
+        }
+    } else if let Some(path) = xdg_runtime_dir
+        .as_ref()
+        .map(|runtime_dir| PathBuf::from(runtime_dir).join(DEFAULT_WAYLAND_DISPLAY))
+        && can_connect_to_wayland(&path)
+    {
+        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
+            display: OsString::from(DEFAULT_WAYLAND_DISPLAY),
+        });
+    }
+
+    if x11_display.is_some() {
+        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11);
+    }
+
+    LinuxDisplaySelection::FatalNoDisplay
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_display_backend() {
+    let selection = select_linux_display_backend(
+        LinuxDisplayEnv {
+            wayland_display: env::var_os("WAYLAND_DISPLAY"),
+            xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR"),
+            x11_display: env::var_os("DISPLAY"),
+            zed_headless: env::var_os("ZED_HEADLESS"),
+        },
+        |path| UnixStream::connect(path).is_ok(),
+    );
+
+    match selection {
+        LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland { display }) => {
+            // SAFETY: Explorer is still single-threaded here, before GPUI starts any
+            // executors or windows. This is the only startup code that mutates the
+            // process environment for display backend selection.
+            unsafe {
+                env::remove_var("ZED_HEADLESS");
+                env::set_var("WAYLAND_DISPLAY", display);
+            }
+        }
+        LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11) => {
+            // SAFETY: Explorer is still single-threaded here, before GPUI starts any
+            // executors or windows. This is the only startup code that mutates the
+            // process environment for display backend selection.
+            unsafe {
+                env::remove_var("ZED_HEADLESS");
+                env::remove_var("WAYLAND_DISPLAY");
+            }
+        }
+        LinuxDisplaySelection::FatalNoDisplay => {
+            eprintln!(
+                "Explorer requires a graphical Linux session. Set WAYLAND_DISPLAY to a connectable Wayland socket or DISPLAY to an X11 display."
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 fn window_state_path() -> Option<PathBuf> {
@@ -205,6 +320,9 @@ fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Resu
 }
 
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    configure_linux_display_backend();
+
     Application::new().run(|cx: &mut App| {
         register_embedded_fonts(cx);
         cx.bind_keys([
@@ -440,12 +558,103 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn linux_display_selector_prefers_valid_wayland_over_x11() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
+                display: OsString::from("wayland-1")
+            })
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_falls_back_to_x11_for_stale_wayland() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |_| false
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11)
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_probes_default_wayland_socket() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[("XDG_RUNTIME_DIR", "/run/user/1000")]),
+                |path| path == Path::new("/run/user/1000/wayland-0")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
+                display: OsString::from("wayland-0")
+            })
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_ignores_empty_display_variables() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("WAYLAND_DISPLAY", ""),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ""),
+                ]),
+                |_| false
+            ),
+            LinuxDisplaySelection::FatalNoDisplay
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_never_selects_headless() {
+        assert_eq!(
+            select_linux_display_backend(linux_display_env(&[("ZED_HEADLESS", "1")]), |_| false),
+            LinuxDisplaySelection::FatalNoDisplay
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_returns_fatal_when_no_gui_display_exists() {
+        assert_eq!(
+            select_linux_display_backend(linux_display_env(&[]), |_| false),
+            LinuxDisplaySelection::FatalNoDisplay
+        );
+    }
+
     fn test_window_state_path(platform: ConfigPlatform, vars: &[(&str, &str)]) -> Option<PathBuf> {
         window_state_path_for(platform, |name| {
             vars.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| PathBuf::from(value))
         })
+    }
+
+    fn linux_display_env(vars: &[(&str, &str)]) -> LinuxDisplayEnv {
+        LinuxDisplayEnv {
+            wayland_display: test_env_var(vars, "WAYLAND_DISPLAY"),
+            xdg_runtime_dir: test_env_var(vars, "XDG_RUNTIME_DIR"),
+            x11_display: test_env_var(vars, "DISPLAY"),
+            zed_headless: test_env_var(vars, "ZED_HEADLESS"),
+        }
+    }
+
+    fn test_env_var(vars: &[(&str, &str)], name: &str) -> Option<OsString> {
+        vars.iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| OsString::from(value))
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {

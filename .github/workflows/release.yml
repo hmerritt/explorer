@@ -55,7 +55,7 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true'
               run: |
                   sudo apt update
-                  sudo apt install -y pkg-config libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev patchelf tar
+                  sudo apt install -y pkg-config libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev patchelf tar
 
             - name: Build
               if: steps.tag_check.outputs.valid == 'true'
@@ -112,7 +112,7 @@ jobs:
                   ldd "$binary" | awk '/=> \// { print $3 }' | sort -u | while read -r lib; do
                     name="$(basename "$lib")"
                     case "$name" in
-                      libxkbcommon*.so*|libX11*.so*|libxcb*.so*|libXau*.so*|libXdmcp*.so*)
+                      libwayland*.so*|libxkbcommon*.so*|libX11*.so*|libxcb*.so*|libXau*.so*|libXdmcp*.so*)
                         cp -L "$lib" "$app_dir/lib/$name"
                         ;;
                     esac

@@ -18,6 +18,12 @@ cargo test
 cargo run
 ```
 
+On Linux, Explorer is GUI-only and requires either Wayland or X11 at startup.
+Wayland is preferred when `WAYLAND_DISPLAY` points to a connectable socket, or
+when `$XDG_RUNTIME_DIR/wayland-0` is available. If Wayland is unavailable but
+`DISPLAY` is set, Explorer starts on X11. If neither backend is available,
+startup exits with a fatal error.
+
 The canonical app icon source is `assets/icon.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/icon.ico` is a derived Windows executable resource.
 
 ---
