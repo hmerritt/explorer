@@ -65,7 +65,7 @@ pub fn run() {
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1064.0), px(506.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1024.0), px(820.0)), cx);
 
         cx.open_window(
             WindowOptions {
