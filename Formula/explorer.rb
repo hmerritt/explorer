@@ -26,6 +26,12 @@ class Explorer < Formula
     sha256 "<REPLACE_ME>"
   end
 
+  def chmod_executable(path)
+    chmod 0755, path
+  rescue StandardError => e
+    opoo "Could not mark #{path} executable: #{e.message}"
+  end
+
   def install
     if OS.linux?
       if File.directory?("explorer.app")
@@ -37,7 +43,7 @@ class Explorer < Formula
         explorer_app.install "share" if File.directory?("share")
       elsif File.exist?("explorer")
         bin.install "explorer"
-        chmod 0755, bin/"explorer"
+        chmod_executable bin/"explorer"
       else
         odie "Expected explorer.app, bin/lib/share bundle root, or explorer in archive; found: #{Dir.children(".").sort.join(", ")}"
       end
@@ -45,20 +51,28 @@ class Explorer < Formula
       if File.directory?(libexec/"explorer.app")
         bin.write_exec_script libexec/"explorer.app/bin/explorer"
 
-        (share/"applications").install libexec/"explorer.app/share/applications/com.hmerritt.explorer.desktop"
         (share/"icons/hicolor/512x512/apps").install libexec/"explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
 
-        inreplace share/"applications/com.hmerritt.explorer.desktop" do |s|
-          s.gsub!(/^Exec=.*/, "Exec=#{bin}/explorer %F")
-          s.gsub!(/^Icon=.*/, "Icon=#{share}/icons/hicolor/512x512/apps/explorer.png")
-        end
+        (share/"applications").mkpath
+        (share/"applications/com.hmerritt.explorer.desktop").write <<~DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=Explorer
+          Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
+          Exec=#{bin}/explorer %F
+          Icon=#{share}/icons/hicolor/512x512/apps/explorer.png
+          Terminal=false
+          Categories=Utility;FileManager;
+          MimeType=inode/directory;
+          StartupNotify=true
+        DESKTOP
 
         (bin/"explorer-register-desktop").write <<~SH
           #!/usr/bin/env sh
           set -eu
 
-          desktop_source="#{libexec}/explorer.app/share/applications/com.hmerritt.explorer.desktop"
-          icon_path="#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
+          bundle_icon="#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
+          share_icon="#{share}/icons/hicolor/512x512/apps/explorer.png"
 
           if [ -z "${HOME:-}" ]; then
             echo "Explorer desktop registration skipped because HOME is not set."
@@ -66,9 +80,12 @@ class Explorer < Formula
             exit 0
           fi
 
-          if [ ! -f "$desktop_source" ]; then
-            echo "Explorer desktop registration skipped because $desktop_source is missing."
-            exit 0
+          if [ -f "$bundle_icon" ]; then
+            icon_path="$bundle_icon"
+          elif [ -f "$share_icon" ]; then
+            icon_path="$share_icon"
+          else
+            icon_path="explorer"
           fi
 
           data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -76,12 +93,18 @@ class Explorer < Formula
           desktop_file="$applications_dir/com.hmerritt.explorer.desktop"
 
           mkdir -p "$applications_dir"
-          cp "$desktop_source" "$desktop_file"
-
-          sed -i \\
-            -e "s|^Exec=.*|Exec=#{bin}/explorer %F|" \\
-            -e "s|^Icon=.*|Icon=$icon_path|" \\
-            "$desktop_file"
+          cat > "$desktop_file" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Explorer
+          Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
+          Exec=#{bin}/explorer %F
+          Icon=$icon_path
+          Terminal=false
+          Categories=Utility;FileManager;
+          MimeType=inode/directory;
+          StartupNotify=true
+          EOF
 
           if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database "$applications_dir" >/dev/null 2>&1 || true
@@ -97,7 +120,7 @@ class Explorer < Formula
       end
     else
       bin.install "explorer"
-      chmod 0755, bin/"explorer"
+      chmod_executable bin/"explorer"
 
       if system "xattr", "-p", "com.apple.quarantine", bin/"explorer", out: File::NULL, err: File::NULL
         system "xattr", "-d", "com.apple.quarantine", bin/"explorer"
@@ -118,6 +141,9 @@ class Explorer < Formula
     <<~EOS
       Explorer registers a launcher entry at:
         ${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.hmerritt.explorer.desktop
+
+      The launcher entry is generated directly and can be refreshed after a
+      reinstall or desktop-session change.
 
       If it does not appear immediately, refresh your desktop shell or run:
         explorer-register-desktop
