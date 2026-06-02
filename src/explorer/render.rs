@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeSet, ops::Range};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
@@ -22,7 +22,9 @@ use crate::explorer::{
         NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
         NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
         SCROLLBAR_GUTTER_WIDTH, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL,
-        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
+        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
+        STATUS_BAR_TEXT_SIZE,
     },
     drag_drop::{DragPreview, DraggedEntries, DropDestination},
     entry::FileEntry,
@@ -554,6 +556,46 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn render_status_bar(&self) -> AnyElement {
+        let summary = folder_status_summary(&self.entries, &self.selection.selected_indices);
+
+        div()
+            .id("explorer-status-bar")
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(STATUS_BAR_HEIGHT))
+            .w_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(rgb(0xffffff))
+            .px(px(STATUS_BAR_HORIZONTAL_PADDING))
+            .text_size(px(STATUS_BAR_TEXT_SIZE))
+            .text_color(rgb(STATUS_BAR_TEXT_COLOR))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(SharedString::from(summary.total_items)),
+            )
+            .when_some(summary.selection_info, |this, selection_info| {
+                this.child(
+                    div()
+                        .h(px(14.0))
+                        .w(px(1.0))
+                        .mx(px(12.0))
+                        .flex_shrink_0()
+                        .bg(rgb(STATUS_BAR_SEPARATOR_COLOR)),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .child(SharedString::from(selection_info)),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_mouse_selection_box(&self) -> AnyElement {
         let Some(selection_box) = self.active_selection_box() else {
             return div().into_any_element();
@@ -729,7 +771,8 @@ impl Render for ExplorerView {
                                 .flex_1()
                                 .w_full()
                                 .overflow_hidden(),
-                            ),
+                            )
+                            .child(self.render_status_bar()),
                     ),
             )
             .when_some(self.pending_permanent_delete.clone(), |this, pending| {
@@ -1212,8 +1255,67 @@ fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FolderStatusSummary {
+    total_items: String,
+    selection_info: Option<String>,
+}
+
+fn folder_status_summary(
+    entries: &[FileEntry],
+    selected_indices: &BTreeSet<usize>,
+) -> FolderStatusSummary {
+    let total_items = count_label(entries.len(), "item", "items");
+    let mut folder_count = 0;
+    let mut file_count = 0;
+    let mut file_size = 0;
+
+    for ix in selected_indices {
+        let Some(entry) = entries.get(*ix) else {
+            continue;
+        };
+
+        if entry.is_directory_like() {
+            folder_count += 1;
+        } else {
+            file_count += 1;
+            file_size += entry.size.unwrap_or(0);
+        }
+    }
+
+    let selection_info = match (folder_count, file_count) {
+        (0, 0) => None,
+        (0, files) => Some(format!(
+            "{} selected  {}",
+            count_label(files, "file", "files"),
+            format_size(Some(file_size))
+        )),
+        (folders, 0) => Some(format!(
+            "{} selected",
+            count_label(folders, "folder", "folders")
+        )),
+        (folders, files) => Some(format!(
+            "{}, {} selected",
+            count_label(folders, "folder", "folders"),
+            count_label(files, "file", "files")
+        )),
+    };
+
+    FolderStatusSummary {
+        total_items,
+        selection_info,
+    }
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    let name = if count == 1 { singular } else { plural };
+    format!("{count} {name}")
+}
+
 #[cfg(test)]
 mod tests {
+
+    use std::collections::BTreeSet;
 
     use gpui::{
         ClickEvent, KeyboardClickEvent, Modifiers, MouseClickEvent, MouseDownEvent, MouseUpEvent,
@@ -1223,15 +1325,17 @@ mod tests {
         constants::{
             COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
             EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-            FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
+            FILE_ICON_SLOT_WIDTH_PHYSICAL, MB_BYTES, NAV_BUTTON_ACTIVE_OPACITY,
+            SCROLLBAR_GUTTER_WIDTH,
         },
+        entry::FileEntry,
         selection::SelectionModifiers,
     };
 
     use super::{
         CUT_ITEM_OPACITY, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP_PHYSICAL,
-        available_filename_text_width, filename_text_width, selection_modifiers_for_click,
-        text_cell_width,
+        available_filename_text_width, filename_text_width, folder_status_summary,
+        selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -1350,5 +1454,103 @@ mod tests {
             selection_modifiers_for_click(&event),
             SelectionModifiers::default()
         );
+    }
+
+    #[test]
+    fn status_summary_shows_total_items_without_selection() {
+        let entries = status_entries(13, 0);
+        let summary = folder_status_summary(&entries, &BTreeSet::new());
+
+        assert_eq!(summary.total_items, "13 items");
+        assert_eq!(summary.selection_info, None);
+    }
+
+    #[test]
+    fn status_summary_shows_selected_files_and_total_size() {
+        let mut entries = status_entries(13, 0);
+        entries[0] = FileEntry::test("a.txt", false, Some(10 * MB_BYTES), None);
+        entries[1] = FileEntry::test("b.txt", false, Some(15 * MB_BYTES + 818_000), None);
+        let selected = BTreeSet::from([0, 1]);
+
+        let summary = folder_status_summary(&entries, &selected);
+
+        assert_eq!(summary.total_items, "13 items");
+        assert_eq!(
+            summary.selection_info,
+            Some("2 files selected  25.78 MB".to_owned())
+        );
+    }
+
+    #[test]
+    fn status_summary_omits_size_for_mixed_folder_and_file_selection() {
+        let entries = status_entries(10, 3);
+        let selected = BTreeSet::from([0, 1, 10, 11, 12]);
+
+        let summary = folder_status_summary(&entries, &selected);
+
+        assert_eq!(summary.total_items, "13 items");
+        assert_eq!(
+            summary.selection_info,
+            Some("3 folders, 2 files selected".to_owned())
+        );
+    }
+
+    #[test]
+    fn status_summary_shows_only_selected_folders() {
+        let entries = status_entries(10, 3);
+        let selected = BTreeSet::from([10, 11, 12]);
+
+        let summary = folder_status_summary(&entries, &selected);
+
+        assert_eq!(summary.total_items, "13 items");
+        assert_eq!(
+            summary.selection_info,
+            Some("3 folders selected".to_owned())
+        );
+    }
+
+    #[test]
+    fn status_summary_uses_singular_labels() {
+        let entries = vec![FileEntry::test("a.txt", false, Some(1), None)];
+        let selected = BTreeSet::from([0]);
+
+        let summary = folder_status_summary(&entries, &selected);
+
+        assert_eq!(summary.total_items, "1 item");
+        assert_eq!(
+            summary.selection_info,
+            Some("1 file selected  1 bytes".to_owned())
+        );
+
+        let entries = vec![FileEntry::test("folder", true, None, None)];
+        let selected = BTreeSet::from([0]);
+        let summary = folder_status_summary(&entries, &selected);
+
+        assert_eq!(summary.total_items, "1 item");
+        assert_eq!(
+            summary.selection_info,
+            Some("1 folder selected".to_owned())
+        );
+    }
+
+    fn status_entries(file_count: usize, folder_count: usize) -> Vec<FileEntry> {
+        let mut entries = Vec::with_capacity(file_count + folder_count);
+        for ix in 0..file_count {
+            entries.push(FileEntry::test(
+                &format!("file-{ix}.txt"),
+                false,
+                Some(1),
+                None,
+            ));
+        }
+        for ix in 0..folder_count {
+            entries.push(FileEntry::test(
+                &format!("folder-{ix}"),
+                true,
+                None,
+                None,
+            ));
+        }
+        entries
     }
 }

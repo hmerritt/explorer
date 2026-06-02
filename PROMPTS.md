@@ -15,11 +15,11 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 - Select None
 - Invert Selection
 
----
+## Specific / for-later
 
 Left side-bar drag re-sizable
 
-## Specific / for-later
+---
 
 Unsigned app bundle for macOS
 
