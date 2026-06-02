@@ -4,7 +4,7 @@
 
 [![Release](https://img.shields.io/github/v/release/hmerritt/explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master)
 
-File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.rs/).
+~Windows~ Explorer for macOS, Linux, (and for some reason Windows) built with [GPUI](https://www.gpui.rs/).
 
 - [Features](#features-)
 - [Development](#development-)

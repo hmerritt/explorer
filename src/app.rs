@@ -10,7 +10,7 @@ use std::{
 
 use gpui::{
     App, Application, Bounds, Context, KeyBinding, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, prelude::*, px, size,
+    WindowBounds, WindowDecorations, WindowOptions, prelude::*, px, size,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +111,14 @@ enum LinuxDisplayBackend {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxDisplayBackendPreference {
+    Auto,
+    Wayland,
+    X11,
+}
+
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LinuxDisplaySelection {
     Backend(LinuxDisplayBackend),
@@ -123,6 +131,7 @@ struct LinuxDisplayEnv {
     wayland_display: Option<OsString>,
     xdg_runtime_dir: Option<OsString>,
     x11_display: Option<OsString>,
+    backend_preference: Option<OsString>,
     zed_headless: Option<OsString>,
 }
 
@@ -175,6 +184,41 @@ fn wayland_display_path(display: &OsString, xdg_runtime_dir: Option<&OsString>) 
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn linux_display_backend_preference(value: Option<OsString>) -> LinuxDisplayBackendPreference {
+    let Some(value) = value.and_then(|value| value.into_string().ok()) else {
+        return LinuxDisplayBackendPreference::Auto;
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "wayland" => LinuxDisplayBackendPreference::Wayland,
+        "x11" => LinuxDisplayBackendPreference::X11,
+        _ => LinuxDisplayBackendPreference::Auto,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn connectable_wayland_display(
+    wayland_display: Option<OsString>,
+    xdg_runtime_dir: Option<&OsString>,
+    mut can_connect_to_wayland: impl FnMut(&Path) -> bool,
+) -> Option<OsString> {
+    if let Some(display) = wayland_display {
+        if wayland_display_path(&display, xdg_runtime_dir)
+            .is_some_and(|path| can_connect_to_wayland(&path))
+        {
+            return Some(display);
+        }
+    } else if let Some(path) =
+        xdg_runtime_dir.map(|runtime_dir| PathBuf::from(runtime_dir).join(DEFAULT_WAYLAND_DISPLAY))
+        && can_connect_to_wayland(&path)
+    {
+        return Some(OsString::from(DEFAULT_WAYLAND_DISPLAY));
+    }
+
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn select_linux_display_backend(
     env: LinuxDisplayEnv,
     mut can_connect_to_wayland: impl FnMut(&Path) -> bool,
@@ -182,26 +226,26 @@ fn select_linux_display_backend(
     let wayland_display = non_empty_os(env.wayland_display);
     let xdg_runtime_dir = non_empty_os(env.xdg_runtime_dir);
     let x11_display = non_empty_os(env.x11_display);
+    let backend_preference = linux_display_backend_preference(non_empty_os(env.backend_preference));
     let _zed_headless = non_empty_os(env.zed_headless);
 
-    if let Some(display) = wayland_display {
-        if wayland_display_path(&display, xdg_runtime_dir.as_ref())
-            .is_some_and(|path| can_connect_to_wayland(&path))
-        {
-            return LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland { display });
-        }
-    } else if let Some(path) = xdg_runtime_dir
-        .as_ref()
-        .map(|runtime_dir| PathBuf::from(runtime_dir).join(DEFAULT_WAYLAND_DISPLAY))
-        && can_connect_to_wayland(&path)
+    if matches!(
+        backend_preference,
+        LinuxDisplayBackendPreference::Auto | LinuxDisplayBackendPreference::X11
+    ) && x11_display.is_some()
     {
-        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
-            display: OsString::from(DEFAULT_WAYLAND_DISPLAY),
-        });
+        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11);
     }
 
-    if x11_display.is_some() {
-        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11);
+    if matches!(
+        backend_preference,
+        LinuxDisplayBackendPreference::Auto | LinuxDisplayBackendPreference::Wayland
+    ) && let Some(display) =
+        connectable_wayland_display(wayland_display, xdg_runtime_dir.as_ref(), |path| {
+            can_connect_to_wayland(path)
+        })
+    {
+        return LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland { display });
     }
 
     LinuxDisplaySelection::FatalNoDisplay
@@ -214,6 +258,7 @@ fn configure_linux_display_backend() {
             wayland_display: env::var_os("WAYLAND_DISPLAY"),
             xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR"),
             x11_display: env::var_os("DISPLAY"),
+            backend_preference: env::var_os("EXPLORER_LINUX_BACKEND"),
             zed_headless: env::var_os("ZED_HEADLESS"),
         },
         |path| UnixStream::connect(path).is_ok(),
@@ -361,6 +406,7 @@ pub fn run() {
                     title: Some(SharedString::from(APP_TITLE)),
                     ..Default::default()
                 }),
+                window_decorations: Some(WindowDecorations::Server),
                 app_id: Some(APP_ID.to_owned()),
                 ..Default::default()
             },
@@ -559,13 +605,27 @@ mod tests {
     }
 
     #[test]
-    fn linux_display_selector_prefers_valid_wayland_over_x11() {
+    fn linux_display_selector_prefers_x11_over_valid_wayland_by_default() {
         assert_eq!(
             select_linux_display_backend(
                 linux_display_env(&[
                     ("WAYLAND_DISPLAY", "wayland-1"),
                     ("XDG_RUNTIME_DIR", "/run/user/1000"),
                     ("DISPLAY", ":0"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11)
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_uses_wayland_when_x11_is_unavailable() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
                 ]),
                 |path| path == Path::new("/run/user/1000/wayland-1")
             ),
@@ -576,16 +636,9 @@ mod tests {
     }
 
     #[test]
-    fn linux_display_selector_falls_back_to_x11_for_stale_wayland() {
+    fn linux_display_selector_uses_x11_when_only_x11_is_available() {
         assert_eq!(
-            select_linux_display_backend(
-                linux_display_env(&[
-                    ("WAYLAND_DISPLAY", "wayland-1"),
-                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
-                    ("DISPLAY", ":0"),
-                ]),
-                |_| false
-            ),
+            select_linux_display_backend(linux_display_env(&[("DISPLAY", ":0")]), |_| false),
             LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11)
         );
     }
@@ -600,6 +653,87 @@ mod tests {
             LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
                 display: OsString::from("wayland-0")
             })
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_forces_wayland_when_requested_and_connectable() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("EXPLORER_LINUX_BACKEND", "wayland"),
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::Wayland {
+                display: OsString::from("wayland-1")
+            })
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_auto_override_uses_default_backend_order() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("EXPLORER_LINUX_BACKEND", "auto"),
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11)
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_forces_x11_when_requested_and_available() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("EXPLORER_LINUX_BACKEND", "x11"),
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::Backend(LinuxDisplayBackend::X11)
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_returns_fatal_when_requested_wayland_is_unavailable() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("EXPLORER_LINUX_BACKEND", "wayland"),
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("DISPLAY", ":0"),
+                ]),
+                |_| false
+            ),
+            LinuxDisplaySelection::FatalNoDisplay
+        );
+    }
+
+    #[test]
+    fn linux_display_selector_returns_fatal_when_requested_x11_is_unavailable() {
+        assert_eq!(
+            select_linux_display_backend(
+                linux_display_env(&[
+                    ("EXPLORER_LINUX_BACKEND", "x11"),
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                ]),
+                |path| path == Path::new("/run/user/1000/wayland-1")
+            ),
+            LinuxDisplaySelection::FatalNoDisplay
         );
     }
 
@@ -647,6 +781,7 @@ mod tests {
             wayland_display: test_env_var(vars, "WAYLAND_DISPLAY"),
             xdg_runtime_dir: test_env_var(vars, "XDG_RUNTIME_DIR"),
             x11_display: test_env_var(vars, "DISPLAY"),
+            backend_preference: test_env_var(vars, "EXPLORER_LINUX_BACKEND"),
             zed_headless: test_env_var(vars, "ZED_HEADLESS"),
         }
     }
