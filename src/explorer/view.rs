@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use gpui::{FocusHandle, UniformListScrollHandle};
 
+use crate::explorer::filesystem::FileConflictBatch;
 use crate::explorer::{
     entry::FileEntry, filesystem::load_entries, mouse_selection::MouseSelectionDrag,
     scrollbar::ScrollbarDrag, selection::SelectionState,
@@ -23,6 +24,7 @@ pub struct ExplorerView {
     pub(super) suppress_next_click: bool,
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
+    pub(super) pending_file_conflict: Option<FileConflictBatch>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +67,7 @@ impl ExplorerView {
             suppress_next_click: false,
             cut_paths: BTreeSet::new(),
             pending_permanent_delete: None,
+            pending_file_conflict: None,
         };
         view.reload();
         view

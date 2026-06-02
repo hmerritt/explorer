@@ -135,54 +135,154 @@ pub(super) fn format_open_error(path: &Path, error: &std::io::Error) -> String {
 pub(super) fn move_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,
-) -> Result<Vec<PathBuf>, String> {
-    let plans = file_operation_plans(paths, destination, PlannedOperation::Move)?;
-    let mut moved_paths = Vec::new();
-
-    for plan in plans {
-        if plan.same_directory_move {
-            continue;
-        }
-
-        match fs::rename(&plan.source, &plan.destination) {
-            Ok(()) => {}
-            Err(error) if is_cross_device_error(&error) => {
-                copy_path_recursively(&plan.source, &plan.destination)
-                    .map_err(|error| format_path_error("move", &plan.source, error))?;
-                remove_source(&plan.source)
-                    .map_err(|error| format_path_error("remove", &plan.source, error))?;
-            }
-            Err(error) => return Err(format_path_error("move", &plan.source, error)),
-        }
-
-        moved_paths.push(plan.destination);
-    }
-
-    Ok(moved_paths)
+) -> Result<FileOperationOutcome, String> {
+    prepare_file_operation(
+        paths,
+        destination,
+        FileOperationKind::Move,
+        CopyNamePolicy::Original,
+    )
+    .and_then(run_or_return_conflicts)
 }
 
 pub(super) fn copy_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,
-) -> Result<Vec<PathBuf>, String> {
-    let plans = file_operation_plans(paths, destination, PlannedOperation::Copy)?;
-    let mut copied_paths = Vec::new();
-
-    for plan in plans {
-        copy_path_recursively(&plan.source, &plan.destination)
-            .map_err(|error| format_path_error("copy", &plan.source, error))?;
-        copied_paths.push(plan.destination);
-    }
-
-    Ok(copied_paths)
+) -> Result<FileOperationOutcome, String> {
+    prepare_file_operation(
+        paths,
+        destination,
+        FileOperationKind::Copy,
+        CopyNamePolicy::Original,
+    )
+    .and_then(run_or_return_conflicts)
 }
 
 pub(super) fn copy_paths_to_directory_for_paste(
     paths: &[PathBuf],
     destination: &Path,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<FileOperationOutcome, String> {
+    prepare_file_operation(
+        paths,
+        destination,
+        FileOperationKind::Copy,
+        CopyNamePolicy::UseCopyNamesInSameDirectory,
+    )
+    .and_then(run_or_return_conflicts)
+}
+
+pub(super) fn resolve_file_conflicts(
+    conflicts: FileConflictBatch,
+    choice: ConflictChoice,
+) -> Result<FileOperationSummary, String> {
+    execute_file_operation(conflicts.job, choice)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum FileOperationOutcome {
+    Finished(FileOperationSummary),
+    Conflicts(FileConflictBatch),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FileOperationSummary {
+    pub(super) destination_paths: Vec<PathBuf>,
+    pub(super) moved_source_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileConflictBatch {
+    pub(super) conflicts: Vec<FileConflict>,
+    job: FileOperationJob,
+}
+
+impl FileConflictBatch {
+    pub(super) fn len(&self) -> usize {
+        self.conflicts.len()
+    }
+
+    pub(super) fn first_destination_name(&self) -> String {
+        self.conflicts
+            .first()
+            .map(|conflict| path_display_name(&conflict.destination))
+            .unwrap_or_else(|| "this file".to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileConflict {
+    pub(super) source: PathBuf,
+    pub(super) destination: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConflictChoice {
+    Replace,
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FileOperationKind {
+    Move,
+    Copy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyNamePolicy {
+    Original,
+    UseCopyNamesInSameDirectory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileOperationJob {
+    kind: FileOperationKind,
+    steps: Vec<FileOperationStep>,
+    roots: Vec<FileOperationRoot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileOperationRoot {
+    source: PathBuf,
+    destination: PathBuf,
+    source_is_dir: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FileOperationStep {
+    CreateDirectory(PathBuf),
+    CopyFile {
+        source: PathBuf,
+        destination: PathBuf,
+        conflict: bool,
+    },
+    MoveFile {
+        source: PathBuf,
+        destination: PathBuf,
+        conflict: bool,
+    },
+    RemoveEmptyDirectory(PathBuf),
+}
+
+fn run_or_return_conflicts(job: FileOperationJob) -> Result<FileOperationOutcome, String> {
+    let conflicts = file_conflicts_for_job(&job);
+    if conflicts.is_empty() {
+        execute_file_operation(job, ConflictChoice::Replace).map(FileOperationOutcome::Finished)
+    } else {
+        Ok(FileOperationOutcome::Conflicts(FileConflictBatch {
+            conflicts,
+            job,
+        }))
+    }
+}
+
+fn prepare_file_operation(
+    paths: &[PathBuf],
+    destination: &Path,
+    kind: FileOperationKind,
+    copy_name_policy: CopyNamePolicy,
+) -> Result<FileOperationJob, String> {
     if paths.is_empty() {
-        return Err("No items were selected for paste.".to_owned());
+        return Err("No items were selected for drag-and-drop.".to_owned());
     }
 
     if !destination.is_dir() {
@@ -194,7 +294,8 @@ pub(super) fn copy_paths_to_directory_for_paste(
 
     let destination_canonical = canonicalize_for_operation(destination)?;
     let mut reserved_destinations = HashSet::new();
-    let mut copied_paths = Vec::new();
+    let mut steps = Vec::new();
+    let mut roots = Vec::new();
 
     for source in paths {
         if !source.exists() {
@@ -206,23 +307,23 @@ pub(super) fn copy_paths_to_directory_for_paste(
             .ok_or_else(|| format!("{} cannot be copied.", path_display_name(source)))?;
         let source_parent = source
             .parent()
-            .ok_or_else(|| format!("{} cannot be copied.", path_display_name(source)))?;
+            .ok_or_else(|| format!("{} cannot be moved or copied.", path_display_name(source)))?;
         let source_parent_canonical = canonicalize_for_operation(source_parent)?;
         let same_directory = source_parent_canonical == destination_canonical;
-        let planned_destination = if same_directory {
+        if kind == FileOperationKind::Move && same_directory {
+            continue;
+        }
+
+        let planned_destination = if kind == FileOperationKind::Copy
+            && same_directory
+            && copy_name_policy == CopyNamePolicy::UseCopyNamesInSameDirectory
+        {
             paste_copy_destination(destination, file_name, &mut reserved_destinations)
         } else {
             let planned_destination = destination.join(file_name);
             if !reserved_destinations.insert(planned_destination.clone()) {
                 return Err(format!(
                     "Multiple selected items are named {}.",
-                    file_name.to_string_lossy()
-                ));
-            }
-            if planned_destination.exists() {
-                return Err(format!(
-                    "{} already contains {}.",
-                    path_display_name(destination),
                     file_name.to_string_lossy()
                 ));
             }
@@ -236,20 +337,27 @@ pub(super) fn copy_paths_to_directory_for_paste(
                     .file_name()
                     .unwrap_or_else(|| OsStr::new("")),
             );
-            if canonical_planned_destination.starts_with(source_canonical) {
+            if canonical_planned_destination.starts_with(&source_canonical) {
+                let operation = match kind {
+                    FileOperationKind::Move => "move",
+                    FileOperationKind::Copy => "copy",
+                };
                 return Err(format!(
-                    "Cannot copy {} into itself.",
+                    "Cannot {operation} {} into itself.",
                     path_display_name(source)
                 ));
             }
         }
 
-        copy_path_recursively(source, &planned_destination)
-            .map_err(|error| format_path_error("copy", source, error))?;
-        copied_paths.push(planned_destination);
+        plan_path_operation(source, &planned_destination, kind, &mut steps)?;
+        roots.push(FileOperationRoot {
+            source: source.clone(),
+            destination: planned_destination,
+            source_is_dir: source.is_dir(),
+        });
     }
 
-    Ok(copied_paths)
+    Ok(FileOperationJob { kind, steps, roots })
 }
 
 pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
@@ -279,105 +387,185 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlannedOperation {
-    Move,
-    Copy,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileOperationPlan {
-    source: PathBuf,
-    destination: PathBuf,
-    same_directory_move: bool,
-}
-
-fn file_operation_plans(
-    paths: &[PathBuf],
+fn plan_path_operation(
+    source: &Path,
     destination: &Path,
-    operation: PlannedOperation,
-) -> Result<Vec<FileOperationPlan>, String> {
-    if paths.is_empty() {
-        return Err("No items were selected for drag-and-drop.".to_owned());
-    }
-
-    if !destination.is_dir() {
-        return Err(format!(
-            "{} is not a folder.",
-            path_display_name(destination)
-        ));
-    }
-
-    let destination_canonical = canonicalize_for_operation(destination)?;
-    let mut destination_names = HashSet::new();
-    let mut plans = Vec::with_capacity(paths.len());
-
-    for source in paths {
-        if !source.exists() {
-            return Err(format!("Could not find {}.", path_display_name(source)));
-        }
-
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| format!("{} cannot be moved or copied.", path_display_name(source)))?;
-
-        if !destination_names.insert(file_name.to_os_string()) {
-            return Err(format!(
-                "Multiple selected items are named {}.",
-                file_name.to_string_lossy()
-            ));
-        }
-
-        let source_parent = source
-            .parent()
-            .ok_or_else(|| format!("{} cannot be moved or copied.", path_display_name(source)))?;
-        let source_parent_canonical = canonicalize_for_operation(source_parent)?;
-        let same_directory_move =
-            operation == PlannedOperation::Move && source_parent_canonical == destination_canonical;
-        let planned_destination = destination.join(file_name);
-
-        if !same_directory_move && planned_destination.exists() {
-            return Err(format!(
-                "{} already contains {}.",
-                path_display_name(destination),
-                file_name.to_string_lossy()
-            ));
-        }
-
-        if operation == PlannedOperation::Move && source.is_dir() {
-            let source_canonical = canonicalize_for_operation(source)?;
-            if destination_canonical.starts_with(source_canonical) {
-                return Err(format!(
-                    "Cannot move {} into itself.",
-                    path_display_name(source)
-                ));
-            }
-        }
-
-        plans.push(FileOperationPlan {
-            source: source.clone(),
-            destination: planned_destination,
-            same_directory_move,
-        });
-    }
-
-    Ok(plans)
-}
-
-fn copy_path_recursively(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let metadata = fs::metadata(source)?;
+    kind: FileOperationKind,
+    steps: &mut Vec<FileOperationStep>,
+) -> Result<(), String> {
+    let metadata =
+        fs::metadata(source).map_err(|error| format_path_error("read", source, error))?;
 
     if metadata.is_dir() {
-        fs::create_dir(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy_path_recursively(&entry.path(), &destination.join(entry.file_name()))?;
+        if destination.exists() {
+            if !destination.is_dir() {
+                return Err(format!(
+                    "{} already exists and is not a folder.",
+                    path_display_name(destination)
+                ));
+            }
+        } else {
+            steps.push(FileOperationStep::CreateDirectory(
+                destination.to_path_buf(),
+            ));
         }
+
+        for entry in
+            fs::read_dir(source).map_err(|error| format_path_error("read", source, error))?
+        {
+            let entry = entry.map_err(|error| format_path_error("read", source, error))?;
+            plan_path_operation(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                kind,
+                steps,
+            )?;
+        }
+
+        if kind == FileOperationKind::Move {
+            steps.push(FileOperationStep::RemoveEmptyDirectory(
+                source.to_path_buf(),
+            ));
+        }
+    } else if destination.is_dir() {
+        return Err(format!(
+            "{} already exists and is a folder.",
+            path_display_name(destination)
+        ));
     } else {
-        fs::copy(source, destination)?;
+        let conflict = destination.exists();
+        match kind {
+            FileOperationKind::Copy => steps.push(FileOperationStep::CopyFile {
+                source: source.to_path_buf(),
+                destination: destination.to_path_buf(),
+                conflict,
+            }),
+            FileOperationKind::Move => steps.push(FileOperationStep::MoveFile {
+                source: source.to_path_buf(),
+                destination: destination.to_path_buf(),
+                conflict,
+            }),
+        }
     }
 
     Ok(())
+}
+
+fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
+    job.steps
+        .iter()
+        .filter_map(|step| match step {
+            FileOperationStep::CopyFile {
+                source,
+                destination,
+                conflict: true,
+            }
+            | FileOperationStep::MoveFile {
+                source,
+                destination,
+                conflict: true,
+            } => Some(FileConflict {
+                source: source.clone(),
+                destination: destination.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn execute_file_operation(
+    job: FileOperationJob,
+    conflict_choice: ConflictChoice,
+) -> Result<FileOperationSummary, String> {
+    let mut operated_destinations = HashSet::new();
+
+    for step in &job.steps {
+        match step {
+            FileOperationStep::CreateDirectory(path) => {
+                fs::create_dir(path).map_err(|error| format_path_error("create", path, error))?;
+            }
+            FileOperationStep::CopyFile {
+                source,
+                destination,
+                conflict,
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    continue;
+                }
+                copy_source_file(source, destination)
+                    .map_err(|error| format_path_error("copy", source, error))?;
+                operated_destinations.insert(destination.clone());
+            }
+            FileOperationStep::MoveFile {
+                source,
+                destination,
+                conflict,
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    continue;
+                }
+                if *conflict {
+                    copy_source_file(source, destination)
+                        .map_err(|error| format_path_error("move", source, error))?;
+                    remove_source(source)
+                        .map_err(|error| format_path_error("remove", source, error))?;
+                } else {
+                    move_source_file(source, destination)
+                        .map_err(|error| format_path_error("move", source, error))?;
+                }
+                operated_destinations.insert(destination.clone());
+            }
+            FileOperationStep::RemoveEmptyDirectory(path) => remove_empty_directory(path)
+                .map_err(|error| format_path_error("remove", path, error))?,
+        }
+    }
+
+    let mut summary = FileOperationSummary::default();
+    for root in &job.roots {
+        if root.source_is_dir {
+            if root.destination.exists() {
+                summary.destination_paths.push(root.destination.clone());
+            }
+        } else if operated_destinations.contains(&root.destination) {
+            summary.destination_paths.push(root.destination.clone());
+        }
+
+        if job.kind == FileOperationKind::Move && !root.source.exists() {
+            summary.moved_source_paths.push(root.source.clone());
+        }
+    }
+
+    Ok(summary)
+}
+
+fn copy_source_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::copy(source, destination).map(|_| ())
+}
+
+fn move_source_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => {
+            copy_source_file(source, destination)?;
+            remove_source(source)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_empty_directory(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn remove_source(source: &Path) -> std::io::Result<()> {
@@ -512,6 +700,25 @@ mod tests {
         assert!(!windows_drive_type_is_explorer_local(0));
     }
 
+    fn finished_summary(result: Result<FileOperationOutcome, String>) -> FileOperationSummary {
+        match result.expect("file operation") {
+            FileOperationOutcome::Finished(summary) => summary,
+            FileOperationOutcome::Conflicts(conflicts) => {
+                panic!(
+                    "expected operation to finish, found {} conflicts",
+                    conflicts.len()
+                )
+            }
+        }
+    }
+
+    fn conflict_batch(result: Result<FileOperationOutcome, String>) -> FileConflictBatch {
+        match result.expect("file operation") {
+            FileOperationOutcome::Conflicts(conflicts) => conflicts,
+            FileOperationOutcome::Finished(_) => panic!("expected file conflicts"),
+        }
+    }
+
     #[test]
     fn move_file_to_directory() {
         let temp = TempDir::new();
@@ -522,10 +729,12 @@ mod tests {
 
         let moved = move_paths_to_directory(std::slice::from_ref(&source), &destination)
             .expect("move file");
+        let moved = finished_summary(Ok(moved));
 
         assert!(!source.exists());
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"data");
-        assert_eq!(moved, vec![destination.join("file.txt")]);
+        assert_eq!(moved.destination_paths, vec![destination.join("file.txt")]);
+        assert_eq!(moved.moved_source_paths, vec![source]);
     }
 
     #[test]
@@ -540,13 +749,15 @@ mod tests {
 
         let moved = move_paths_to_directory(std::slice::from_ref(&source), &destination)
             .expect("move directory");
+        let moved = finished_summary(Ok(moved));
 
         assert!(!source.exists());
         assert_eq!(
             fs::read(destination.join("folder").join("nested").join("file.txt")).unwrap(),
             b"data"
         );
-        assert_eq!(moved, vec![destination.join("folder")]);
+        assert_eq!(moved.destination_paths, vec![destination.join("folder")]);
+        assert_eq!(moved.moved_source_paths, vec![source]);
     }
 
     #[test]
@@ -559,10 +770,12 @@ mod tests {
 
         let copied = copy_paths_to_directory(std::slice::from_ref(&source), &destination)
             .expect("copy file");
+        let copied = finished_summary(Ok(copied));
 
         assert_eq!(fs::read(&source).unwrap(), b"data");
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"data");
-        assert_eq!(copied, vec![destination.join("file.txt")]);
+        assert_eq!(copied.destination_paths, vec![destination.join("file.txt")]);
+        assert!(copied.moved_source_paths.is_empty());
     }
 
     #[test]
@@ -577,17 +790,18 @@ mod tests {
 
         let copied = copy_paths_to_directory(std::slice::from_ref(&source), &destination)
             .expect("copy directory");
+        let copied = finished_summary(Ok(copied));
 
         assert!(source.exists());
         assert_eq!(
             fs::read(destination.join("folder").join("nested").join("file.txt")).unwrap(),
             b"data"
         );
-        assert_eq!(copied, vec![destination.join("folder")]);
+        assert_eq!(copied.destination_paths, vec![destination.join("folder")]);
     }
 
     #[test]
-    fn destination_conflict_fails_without_overwrite() {
+    fn copy_conflict_replace_overwrites_destination() {
         let temp = TempDir::new();
         let source = temp.path().join("file.txt");
         let destination = temp.path().join("destination");
@@ -595,12 +809,160 @@ mod tests {
         fs::create_dir(&destination).expect("create destination");
         fs::write(destination.join("file.txt"), b"existing").expect("create existing");
 
-        let error = move_paths_to_directory(std::slice::from_ref(&source), &destination)
-            .expect_err("conflict should fail");
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflict");
 
-        assert!(error.contains("already contains file.txt"));
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"source");
+        assert_eq!(
+            summary.destination_paths,
+            vec![destination.join("file.txt")]
+        );
+    }
+
+    #[test]
+    fn copy_conflict_skip_leaves_files_unchanged() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"source").expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(destination.join("file.txt"), b"existing").expect("create existing");
+
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Skip).expect("skip conflict");
+
         assert_eq!(fs::read(&source).unwrap(), b"source");
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"existing");
+        assert!(summary.destination_paths.is_empty());
+    }
+
+    #[test]
+    fn move_conflict_replace_overwrites_destination_and_removes_source() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"source").expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(destination.join("file.txt"), b"existing").expect("create existing");
+
+        let conflicts = conflict_batch(move_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflict");
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"source");
+        assert_eq!(
+            summary.destination_paths,
+            vec![destination.join("file.txt")]
+        );
+        assert_eq!(summary.moved_source_paths, vec![source]);
+    }
+
+    #[test]
+    fn move_conflict_skip_leaves_files_unchanged() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"source").expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(destination.join("file.txt"), b"existing").expect("create existing");
+
+        let conflicts = conflict_batch(move_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Skip).expect("skip conflict");
+
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"existing");
+        assert!(summary.destination_paths.is_empty());
+        assert!(summary.moved_source_paths.is_empty());
+    }
+
+    #[test]
+    fn multiple_conflicts_replace_applies_to_all_conflicts() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(source.join("a.txt"), b"new a").expect("create source a");
+        fs::write(source.join("b.txt"), b"new b").expect("create source b");
+        fs::write(destination.join("a.txt"), b"old a").expect("create destination a");
+        fs::write(destination.join("b.txt"), b"old b").expect("create destination b");
+
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            &[source.join("a.txt"), source.join("b.txt")],
+            &destination,
+        ));
+        assert_eq!(conflicts.len(), 2);
+
+        resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflicts");
+
+        assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"new a");
+        assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"new b");
+    }
+
+    #[test]
+    fn multiple_conflicts_skip_applies_to_all_conflicts() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(source.join("a.txt"), b"new a").expect("create source a");
+        fs::write(source.join("b.txt"), b"new b").expect("create source b");
+        fs::write(destination.join("a.txt"), b"old a").expect("create destination a");
+        fs::write(destination.join("b.txt"), b"old b").expect("create destination b");
+
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            &[source.join("a.txt"), source.join("b.txt")],
+            &destination,
+        ));
+        assert_eq!(conflicts.len(), 2);
+
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Skip).expect("skip conflicts");
+
+        assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"old a");
+        assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"old b");
+        assert!(summary.destination_paths.is_empty());
+    }
+
+    #[test]
+    fn mixed_conflicting_and_non_conflicting_files_continue_after_skip() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(source.join("conflict.txt"), b"new").expect("create conflict source");
+        fs::write(source.join("new.txt"), b"new file").expect("create non-conflict source");
+        fs::write(destination.join("conflict.txt"), b"old").expect("create conflict destination");
+
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            &[source.join("conflict.txt"), source.join("new.txt")],
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Skip).expect("skip conflicts");
+
+        assert_eq!(fs::read(destination.join("conflict.txt")).unwrap(), b"old");
+        assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"new file");
+        assert_eq!(summary.destination_paths, vec![destination.join("new.txt")]);
     }
 
     #[test]
@@ -632,8 +994,9 @@ mod tests {
 
         let moved =
             move_paths_to_directory(std::slice::from_ref(&source), temp.path()).expect("move noop");
+        let moved = finished_summary(Ok(moved));
 
-        assert!(moved.is_empty());
+        assert!(moved.destination_paths.is_empty());
         assert_eq!(fs::read(&source).unwrap(), b"data");
     }
 
@@ -661,8 +1024,12 @@ mod tests {
 
         let copied = copy_paths_to_directory_for_paste(std::slice::from_ref(&source), temp.path())
             .expect("paste copy");
+        let copied = finished_summary(Ok(copied));
 
-        assert_eq!(copied, vec![temp.path().join("file - Copy (2).txt")]);
+        assert_eq!(
+            copied.destination_paths,
+            vec![temp.path().join("file - Copy (2).txt")]
+        );
         assert_eq!(fs::read(&source).unwrap(), b"data");
         assert_eq!(
             fs::read(temp.path().join("file - Copy (2).txt")).unwrap(),
@@ -679,10 +1046,58 @@ mod tests {
 
         let copied = copy_paths_to_directory_for_paste(std::slice::from_ref(&source), temp.path())
             .expect("paste copy");
+        let copied = finished_summary(Ok(copied));
 
         let copied_folder = temp.path().join("folder - Copy");
-        assert_eq!(copied, vec![copied_folder.clone()]);
+        assert_eq!(copied.destination_paths, vec![copied_folder.clone()]);
         assert_eq!(fs::read(copied_folder.join("nested.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn folder_merge_copies_non_conflicting_nested_files() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).expect("create source nested");
+        fs::create_dir_all(destination.join("folder")).expect("create destination folder");
+        fs::write(source.join("nested").join("file.txt"), b"data").expect("create source file");
+
+        let summary = finished_summary(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+
+        assert_eq!(
+            fs::read(destination.join("folder").join("nested").join("file.txt")).unwrap(),
+            b"data"
+        );
+        assert_eq!(summary.destination_paths, vec![destination.join("folder")]);
+    }
+
+    #[test]
+    fn folder_merge_includes_nested_file_conflicts_in_global_choice() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        let destination_folder = destination.join("folder");
+        fs::create_dir_all(source.join("nested")).expect("create source nested");
+        fs::create_dir_all(destination_folder.join("nested")).expect("create destination nested");
+        fs::write(source.join("nested").join("file.txt"), b"new").expect("create source file");
+        fs::write(destination_folder.join("nested").join("file.txt"), b"old")
+            .expect("create destination file");
+
+        let conflicts = conflict_batch(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        assert_eq!(conflicts.len(), 1);
+
+        resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace nested");
+
+        assert_eq!(
+            fs::read(destination_folder.join("nested").join("file.txt")).unwrap(),
+            b"new"
+        );
     }
 
     #[test]

@@ -10,8 +10,9 @@ use crate::explorer::{
         FileClipboard, FileClipboardOperation, clipboard_item_for_files, file_clipboard_from_item,
     },
     filesystem::{
+        ConflictChoice, FileOperationOutcome, FileOperationSummary,
         copy_paths_to_directory_for_paste, move_paths_to_directory, remove_paths_permanently,
-        trash_paths,
+        resolve_file_conflicts, trash_paths,
     },
     view::{ExplorerView, PendingPermanentDelete},
 };
@@ -65,11 +66,7 @@ impl ExplorerView {
             }
             FileClipboardOperation::Cut => {
                 let result = move_paths_to_directory(&clipboard.paths, &self.path);
-                let success = result.is_ok();
                 self.handle_file_command_result(result);
-                if success {
-                    self.clear_cut_paths();
-                }
             }
         }
     }
@@ -131,6 +128,14 @@ impl ExplorerView {
         self.pending_permanent_delete = None;
     }
 
+    pub(super) fn replace_pending_file_conflicts(&mut self) {
+        self.resolve_pending_file_conflicts(ConflictChoice::Replace);
+    }
+
+    pub(super) fn skip_pending_file_conflicts(&mut self) {
+        self.resolve_pending_file_conflicts(ConflictChoice::Skip);
+    }
+
     pub(super) fn selected_file_clipboard(
         &self,
         operation: FileClipboardOperation,
@@ -143,6 +148,7 @@ impl ExplorerView {
         self.cut_paths = paths.iter().cloned().collect();
     }
 
+    #[cfg(test)]
     pub(super) fn clear_cut_paths(&mut self) {
         self.cut_paths.clear();
     }
@@ -156,18 +162,44 @@ impl ExplorerView {
         self.cut_paths.contains(path)
     }
 
-    fn handle_file_command_result(&mut self, result: Result<Vec<PathBuf>, String>) {
+    pub(super) fn handle_file_command_result(
+        &mut self,
+        result: Result<FileOperationOutcome, String>,
+    ) {
         match result {
-            Ok(paths) => {
+            Ok(FileOperationOutcome::Finished(summary)) => {
+                self.finish_file_operation(summary);
+            }
+            Ok(FileOperationOutcome::Conflicts(conflicts)) => {
+                self.pending_file_conflict = Some(conflicts);
                 self.open_error = None;
-                self.reload();
-                self.restore_selection_from_paths(&paths);
             }
             Err(error) => {
                 self.open_error = Some(error);
                 self.reload();
             }
         }
+    }
+
+    fn resolve_pending_file_conflicts(&mut self, choice: ConflictChoice) {
+        let Some(conflicts) = self.pending_file_conflict.take() else {
+            return;
+        };
+
+        match resolve_file_conflicts(conflicts, choice) {
+            Ok(summary) => self.finish_file_operation(summary),
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload();
+            }
+        }
+    }
+
+    fn finish_file_operation(&mut self, summary: FileOperationSummary) {
+        self.open_error = None;
+        self.remove_cut_paths(&summary.moved_source_paths);
+        self.reload();
+        self.restore_selection_from_paths(&summary.destination_paths);
     }
 
     fn selection_fallback_index_for_delete(&self) -> Option<usize> {
@@ -266,11 +298,7 @@ mod tests {
         let mut view = ExplorerView::new(destination.clone());
         view.mark_cut_paths(std::slice::from_ref(&source));
         let result = move_paths_to_directory(std::slice::from_ref(&source), &view.path);
-        let success = result.is_ok();
         view.handle_file_command_result(result);
-        if success {
-            view.clear_cut_paths();
-        }
 
         assert!(!source.exists());
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"data");

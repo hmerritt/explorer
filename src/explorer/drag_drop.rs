@@ -253,30 +253,16 @@ impl ExplorerView {
     fn perform_file_drop(&mut self, paths: &[PathBuf], destination: &Path, modifiers: Modifiers) {
         match resolve_drop_operation(modifiers, destination.is_dir()) {
             ResolvedDrop::Move => {
-                self.handle_file_operation_result(move_paths_to_directory(paths, destination));
+                self.handle_file_command_result(move_paths_to_directory(paths, destination));
             }
             ResolvedDrop::Copy => {
-                self.handle_file_operation_result(copy_paths_to_directory(paths, destination));
+                self.handle_file_command_result(copy_paths_to_directory(paths, destination));
             }
             ResolvedDrop::UnsupportedShortcut => {
                 self.open_error = Some("Shortcut drag-and-drop is not supported yet.".to_owned());
             }
             ResolvedDrop::Invalid => {
                 self.open_error = Some("This drop target is not valid.".to_owned());
-            }
-        }
-    }
-
-    fn handle_file_operation_result(&mut self, result: Result<Vec<PathBuf>, String>) {
-        match result {
-            Ok(moved_or_copied_paths) => {
-                self.open_error = None;
-                self.reload();
-                self.restore_selection_from_paths(&moved_or_copied_paths);
-            }
-            Err(error) => {
-                self.open_error = Some(error);
-                self.reload();
             }
         }
     }
