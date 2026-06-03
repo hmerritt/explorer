@@ -192,12 +192,14 @@ pub(super) fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
 #[derive(Clone, Copy)]
 struct EntryLoadOptions {
     hide_hidden_entries: bool,
+    applications_view: bool,
 }
 
 impl EntryLoadOptions {
     fn for_path(path: &Path) -> Self {
         Self {
             hide_hidden_entries: should_hide_hidden_entries(path),
+            applications_view: should_use_applications_view(path),
         }
     }
 }
@@ -206,6 +208,10 @@ fn load_entries_with_options(
     path: &Path,
     options: EntryLoadOptions,
 ) -> std::io::Result<Vec<FileEntry>> {
+    if options.applications_view {
+        return load_applications_entries(path, options);
+    }
+
     let mut entries = fs::read_dir(path)?
         .filter_map(Result::ok)
         .filter(|entry| !should_skip_directory_entry(entry, options))
@@ -214,6 +220,59 @@ fn load_entries_with_options(
 
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+fn load_applications_entries(
+    path: &Path,
+    options: EntryLoadOptions,
+) -> std::io::Result<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+
+    for directory_entry in fs::read_dir(path)?
+        .filter_map(Result::ok)
+        .filter(|entry| !should_skip_directory_entry(entry, options))
+    {
+        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+            continue;
+        };
+
+        if entry.is_app_bundle() {
+            entries.push(entry);
+        } else if entry.is_directory_like() {
+            collect_nested_applications(entry.navigation_path(), options, &mut entries);
+        }
+    }
+
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+fn collect_nested_applications(
+    path: &Path,
+    options: EntryLoadOptions,
+    entries: &mut Vec<FileEntry>,
+) {
+    let Ok(nested_entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    entries.extend(
+        nested_entries
+            .filter_map(Result::ok)
+            .filter(|entry| !should_skip_directory_entry(entry, options))
+            .filter_map(|entry| FileEntry::from_path(entry.path()))
+            .filter(FileEntry::is_app_bundle),
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn should_use_applications_view(path: &Path) -> bool {
+    path == Path::new("/Applications")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_use_applications_view(_: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -1201,6 +1260,7 @@ mod tests {
             temp.path(),
             EntryLoadOptions {
                 hide_hidden_entries: true,
+                applications_view: false,
             },
         )
         .expect("load entries");
@@ -1224,6 +1284,7 @@ mod tests {
             temp.path(),
             EntryLoadOptions {
                 hide_hidden_entries: false,
+                applications_view: false,
             },
         )
         .expect("load entries");
@@ -1234,6 +1295,93 @@ mod tests {
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
             vec![".hidden", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn applications_view_includes_direct_and_one_level_nested_app_bundles() {
+        let temp = TempDir::new();
+        let preview = temp.path().join("Preview.app");
+        let utilities = temp.path().join("Utilities");
+        let terminal = utilities.join("Terminal.app");
+        let macports = temp.path().join("MacPorts");
+        fs::create_dir(&preview).expect("create direct app");
+        fs::create_dir(&utilities).expect("create utilities");
+        fs::create_dir(&terminal).expect("create nested app");
+        fs::create_dir(&macports).expect("create non-app folder");
+        fs::write(temp.path().join("readme.txt"), b"not an app").expect("create file");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: true,
+                applications_view: true,
+            },
+        )
+        .expect("load applications view");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            vec![preview, terminal]
+        );
+    }
+
+    #[test]
+    fn applications_view_omits_hidden_direct_and_nested_app_bundles() {
+        let temp = TempDir::new();
+        let visible = temp.path().join("Visible.app");
+        let hidden_direct = temp.path().join(".Hidden.app");
+        let utilities = temp.path().join("Utilities");
+        let hidden_nested = utilities.join(".Nested.app");
+        fs::create_dir(&visible).expect("create visible app");
+        fs::create_dir(&hidden_direct).expect("create hidden direct app");
+        fs::create_dir(&utilities).expect("create utilities");
+        fs::create_dir(&hidden_nested).expect("create hidden nested app");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: true,
+                applications_view: true,
+            },
+        )
+        .expect("load applications view");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            vec![visible]
+        );
+    }
+
+    #[test]
+    fn normal_entries_view_keeps_non_app_folders() {
+        let temp = TempDir::new();
+        let utilities = temp.path().join("Utilities");
+        let terminal = utilities.join("Terminal.app");
+        fs::create_dir(&utilities).expect("create utilities");
+        fs::create_dir(&terminal).expect("create nested app");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: false,
+                applications_view: false,
+            },
+        )
+        .expect("load normal view");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Utilities"]
         );
     }
 

@@ -108,7 +108,14 @@ impl FileEntry {
     pub(super) fn display_name(&self) -> &str {
         let suffix_start = self.name.len().saturating_sub(4);
 
-        if self
+        if self.is_app_bundle()
+            && self
+                .name
+                .get(suffix_start..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".app"))
+        {
+            &self.name[..suffix_start]
+        } else if self
             .name
             .get(suffix_start..)
             .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lnk"))
@@ -319,6 +326,26 @@ mod tests {
         assert_eq!(
             FileEntry::test("target.LNK", false, Some(1), None).display_name(),
             "target"
+        );
+    }
+
+    #[test]
+    fn display_name_hides_app_bundle_extension_case_insensitively() {
+        assert_eq!(
+            FileEntry::test("Preview.app", true, None, None).display_name(),
+            "Preview"
+        );
+        assert_eq!(
+            FileEntry::test("Terminal.APP", true, None, None).display_name(),
+            "Terminal"
+        );
+    }
+
+    #[test]
+    fn display_name_keeps_app_extension_for_non_bundle_files() {
+        assert_eq!(
+            FileEntry::test("Something.app", false, Some(1), None).display_name(),
+            "Something.app"
         );
     }
 
