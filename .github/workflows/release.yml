@@ -237,29 +237,77 @@ jobs:
             - name: Package artifact
               if: steps.tag_check.outputs.valid == 'true'
               run: |
-                  mkdir -p dist package
-                  install -m 755 "target/${{ matrix.target }}/release/explorer" package/explorer
-                  cat > package/explorer-readme.md <<'EOF'
-                  To run the current macOS release artifact:
+                  set -eu
 
-                  ```sh
-                  unzip explorer-*-macos-*.zip
-                  chmod +x explorer
-                  xattr -d com.apple.quarantine explorer
-                  ./explorer
-                  ```
+                  app_dir="package/Explorer.app"
+                  contents_dir="$app_dir/Contents"
+                  macos_dir="$contents_dir/MacOS"
+                  resources_dir="$contents_dir/Resources"
+                  iconset_dir="package/explorer.iconset"
+                  archive="dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip"
 
-                  If macOS still refuses to launch it, these commands can help diagnose whether
-                  the issue is quarantine, Gatekeeper, code signing, or the wrong CPU artifact:
+                  mkdir -p dist "$macos_dir" "$resources_dir" "$iconset_dir"
+                  install -m 755 "target/${{ matrix.target }}/release/explorer" "$macos_dir/explorer"
 
-                  ```sh
-                  xattr -l explorer
-                  spctl --assess --type execute -vv ./explorer
-                  codesign --verify --verbose ./explorer
-                  file ./explorer
-                  ```
+                  sips -z 16 16 assets/icon.png --out "$iconset_dir/icon_16x16.png"
+                  sips -z 32 32 assets/icon.png --out "$iconset_dir/icon_16x16@2x.png"
+                  sips -z 32 32 assets/icon.png --out "$iconset_dir/icon_32x32.png"
+                  sips -z 64 64 assets/icon.png --out "$iconset_dir/icon_32x32@2x.png"
+                  sips -z 128 128 assets/icon.png --out "$iconset_dir/icon_128x128.png"
+                  sips -z 256 256 assets/icon.png --out "$iconset_dir/icon_128x128@2x.png"
+                  sips -z 256 256 assets/icon.png --out "$iconset_dir/icon_256x256.png"
+                  sips -z 512 512 assets/icon.png --out "$iconset_dir/icon_256x256@2x.png"
+                  sips -z 512 512 assets/icon.png --out "$iconset_dir/icon_512x512.png"
+                  sips -z 1024 1024 assets/icon.png --out "$iconset_dir/icon_512x512@2x.png"
+                  iconutil -c icns "$iconset_dir" -o "$resources_dir/explorer.icns"
+
+                  cat > "$contents_dir/Info.plist" <<'EOF'
+                  <?xml version="1.0" encoding="UTF-8"?>
+                  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                  <plist version="1.0">
+                  <dict>
+                    <key>CFBundleDevelopmentRegion</key>
+                    <string>en</string>
+                    <key>CFBundleDisplayName</key>
+                    <string>Explorer</string>
+                    <key>CFBundleExecutable</key>
+                    <string>explorer</string>
+                    <key>CFBundleIconFile</key>
+                    <string>explorer</string>
+                    <key>CFBundleIdentifier</key>
+                    <string>com.hmerritt.explorer</string>
+                    <key>CFBundleInfoDictionaryVersion</key>
+                    <string>6.0</string>
+                    <key>CFBundleName</key>
+                    <string>Explorer</string>
+                    <key>CFBundlePackageType</key>
+                    <string>APPL</string>
+                    <key>CFBundleShortVersionString</key>
+                    <string>${{ github.ref_name }}</string>
+                    <key>CFBundleVersion</key>
+                    <string>${{ github.ref_name }}</string>
+                    <key>LSApplicationCategoryType</key>
+                    <string>public.app-category.utilities</string>
+                    <key>NSHighResolutionCapable</key>
+                    <true/>
+                  </dict>
+                  </plist>
                   EOF
-                  (cd package && zip -9 "../dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" explorer explorer-readme.md)
+
+                  plutil -lint "$contents_dir/Info.plist"
+                  test -x "$macos_dir/explorer"
+                  test -f "$resources_dir/explorer.icns"
+                  codesign --force --deep --sign - "$app_dir"
+                  codesign --verify --deep --strict --verbose=2 "$app_dir"
+
+                  (cd package && ditto -c -k --keepParent Explorer.app "../$archive")
+                  zipinfo -1 "$archive" | grep -q '^Explorer.app/Contents/Info.plist$'
+                  zipinfo -1 "$archive" | grep -q '^Explorer.app/Contents/MacOS/explorer$'
+                  zipinfo -1 "$archive" | grep -q '^Explorer.app/Contents/Resources/explorer.icns$'
+                  if zipinfo -1 "$archive" | grep -q '^explorer$'; then
+                    echo "macOS archive must not contain a top-level raw explorer executable"
+                    exit 1
+                  fi
 
             - name: Upload release asset
               if: steps.tag_check.outputs.valid == 'true'

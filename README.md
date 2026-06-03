@@ -29,6 +29,9 @@ Or via one of the supported package managers:
 brew install hmerritt/tap/explorer
 ```
 
+macOS release downloads contain `Explorer.app`; open the app bundle from Finder
+or launch it with the Homebrew `explorer` command.
+
 #### ➡️ Linux installer
 
 ```sh

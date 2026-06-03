@@ -119,7 +119,15 @@ class Explorer < Formula
         chmod 0755, bin/"explorer-register-desktop"
       end
     else
-      bin.install "explorer"
+      odie "Expected Explorer.app in archive; found: #{Dir.children(".").sort.join(", ")}" unless File.directory?("Explorer.app")
+
+      libexec.install "Explorer.app"
+      (bin/"explorer").write <<~SH
+        #!/usr/bin/env sh
+        set -eu
+
+        exec /usr/bin/open -na "#{opt_libexec}/Explorer.app" --args "$@"
+      SH
       chmod_executable bin/"explorer"
     end
   end
@@ -156,7 +164,16 @@ class Explorer < Formula
   test do
     assert_predicate bin/"explorer", :exist?
 
-    if OS.linux?
+    if OS.mac?
+      assert_predicate libexec/"Explorer.app", :directory?
+      assert_predicate libexec/"Explorer.app/Contents/Info.plist", :exist?
+      assert_predicate libexec/"Explorer.app/Contents/MacOS/explorer", :exist?
+      assert_predicate libexec/"Explorer.app/Contents/Resources/explorer.icns", :exist?
+
+      launcher = (bin/"explorer").read
+      expected_launcher = "/usr/bin/open -na \"#{opt_libexec}/Explorer.app\" --args " + '"$@"'
+      assert_match expected_launcher, launcher
+    elsif OS.linux?
       if File.directory?(libexec/"explorer.app")
         assert_predicate libexec/"explorer.app/bin/explorer", :exist?
         assert_predicate libexec/"explorer.app/bin/explorer.bin", :exist?

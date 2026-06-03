@@ -34,9 +34,14 @@ The canonical app icon source is `assets/icon.png`. It is referenced as package/
 
 ### macOS
 
-A better long-term macOS distribution should ship `Explorer.app`, signed with a
-Developer ID certificate, notarized by Apple, stapled, and packaged as a `.dmg`
-or `.app.zip`. Apple documents this flow in
+macOS release artifacts ship `Explorer.app` so Finder and Launch Services start
+Explorer as a GUI application instead of a terminal-launched executable. Release
+builds generate the app icon from `assets/icon.png`, include an `Info.plist`, and
+ad-hoc sign the bundle so its local signing metadata is coherent.
+
+A better long-term macOS distribution should use a Developer ID certificate,
+notarize with Apple, staple the notarization ticket, and package as a `.dmg` or
+`.app.zip`. Apple documents this flow in
 [Distributing software on macOS](https://developer.apple.com/macos/distribution/),
 [Developer ID](https://developer.apple.com/developer-id/), and
 [Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution).
