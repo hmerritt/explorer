@@ -2,6 +2,7 @@ mod actions;
 mod breadcrumb;
 mod clipboard;
 mod constants;
+mod dialog;
 mod drag_drop;
 mod entry;
 mod file_commands;
@@ -24,6 +25,7 @@ pub use actions::{
     ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected,
     PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
 };
+pub use dialog::DialogCancel;
 #[allow(unused_imports)]
 pub use entry::FileEntry;
 pub use filesystem::default_start_path;

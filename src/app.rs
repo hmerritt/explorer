@@ -15,8 +15,8 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::{
-    CancelDrag, CopySelected, CutSelected, EnterSelected, ExplorerView, ExtendDown, ExtendEnd,
-    ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
+    CancelDrag, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerView, ExtendDown,
+    ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
     OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
     default_start_path,
 };
@@ -388,6 +388,7 @@ pub fn run() {
             KeyBinding::new("backspace", GoUp, None),
             KeyBinding::new("alt-up", GoUp, None),
             KeyBinding::new("escape", CancelDrag, None),
+            KeyBinding::new("escape", DialogCancel, Some("ExplorerDialog")),
             KeyBinding::new("ctrl-a", SelectAll, None),
             KeyBinding::new("ctrl-c", CopySelected, None),
             KeyBinding::new("ctrl-x", CutSelected, None),

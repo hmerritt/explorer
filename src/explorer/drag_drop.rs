@@ -356,6 +356,7 @@ impl ExplorerView {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn drop_internal_entries(
         &mut self,
         dragged: &DraggedEntries,
@@ -378,6 +379,35 @@ impl ExplorerView {
         self.perform_file_drop(&dragged.paths, &resolved_destination, modifiers);
     }
 
+    pub(super) fn drop_internal_entries_and_open_dialog(
+        &mut self,
+        dragged: &DraggedEntries,
+        destination: DropDestination,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let destination_item = destination.item_path(&self.path);
+        let resolved_destination = destination.resolve(&self.path);
+        if dragged.paths.iter().any(|path| path == &destination_item)
+            || destination_contains_internal_drag_source(
+                &destination,
+                &self.path,
+                &resolved_destination,
+                dragged,
+            )
+        {
+            return;
+        }
+
+        self.perform_file_drop_and_open_dialog(
+            &dragged.paths,
+            &resolved_destination,
+            modifiers,
+            cx,
+        );
+    }
+
+    #[cfg(test)]
     pub(super) fn drop_external_paths(
         &mut self,
         paths: &[PathBuf],
@@ -397,6 +427,27 @@ impl ExplorerView {
         self.perform_file_drop(paths, &resolved_destination, modifiers);
     }
 
+    pub(super) fn drop_external_paths_and_open_dialog(
+        &mut self,
+        paths: &[PathBuf],
+        destination: DropDestination,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved_destination = destination.resolve(&self.path);
+        if destination_contains_all_external_path_sources(
+            &destination,
+            &self.path,
+            &resolved_destination,
+            paths,
+        ) {
+            return;
+        }
+
+        self.perform_file_drop_and_open_dialog(paths, &resolved_destination, modifiers, cx);
+    }
+
+    #[cfg(test)]
     fn perform_file_drop(&mut self, paths: &[PathBuf], destination: &Path, modifiers: Modifiers) {
         match resolve_drop_operation(modifiers, destination.is_dir()) {
             ResolvedDrop::Move => {
@@ -404,6 +455,35 @@ impl ExplorerView {
             }
             ResolvedDrop::Copy => {
                 self.handle_file_command_result(copy_paths_to_directory(paths, destination));
+            }
+            ResolvedDrop::UnsupportedShortcut => {
+                self.open_error = Some("Shortcut drag-and-drop is not supported yet.".to_owned());
+            }
+            ResolvedDrop::Invalid => {
+                self.open_error = Some("This drop target is not valid.".to_owned());
+            }
+        }
+    }
+
+    fn perform_file_drop_and_open_dialog(
+        &mut self,
+        paths: &[PathBuf],
+        destination: &Path,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        match resolve_drop_operation(modifiers, destination.is_dir()) {
+            ResolvedDrop::Move => {
+                self.handle_file_command_result_and_open_dialog(
+                    move_paths_to_directory(paths, destination),
+                    cx,
+                );
+            }
+            ResolvedDrop::Copy => {
+                self.handle_file_command_result_and_open_dialog(
+                    copy_paths_to_directory(paths, destination),
+                    cx,
+                );
             }
             ResolvedDrop::UnsupportedShortcut => {
                 self.open_error = Some("Shortcut drag-and-drop is not supported yet.".to_owned());

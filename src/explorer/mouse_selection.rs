@@ -262,6 +262,7 @@ pub(super) fn row_indices_intersecting_content_box(
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn row_indices_intersecting_box(
     selection_box: SelectionBox,
     scroll_top: f32,

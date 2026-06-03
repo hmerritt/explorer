@@ -31,7 +31,6 @@ use crate::explorer::{
         drop_indicator_origin,
     },
     entry::FileEntry,
-    filesystem::FileConflictBatch,
     formatting::{format_modified, format_size},
     icons::{
         NavIcon, desktop_folder_icon, device_px, device_px_value, directory_shortcut_icon,
@@ -42,7 +41,7 @@ use crate::explorer::{
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections},
-    view::{ExplorerContentBranch, ExplorerView, PendingPermanentDelete},
+    view::{ExplorerContentBranch, ExplorerView},
 };
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -252,10 +251,11 @@ impl ExplorerView {
                     let destination = destination.clone();
                     move |this, dragged: &DraggedEntries, window, cx| {
                         this.clear_drop_indicator();
-                        this.drop_internal_entries(
+                        this.drop_internal_entries_and_open_dialog(
                             dragged,
                             destination.clone(),
                             window.modifiers(),
+                            cx,
                         );
                         cx.stop_propagation();
                         cx.notify();
@@ -265,10 +265,11 @@ impl ExplorerView {
                     let destination = destination.clone();
                     move |this, paths: &ExternalPaths, window, cx| {
                         this.clear_drop_indicator();
-                        this.drop_external_paths(
+                        this.drop_external_paths_and_open_dialog(
                             paths.paths(),
                             destination.clone(),
                             window.modifiers(),
+                            cx,
                         );
                         cx.stop_propagation();
                         cx.notify();
@@ -391,10 +392,11 @@ impl ExplorerView {
                     let destination = destination.clone();
                     move |this, dragged: &DraggedEntries, window, cx| {
                         this.clear_drop_indicator();
-                        this.drop_internal_entries(
+                        this.drop_internal_entries_and_open_dialog(
                             dragged,
                             destination.clone(),
                             window.modifiers(),
+                            cx,
                         );
                         cx.stop_propagation();
                         cx.notify();
@@ -404,10 +406,11 @@ impl ExplorerView {
                     let destination = destination.clone();
                     move |this, paths: &ExternalPaths, window, cx| {
                         this.clear_drop_indicator();
-                        this.drop_external_paths(
+                        this.drop_external_paths_and_open_dialog(
                             paths.paths(),
                             destination.clone(),
                             window.modifiers(),
+                            cx,
                         );
                         cx.stop_propagation();
                         cx.notify();
@@ -541,10 +544,11 @@ impl ExplorerView {
                         let current_directory = current_directory.clone();
                         move |this, dragged: &DraggedEntries, window, cx| {
                             this.clear_drop_indicator();
-                            this.drop_internal_entries(
+                            this.drop_internal_entries_and_open_dialog(
                                 dragged,
                                 current_directory.clone(),
                                 window.modifiers(),
+                                cx,
                             );
                             cx.stop_propagation();
                             cx.notify();
@@ -554,10 +558,11 @@ impl ExplorerView {
                         let current_directory = current_directory.clone();
                         move |this, paths: &ExternalPaths, window, cx| {
                             this.clear_drop_indicator();
-                            this.drop_external_paths(
+                            this.drop_external_paths_and_open_dialog(
                                 paths.paths(),
                                 current_directory.clone(),
                                 window.modifiers(),
+                                cx,
                             );
                             cx.stop_propagation();
                             cx.notify();
@@ -636,10 +641,11 @@ impl ExplorerView {
                 let current_directory = current_directory.clone();
                 move |this, dragged: &DraggedEntries, window, cx| {
                     this.clear_drop_indicator();
-                    this.drop_internal_entries(
+                    this.drop_internal_entries_and_open_dialog(
                         dragged,
                         current_directory.clone(),
                         window.modifiers(),
+                        cx,
                     );
                     cx.stop_propagation();
                     cx.notify();
@@ -649,10 +655,11 @@ impl ExplorerView {
                 let current_directory = current_directory.clone();
                 move |this, paths: &ExternalPaths, window, cx| {
                     this.clear_drop_indicator();
-                    this.drop_external_paths(
+                    this.drop_external_paths_and_open_dialog(
                         paths.paths(),
                         current_directory.clone(),
                         window.modifiers(),
+                        cx,
                     );
                     cx.stop_propagation();
                     cx.notify();
@@ -902,12 +909,6 @@ impl Render for ExplorerView {
                             .child(self.render_status_bar()),
                     ),
             )
-            .when_some(self.pending_permanent_delete.clone(), |this, pending| {
-                this.child(render_permanent_delete_confirmation(pending, cx))
-            })
-            .when_some(self.pending_file_conflict.clone(), |this, conflicts| {
-                this.child(render_file_conflict_dialog(conflicts, cx))
-            })
             .when_some(self.active_drop_indicator.clone(), |this, indicator| {
                 this.child(render_drop_indicator(indicator, window))
             })
@@ -1016,203 +1017,6 @@ fn truncated_drop_indicator_target_label(
             NAME_TRUNCATION_SUFFIX,
             &mut runs,
         )
-}
-
-fn render_file_conflict_dialog(
-    conflicts: FileConflictBatch,
-    cx: &mut Context<ExplorerView>,
-) -> AnyElement {
-    let count = conflicts.len();
-    let title = if count == 1 {
-        "There is already a file with the same name in this location.".to_owned()
-    } else {
-        format!("There are {count} files with the same names in this location.")
-    };
-    let detail = if count == 1 {
-        format!(
-            "Choose what to do with {}.",
-            conflicts.first_destination_name()
-        )
-    } else {
-        "The choice you make will apply to all conflicts in this operation.".to_owned()
-    };
-    let replace_label = if count == 1 {
-        "Replace the file in the destination"
-    } else {
-        "Replace the files in the destination"
-    };
-    let skip_label = if count == 1 {
-        "Skip this file"
-    } else {
-        "Skip these files"
-    };
-
-    div()
-        .id("file-conflict-dialog")
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .w_full()
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .w(px(430.0))
-                .rounded(px(4.0))
-                .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0x8a8a8a))
-                .shadow_md()
-                .p(px(16.0))
-                .text_size(px(12.0))
-                .text_color(rgb(0x1f1f1f))
-                .child(div().child(SharedString::from(title)))
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .text_color(rgb(0x5f5f5f))
-                        .child(SharedString::from(detail)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .mt(px(18.0))
-                        .child(
-                            div()
-                                .id("file-conflict-replace")
-                                .min_h(px(32.0))
-                                .flex()
-                                .items_center()
-                                .px(px(10.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(rgb(0xadadad))
-                                .bg(rgb(0xf5f5f5))
-                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
-                                .cursor_default()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.replace_pending_file_conflicts();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }))
-                                .child(replace_label),
-                        )
-                        .child(
-                            div()
-                                .id("file-conflict-skip")
-                                .min_h(px(32.0))
-                                .flex()
-                                .items_center()
-                                .px(px(10.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(rgb(0xadadad))
-                                .bg(rgb(0xf5f5f5))
-                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
-                                .cursor_default()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.skip_pending_file_conflicts();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }))
-                                .child(skip_label),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn render_permanent_delete_confirmation(
-    pending: PendingPermanentDelete,
-    cx: &mut Context<ExplorerView>,
-) -> AnyElement {
-    let message = if pending.paths.len() == 1 {
-        "Are you sure you want to permanently delete this item?".to_owned()
-    } else {
-        format!(
-            "Are you sure you want to permanently delete these {} items?",
-            pending.paths.len()
-        )
-    };
-
-    div()
-        .id("permanent-delete-confirmation")
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .w_full()
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .w(px(380.0))
-                .rounded(px(4.0))
-                .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0x8a8a8a))
-                .shadow_md()
-                .p(px(16.0))
-                .text_size(px(12.0))
-                .text_color(rgb(0x1f1f1f))
-                .child(div().child(SharedString::from(message)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .mt(px(18.0))
-                        .child(
-                            div()
-                                .id("permanent-delete-yes")
-                                .min_w(px(76.0))
-                                .h(px(28.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(rgb(0xadadad))
-                                .bg(rgb(0xf5f5f5))
-                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
-                                .cursor_default()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.confirm_pending_permanent_delete();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }))
-                                .child("Yes"),
-                        )
-                        .child(
-                            div()
-                                .id("permanent-delete-no")
-                                .min_w(px(76.0))
-                                .h(px(28.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(rgb(0xadadad))
-                                .bg(rgb(0xf5f5f5))
-                                .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
-                                .cursor_default()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.cancel_pending_permanent_delete();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }))
-                                .child("No"),
-                        ),
-                ),
-        )
-        .into_any_element()
 }
 
 fn sidebar_separator() -> Div {
@@ -1411,7 +1215,12 @@ fn directory_bar_label(
             let destination = destination.clone();
             move |this, dragged: &DraggedEntries, window, cx| {
                 this.clear_drop_indicator();
-                this.drop_internal_entries(dragged, destination.clone(), window.modifiers());
+                this.drop_internal_entries_and_open_dialog(
+                    dragged,
+                    destination.clone(),
+                    window.modifiers(),
+                    cx,
+                );
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -1420,7 +1229,12 @@ fn directory_bar_label(
             let destination = destination.clone();
             move |this, paths: &ExternalPaths, window, cx| {
                 this.clear_drop_indicator();
-                this.drop_external_paths(paths.paths(), destination.clone(), window.modifiers());
+                this.drop_external_paths_and_open_dialog(
+                    paths.paths(),
+                    destination.clone(),
+                    window.modifiers(),
+                    cx,
+                );
                 cx.stop_propagation();
                 cx.notify();
             }

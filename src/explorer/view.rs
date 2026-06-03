@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use gpui::{FocusHandle, UniformListScrollHandle};
+use gpui::{AnyWindowHandle, FocusHandle, UniformListScrollHandle};
 
 use crate::explorer::{
     drag_drop::DropIndicator, entry::FileEntry, filesystem::FileConflictBatch,
@@ -26,6 +26,7 @@ pub struct ExplorerView {
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
+    pub(super) active_dialog_window: Option<AnyWindowHandle>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,6 +71,7 @@ impl ExplorerView {
             active_drop_indicator: None,
             pending_permanent_delete: None,
             pending_file_conflict: None,
+            active_dialog_window: None,
         };
         view.reload();
         view

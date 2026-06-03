@@ -223,7 +223,7 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.request_permanent_delete_selected();
+        self.request_permanent_delete_selected(cx);
         cx.notify();
     }
 }

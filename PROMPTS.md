@@ -1,9 +1,5 @@
 ## New
 
-Dialog in a separate window that can be dragged around
-
----
-
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ---

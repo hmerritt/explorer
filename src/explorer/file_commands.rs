@@ -59,14 +59,14 @@ impl ExplorerView {
 
         match clipboard.operation {
             FileClipboardOperation::Copy => {
-                self.handle_file_command_result(copy_paths_to_directory_for_paste(
-                    &clipboard.paths,
-                    &self.path,
-                ));
+                self.handle_file_command_result_and_open_dialog(
+                    copy_paths_to_directory_for_paste(&clipboard.paths, &self.path),
+                    cx,
+                );
             }
             FileClipboardOperation::Cut => {
                 let result = move_paths_to_directory(&clipboard.paths, &self.path);
-                self.handle_file_command_result(result);
+                self.handle_file_command_result_and_open_dialog(result, cx);
             }
         }
     }
@@ -92,7 +92,7 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn request_permanent_delete_selected(&mut self) {
+    pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
@@ -103,6 +103,7 @@ impl ExplorerView {
             fallback_index: self.selection_fallback_index_for_delete(),
         });
         self.open_error = None;
+        self.open_pending_dialog_window(cx);
     }
 
     pub(super) fn confirm_pending_permanent_delete(&mut self) {
@@ -179,6 +180,15 @@ impl ExplorerView {
                 self.reload();
             }
         }
+    }
+
+    pub(super) fn handle_file_command_result_and_open_dialog(
+        &mut self,
+        result: Result<FileOperationOutcome, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_file_command_result(result);
+        self.open_pending_dialog_window(cx);
     }
 
     fn resolve_pending_file_conflicts(&mut self, choice: ConflictChoice) {
