@@ -322,7 +322,7 @@ mod tests {
     use crate::explorer::constants::{
         FILE_ICON_PAGE_HEIGHT_PHYSICAL, FILE_ICON_PAGE_LEFT_PHYSICAL,
         FILE_ICON_PAGE_WIDTH_PHYSICAL, FILE_ICON_SLOT_HEIGHT_PHYSICAL,
-        FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_ICON_SIZE_PHYSICAL,
+        FILE_ICON_SLOT_WIDTH_PHYSICAL, NAV_ICON_TEXT_SIZE,
     };
 
     #[test]
@@ -383,9 +383,8 @@ mod tests {
     }
 
     #[test]
-    fn nav_icon_size_converts_from_physical_pixels() {
-        assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.0), 18.0);
-        assert_eq!(device_px_value(NAV_ICON_SIZE_PHYSICAL, 1.5), 12.0);
+    fn nav_icon_size_is_logical_and_scale_independent() {
+        assert_eq!(NAV_ICON_TEXT_SIZE, 12.0);
     }
 
     #[test]

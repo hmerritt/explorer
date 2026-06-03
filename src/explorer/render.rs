@@ -19,7 +19,7 @@ use crate::explorer::{
         DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
         EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_WIDTH_PHYSICAL, HEADER_HEIGHT,
         NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
-        NAV_ICON_ENABLED_COLOR, NAV_ICON_SIZE_PHYSICAL, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
+        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
         NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
         SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
         SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
@@ -58,7 +58,7 @@ const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 
 impl ExplorerView {
-    fn render_navbar(&self, window: &Window, scale_factor: f32, cx: &mut Context<Self>) -> Div {
+    fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let breadcrumb = visible_breadcrumb_for_path(
             &self.path,
             directory_bar_available_width(f32::from(window.bounds().size.width)),
@@ -78,7 +78,6 @@ impl ExplorerView {
                 "back",
                 NavIcon::Back,
                 self.can_go_back(),
-                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_back();
                     cx.notify();
@@ -88,7 +87,6 @@ impl ExplorerView {
                 "forward",
                 NavIcon::Forward,
                 self.can_go_forward(),
-                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_forward();
                     cx.notify();
@@ -98,7 +96,6 @@ impl ExplorerView {
                 "up",
                 NavIcon::Up,
                 self.can_go_up(),
-                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.navigate_up();
                     cx.notify();
@@ -108,7 +105,6 @@ impl ExplorerView {
                 "refresh",
                 NavIcon::Refresh,
                 true,
-                scale_factor,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reload();
                     cx.notify();
@@ -861,7 +857,7 @@ impl Render for ExplorerView {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
-            .child(self.render_navbar(window, scale_factor, cx))
+            .child(self.render_navbar(window, cx))
             .child(
                 div()
                     .flex()
@@ -1278,7 +1274,6 @@ fn nav_button(
     id: &'static str,
     icon: NavIcon,
     enabled: bool,
-    scale_factor: f32,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
@@ -1298,7 +1293,7 @@ fn nav_button(
         .child(
             div()
                 .font(nav_icon_font())
-                .text_size(device_px(NAV_ICON_SIZE_PHYSICAL, scale_factor))
+                .text_size(px(NAV_ICON_TEXT_SIZE))
                 .text_color(if enabled {
                     rgb(NAV_ICON_ENABLED_COLOR)
                 } else {
