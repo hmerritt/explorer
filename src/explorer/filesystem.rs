@@ -186,13 +186,66 @@ pub(super) fn local_drive_roots() -> Vec<PathBuf> {
 }
 
 pub(super) fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
+    load_entries_with_options(path, EntryLoadOptions::for_path(path))
+}
+
+#[derive(Clone, Copy)]
+struct EntryLoadOptions {
+    hide_hidden_entries: bool,
+}
+
+impl EntryLoadOptions {
+    fn for_path(path: &Path) -> Self {
+        Self {
+            hide_hidden_entries: should_hide_hidden_entries(path),
+        }
+    }
+}
+
+fn load_entries_with_options(
+    path: &Path,
+    options: EntryLoadOptions,
+) -> std::io::Result<Vec<FileEntry>> {
     let mut entries = fs::read_dir(path)?
         .filter_map(Result::ok)
+        .filter(|entry| !should_skip_directory_entry(entry, options))
         .filter_map(|entry| FileEntry::from_path(entry.path()))
         .collect::<Vec<_>>();
 
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+#[cfg(target_os = "macos")]
+fn should_hide_hidden_entries(path: &Path) -> bool {
+    path == Path::new("/Applications")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_hide_hidden_entries(_: &Path) -> bool {
+    false
+}
+
+fn should_skip_directory_entry(entry: &fs::DirEntry, options: EntryLoadOptions) -> bool {
+    options.hide_hidden_entries && is_hidden_directory_entry(entry)
+}
+
+fn is_hidden_directory_entry(entry: &fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with('.') || has_macos_hidden_flag(&entry.path())
+}
+
+#[cfg(target_os = "macos")]
+fn has_macos_hidden_flag(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+
+    const UF_HIDDEN: u32 = 0x0000_8000;
+
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.st_flags() & UF_HIDDEN != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_macos_hidden_flag(_: &Path) -> bool {
+    false
 }
 
 pub(super) fn open_path_with_default_app(path: &Path) -> std::io::Result<()> {
@@ -1136,6 +1189,52 @@ mod tests {
     #[test]
     fn local_drive_roots_falls_back_to_unix_root() {
         assert_eq!(local_drive_roots(), vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn hidden_entry_filter_omits_dot_prefixed_entries_when_enabled() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: true,
+            },
+        )
+        .expect("load entries");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+    }
+
+    #[test]
+    fn hidden_entry_filter_keeps_dot_prefixed_entries_when_disabled() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: false,
+            },
+        )
+        .expect("load entries");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![".hidden", "visible.txt"]
+        );
     }
 
     #[cfg(target_os = "windows")]

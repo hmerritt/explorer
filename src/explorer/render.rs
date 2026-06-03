@@ -331,7 +331,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
-        let app_icon = self.app_icon_cache.icon_for_entry(&entry);
+        let app_icon = self.app_icon_for_entry(&entry, cx);
         let is_selected = self.entry_is_selected(ix);
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();

@@ -98,7 +98,9 @@ impl ExplorerView {
             return None;
         }
 
-        if entry.is_directory_like() {
+        if entry.is_app_bundle() {
+            Some(EntryAction::OpenFile(entry.path.clone()))
+        } else if entry.is_directory_like() {
             self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
             None
         } else {
@@ -110,7 +112,13 @@ impl ExplorerView {
         let entry = self.focused_entry()?.clone();
         self.open_error = None;
 
-        if entry.is_directory_like() {
+        if entry.is_app_bundle() {
+            if open_files {
+                Some(EntryAction::OpenFile(entry.path))
+            } else {
+                None
+            }
+        } else if entry.is_directory_like() {
             self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
             None
         } else if open_files {
@@ -251,6 +259,29 @@ mod tests {
     }
 
     #[test]
+    fn double_click_opens_app_bundles_instead_of_navigating_into_them() {
+        let temp = TempDir::new();
+        let app = temp.path().join("Preview.app");
+        fs::create_dir_all(&app).expect("create app bundle");
+        let entry = FileEntry {
+            path: app.clone(),
+            name: "Preview.app".to_owned(),
+            kind: EntryKind::Directory,
+            modified: None,
+            size: None,
+        };
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        let action = view.handle_entry_click(&entry, 2, SelectionModifiers::default());
+
+        assert_eq!(action, Some(EntryAction::OpenFile(app.clone())));
+        assert_eq!(view.path, temp.path());
+        assert_eq!(view.selected_paths(), vec![app]);
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
     fn open_file_result_sets_and_clears_open_error() {
         let temp = TempDir::new();
         let file = temp.path().join("file.txt");
@@ -302,6 +333,29 @@ mod tests {
             view.activate_focused_entry(true),
             Some(EntryAction::OpenFile(PathBuf::from("file.txt")))
         );
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn focused_activation_opens_app_bundles_on_enter() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("Preview.app", true, None, None)];
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry(true),
+            Some(EntryAction::OpenFile(PathBuf::from("Preview.app")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn right_arrow_activation_ignores_app_bundles() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("Preview.app", true, None, None)];
+        view.select_single_index(0);
+
+        assert_eq!(view.activate_focused_entry(false), None);
         assert_eq!(view.path, PathBuf::from("root"));
     }
 

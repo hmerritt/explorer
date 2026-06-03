@@ -92,13 +92,17 @@ impl FileEntry {
         matches!(self.kind, EntryKind::DirectoryLink(_))
     }
 
-    pub(super) fn uses_app_bundle_icon(&self) -> bool {
+    pub(super) fn is_app_bundle(&self) -> bool {
         self.is_directory_like()
             && self
                 .path
                 .extension()
                 .and_then(OsStr::to_str)
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    }
+
+    pub(super) fn uses_app_bundle_icon(&self) -> bool {
+        self.is_app_bundle()
     }
 
     pub(super) fn display_name(&self) -> &str {
@@ -127,6 +131,10 @@ impl FileEntry {
     }
 
     pub(super) fn type_label(&self) -> String {
+        if self.is_app_bundle() {
+            return "Application".to_owned();
+        }
+
         match self.kind {
             EntryKind::Directory | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink) => {
                 return "File folder".to_owned();
@@ -292,10 +300,14 @@ mod tests {
 
     #[test]
     fn app_bundle_icon_detection_matches_app_directories_only() {
-        assert!(FileEntry::test("Preview.app", true, None, None).uses_app_bundle_icon());
-        assert!(FileEntry::test("preview.APP", true, None, None).uses_app_bundle_icon());
-        assert!(!FileEntry::test("Preview.app", false, Some(1), None).uses_app_bundle_icon());
-        assert!(!FileEntry::test("folder", true, None, None).uses_app_bundle_icon());
+        let entry = FileEntry::test("Preview.app", true, None, None);
+        assert!(entry.is_app_bundle());
+        assert!(entry.uses_app_bundle_icon());
+        assert_eq!(entry.type_label(), "Application");
+
+        assert!(FileEntry::test("preview.APP", true, None, None).is_app_bundle());
+        assert!(!FileEntry::test("Preview.app", false, Some(1), None).is_app_bundle());
+        assert!(!FileEntry::test("folder", true, None, None).is_app_bundle());
     }
 
     #[test]
