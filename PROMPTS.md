@@ -1,5 +1,13 @@
 ## New
 
+Dialog in a separate window that can be dragged around
+
+---
+
+Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
+
+---
+
 Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 - New
@@ -48,3 +56,13 @@ Signed app bundle for macOS
 - 7zip built-in
 - rsync copy/sync builtin
 - Network drives (rclone builtin)
+
+- Context menu
+- File icons
+- File search, plus recursive search
+- Large icons grid view (alternate to the current Details view)
+- Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
+- ssh drive support
+- rsync for basic file operations?
+- OS level hook for file operations?
+- rclone hook for drive, B2, S3, etc...

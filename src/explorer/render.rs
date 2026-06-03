@@ -1231,10 +1231,10 @@ fn sidebar_separator() -> Div {
 fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
     match item.kind {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop) => {
-            desktop_folder_icon(item.path, scale_factor)
+            desktop_folder_icon(scale_factor)
         }
         SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads) => {
-            downloads_folder_icon(item.path, scale_factor)
+            downloads_folder_icon(scale_factor)
         }
         SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
             folder_icon(scale_factor).into_any_element()

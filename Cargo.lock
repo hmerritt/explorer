@@ -1536,7 +1536,6 @@ dependencies = [
  "chrono",
  "embed-resource",
  "gpui",
- "image",
  "open",
  "serde",
  "serde_json",

@@ -1,9 +1,4 @@
-use std::path::PathBuf;
-
-use gpui::{
-    AnyElement, Div, FontFallbacks, ObjectFit, Pixels, RenderImage, div, font, img, prelude::*, px,
-    rgb,
-};
+use gpui::{AnyElement, Div, FontFallbacks, Pixels, div, font, prelude::*, px, rgb};
 
 use crate::explorer::constants::{
     FILE_ICON_FOLD_SIZE_PHYSICAL, FILE_ICON_PAGE_HEIGHT_PHYSICAL, FILE_ICON_PAGE_LEFT_PHYSICAL,
@@ -99,38 +94,12 @@ pub(super) fn folder_icon(scale_factor: f32) -> Div {
         )
 }
 
-pub(super) fn desktop_folder_icon(path: PathBuf, scale_factor: f32) -> AnyElement {
-    system_or_fallback_folder_icon(path, scale_factor, desktop_folder_fallback_icon)
+pub(super) fn desktop_folder_icon(scale_factor: f32) -> AnyElement {
+    desktop_folder_fallback_icon(scale_factor).into_any_element()
 }
 
-pub(super) fn downloads_folder_icon(path: PathBuf, scale_factor: f32) -> AnyElement {
-    system_or_fallback_folder_icon(path, scale_factor, downloads_folder_fallback_icon)
-}
-
-fn system_or_fallback_folder_icon(
-    path: PathBuf,
-    scale_factor: f32,
-    fallback: fn(f32) -> Div,
-) -> AnyElement {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(image) = windows_shell_small_icon(&path) {
-            return img(image)
-                .w(device_px(22.0, scale_factor))
-                .h(device_px(20.0, scale_factor))
-                .object_fit(ObjectFit::Contain)
-                .flex_shrink_0()
-                .into_any_element();
-        }
-
-        fallback(scale_factor).into_any_element()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        fallback(scale_factor).into_any_element()
-    }
+pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
+    downloads_folder_fallback_icon(scale_factor).into_any_element()
 }
 
 fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
@@ -231,117 +200,6 @@ fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
         ))
         .text_color(rgb(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR))
         .child(DOWNLOADS_FOLDER_FALLBACK_GLYPH)
-}
-
-#[cfg(target_os = "windows")]
-fn windows_shell_small_icon(path: &std::path::Path) -> Option<std::sync::Arc<RenderImage>> {
-    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr, sync::Arc};
-
-    use image::{Frame, ImageBuffer, Rgba};
-    use windows::{
-        Win32::{
-            Foundation::HANDLE,
-            Graphics::Gdi::{
-                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-                DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
-            },
-            Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
-            UI::{
-                Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGetFileInfoW},
-                WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx},
-            },
-        },
-        core::PCWSTR,
-    };
-
-    const ICON_SIZE: i32 = 20;
-
-    let mut wide_path = OsStr::new(path).encode_wide().collect::<Vec<_>>();
-    wide_path.push(0);
-
-    let mut info = SHFILEINFOW::default();
-    let result = unsafe {
-        SHGetFileInfoW(
-            PCWSTR(wide_path.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_SMALLICON,
-        )
-    };
-
-    if result == 0 || info.hIcon.is_invalid() {
-        return None;
-    }
-
-    let mut bits = ptr::null_mut();
-    let bitmap_info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: ICON_SIZE,
-            biHeight: -ICON_SIZE,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let hdc = unsafe { CreateCompatibleDC(None) };
-    if hdc.is_invalid() {
-        let _ = unsafe { DestroyIcon(info.hIcon) };
-        return None;
-    }
-
-    let bitmap = unsafe {
-        CreateDIBSection(
-            Some(hdc),
-            &bitmap_info,
-            DIB_RGB_COLORS,
-            &mut bits,
-            Some(HANDLE::default()),
-            0,
-        )
-        .ok()?
-    };
-
-    if bits.is_null() {
-        let _ = unsafe { DeleteObject(HGDIOBJ::from(bitmap)) };
-        let _ = unsafe { DeleteDC(hdc) };
-        let _ = unsafe { DestroyIcon(info.hIcon) };
-        return None;
-    }
-
-    let previous = unsafe { SelectObject(hdc, HGDIOBJ::from(bitmap)) };
-    if previous.is_invalid() {
-        let _ = unsafe { DeleteObject(HGDIOBJ::from(bitmap)) };
-        let _ = unsafe { DeleteDC(hdc) };
-        let _ = unsafe { DestroyIcon(info.hIcon) };
-        return None;
-    }
-
-    let draw_result = unsafe {
-        DrawIconEx(
-            hdc, 0, 0, info.hIcon, ICON_SIZE, ICON_SIZE, 0, None, DI_NORMAL,
-        )
-    };
-
-    let len = ICON_SIZE as usize * ICON_SIZE as usize * 4;
-    let bytes = if draw_result.is_ok() {
-        Some(unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) }.to_vec())
-    } else {
-        None
-    };
-
-    let _ = unsafe { SelectObject(hdc, previous) };
-    let _ = unsafe { DeleteObject(HGDIOBJ::from(bitmap)) };
-    let _ = unsafe { DeleteDC(hdc) };
-    let _ = unsafe { DestroyIcon(info.hIcon) };
-
-    let buffer =
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(ICON_SIZE as u32, ICON_SIZE as u32, bytes?)?;
-    Some(Arc::new(RenderImage::new([Frame::new(buffer)])))
 }
 
 pub(super) fn drive_icon(scale_factor: f32) -> Div {
