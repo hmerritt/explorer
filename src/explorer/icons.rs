@@ -16,6 +16,9 @@ pub(super) enum NavIcon {
 const DOWNLOADS_FOLDER_FALLBACK_GLYPH: &str = "\u{E896}";
 const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x10893e;
+const DOCUMENTS_FOLDER_FALLBACK_GLYPH: &str = "\u{E8A5}";
+const DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
+const DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x0078d7;
 const DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
 const DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
 const DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL: f32 = 20.0;
@@ -96,6 +99,10 @@ pub(super) fn folder_icon(scale_factor: f32) -> Div {
 
 pub(super) fn desktop_folder_icon(scale_factor: f32) -> AnyElement {
     desktop_folder_fallback_icon(scale_factor).into_any_element()
+}
+
+pub(super) fn documents_folder_icon(scale_factor: f32) -> AnyElement {
+    documents_folder_fallback_icon(scale_factor).into_any_element()
 }
 
 pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
@@ -186,6 +193,29 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
 }
 
 fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
+    special_folder_glyph_icon(
+        DOWNLOADS_FOLDER_FALLBACK_GLYPH,
+        DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL,
+        DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR,
+        scale_factor,
+    )
+}
+
+fn documents_folder_fallback_icon(scale_factor: f32) -> Div {
+    special_folder_glyph_icon(
+        DOCUMENTS_FOLDER_FALLBACK_GLYPH,
+        DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL,
+        DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR,
+        scale_factor,
+    )
+}
+
+fn special_folder_glyph_icon(
+    glyph: &'static str,
+    icon_size_physical: f32,
+    icon_color: u32,
+    scale_factor: f32,
+) -> Div {
     div()
         .flex()
         .items_center()
@@ -194,12 +224,9 @@ fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
         .h(device_px(20.0, scale_factor))
         .flex_shrink_0()
         .font(nav_icon_font())
-        .text_size(device_px(
-            DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL,
-            scale_factor,
-        ))
-        .text_color(rgb(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR))
-        .child(DOWNLOADS_FOLDER_FALLBACK_GLYPH)
+        .text_size(device_px(icon_size_physical, scale_factor))
+        .text_color(rgb(icon_color))
+        .child(glyph)
 }
 
 pub(super) fn drive_icon(scale_factor: f32) -> Div {
@@ -365,6 +392,13 @@ mod tests {
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_GLYPH, "\u{E896}");
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 18.0);
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR, 0x10893e);
+    }
+
+    #[test]
+    fn documents_fallback_icon_uses_windows_explorer_document_glyph() {
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_GLYPH, "\u{E8A5}");
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 18.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR, 0x0078d7);
     }
 
     #[test]

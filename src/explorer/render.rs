@@ -34,7 +34,8 @@ use crate::explorer::{
     formatting::{format_modified, format_size},
     icons::{
         NavIcon, desktop_folder_icon, device_px, device_px_value, directory_shortcut_icon,
-        downloads_folder_icon, drive_icon, file_icon, folder_icon, nav_icon_font,
+        documents_folder_icon, downloads_folder_icon, drive_icon, file_icon, folder_icon,
+        nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -1032,6 +1033,9 @@ fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
     match item.kind {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop) => {
             desktop_folder_icon(scale_factor)
+        }
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Documents) => {
+            documents_folder_icon(scale_factor)
         }
         SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads) => {
             downloads_folder_icon(scale_factor)

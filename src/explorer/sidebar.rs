@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::explorer::filesystem::{
-    drive_display_label, local_drive_roots, user_desktop_dir, user_downloads_dir, user_home_dir,
+    drive_display_label, local_drive_roots, user_desktop_dir, user_documents_dir,
+    user_downloads_dir, user_home_dir,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub(super) enum SidebarItemKind {
 pub(super) enum UserDirectoryKind {
     Home,
     Desktop,
+    Documents,
     Downloads,
 }
 
@@ -30,6 +32,7 @@ pub(super) fn sidebar_sections() -> SidebarSections {
         user_directories: user_directory_items_from_paths(
             home_dir.clone(),
             user_desktop_dir(home_dir.as_deref()),
+            user_documents_dir(home_dir.as_deref()),
             user_downloads_dir(home_dir.as_deref()),
         ),
         drives: drive_items_from_roots(local_drive_roots()),
@@ -45,6 +48,7 @@ pub(super) struct SidebarSections {
 fn user_directory_items_from_paths(
     home: Option<PathBuf>,
     desktop: Option<PathBuf>,
+    documents: Option<PathBuf>,
     downloads: Option<PathBuf>,
 ) -> Vec<SidebarItem> {
     [
@@ -56,6 +60,11 @@ fn user_directory_items_from_paths(
             UserDirectoryKind::Home,
         ),
         ("Desktop".to_owned(), desktop, UserDirectoryKind::Desktop),
+        (
+            "Documents".to_owned(),
+            documents,
+            UserDirectoryKind::Documents,
+        ),
         (
             "Downloads".to_owned(),
             downloads,
@@ -114,13 +123,16 @@ mod tests {
         let temp = TempDir::new();
         let home = temp.path().join("home");
         let desktop = home.join("Desktop");
+        let documents = home.join("Documents");
         let downloads = home.join("Downloads");
         fs::create_dir_all(&desktop).expect("create desktop");
+        fs::create_dir_all(&documents).expect("create documents");
         fs::create_dir_all(&downloads).expect("create downloads");
 
         let items = user_directory_items_from_paths(
             Some(home.clone()),
             Some(desktop.clone()),
+            Some(documents.clone()),
             Some(downloads.clone()),
         );
 
@@ -138,6 +150,11 @@ mod tests {
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop),
                 },
                 SidebarItem {
+                    label: "Documents".to_owned(),
+                    path: documents,
+                    kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Documents),
+                },
+                SidebarItem {
                     label: "Downloads".to_owned(),
                     path: downloads,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
@@ -151,10 +168,16 @@ mod tests {
         let temp = TempDir::new();
         let home = temp.path().join("home");
         let missing_desktop = home.join("Desktop");
+        let missing_documents = home.join("Documents");
         let downloads = temp.path().join("Downloads");
         fs::create_dir_all(&downloads).expect("create downloads");
 
-        let items = user_directory_items_from_paths(None, Some(missing_desktop), Some(downloads));
+        let items = user_directory_items_from_paths(
+            None,
+            Some(missing_desktop),
+            Some(missing_documents),
+            Some(downloads),
+        );
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Downloads");

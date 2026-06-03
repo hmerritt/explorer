@@ -70,6 +70,18 @@ pub(super) fn user_desktop_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+pub(super) fn user_documents_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Documents;
+
+    known_folder_path(&FOLDERID_Documents)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn user_documents_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Documents"))
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::FOLDERID_Downloads;
 

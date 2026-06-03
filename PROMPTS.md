@@ -1,14 +1,5 @@
 ## New
 
-Add users "Documents" folder to the side-menu
-
-1. <user>
-2. Desktop
-3. Documents
-4. Downloads
-
----
-
 macOS-specific features:
 
 - macOS request "Full Disk Access" on app open.
