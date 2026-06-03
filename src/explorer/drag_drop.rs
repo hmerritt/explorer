@@ -12,9 +12,12 @@ use gpui::{
 
 use crate::explorer::{
     entry::FileEntry,
-    filesystem::{copy_paths_to_directory, move_paths_to_directory},
+    filesystem::{prepare_copy_paths_to_directory, prepare_move_paths_to_directory},
     view::ExplorerView,
 };
+
+#[cfg(test)]
+use crate::explorer::filesystem::{copy_paths_to_directory, move_paths_to_directory};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DraggedEntries {
@@ -474,14 +477,14 @@ impl ExplorerView {
     ) {
         match resolve_drop_operation(modifiers, destination.is_dir()) {
             ResolvedDrop::Move => {
-                self.handle_file_command_result_and_open_dialog(
-                    move_paths_to_directory(paths, destination),
+                self.handle_prepared_file_command_result_and_open_dialog(
+                    prepare_move_paths_to_directory(paths, destination),
                     cx,
                 );
             }
             ResolvedDrop::Copy => {
-                self.handle_file_command_result_and_open_dialog(
-                    copy_paths_to_directory(paths, destination),
+                self.handle_prepared_file_command_result_and_open_dialog(
+                    prepare_copy_paths_to_directory(paths, destination),
                     cx,
                 );
             }

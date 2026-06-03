@@ -1,11 +1,21 @@
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
-    fs,
+    fs::{self, File},
+    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
+use filetime::FileTime;
+
 use crate::explorer::{entry::FileEntry, sorting::sort_entries};
+
+const COPY_BUFFER_SIZE: usize = 1024 * 1024;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
@@ -187,45 +197,71 @@ pub(super) fn format_open_error(path: &Path, error: &std::io::Error) -> String {
     format!("Could not open {name}: {error}")
 }
 
+#[cfg(test)]
 pub(super) fn move_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationOutcome, String> {
+    prepare_move_paths_to_directory(paths, destination).and_then(run_prepared_file_operation)
+}
+
+pub(super) fn prepare_move_paths_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
     prepare_file_operation(
         paths,
         destination,
         FileOperationKind::Move,
         CopyNamePolicy::Original,
     )
-    .and_then(run_or_return_conflicts)
+    .map(prepared_or_conflicts)
 }
 
+#[cfg(test)]
 pub(super) fn copy_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationOutcome, String> {
+    prepare_copy_paths_to_directory(paths, destination).and_then(run_prepared_file_operation)
+}
+
+pub(super) fn prepare_copy_paths_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
     prepare_file_operation(
         paths,
         destination,
         FileOperationKind::Copy,
         CopyNamePolicy::Original,
     )
-    .and_then(run_or_return_conflicts)
+    .map(prepared_or_conflicts)
 }
 
+#[cfg(test)]
 pub(super) fn copy_paths_to_directory_for_paste(
     paths: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationOutcome, String> {
+    prepare_copy_paths_to_directory_for_paste(paths, destination)
+        .and_then(run_prepared_file_operation)
+}
+
+pub(super) fn prepare_copy_paths_to_directory_for_paste(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
     prepare_file_operation(
         paths,
         destination,
         FileOperationKind::Copy,
         CopyNamePolicy::UseCopyNamesInSameDirectory,
     )
-    .and_then(run_or_return_conflicts)
+    .map(prepared_or_conflicts)
 }
 
+#[cfg(test)]
 pub(super) fn resolve_file_conflicts(
     conflicts: FileConflictBatch,
     choice: ConflictChoice,
@@ -233,9 +269,39 @@ pub(super) fn resolve_file_conflicts(
     execute_file_operation(conflicts.job, choice)
 }
 
+#[cfg(test)]
+fn run_prepared_file_operation(
+    prepared: PreparedFileOperation,
+) -> Result<FileOperationOutcome, String> {
+    match prepared {
+        PreparedFileOperation::Ready(job) => {
+            execute_file_operation(job, ConflictChoice::Replace).map(FileOperationOutcome::Finished)
+        }
+        PreparedFileOperation::Conflicts(conflicts) => {
+            Ok(FileOperationOutcome::Conflicts(conflicts))
+        }
+    }
+}
+
+fn prepared_or_conflicts(job: FileOperationJob) -> PreparedFileOperation {
+    let conflicts = file_conflicts_for_job(&job);
+    if conflicts.is_empty() {
+        PreparedFileOperation::Ready(job)
+    } else {
+        PreparedFileOperation::Conflicts(FileConflictBatch { conflicts, job })
+    }
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum FileOperationOutcome {
     Finished(FileOperationSummary),
+    Conflicts(FileConflictBatch),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum PreparedFileOperation {
+    Ready(FileOperationJob),
     Conflicts(FileConflictBatch),
 }
 
@@ -257,10 +323,11 @@ impl FileConflictBatch {
     }
 
     pub(super) fn operation_label(&self) -> &'static str {
-        match self.job.kind {
-            FileOperationKind::Move => "Moving",
-            FileOperationKind::Copy => "Copying",
-        }
+        self.job.kind.progress_title()
+    }
+
+    pub(super) fn into_job(self) -> FileOperationJob {
+        self.job
     }
 
     pub(super) fn item_count_label(&self) -> String {
@@ -324,6 +391,56 @@ pub(super) enum FileOperationKind {
     Copy,
 }
 
+impl FileOperationKind {
+    pub(super) fn progress_title(self) -> &'static str {
+        match self {
+            FileOperationKind::Move => "Moving",
+            FileOperationKind::Copy => "Copying",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FileOperationPhase {
+    Preparing,
+    Copying,
+    Moving,
+    Removing,
+    Finished,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileOperationProgress {
+    pub(super) kind: FileOperationKind,
+    pub(super) phase: FileOperationPhase,
+    pub(super) total_bytes: u64,
+    pub(super) copied_bytes: u64,
+    pub(super) total_files: usize,
+    pub(super) completed_files: usize,
+    pub(super) current_item: Option<PathBuf>,
+    pub(super) cancellable: bool,
+}
+
+impl FileOperationProgress {
+    pub(super) fn percent(&self) -> Option<f32> {
+        (self.total_bytes > 0)
+            .then(|| (self.copied_bytes as f32 / self.total_bytes as f32).clamp(0.0, 1.0))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileOperationStats {
+    pub(super) total_bytes: u64,
+    pub(super) total_files: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum FileOperationError {
+    Cancelled,
+    Failed(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyNamePolicy {
     Original,
@@ -331,10 +448,26 @@ enum CopyNamePolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FileOperationJob {
-    kind: FileOperationKind,
+pub(super) struct FileOperationJob {
+    pub(super) kind: FileOperationKind,
+    pub(super) stats: FileOperationStats,
     steps: Vec<FileOperationStep>,
     roots: Vec<FileOperationRoot>,
+}
+
+impl FileOperationJob {
+    pub(super) fn initial_progress(&self) -> FileOperationProgress {
+        FileOperationProgress {
+            kind: self.kind,
+            phase: FileOperationPhase::Preparing,
+            total_bytes: self.stats.total_bytes,
+            copied_bytes: 0,
+            total_files: self.stats.total_files,
+            completed_files: 0,
+            current_item: None,
+            cancellable: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -360,18 +493,6 @@ enum FileOperationStep {
     RemoveEmptyDirectory(PathBuf),
 }
 
-fn run_or_return_conflicts(job: FileOperationJob) -> Result<FileOperationOutcome, String> {
-    let conflicts = file_conflicts_for_job(&job);
-    if conflicts.is_empty() {
-        execute_file_operation(job, ConflictChoice::Replace).map(FileOperationOutcome::Finished)
-    } else {
-        Ok(FileOperationOutcome::Conflicts(FileConflictBatch {
-            conflicts,
-            job,
-        }))
-    }
-}
-
 fn prepare_file_operation(
     paths: &[PathBuf],
     destination: &Path,
@@ -393,6 +514,10 @@ fn prepare_file_operation(
     let mut reserved_destinations = HashSet::new();
     let mut steps = Vec::new();
     let mut roots = Vec::new();
+    let mut stats = FileOperationStats {
+        total_bytes: 0,
+        total_files: 0,
+    };
 
     for source in paths {
         if !source.exists() {
@@ -446,7 +571,7 @@ fn prepare_file_operation(
             }
         }
 
-        plan_path_operation(source, &planned_destination, kind, &mut steps)?;
+        plan_path_operation(source, &planned_destination, kind, &mut steps, &mut stats)?;
         roots.push(FileOperationRoot {
             source: source.clone(),
             destination: planned_destination,
@@ -454,7 +579,12 @@ fn prepare_file_operation(
         });
     }
 
-    Ok(FileOperationJob { kind, steps, roots })
+    Ok(FileOperationJob {
+        kind,
+        stats,
+        steps,
+        roots,
+    })
 }
 
 pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
@@ -489,6 +619,7 @@ fn plan_path_operation(
     destination: &Path,
     kind: FileOperationKind,
     steps: &mut Vec<FileOperationStep>,
+    stats: &mut FileOperationStats,
 ) -> Result<(), String> {
     let metadata =
         fs::metadata(source).map_err(|error| format_path_error("read", source, error))?;
@@ -516,6 +647,7 @@ fn plan_path_operation(
                 &destination.join(entry.file_name()),
                 kind,
                 steps,
+                stats,
             )?;
         }
 
@@ -531,6 +663,8 @@ fn plan_path_operation(
         ));
     } else {
         let conflict = destination.exists();
+        stats.total_files += 1;
+        stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
         match kind {
             FileOperationKind::Copy => steps.push(FileOperationStep::CopyFile {
                 source: source.to_path_buf(),
@@ -570,16 +704,47 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
         .collect()
 }
 
+#[cfg(test)]
 fn execute_file_operation(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
 ) -> Result<FileOperationSummary, String> {
+    execute_file_operation_with_progress(
+        job,
+        conflict_choice,
+        Arc::new(AtomicBool::new(false)),
+        |_| {},
+    )
+    .map_err(|error| match error {
+        FileOperationError::Cancelled => "The file operation was cancelled.".to_owned(),
+        FileOperationError::Failed(error) => error,
+    })
+}
+
+pub(super) fn execute_file_operation_with_progress(
+    job: FileOperationJob,
+    conflict_choice: ConflictChoice,
+    cancel: Arc<AtomicBool>,
+    mut on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
     let mut operated_destinations = HashSet::new();
+    let mut progress = job.initial_progress();
+    on_progress(progress.clone());
 
     for step in &job.steps {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress);
+            return Err(FileOperationError::Cancelled);
+        }
+
         match step {
             FileOperationStep::CreateDirectory(path) => {
-                fs::create_dir(path).map_err(|error| format_path_error("create", path, error))?;
+                progress.phase = FileOperationPhase::Preparing;
+                progress.current_item = Some(path.clone());
+                on_progress(progress.clone());
+                fs::create_dir(path).map_err(|error| operation_error("create", path, error))?;
             }
             FileOperationStep::CopyFile {
                 source,
@@ -589,8 +754,17 @@ fn execute_file_operation(
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     continue;
                 }
-                copy_source_file(source, destination)
-                    .map_err(|error| format_path_error("copy", source, error))?;
+                progress.phase = FileOperationPhase::Copying;
+                progress.current_item = Some(source.clone());
+                on_progress(progress.clone());
+                copy_source_file_with_progress(
+                    source,
+                    destination,
+                    &cancel,
+                    &mut progress,
+                    &mut on_progress,
+                )
+                .map_err(|error| operation_error("copy", source, error))?;
                 operated_destinations.insert(destination.clone());
             }
             FileOperationStep::MoveFile {
@@ -602,18 +776,41 @@ fn execute_file_operation(
                     continue;
                 }
                 if *conflict {
-                    copy_source_file(source, destination)
-                        .map_err(|error| format_path_error("move", source, error))?;
+                    progress.phase = FileOperationPhase::Copying;
+                    progress.current_item = Some(source.clone());
+                    on_progress(progress.clone());
+                    copy_source_file_with_progress(
+                        source,
+                        destination,
+                        &cancel,
+                        &mut progress,
+                        &mut on_progress,
+                    )
+                    .map_err(|error| operation_error("move", source, error))?;
                     remove_source(source)
-                        .map_err(|error| format_path_error("remove", source, error))?;
+                        .map_err(|error| operation_error("remove", source, error))?;
                 } else {
-                    move_source_file(source, destination)
-                        .map_err(|error| format_path_error("move", source, error))?;
+                    progress.phase = FileOperationPhase::Moving;
+                    progress.current_item = Some(source.clone());
+                    on_progress(progress.clone());
+                    move_source_file_with_progress(
+                        source,
+                        destination,
+                        &cancel,
+                        &mut progress,
+                        &mut on_progress,
+                    )
+                    .map_err(|error| operation_error("move", source, error))?;
                 }
                 operated_destinations.insert(destination.clone());
             }
-            FileOperationStep::RemoveEmptyDirectory(path) => remove_empty_directory(path)
-                .map_err(|error| format_path_error("remove", path, error))?,
+            FileOperationStep::RemoveEmptyDirectory(path) => {
+                progress.phase = FileOperationPhase::Removing;
+                progress.current_item = Some(path.clone());
+                on_progress(progress.clone());
+                remove_empty_directory(path)
+                    .map_err(|error| operation_error("remove", path, error))?;
+            }
         }
     }
 
@@ -632,21 +829,157 @@ fn execute_file_operation(
         }
     }
 
+    progress.phase = FileOperationPhase::Finished;
+    progress.current_item = None;
+    progress.copied_bytes = progress.copied_bytes.max(progress.total_bytes);
+    progress.completed_files = progress.completed_files.max(progress.total_files);
+    progress.cancellable = false;
+    on_progress(progress);
+
     Ok(summary)
 }
 
-fn copy_source_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::copy(source, destination).map(|_| ())
-}
-
-fn move_source_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn move_source_file_with_progress(
+    source: &Path,
+    destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> std::io::Result<()> {
     match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let file_size = fs::metadata(destination)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            progress.copied_bytes = progress.copied_bytes.saturating_add(file_size);
+            progress.completed_files += 1;
+            on_progress(progress.clone());
+            Ok(())
+        }
         Err(error) if is_cross_device_error(&error) => {
-            copy_source_file(source, destination)?;
+            progress.phase = FileOperationPhase::Copying;
+            on_progress(progress.clone());
+            copy_source_file_with_progress(source, destination, cancel, progress, on_progress)?;
             remove_source(source)
         }
         Err(error) => Err(error),
+    }
+}
+
+fn copy_source_file_with_progress(
+    source: &Path,
+    destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> std::io::Result<()> {
+    let metadata = fs::metadata(source)?;
+    let temp_destination = temp_destination_for(destination)?;
+    let copy_result =
+        copy_source_file_to_temp(source, &temp_destination, cancel, progress, on_progress);
+
+    match copy_result {
+        Ok(()) => {
+            preserve_file_metadata(&metadata, &temp_destination)?;
+            replace_destination_with_temp(&temp_destination, destination)?;
+            progress.completed_files += 1;
+            on_progress(progress.clone());
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_destination);
+            Err(error)
+        }
+    }
+}
+
+fn copy_source_file_to_temp(
+    source: &Path,
+    temp_destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> std::io::Result<()> {
+    let mut source_file = File::open(source)?;
+    let mut destination_file = File::create(temp_destination)?;
+    let mut buffer = vec![0; COPY_BUFFER_SIZE];
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "file operation cancelled",
+            ));
+        }
+
+        let read = source_file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        destination_file.write_all(&buffer[..read])?;
+        progress.copied_bytes = progress.copied_bytes.saturating_add(read as u64);
+        on_progress(progress.clone());
+    }
+
+    destination_file.sync_all()?;
+    Ok(())
+}
+
+fn preserve_file_metadata(metadata: &fs::Metadata, destination: &Path) -> std::io::Result<()> {
+    fs::set_permissions(destination, metadata.permissions())?;
+    let accessed = FileTime::from_last_access_time(metadata);
+    let modified = FileTime::from_last_modification_time(metadata);
+    filetime::set_file_times(destination, accessed, modified)
+}
+
+fn temp_destination_for(destination: &Path) -> std::io::Result<PathBuf> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("file"))
+        .to_string_lossy();
+    let process_id = std::process::id();
+
+    loop {
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".explorer-copy-{process_id}-{counter}-{file_name}.tmp"
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_destination_with_temp(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temp, destination)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_destination_with_temp(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let temp = wide(temp);
+    let destination = wide(destination);
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temp.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))
     }
 }
 
@@ -715,6 +1048,14 @@ fn canonicalize_for_operation(path: &Path) -> Result<PathBuf, String> {
 
 fn is_cross_device_error(error: &std::io::Error) -> bool {
     matches!(error.kind(), std::io::ErrorKind::CrossesDevices)
+}
+
+fn operation_error(operation: &str, path: &Path, error: std::io::Error) -> FileOperationError {
+    if error.kind() == std::io::ErrorKind::Interrupted && error.to_string().contains("cancelled") {
+        FileOperationError::Cancelled
+    } else {
+        FileOperationError::Failed(format_path_error(operation, path, error))
+    }
 }
 
 fn format_path_error(operation: &str, path: &Path, error: std::io::Error) -> String {
@@ -839,6 +1180,148 @@ mod tests {
             FileOperationOutcome::Conflicts(conflicts) => conflicts,
             FileOperationOutcome::Finished(_) => panic!("expected file conflicts"),
         }
+    }
+
+    fn ready_job(result: Result<PreparedFileOperation, String>) -> FileOperationJob {
+        match result.expect("prepared operation") {
+            PreparedFileOperation::Ready(job) => job,
+            PreparedFileOperation::Conflicts(conflicts) => {
+                panic!(
+                    "expected ready operation, found {} conflicts",
+                    conflicts.len()
+                )
+            }
+        }
+    }
+
+    fn temp_copy_files(path: &Path) -> Vec<PathBuf> {
+        fs::read_dir(path)
+            .expect("read temp files")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(".explorer-copy-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prepared_operation_counts_nested_file_totals() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).expect("create nested source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(source.join("a.txt"), b"abc").expect("create first file");
+        fs::write(source.join("nested").join("b.txt"), b"defg").expect("create second file");
+
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+
+        assert_eq!(job.stats.total_files, 2);
+        assert_eq!(job.stats.total_bytes, 7);
+    }
+
+    #[test]
+    fn progress_copy_uses_temp_file_and_reports_bytes() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let data = vec![7; COPY_BUFFER_SIZE + 128];
+        fs::write(&source, &data).expect("create source");
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        let summary = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("copy with progress");
+
+        let copied = destination.join("large.bin");
+        assert_eq!(fs::read(&copied).unwrap(), data);
+        assert_eq!(summary.destination_paths, vec![copied]);
+        assert!(temp_copy_files(&destination).is_empty());
+        assert!(
+            progress_events
+                .iter()
+                .any(|progress| progress.copied_bytes > 0)
+        );
+        assert_eq!(
+            progress_events.last().map(|progress| progress.phase),
+            Some(FileOperationPhase::Finished)
+        );
+    }
+
+    #[test]
+    fn cancelling_chunked_copy_removes_temp_file_and_keeps_source() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&source, vec![9; COPY_BUFFER_SIZE + 128]).expect("create source");
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut requested_cancel = false;
+
+        let result = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            cancel.clone(),
+            |progress| {
+                if progress.copied_bytes > 0 && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+
+        assert_eq!(result, Err(FileOperationError::Cancelled));
+        assert!(source.exists());
+        assert!(!destination.join("large.bin").exists());
+        assert!(temp_copy_files(&destination).is_empty());
+    }
+
+    #[test]
+    fn chunked_copy_preserves_modified_time() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&source, b"data").expect("create source");
+        let modified = FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source, modified).expect("set modified time");
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+
+        execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .expect("copy with metadata");
+
+        let copied_metadata = fs::metadata(destination.join("file.txt")).unwrap();
+        assert_eq!(
+            FileTime::from_last_modification_time(&copied_metadata),
+            modified
+        );
     }
 
     #[test]

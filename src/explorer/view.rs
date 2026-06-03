@@ -1,10 +1,17 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
-use gpui::{AnyWindowHandle, FocusHandle, UniformListScrollHandle};
+use gpui::{AnyWindowHandle, FocusHandle, Task, UniformListScrollHandle};
 
 use crate::explorer::{
-    drag_drop::DropIndicator, entry::FileEntry, filesystem::FileConflictBatch,
-    filesystem::load_entries, mouse_selection::MouseSelectionDrag, scrollbar::ScrollbarDrag,
+    drag_drop::DropIndicator,
+    entry::FileEntry,
+    filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
+    mouse_selection::MouseSelectionDrag,
+    scrollbar::ScrollbarDrag,
     selection::SelectionState,
 };
 
@@ -26,7 +33,14 @@ pub struct ExplorerView {
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
+    pub(super) active_file_operation: Option<FileOperationState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
+}
+
+pub(super) struct FileOperationState {
+    pub(super) progress: FileOperationProgress,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) task: Option<Task<()>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +85,7 @@ impl ExplorerView {
             active_drop_indicator: None,
             pending_permanent_delete: None,
             pending_file_conflict: None,
+            active_file_operation: None,
             active_dialog_window: None,
         };
         view.reload();

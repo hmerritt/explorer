@@ -10,11 +10,12 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use crate::explorer::{
     entry::FileEntry,
-    filesystem::FileConflictBatch,
+    filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::format_size,
     view::{ExplorerView, PendingPermanentDelete},
@@ -57,11 +58,22 @@ const CONFLICT_COMMAND_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const CONFLICT_COMMAND_ICON_SLOT_WIDTH: f32 = 18.0;
 const CONFLICT_COMMAND_ICON_TEXT_SIZE: f32 = 20.0;
 const CONFLICT_COMMAND_LABEL_TEXT_SIZE: f32 = 16.0;
+const PROGRESS_DIALOG_WIDTH: f32 = 430.0;
+const PROGRESS_DIALOG_TITLE_TEXT_SIZE: f32 = 16.0;
+const PROGRESS_DIALOG_TEXT_SIZE: f32 = 12.0;
+const PROGRESS_DIALOG_CURRENT_ITEM_TOP_MARGIN: f32 = 10.0;
+const PROGRESS_DIALOG_BAR_TOP_MARGIN: f32 = 12.0;
+const PROGRESS_DIALOG_BAR_HEIGHT: f32 = 16.0;
+const PROGRESS_DIALOG_BAR_WIDTH: f32 = 390.0;
+const PROGRESS_DIALOG_STATUS_TOP_MARGIN: f32 = 8.0;
+const PROGRESS_DIALOG_BUTTONS_TOP_MARGIN: f32 = 16.0;
+const PROGRESS_DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerDialogKind {
     PermanentDelete(PendingPermanentDelete),
     FileConflict(FileConflictBatch),
+    FileOperation(FileOperationProgress),
 }
 
 pub(super) struct ExplorerDialog {
@@ -72,6 +84,8 @@ pub(super) struct ExplorerDialog {
     folder_size_state: FolderSizeState,
     folder_size_task: Option<Task<()>>,
     folder_size_cancel: Option<Arc<AtomicBool>>,
+    file_operation_progress: Option<FileOperationProgress>,
+    file_operation_task: Option<Task<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +154,33 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn open_file_operation_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.active_dialog_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.active_dialog_window = None;
+        }
+
+        let Some(progress) = self
+            .active_file_operation
+            .as_ref()
+            .map(|operation| operation.progress.clone())
+        else {
+            return;
+        };
+
+        match open_dialog_window(ExplorerDialogKind::FileOperation(progress), cx.entity(), cx) {
+            Ok(handle) => self.active_dialog_window = Some(handle),
+            Err(error) => {
+                self.open_error = Some(format!("Failed to open progress dialog: {error}"))
+            }
+        }
+    }
+
     pub(super) fn clear_active_dialog_window(&mut self) {
         self.active_dialog_window = None;
     }
@@ -148,7 +189,8 @@ impl ExplorerView {
         if !completed {
             match kind {
                 ExplorerDialogKind::PermanentDelete(_) => self.cancel_pending_permanent_delete(),
-                ExplorerDialogKind::FileConflict(_) => self.skip_pending_file_conflicts(),
+                ExplorerDialogKind::FileConflict(_) => {}
+                ExplorerDialogKind::FileOperation(_) => self.cancel_active_file_operation(),
             }
         }
         self.clear_active_dialog_window();
@@ -162,6 +204,11 @@ impl ExplorerDialog {
         focus_handle: FocusHandle,
         cx: &mut Context<Self>,
     ) -> Self {
+        let file_operation_progress = match &kind {
+            ExplorerDialogKind::FileOperation(progress) => Some(progress.clone()),
+            _ => None,
+        };
+
         let mut dialog = Self {
             kind,
             explorer,
@@ -170,8 +217,11 @@ impl ExplorerDialog {
             folder_size_state: FolderSizeState::NotNeeded,
             folder_size_task: None,
             folder_size_cancel: None,
+            file_operation_progress,
+            file_operation_task: None,
         };
         dialog.start_folder_size_task(cx);
+        dialog.start_file_operation_progress_task(cx);
         dialog
     }
 
@@ -197,11 +247,21 @@ impl ExplorerDialog {
         let _ = self.explorer.update(cx, |explorer, cx| {
             match kind {
                 ExplorerDialogKind::PermanentDelete(_) => {
-                    explorer.cancel_pending_permanent_delete()
+                    explorer.cancel_pending_permanent_delete();
+                    explorer.clear_active_dialog_window();
                 }
-                ExplorerDialogKind::FileConflict(_) => explorer.skip_pending_file_conflicts(),
+                ExplorerDialogKind::FileConflict(_) => {
+                    explorer.clear_active_dialog_window();
+                    explorer.resolve_pending_file_conflicts_and_open_progress(
+                        crate::explorer::filesystem::ConflictChoice::Skip,
+                        cx,
+                    )
+                }
+                ExplorerDialogKind::FileOperation(_) => {
+                    explorer.cancel_active_file_operation();
+                    explorer.clear_active_dialog_window();
+                }
             }
-            explorer.clear_active_dialog_window();
             cx.notify();
         });
         window.remove_window();
@@ -210,8 +270,11 @@ impl ExplorerDialog {
     fn replace_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
         let _ = self.explorer.update(cx, |explorer, cx| {
-            explorer.replace_pending_file_conflicts();
             explorer.clear_active_dialog_window();
+            explorer.resolve_pending_file_conflicts_and_open_progress(
+                crate::explorer::filesystem::ConflictChoice::Replace,
+                cx,
+            );
             cx.notify();
         });
         window.remove_window();
@@ -222,7 +285,17 @@ impl ExplorerDialog {
         let kind = self.kind.clone();
         let completed = self.completed;
         let _ = self.explorer.update(cx, move |explorer, cx| {
-            explorer.dialog_window_released(kind, completed);
+            match kind {
+                ExplorerDialogKind::FileConflict(_) if !completed => {
+                    explorer.clear_active_dialog_window();
+                    explorer.resolve_pending_file_conflicts_and_open_progress(
+                        crate::explorer::filesystem::ConflictChoice::Skip,
+                        cx,
+                    );
+                }
+                ExplorerDialogKind::FileConflict(_) => {}
+                kind => explorer.dialog_window_released(kind, completed),
+            }
             cx.notify();
         });
     }
@@ -312,6 +385,51 @@ impl ExplorerDialog {
             _ => "Size: calculating...".to_owned(),
         }
     }
+
+    fn start_file_operation_progress_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.kind, ExplorerDialogKind::FileOperation(_)) {
+            return;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(PROGRESS_DIALOG_POLL_INTERVAL)
+                    .await;
+
+                let should_continue = this
+                    .update(cx, |dialog, cx| {
+                        if dialog.completed
+                            || !matches!(dialog.kind, ExplorerDialogKind::FileOperation(_))
+                        {
+                            return false;
+                        }
+                        dialog.refresh_file_operation_progress(cx);
+                        cx.notify();
+                        dialog.file_operation_progress.is_some()
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    break;
+                }
+            }
+        });
+        self.file_operation_task = Some(task);
+    }
+
+    fn refresh_file_operation_progress(&mut self, cx: &mut Context<Self>) {
+        self.file_operation_progress = self
+            .explorer
+            .read_with(cx, |explorer, _| {
+                explorer
+                    .active_file_operation
+                    .as_ref()
+                    .map(|operation| operation.progress.clone())
+            })
+            .ok()
+            .flatten();
+    }
 }
 
 impl Render for ExplorerDialog {
@@ -335,6 +453,7 @@ impl Render for ExplorerDialog {
                 ExplorerDialogKind::FileConflict(conflicts) => {
                     self.render_file_conflict(conflicts, cx)
                 }
+                ExplorerDialogKind::FileOperation(_) => self.render_file_operation(cx),
             })
     }
 }
@@ -457,6 +576,64 @@ impl ExplorerDialog {
             )
             .into_any_element()
     }
+
+    fn render_file_operation(&self, cx: &mut Context<Self>) -> AnyElement {
+        let progress = self.file_operation_progress.clone();
+        let title = progress
+            .as_ref()
+            .map(|progress| progress.kind.progress_title())
+            .unwrap_or("Working");
+        let current_item = progress
+            .as_ref()
+            .and_then(|progress| progress.current_item.as_deref())
+            .map(path_display_name)
+            .unwrap_or_else(|| "Preparing...".to_owned());
+        let item_label = progress
+            .as_ref()
+            .map(file_operation_item_label)
+            .unwrap_or_else(|| "Preparing".to_owned());
+        let percent = progress.as_ref().and_then(FileOperationProgress::percent);
+
+        div()
+            .id("file-operation-progress")
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(PROGRESS_DIALOG_TITLE_TEXT_SIZE))
+                    .child(SharedString::from(title.to_owned())),
+            )
+            .child(
+                div()
+                    .mt(px(PROGRESS_DIALOG_CURRENT_ITEM_TOP_MARGIN))
+                    .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
+                    .child(SharedString::from(current_item)),
+            )
+            .child(render_file_operation_progress_bar(percent))
+            .child(
+                div()
+                    .mt(px(PROGRESS_DIALOG_STATUS_TOP_MARGIN))
+                    .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
+                    .text_color(rgb(0x595959))
+                    .child(SharedString::from(item_label)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
+                    .child(
+                        dialog_button("file-operation-cancel", "Cancel").on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.cancel(window, cx);
+                                cx.stop_propagation();
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 fn open_dialog_window(
@@ -512,6 +689,7 @@ fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
             let height = file_conflict_dialog_height(&text.title, cx);
             (CONFLICT_DIALOG_WIDTH, height)
         }
+        ExplorerDialogKind::FileOperation(_) => (PROGRESS_DIALOG_WIDTH, progress_dialog_height()),
     }
 }
 
@@ -570,6 +748,21 @@ fn file_conflict_dialog_height_for_title_height(title_height: f32) -> f32 {
         + SHELL_DIALOG_VERTICAL_SLACK
 }
 
+fn progress_dialog_height() -> f32 {
+    SHELL_DIALOG_TOP_PADDING
+        + dialog_line_height(PROGRESS_DIALOG_TITLE_TEXT_SIZE)
+        + PROGRESS_DIALOG_CURRENT_ITEM_TOP_MARGIN
+        + dialog_line_height(PROGRESS_DIALOG_TEXT_SIZE)
+        + PROGRESS_DIALOG_BAR_TOP_MARGIN
+        + PROGRESS_DIALOG_BAR_HEIGHT
+        + PROGRESS_DIALOG_STATUS_TOP_MARGIN
+        + dialog_line_height(PROGRESS_DIALOG_TEXT_SIZE)
+        + PROGRESS_DIALOG_BUTTONS_TOP_MARGIN
+        + DELETE_DIALOG_BUTTON_HEIGHT
+        + SHELL_DIALOG_BOTTOM_PADDING
+        + SHELL_DIALOG_VERTICAL_SLACK
+}
+
 fn dialog_content_width(window_width: f32) -> f32 {
     (window_width - (SHELL_DIALOG_HORIZONTAL_PADDING * 2.0)).max(0.0)
 }
@@ -605,6 +798,7 @@ impl ExplorerDialogKind {
         match self {
             ExplorerDialogKind::PermanentDelete(_) => "Delete File",
             ExplorerDialogKind::FileConflict(_) => "Replace or Skip Files",
+            ExplorerDialogKind::FileOperation(_) => "File Operation",
         }
     }
 }
@@ -772,6 +966,49 @@ fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
                 .child(SharedString::from(text.destination_name.clone())),
         )
         .into_any_element()
+}
+
+fn render_file_operation_progress_bar(percent: Option<f32>) -> AnyElement {
+    let fill_width = percent.unwrap_or(0.0) * PROGRESS_DIALOG_BAR_WIDTH;
+
+    div()
+        .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
+        .w(px(PROGRESS_DIALOG_BAR_WIDTH))
+        .h(px(PROGRESS_DIALOG_BAR_HEIGHT))
+        .border_1()
+        .border_color(rgb(0x8a8a8a))
+        .bg(rgb(0xffffff))
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(px(fill_width))
+                .bg(rgb(SHELL_DIALOG_LINK_BLUE)),
+        )
+        .into_any_element()
+}
+
+fn file_operation_item_label(progress: &FileOperationProgress) -> String {
+    let action = match progress.phase {
+        FileOperationPhase::Preparing => "Preparing",
+        FileOperationPhase::Copying => "Copying",
+        FileOperationPhase::Moving => "Moving",
+        FileOperationPhase::Removing => "Removing",
+        FileOperationPhase::Finished => "Finished",
+        FileOperationPhase::Cancelled => "Cancelled",
+    };
+
+    if progress.total_files == 0 {
+        return action.to_owned();
+    }
+
+    let copied = format_size(Some(progress.copied_bytes));
+    let total = format_size(Some(progress.total_bytes));
+    format!(
+        "{action} {} of {} items ({copied} of {total})",
+        progress.completed_files.min(progress.total_files),
+        progress.total_files
+    )
 }
 
 fn dialog_command_row(
@@ -1135,6 +1372,24 @@ mod tests {
         );
 
         assert!(wrapped_height > single_line_height);
+    }
+
+    #[test]
+    fn progress_dialog_height_fits_cancel_button_row() {
+        let minimum_height = SHELL_DIALOG_TOP_PADDING
+            + dialog_line_height(PROGRESS_DIALOG_TITLE_TEXT_SIZE)
+            + PROGRESS_DIALOG_CURRENT_ITEM_TOP_MARGIN
+            + dialog_line_height(PROGRESS_DIALOG_TEXT_SIZE)
+            + PROGRESS_DIALOG_BAR_TOP_MARGIN
+            + PROGRESS_DIALOG_BAR_HEIGHT
+            + PROGRESS_DIALOG_STATUS_TOP_MARGIN
+            + dialog_line_height(PROGRESS_DIALOG_TEXT_SIZE)
+            + PROGRESS_DIALOG_BUTTONS_TOP_MARGIN
+            + DELETE_DIALOG_BUTTON_HEIGHT
+            + SHELL_DIALOG_BOTTOM_PADDING;
+
+        assert!(progress_dialog_height() >= minimum_height);
+        assert_approx_eq(progress_dialog_height(), 188.0);
     }
 
     #[test]

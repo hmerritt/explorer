@@ -1,6 +1,12 @@
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
 
 use gpui::Context;
@@ -10,12 +16,18 @@ use crate::explorer::{
         FileClipboard, FileClipboardOperation, clipboard_item_for_files, file_clipboard_from_item,
     },
     filesystem::{
-        ConflictChoice, FileOperationOutcome, FileOperationSummary,
-        copy_paths_to_directory_for_paste, move_paths_to_directory, remove_paths_permanently,
-        resolve_file_conflicts, trash_paths,
+        ConflictChoice, FileOperationError, FileOperationJob, FileOperationSummary,
+        PreparedFileOperation, execute_file_operation_with_progress,
+        prepare_copy_paths_to_directory_for_paste, prepare_move_paths_to_directory,
+        remove_paths_permanently, trash_paths,
     },
-    view::{ExplorerView, PendingPermanentDelete},
+    view::{ExplorerView, FileOperationState, PendingPermanentDelete},
 };
+
+#[cfg(test)]
+use crate::explorer::filesystem::{FileOperationOutcome, move_paths_to_directory};
+
+const FILE_OPERATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 impl ExplorerView {
     pub(super) fn copy_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
@@ -59,14 +71,14 @@ impl ExplorerView {
 
         match clipboard.operation {
             FileClipboardOperation::Copy => {
-                self.handle_file_command_result_and_open_dialog(
-                    copy_paths_to_directory_for_paste(&clipboard.paths, &self.path),
+                self.handle_prepared_file_command_result_and_open_dialog(
+                    prepare_copy_paths_to_directory_for_paste(&clipboard.paths, &self.path),
                     cx,
                 );
             }
             FileClipboardOperation::Cut => {
-                let result = move_paths_to_directory(&clipboard.paths, &self.path);
-                self.handle_file_command_result_and_open_dialog(result, cx);
+                let result = prepare_move_paths_to_directory(&clipboard.paths, &self.path);
+                self.handle_prepared_file_command_result_and_open_dialog(result, cx);
             }
         }
     }
@@ -129,14 +141,6 @@ impl ExplorerView {
         self.pending_permanent_delete = None;
     }
 
-    pub(super) fn replace_pending_file_conflicts(&mut self) {
-        self.resolve_pending_file_conflicts(ConflictChoice::Replace);
-    }
-
-    pub(super) fn skip_pending_file_conflicts(&mut self) {
-        self.resolve_pending_file_conflicts(ConflictChoice::Skip);
-    }
-
     pub(super) fn selected_file_clipboard(
         &self,
         operation: FileClipboardOperation,
@@ -163,6 +167,7 @@ impl ExplorerView {
         self.cut_paths.contains(path)
     }
 
+    #[cfg(test)]
     pub(super) fn handle_file_command_result(
         &mut self,
         result: Result<FileOperationOutcome, String>,
@@ -182,23 +187,147 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn handle_file_command_result_and_open_dialog(
+    pub(super) fn handle_prepared_file_command_result_and_open_dialog(
         &mut self,
-        result: Result<FileOperationOutcome, String>,
+        result: Result<PreparedFileOperation, String>,
         cx: &mut Context<Self>,
     ) {
-        self.handle_file_command_result(result);
-        self.open_pending_dialog_window(cx);
+        match result {
+            Ok(PreparedFileOperation::Ready(job)) => {
+                self.start_file_operation(job, ConflictChoice::Replace, cx);
+            }
+            Ok(PreparedFileOperation::Conflicts(conflicts)) => {
+                self.pending_file_conflict = Some(conflicts);
+                self.open_error = None;
+                self.open_pending_dialog_window(cx);
+            }
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload();
+            }
+        }
     }
 
-    fn resolve_pending_file_conflicts(&mut self, choice: ConflictChoice) {
+    pub(super) fn resolve_pending_file_conflicts_and_open_progress(
+        &mut self,
+        choice: ConflictChoice,
+        cx: &mut Context<Self>,
+    ) {
         let Some(conflicts) = self.pending_file_conflict.take() else {
             return;
         };
+        self.start_file_operation(conflicts.into_job(), choice, cx);
+    }
 
-        match resolve_file_conflicts(conflicts, choice) {
+    pub(super) fn cancel_active_file_operation(&mut self) {
+        if let Some(operation) = self.active_file_operation.as_ref() {
+            operation.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn start_file_operation(
+        &mut self,
+        job: FileOperationJob,
+        conflict_choice: ConflictChoice,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_file_operation.is_some() {
+            self.open_error = Some("Another file operation is already running.".to_owned());
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = job.initial_progress();
+        self.active_file_operation = Some(FileOperationState {
+            progress: progress.clone(),
+            cancel: cancel.clone(),
+            task: None,
+        });
+        self.open_error = None;
+        self.open_file_operation_window(cx);
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            let finished = finished.clone();
+            async move |this, cx| {
+                let operation_task = cx.background_executor().spawn({
+                    let progress_tx = progress_tx.clone();
+                    let finished = finished.clone();
+                    async move {
+                        let result = execute_file_operation_with_progress(
+                            job,
+                            conflict_choice,
+                            cancel,
+                            |progress| {
+                                let _ = progress_tx.send(progress);
+                            },
+                        );
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    cx.background_executor()
+                        .timer(FILE_OPERATION_PROGRESS_INTERVAL)
+                        .await;
+                    Self::drain_file_operation_progress(&this, cx, &progress_rx);
+                }
+
+                let result = operation_task.await;
+                Self::drain_file_operation_progress(&this, cx, &progress_rx);
+
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.complete_active_file_operation(result, cx);
+                    cx.notify();
+                });
+            }
+        });
+
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    fn drain_file_operation_progress(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        progress_rx: &mpsc::Receiver<crate::explorer::filesystem::FileOperationProgress>,
+    ) {
+        let mut latest = None;
+        while let Ok(progress) = progress_rx.try_recv() {
+            latest = Some(progress);
+        }
+
+        if let Some(progress) = latest {
+            let _ = this.update(cx, |explorer, cx| {
+                if let Some(operation) = explorer.active_file_operation.as_mut() {
+                    operation.progress = progress;
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    fn complete_active_file_operation(
+        &mut self,
+        result: Result<FileOperationSummary, FileOperationError>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.active_dialog_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.active_file_operation = None;
+
+        match result {
             Ok(summary) => self.finish_file_operation(summary),
-            Err(error) => {
+            Err(FileOperationError::Cancelled) => {
+                self.open_error = None;
+                self.reload();
+            }
+            Err(FileOperationError::Failed(error)) => {
                 self.open_error = Some(error);
                 self.reload();
             }

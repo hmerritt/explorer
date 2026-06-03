@@ -15,6 +15,7 @@ icon = ["assets/icon.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+filetime = "0.2.29"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 serde = { version = "1.0.228", features = ["derive"] }

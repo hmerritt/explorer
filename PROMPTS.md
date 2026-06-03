@@ -1,5 +1,9 @@
 ## New
 
+macOS opens along with a terminal. It should only open the GUI window.
+
+---
+
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ---
