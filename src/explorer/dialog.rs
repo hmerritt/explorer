@@ -1,12 +1,15 @@
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, LineFragment, Render, SharedString, TitlebarOptions, WeakEntity, Window,
+    IntoElement, LineFragment, Render, SharedString, TextRun, TitlebarOptions, WeakEntity, Window,
     WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, font, prelude::*, px,
     rgb, size,
 };
+use std::path::Path;
 
 use crate::explorer::{
+    entry::FileEntry,
     filesystem::FileConflictBatch,
+    formatting::format_size,
     view::{ExplorerView, PendingPermanentDelete},
 };
 
@@ -27,10 +30,16 @@ const SHELL_DIALOG_BUTTON_HOVER_BORDER: u32 = 0x0078d7;
 const SHELL_DIALOG_ICON_GREEN: u32 = 0x36a646;
 const SHELL_DIALOG_LINE_HEIGHT_SCALE: f32 = 1.618;
 const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
-const DELETE_DIALOG_WIDTH: f32 = 380.0;
-const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 14.0;
-const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 18.0;
+const DELETE_DIALOG_WIDTH: f32 = 460.0;
+const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 12.0;
+const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 24.0;
 const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
+const DELETE_DIALOG_ICON_SLOT_WIDTH: f32 = 46.0;
+const DELETE_DIALOG_ICON_SLOT_HEIGHT: f32 = 64.0;
+const DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT: f32 = 46.0;
+const DELETE_DIALOG_ICON_GAP: f32 = 16.0;
+const DELETE_DIALOG_DETAILS_TOP_MARGIN: f32 = 8.0;
+const DELETE_DIALOG_TRUNCATION_SUFFIX: &str = "...";
 const CONFLICT_HEADER_TEXT_SIZE: f32 = 12.0;
 const CONFLICT_TITLE_TEXT_SIZE: f32 = 16.0;
 const CONFLICT_TITLE_TOP_MARGIN: f32 = 5.0;
@@ -58,6 +67,14 @@ pub(super) struct ExplorerDialog {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct PermanentDeleteDialogText {
     pub(super) message: String,
+    pub(super) file_name: Option<String>,
+    pub(super) size_label: Option<String>,
+}
+
+impl PermanentDeleteDialogText {
+    fn has_file_details(&self) -> bool {
+        self.file_name.is_some() || self.size_label.is_some()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -177,7 +194,7 @@ impl ExplorerDialog {
 }
 
 impl Render for ExplorerDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
@@ -192,7 +209,7 @@ impl Render for ExplorerDialog {
             .on_action(cx.listener(Self::handle_cancel))
             .child(match self.kind.clone() {
                 ExplorerDialogKind::PermanentDelete(pending) => {
-                    self.render_permanent_delete(pending, cx)
+                    self.render_permanent_delete(pending, window, cx)
                 }
                 ExplorerDialogKind::FileConflict(conflicts) => {
                     self.render_file_conflict(conflicts, cx)
@@ -211,27 +228,33 @@ impl ExplorerDialog {
     fn render_permanent_delete(
         &self,
         pending: PendingPermanentDelete,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let text = permanent_delete_dialog_text(&pending);
+        let file_name = text
+            .file_name
+            .as_deref()
+            .map(|name| truncated_permanent_delete_file_name(name, window));
+        let body = if text.has_file_details() {
+            render_permanent_delete_file_body(text, file_name)
+        } else {
+            render_permanent_delete_compact_body(text.message)
+        };
 
         div()
             .id("permanent-delete-confirmation")
             .flex()
             .flex_col()
             .w_full()
-            .child(
-                div()
-                    .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
-                    .child(SharedString::from(text.message)),
-            )
+            .child(body)
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .justify_end()
                     .gap(px(8.0))
-                    .mt(px(18.0))
+                    .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
                     .child(
                         dialog_button("permanent-delete-yes", "Yes").on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -357,7 +380,7 @@ fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
     match kind {
         ExplorerDialogKind::PermanentDelete(pending) => {
             let text = permanent_delete_dialog_text(pending);
-            let height = permanent_delete_dialog_height(&text.message, cx);
+            let height = permanent_delete_dialog_height(&text, cx);
             (DELETE_DIALOG_WIDTH, height)
         }
         ExplorerDialogKind::FileConflict(conflicts) => {
@@ -368,20 +391,32 @@ fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
     }
 }
 
-fn permanent_delete_dialog_height(message: &str, cx: &App) -> f32 {
+fn permanent_delete_dialog_height(text: &PermanentDeleteDialogText, cx: &App) -> f32 {
     let prompt_height = wrapped_dialog_text_height(
-        message,
+        &text.message,
         DELETE_DIALOG_PROMPT_TEXT_SIZE,
-        dialog_content_width(DELETE_DIALOG_WIDTH),
+        permanent_delete_detail_text_width(),
         cx,
     );
 
-    permanent_delete_dialog_height_for_prompt_height(prompt_height)
+    let content_height = if text.has_file_details() {
+        permanent_delete_text_stack_height(prompt_height).max(DELETE_DIALOG_ICON_SLOT_HEIGHT)
+    } else {
+        prompt_height.max(DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT)
+    };
+
+    permanent_delete_dialog_height_for_content_height(content_height)
 }
 
-fn permanent_delete_dialog_height_for_prompt_height(prompt_height: f32) -> f32 {
+fn permanent_delete_text_stack_height(prompt_height: f32) -> f32 {
+    prompt_height
+        + DELETE_DIALOG_DETAILS_TOP_MARGIN
+        + (dialog_line_height(DELETE_DIALOG_PROMPT_TEXT_SIZE) * 2.0)
+}
+
+fn permanent_delete_dialog_height_for_content_height(content_height: f32) -> f32 {
     SHELL_DIALOG_TOP_PADDING
-        + prompt_height
+        + content_height
         + DELETE_DIALOG_BUTTONS_TOP_MARGIN
         + DELETE_DIALOG_BUTTON_HEIGHT
         + SHELL_DIALOG_BOTTOM_PADDING
@@ -413,6 +448,13 @@ fn file_conflict_dialog_height_for_title_height(title_height: f32) -> f32 {
 
 fn dialog_content_width(window_width: f32) -> f32 {
     (window_width - (SHELL_DIALOG_HORIZONTAL_PADDING * 2.0)).max(0.0)
+}
+
+fn permanent_delete_detail_text_width() -> f32 {
+    (dialog_content_width(DELETE_DIALOG_WIDTH)
+        - DELETE_DIALOG_ICON_SLOT_WIDTH
+        - DELETE_DIALOG_ICON_GAP)
+        .max(0.0)
 }
 
 fn wrapped_dialog_text_height(text: &str, text_size: f32, width: f32, cx: &App) -> f32 {
@@ -462,6 +504,126 @@ fn dialog_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::
         })
         .cursor_default()
         .child(label)
+}
+
+fn render_permanent_delete_file_body(
+    text: PermanentDeleteDialogText,
+    file_name: Option<SharedString>,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(DELETE_DIALOG_ICON_GAP))
+        .child(render_delete_file_icon(DELETE_DIALOG_ICON_SLOT_HEIGHT))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .w(px(permanent_delete_detail_text_width()))
+                .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+                .child(SharedString::from(text.message))
+                .when_some(file_name, |this, file_name| {
+                    this.child(
+                        div()
+                            .mt(px(DELETE_DIALOG_DETAILS_TOP_MARGIN))
+                            .min_w(px(0.0))
+                            .w_full()
+                            .child(file_name),
+                    )
+                })
+                .when_some(text.size_label, |this, size_label| {
+                    this.child(SharedString::from(size_label))
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_permanent_delete_compact_body(message: String) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(DELETE_DIALOG_ICON_GAP))
+        .child(render_delete_file_icon(
+            DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .w(px(permanent_delete_detail_text_width()))
+                .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+                .child(SharedString::from(message)),
+        )
+        .into_any_element()
+}
+
+fn render_delete_file_icon(slot_height: f32) -> gpui::Div {
+    div()
+        .relative()
+        .w(px(DELETE_DIALOG_ICON_SLOT_WIDTH))
+        .h(px(slot_height))
+        .flex_shrink_0()
+        .child(
+            div()
+                .absolute()
+                .left(px(6.0))
+                .top(px(0.0))
+                .w(px(34.0))
+                .h(px(46.0))
+                .border_1()
+                .border_color(rgb(0x9a9a9a))
+                .bg(rgb(0xffffff))
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(0.0))
+                        .top(px(0.0))
+                        .w(px(11.0))
+                        .h(px(11.0))
+                        .border_l_1()
+                        .border_b_1()
+                        .border_color(rgb(0xc8c8c8))
+                        .bg(rgb(0xf4f4f4)),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(24.0))
+                .top(px(26.0))
+                .w(px(18.0))
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(24.0))
+                .text_color(rgb(0xd13438))
+                .child("X"),
+        )
+}
+
+fn truncated_permanent_delete_file_name(name: &str, window: &Window) -> SharedString {
+    let name_font = font(".SystemUIFont");
+    let mut runs = vec![TextRun {
+        len: name.len(),
+        font: name_font.clone(),
+        color: rgb(SHELL_DIALOG_TEXT_COLOR).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+
+    window
+        .text_system()
+        .line_wrapper(name_font, px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+        .truncate_line(
+            SharedString::from(name.to_owned()),
+            px(permanent_delete_detail_text_width()),
+            DELETE_DIALOG_TRUNCATION_SUFFIX,
+            &mut runs,
+        )
 }
 
 fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
@@ -536,8 +698,15 @@ fn dialog_command_row(
 pub(super) fn permanent_delete_dialog_text(
     pending: &PendingPermanentDelete,
 ) -> PermanentDeleteDialogText {
-    let message = if pending.paths.len() == 1 {
-        "Are you sure you want to permanently delete this item?".to_owned()
+    let (file_name, size_label) = if let [path] = pending.paths.as_slice() {
+        let detail = permanent_delete_file_detail(path);
+        (Some(detail.file_name), Some(detail.size_label))
+    } else {
+        (None, None)
+    };
+
+    let message = if file_name.is_some() {
+        "Are you sure you want to permanently delete this file?".to_owned()
     } else {
         format!(
             "Are you sure you want to permanently delete these {} items?",
@@ -545,7 +714,37 @@ pub(super) fn permanent_delete_dialog_text(
         )
     };
 
-    PermanentDeleteDialogText { message }
+    PermanentDeleteDialogText {
+        message,
+        file_name,
+        size_label,
+    }
+}
+
+struct PermanentDeleteFileDetail {
+    file_name: String,
+    size_label: String,
+}
+
+fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
+    if let Some(entry) = FileEntry::from_path(path.to_path_buf()) {
+        return PermanentDeleteFileDetail {
+            file_name: entry.display_name().to_owned(),
+            size_label: format!("Size: {}", format_size(entry.size)),
+        };
+    }
+
+    PermanentDeleteFileDetail {
+        file_name: path_display_name(path),
+        size_label: "Size: ".to_owned(),
+    }
+}
+
+fn path_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 pub(super) fn file_conflict_dialog_text(conflicts: &FileConflictBatch) -> FileConflictDialogText {
@@ -590,15 +789,54 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     #[test]
-    fn permanent_delete_text_uses_singular_item_message() {
+    fn permanent_delete_text_uses_singular_file_message_and_details() {
+        let temp = TempDir::new();
+        let path = temp.path().join("a.tif");
+        fs::write(&path, []).expect("create selected file");
+
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
-            paths: vec![PathBuf::from("a.txt")],
+            paths: vec![path],
             fallback_index: None,
         });
 
         assert_eq!(
             text.message,
-            "Are you sure you want to permanently delete this item?"
+            "Are you sure you want to permanently delete this file?"
+        );
+        assert_eq!(text.file_name, Some("a.tif".to_owned()));
+        assert_eq!(text.size_label, Some("Size: 0 bytes".to_owned()));
+    }
+
+    #[test]
+    fn permanent_delete_text_falls_back_to_path_name_when_metadata_is_missing() {
+        let text = permanent_delete_dialog_text(&PendingPermanentDelete {
+            paths: vec![PathBuf::from("missing.txt")],
+            fallback_index: None,
+        });
+
+        assert_eq!(text.file_name, Some("missing.txt".to_owned()));
+        assert_eq!(text.size_label, Some("Size: ".to_owned()));
+    }
+
+    #[test]
+    fn permanent_delete_text_keeps_long_file_name_separate_from_prompt() {
+        let long_name = format!("{}{}", "a".repeat(160), ".txt");
+        let text = permanent_delete_dialog_text(&PendingPermanentDelete {
+            paths: vec![PathBuf::from(&long_name)],
+            fallback_index: None,
+        });
+
+        assert_eq!(
+            text.message,
+            "Are you sure you want to permanently delete this file?"
+        );
+        assert_eq!(text.file_name, Some(long_name));
+    }
+
+    #[test]
+    fn permanent_delete_filename_truncation_has_visible_text_width() {
+        assert!(
+            permanent_delete_detail_text_width() > DELETE_DIALOG_TRUNCATION_SUFFIX.len() as f32
         );
     }
 
@@ -613,6 +851,8 @@ mod tests {
             text.message,
             "Are you sure you want to permanently delete these 2 items?"
         );
+        assert_eq!(text.file_name, None);
+        assert_eq!(text.size_label, None);
     }
 
     #[test]
@@ -671,11 +911,20 @@ mod tests {
 
     #[test]
     fn permanent_delete_dialog_height_matches_content_baseline() {
-        let height = permanent_delete_dialog_height_for_prompt_height(dialog_line_height(
-            DELETE_DIALOG_PROMPT_TEXT_SIZE,
-        ));
+        let prompt_height = dialog_line_height(DELETE_DIALOG_PROMPT_TEXT_SIZE);
+        let content_height = permanent_delete_text_stack_height(prompt_height);
+        let height = permanent_delete_dialog_height_for_content_height(content_height);
 
-        assert_approx_eq(height, 130.0);
+        assert_approx_eq(height, 151.0);
+    }
+
+    #[test]
+    fn permanent_delete_multi_item_height_uses_compact_prompt_only_body() {
+        let prompt_height = dialog_line_height(DELETE_DIALOG_PROMPT_TEXT_SIZE);
+        let content_height = prompt_height.max(DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT);
+        let height = permanent_delete_dialog_height_for_content_height(content_height);
+
+        assert_approx_eq(height, 132.0);
     }
 
     #[test]
@@ -684,7 +933,7 @@ mod tests {
             CONFLICT_TITLE_TEXT_SIZE,
         ));
 
-        assert_approx_eq(height, 182.0);
+        assert_approx_eq(height, 183.0);
     }
 
     #[test]
