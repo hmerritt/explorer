@@ -22,11 +22,6 @@ pub(super) const HEADER_HEIGHT: f32 = 32.0;
 pub(super) const ROW_HEIGHT: f32 = 28.0;
 pub(super) const FILE_ICON_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
 pub(super) const FILE_ICON_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
-pub(super) const FILE_ICON_PAGE_WIDTH_PHYSICAL: f32 = 16.0;
-pub(super) const FILE_ICON_PAGE_HEIGHT_PHYSICAL: f32 = 20.0;
-pub(super) const FILE_ICON_PAGE_LEFT_PHYSICAL: f32 =
-    (FILE_ICON_SLOT_WIDTH_PHYSICAL - FILE_ICON_PAGE_WIDTH_PHYSICAL) / 2.0;
-pub(super) const FILE_ICON_FOLD_SIZE_PHYSICAL: f32 = 5.0;
 pub(super) const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
 pub(super) const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
 pub(super) const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
