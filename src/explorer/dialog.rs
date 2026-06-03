@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, Render, SharedString, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions, actions, div, prelude::*, px, rgb, size,
+    IntoElement, LineFragment, Render, SharedString, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, font, prelude::*, px,
+    rgb, size,
 };
 
 use crate::explorer::{
@@ -14,6 +15,7 @@ actions!(dialog, [DialogCancel]);
 const SHELL_DIALOG_HORIZONTAL_PADDING: f32 = 20.0;
 const SHELL_DIALOG_TOP_PADDING: f32 = 14.0;
 const SHELL_DIALOG_BOTTOM_PADDING: f32 = 14.0;
+const SHELL_DIALOG_VERTICAL_SLACK: f32 = 6.0;
 const SHELL_DIALOG_TEXT_COLOR: u32 = 0x000000;
 const SHELL_DIALOG_LINK_BLUE: u32 = 0x0067c0;
 const SHELL_DIALOG_COMMAND_BLUE: u32 = 0x001f60;
@@ -23,16 +25,17 @@ const SHELL_DIALOG_BUTTON_BG: u32 = 0xf3f3f3;
 const SHELL_DIALOG_BUTTON_BORDER: u32 = 0x8a8a8a;
 const SHELL_DIALOG_BUTTON_HOVER_BORDER: u32 = 0x0078d7;
 const SHELL_DIALOG_ICON_GREEN: u32 = 0x36a646;
+const SHELL_DIALOG_LINE_HEIGHT_SCALE: f32 = 1.618;
 const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
-const CONFLICT_DIALOG_HEIGHT: f32 = 205.0;
 const DELETE_DIALOG_WIDTH: f32 = 380.0;
-const DELETE_DIALOG_HEIGHT: f32 = 130.0;
 const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 14.0;
+const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 18.0;
+const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
 const CONFLICT_HEADER_TEXT_SIZE: f32 = 12.0;
 const CONFLICT_TITLE_TEXT_SIZE: f32 = 16.0;
 const CONFLICT_TITLE_TOP_MARGIN: f32 = 5.0;
 const CONFLICT_COMMANDS_TOP_MARGIN: f32 = 14.0;
-const CONFLICT_COMMAND_GAP: f32 = 0.0;
+const CONFLICT_COMMAND_GAP: f32 = 5.0;
 const CONFLICT_COMMAND_ROW_HEIGHT: f32 = 40.0;
 const CONFLICT_COMMAND_ROW_HORIZONTAL_PADDING: f32 = 12.0;
 const CONFLICT_COMMAND_ICON_SLOT_WIDTH: f32 = 18.0;
@@ -216,8 +219,7 @@ impl ExplorerDialog {
             .id("permanent-delete-confirmation")
             .flex()
             .flex_col()
-            .justify_between()
-            .size_full()
+            .w_full()
             .child(
                 div()
                     .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
@@ -261,7 +263,7 @@ impl ExplorerDialog {
             .id("file-conflict-dialog")
             .flex()
             .flex_col()
-            .size_full()
+            .w_full()
             .child(render_operation_header(&text))
             .child(
                 div()
@@ -333,10 +335,7 @@ fn open_dialog_window(
 }
 
 fn dialog_window_options(kind: &ExplorerDialogKind, cx: &App) -> WindowOptions {
-    let (width, height) = match kind {
-        ExplorerDialogKind::PermanentDelete(_) => (DELETE_DIALOG_WIDTH, DELETE_DIALOG_HEIGHT),
-        ExplorerDialogKind::FileConflict(_) => (CONFLICT_DIALOG_WIDTH, CONFLICT_DIALOG_HEIGHT),
-    };
+    let (width, height) = dialog_window_size(kind, cx);
 
     WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
@@ -348,10 +347,91 @@ fn dialog_window_options(kind: &ExplorerDialogKind, cx: &App) -> WindowOptions {
         kind: WindowKind::Floating,
         is_movable: true,
         is_resizable: false,
-        is_minimizable: false,
+        is_minimizable: true,
         window_decorations: Some(WindowDecorations::Server),
         ..Default::default()
     }
+}
+
+fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
+    match kind {
+        ExplorerDialogKind::PermanentDelete(pending) => {
+            let text = permanent_delete_dialog_text(pending);
+            let height = permanent_delete_dialog_height(&text.message, cx);
+            (DELETE_DIALOG_WIDTH, height)
+        }
+        ExplorerDialogKind::FileConflict(conflicts) => {
+            let text = file_conflict_dialog_text(conflicts);
+            let height = file_conflict_dialog_height(&text.title, cx);
+            (CONFLICT_DIALOG_WIDTH, height)
+        }
+    }
+}
+
+fn permanent_delete_dialog_height(message: &str, cx: &App) -> f32 {
+    let prompt_height = wrapped_dialog_text_height(
+        message,
+        DELETE_DIALOG_PROMPT_TEXT_SIZE,
+        dialog_content_width(DELETE_DIALOG_WIDTH),
+        cx,
+    );
+
+    permanent_delete_dialog_height_for_prompt_height(prompt_height)
+}
+
+fn permanent_delete_dialog_height_for_prompt_height(prompt_height: f32) -> f32 {
+    SHELL_DIALOG_TOP_PADDING
+        + prompt_height
+        + DELETE_DIALOG_BUTTONS_TOP_MARGIN
+        + DELETE_DIALOG_BUTTON_HEIGHT
+        + SHELL_DIALOG_BOTTOM_PADDING
+        + SHELL_DIALOG_VERTICAL_SLACK
+}
+
+fn file_conflict_dialog_height(title: &str, cx: &App) -> f32 {
+    let title_height = wrapped_dialog_text_height(
+        title,
+        CONFLICT_TITLE_TEXT_SIZE,
+        dialog_content_width(CONFLICT_DIALOG_WIDTH),
+        cx,
+    );
+
+    file_conflict_dialog_height_for_title_height(title_height)
+}
+
+fn file_conflict_dialog_height_for_title_height(title_height: f32) -> f32 {
+    SHELL_DIALOG_TOP_PADDING
+        + dialog_line_height(CONFLICT_HEADER_TEXT_SIZE)
+        + CONFLICT_TITLE_TOP_MARGIN
+        + title_height
+        + CONFLICT_COMMANDS_TOP_MARGIN
+        + (CONFLICT_COMMAND_ROW_HEIGHT * 2.0)
+        + CONFLICT_COMMAND_GAP
+        + SHELL_DIALOG_BOTTOM_PADDING
+        + SHELL_DIALOG_VERTICAL_SLACK
+}
+
+fn dialog_content_width(window_width: f32) -> f32 {
+    (window_width - (SHELL_DIALOG_HORIZONTAL_PADDING * 2.0)).max(0.0)
+}
+
+fn wrapped_dialog_text_height(text: &str, text_size: f32, width: f32, cx: &App) -> f32 {
+    let line_height = dialog_line_height(text_size);
+    if text.is_empty() {
+        return line_height;
+    }
+
+    let mut line_wrapper = cx
+        .text_system()
+        .line_wrapper(font(".SystemUIFont"), px(text_size));
+    let fragments = [LineFragment::text(text)];
+    let wrapped_lines = line_wrapper.wrap_line(&fragments, px(width)).count() + 1;
+
+    line_height * wrapped_lines as f32
+}
+
+fn dialog_line_height(text_size: f32) -> f32 {
+    (text_size * SHELL_DIALOG_LINE_HEIGHT_SCALE).round()
 }
 
 impl ExplorerDialogKind {
@@ -590,6 +670,36 @@ mod tests {
     }
 
     #[test]
+    fn permanent_delete_dialog_height_matches_content_baseline() {
+        let height = permanent_delete_dialog_height_for_prompt_height(dialog_line_height(
+            DELETE_DIALOG_PROMPT_TEXT_SIZE,
+        ));
+
+        assert_approx_eq(height, 130.0);
+    }
+
+    #[test]
+    fn file_conflict_dialog_height_matches_single_line_baseline() {
+        let height = file_conflict_dialog_height_for_title_height(dialog_line_height(
+            CONFLICT_TITLE_TEXT_SIZE,
+        ));
+
+        assert_approx_eq(height, 182.0);
+    }
+
+    #[test]
+    fn file_conflict_dialog_height_grows_for_wrapped_title() {
+        let single_line_height = file_conflict_dialog_height_for_title_height(dialog_line_height(
+            CONFLICT_TITLE_TEXT_SIZE,
+        ));
+        let wrapped_height = file_conflict_dialog_height_for_title_height(
+            dialog_line_height(CONFLICT_TITLE_TEXT_SIZE) * 2.0,
+        );
+
+        assert!(wrapped_height > single_line_height);
+    }
+
+    #[test]
     fn dialog_window_release_cancels_pending_delete() {
         let mut view = ExplorerView::new(PathBuf::from("delete"));
         view.pending_permanent_delete = Some(PendingPermanentDelete {
@@ -684,5 +794,12 @@ mod tests {
             FileOperationOutcome::Conflicts(conflicts) => conflicts,
             FileOperationOutcome::Finished(_) => panic!("expected conflict batch"),
         }
+    }
+
+    fn assert_approx_eq(left: f32, right: f32) {
+        assert!(
+            (left - right).abs() <= f32::EPSILON,
+            "expected {left} to equal {right}"
+        );
     }
 }
