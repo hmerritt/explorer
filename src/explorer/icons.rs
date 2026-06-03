@@ -16,9 +16,14 @@ const FILE_ICON_FALLBACK_ICON_COLOR: u32 = 0x9a9a9a;
 const DOWNLOADS_FOLDER_FALLBACK_GLYPH: &str = "\u{E896}";
 const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x10893e;
-const DOCUMENTS_FOLDER_FALLBACK_GLYPH: &str = "\u{E8A5}";
-const DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
-const DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x0078d7;
+const DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
+const DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL: f32 = 4.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL: f32 = 1.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL: f32 = 14.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL: f32 = 18.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR: u32 = 0x7897b6;
+const DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR: u32 = 0xffffff;
 const DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
 const DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
 const DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL: f32 = 20.0;
@@ -202,12 +207,43 @@ fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
 }
 
 fn documents_folder_fallback_icon(scale_factor: f32) -> Div {
-    special_folder_glyph_icon(
-        DOCUMENTS_FOLDER_FALLBACK_GLYPH,
-        DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL,
-        DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR,
-        scale_factor,
-    )
+    div()
+        .relative()
+        .w(device_px(
+            DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL,
+            scale_factor,
+        ))
+        .h(device_px(
+            DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL,
+            scale_factor,
+        ))
+        .flex_shrink_0()
+        .child(
+            div()
+                .absolute()
+                .left(device_px(
+                    DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL,
+                    scale_factor,
+                ))
+                .top(device_px(
+                    DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL,
+                    scale_factor,
+                ))
+                .w(device_px(
+                    DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL,
+                    scale_factor,
+                ))
+                .h(device_px(
+                    DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL,
+                    scale_factor,
+                ))
+                .bg(rgb(DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR)),
+        )
+        .child(documents_folder_line(7.0, 3.0, 2.0, scale_factor))
+        .child(documents_folder_line(7.0, 6.0, 3.0, scale_factor))
+        .child(documents_folder_line(7.0, 9.0, 8.0, scale_factor))
+        .child(documents_folder_line(7.0, 12.0, 8.0, scale_factor))
+        .child(documents_folder_line(7.0, 15.0, 8.0, scale_factor))
 }
 
 fn special_folder_glyph_icon(
@@ -227,6 +263,21 @@ fn special_folder_glyph_icon(
         .text_size(device_px(icon_size_physical, scale_factor))
         .text_color(rgb(icon_color))
         .child(glyph)
+}
+
+fn documents_folder_line(
+    left_physical: f32,
+    top_physical: f32,
+    width_physical: f32,
+    scale_factor: f32,
+) -> Div {
+    div()
+        .absolute()
+        .left(device_px(left_physical, scale_factor))
+        .top(device_px(top_physical, scale_factor))
+        .w(device_px(width_physical, scale_factor))
+        .h(device_px(1.0, scale_factor))
+        .bg(rgb(DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR))
 }
 
 pub(super) fn drive_icon(scale_factor: f32) -> Div {
@@ -354,10 +405,15 @@ mod tests {
     }
 
     #[test]
-    fn documents_fallback_icon_uses_windows_explorer_document_glyph() {
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_GLYPH, "\u{E8A5}");
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 18.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_ICON_COLOR, 0x0078d7);
+    fn documents_fallback_icon_uses_windows_explorer_documents_geometry() {
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL, 22.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 20.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL, 4.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL, 1.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL, 14.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL, 18.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR, 0x7897b6);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR, 0xffffff);
     }
 
     #[test]
