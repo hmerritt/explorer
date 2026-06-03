@@ -2,10 +2,11 @@
 
 macOS-specific features:
 
-- macOS request "Full Disk Access" on app open.
 - A new left side-bar segment group (above the local drives), with macOS "Applications" folder in the left side-bar (load in the actual icons too), And also macOS "Bin" folder
     1. Applications
     2. Bin
+
+---
 
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 

@@ -14,11 +14,18 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
+use gpui::{ClickEvent, FocusHandle, WindowKind, div, rgb};
+
 use crate::explorer::{
     CancelDrag, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerView, ExtendDown,
     ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
     OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
     default_start_path,
+};
+#[cfg(target_os = "macos")]
+use crate::macos_permissions::{
+    MacosFullDiskAccessStatus, macos_full_disk_access_status, open_macos_full_disk_access_settings,
 };
 
 const APP_ID: &str = "com.hmerritt.explorer";
@@ -33,6 +40,10 @@ const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/Segoe Fluent Icons.t
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/Segoe MDL2 Assets.ttf");
 #[cfg(any(target_os = "linux", test))]
 const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
+#[cfg(target_os = "macos")]
+const FULL_DISK_ACCESS_PROMPT_WIDTH: f32 = 430.0;
+#[cfg(target_os = "macos")]
+const FULL_DISK_ACCESS_PROMPT_HEIGHT: f32 = 184.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfigPlatform {
@@ -103,6 +114,12 @@ struct Explorer {
     explorer: gpui::Entity<ExplorerView>,
 }
 
+#[cfg(target_os = "macos")]
+struct FullDiskAccessPrompt {
+    focus_handle: FocusHandle,
+    open_error: Option<String>,
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LinuxDisplayBackend {
@@ -138,6 +155,100 @@ struct LinuxDisplayEnv {
 impl Render for Explorer {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.explorer.clone()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl FullDiskAccessPrompt {
+    fn new(focus_handle: FocusHandle) -> Self {
+        Self {
+            focus_handle,
+            open_error: None,
+        }
+    }
+
+    fn open_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match open_macos_full_disk_access_settings() {
+            Ok(()) => window.remove_window(),
+            Err(error) => {
+                self.open_error = Some(format!("Could not open System Settings: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn continue_without_access(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.remove_window();
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Render for FullDiskAccessPrompt {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("FullDiskAccessPrompt")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(rgb(0xffffff))
+            .text_color(rgb(0x000000))
+            .cursor_default()
+            .p(px(20.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .child("Explorer Needs Full Disk Access"),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .text_size(px(12.0))
+                    .line_height(px(19.0))
+                    .child(
+                        "Explorer needs Full Disk Access to browse and manage files across protected macOS locations.",
+                    ),
+            )
+            .when_some(self.open_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x6f1d1d))
+                        .child(SharedString::from(error)),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_end()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        startup_prompt_button(
+                            "full-disk-access-open-settings",
+                            "Open System Settings",
+                        )
+                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                            this.open_settings(event, window, cx);
+                            cx.stop_propagation();
+                        })),
+                    )
+                    .child(
+                        startup_prompt_button("full-disk-access-continue", "Continue").on_click(
+                            cx.listener(|this, event: &ClickEvent, window, cx| {
+                                this.continue_without_access(event, window, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
+                    ),
+            )
     }
 }
 
@@ -364,6 +475,73 @@ fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Resu
     fs::write(path, json)
 }
 
+#[cfg(target_os = "macos")]
+fn maybe_open_full_disk_access_prompt(cx: &mut App) {
+    if matches!(
+        macos_full_disk_access_status(),
+        MacosFullDiskAccessStatus::Granted
+    ) {
+        return;
+    }
+
+    let _ = open_full_disk_access_prompt(cx);
+}
+
+#[cfg(target_os = "macos")]
+fn open_full_disk_access_prompt(cx: &mut App) -> Result<(), String> {
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::centered(
+                size(
+                    px(FULL_DISK_ACCESS_PROMPT_WIDTH),
+                    px(FULL_DISK_ACCESS_PROMPT_HEIGHT),
+                ),
+                cx,
+            )),
+            window_min_size: Some(size(
+                px(FULL_DISK_ACCESS_PROMPT_WIDTH),
+                px(FULL_DISK_ACCESS_PROMPT_HEIGHT),
+            )),
+            titlebar: Some(TitlebarOptions {
+                title: Some(SharedString::from(APP_TITLE)),
+                ..Default::default()
+            }),
+            kind: WindowKind::Floating,
+            is_movable: true,
+            is_resizable: false,
+            is_minimizable: false,
+            window_decorations: Some(WindowDecorations::Server),
+            app_id: Some(APP_ID.to_owned()),
+            ..Default::default()
+        },
+        |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            cx.new(|_| FullDiskAccessPrompt::new(focus_handle))
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn startup_prompt_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .min_w(px(86.0))
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(1.0))
+        .border_1()
+        .border_color(rgb(0x8a8a8a))
+        .bg(rgb(0xf3f3f3))
+        .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
+        .text_size(px(12.0))
+        .child(label)
+}
+
 pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
@@ -429,6 +607,9 @@ pub fn run() {
             },
         )
         .expect("failed to open Explorer window");
+
+        #[cfg(target_os = "macos")]
+        maybe_open_full_disk_access_prompt(cx);
 
         cx.activate(true);
     });

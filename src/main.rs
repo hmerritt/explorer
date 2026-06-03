@@ -7,6 +7,8 @@
 mod app;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod explorer;
+#[cfg(any(target_os = "macos", test))]
+mod macos_permissions;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn main() {
