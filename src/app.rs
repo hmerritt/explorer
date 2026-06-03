@@ -533,6 +533,7 @@ fn startup_prompt_button(id: &'static str, label: &'static str) -> gpui::Statefu
         .flex()
         .items_center()
         .justify_center()
+        .px(px(12.0))
         .rounded(px(1.0))
         .border_1()
         .border_color(rgb(0x8a8a8a))
