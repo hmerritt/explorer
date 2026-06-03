@@ -59,8 +59,8 @@ class Explorer < Formula
           Type=Application
           Name=Explorer
           Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
-          Exec=#{bin}/explorer %F
-          Icon=#{share}/icons/hicolor/512x512/apps/explorer.png
+          Exec=#{opt_bin}/explorer %F
+          Icon=#{opt_share}/icons/hicolor/512x512/apps/explorer.png
           Terminal=false
           Categories=Utility;FileManager;
           MimeType=inode/directory;
@@ -71,8 +71,8 @@ class Explorer < Formula
           #!/usr/bin/env sh
           set -eu
 
-          bundle_icon="#{libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
-          share_icon="#{share}/icons/hicolor/512x512/apps/explorer.png"
+          bundle_icon="#{opt_libexec}/explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
+          share_icon="#{opt_share}/icons/hicolor/512x512/apps/explorer.png"
 
           if [ -z "${HOME:-}" ]; then
             echo "Explorer desktop registration skipped because HOME is not set."
@@ -98,7 +98,7 @@ class Explorer < Formula
           Type=Application
           Name=Explorer
           Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
-          Exec=#{bin}/explorer %F
+          Exec=#{opt_bin}/explorer %F
           Icon=$icon_path
           Terminal=false
           Categories=Utility;FileManager;
@@ -121,10 +121,6 @@ class Explorer < Formula
     else
       bin.install "explorer"
       chmod_executable bin/"explorer"
-
-      if system "xattr", "-p", "com.apple.quarantine", bin/"explorer", out: File::NULL, err: File::NULL
-        system "xattr", "-d", "com.apple.quarantine", bin/"explorer"
-      end
     end
   end
 
@@ -143,7 +139,7 @@ class Explorer < Formula
         ${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.hmerritt.explorer.desktop
 
       The launcher entry is generated directly and can be refreshed after a
-      reinstall or desktop-session change.
+      reinstall, upgrade from an older launcher, or desktop-session change.
 
       If it does not appear immediately, refresh your desktop shell or run:
         explorer-register-desktop
@@ -167,6 +163,24 @@ class Explorer < Formula
         assert_predicate bin/"explorer-register-desktop", :exist?
         assert_predicate share/"applications/com.hmerritt.explorer.desktop", :exist?
         assert_predicate share/"icons/hicolor/512x512/apps/explorer.png", :exist?
+
+        icon_path = "icons/hicolor/512x512/apps/explorer.png"
+        stable_exec = "Exec=#{opt_bin}/explorer %F"
+        stable_icon = "Icon=#{opt_share}/#{icon_path}"
+        versioned_exec = "Exec=#{bin}/explorer %F"
+        versioned_icon = "Icon=#{share}/#{icon_path}"
+
+        desktop_entry = (share/"applications/com.hmerritt.explorer.desktop").read
+        assert_match stable_exec, desktop_entry
+        assert_match stable_icon, desktop_entry
+        refute_match versioned_exec, desktop_entry
+        refute_match versioned_icon, desktop_entry
+
+        register_desktop = (bin/"explorer-register-desktop").read
+        assert_match stable_exec, register_desktop
+        assert_match "bundle_icon=\"#{opt_libexec}/explorer.app/share/#{icon_path}\"", register_desktop
+        assert_match "share_icon=\"#{opt_share}/#{icon_path}\"", register_desktop
+        refute_match versioned_exec, register_desktop
       end
     end
   end
