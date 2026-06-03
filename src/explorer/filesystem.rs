@@ -256,11 +256,53 @@ impl FileConflictBatch {
         self.conflicts.len()
     }
 
+    pub(super) fn operation_label(&self) -> &'static str {
+        match self.job.kind {
+            FileOperationKind::Move => "Moving",
+            FileOperationKind::Copy => "Copying",
+        }
+    }
+
+    pub(super) fn item_count_label(&self) -> String {
+        let count = self.job.roots.len();
+        if count == 1 {
+            "1 item".to_owned()
+        } else {
+            format!("{count} items")
+        }
+    }
+
+    pub(super) fn source_location_name(&self) -> String {
+        self.unique_root_parent_name(|root| root.source.parent())
+    }
+
+    pub(super) fn destination_location_name(&self) -> String {
+        self.unique_root_parent_name(|root| root.destination.parent())
+    }
+
     pub(super) fn first_destination_name(&self) -> String {
         self.conflicts
             .first()
             .map(|conflict| path_display_name(&conflict.destination))
             .unwrap_or_else(|| "this file".to_owned())
+    }
+
+    fn unique_root_parent_name<'a>(
+        &'a self,
+        parent_for_root: impl Fn(&'a FileOperationRoot) -> Option<&'a Path>,
+    ) -> String {
+        let parents = self
+            .job
+            .roots
+            .iter()
+            .filter_map(parent_for_root)
+            .collect::<HashSet<_>>();
+
+        if parents.len() == 1 {
+            path_display_name(parents.iter().next().expect("one parent"))
+        } else {
+            "multiple locations".to_owned()
+        }
     }
 }
 

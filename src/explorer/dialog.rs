@@ -11,10 +11,33 @@ use crate::explorer::{
 
 actions!(dialog, [DialogCancel]);
 
+const SHELL_DIALOG_HORIZONTAL_PADDING: f32 = 20.0;
+const SHELL_DIALOG_TOP_PADDING: f32 = 14.0;
+const SHELL_DIALOG_BOTTOM_PADDING: f32 = 14.0;
+const SHELL_DIALOG_TEXT_COLOR: u32 = 0x000000;
+const SHELL_DIALOG_LINK_BLUE: u32 = 0x0067c0;
+const SHELL_DIALOG_COMMAND_BLUE: u32 = 0x001f60;
+const SHELL_DIALOG_COMMAND_SELECTED_BG: u32 = 0xcfe8ff;
+const SHELL_DIALOG_COMMAND_HOVER_BG: u32 = 0xe5f3ff;
+const SHELL_DIALOG_BUTTON_BG: u32 = 0xf3f3f3;
+const SHELL_DIALOG_BUTTON_BORDER: u32 = 0x8a8a8a;
+const SHELL_DIALOG_BUTTON_HOVER_BORDER: u32 = 0x0078d7;
+const SHELL_DIALOG_ICON_GREEN: u32 = 0x36a646;
+const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
+const CONFLICT_DIALOG_HEIGHT: f32 = 205.0;
 const DELETE_DIALOG_WIDTH: f32 = 380.0;
-const DELETE_DIALOG_HEIGHT: f32 = 132.0;
-const CONFLICT_DIALOG_WIDTH: f32 = 430.0;
-const CONFLICT_DIALOG_HEIGHT: f32 = 190.0;
+const DELETE_DIALOG_HEIGHT: f32 = 130.0;
+const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 14.0;
+const CONFLICT_HEADER_TEXT_SIZE: f32 = 12.0;
+const CONFLICT_TITLE_TEXT_SIZE: f32 = 16.0;
+const CONFLICT_TITLE_TOP_MARGIN: f32 = 5.0;
+const CONFLICT_COMMANDS_TOP_MARGIN: f32 = 14.0;
+const CONFLICT_COMMAND_GAP: f32 = 0.0;
+const CONFLICT_COMMAND_ROW_HEIGHT: f32 = 40.0;
+const CONFLICT_COMMAND_ROW_HORIZONTAL_PADDING: f32 = 12.0;
+const CONFLICT_COMMAND_ICON_SLOT_WIDTH: f32 = 18.0;
+const CONFLICT_COMMAND_ICON_TEXT_SIZE: f32 = 20.0;
+const CONFLICT_COMMAND_LABEL_TEXT_SIZE: f32 = 16.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerDialogKind {
@@ -36,8 +59,11 @@ pub(super) struct PermanentDeleteDialogText {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct FileConflictDialogText {
+    pub(super) operation: &'static str,
+    pub(super) item_count: String,
+    pub(super) source_name: String,
+    pub(super) destination_name: String,
     pub(super) title: String,
-    pub(super) detail: String,
     pub(super) replace_label: &'static str,
     pub(super) skip_label: &'static str,
 }
@@ -155,9 +181,11 @@ impl Render for ExplorerDialog {
             .size_full()
             .bg(rgb(0xffffff))
             .cursor_default()
-            .p(px(16.0))
+            .pt(px(SHELL_DIALOG_TOP_PADDING))
+            .px(px(SHELL_DIALOG_HORIZONTAL_PADDING))
+            .pb(px(SHELL_DIALOG_BOTTOM_PADDING))
             .text_size(px(12.0))
-            .text_color(rgb(0x1f1f1f))
+            .text_color(rgb(SHELL_DIALOG_TEXT_COLOR))
             .on_action(cx.listener(Self::handle_cancel))
             .child(match self.kind.clone() {
                 ExplorerDialogKind::PermanentDelete(pending) => {
@@ -188,8 +216,13 @@ impl ExplorerDialog {
             .id("permanent-delete-confirmation")
             .flex()
             .flex_col()
+            .justify_between()
             .size_full()
-            .child(div().child(SharedString::from(text.message)))
+            .child(
+                div()
+                    .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+                    .child(SharedString::from(text.message)),
+            )
             .child(
                 div()
                     .flex()
@@ -229,34 +262,48 @@ impl ExplorerDialog {
             .flex()
             .flex_col()
             .size_full()
-            .child(div().child(SharedString::from(text.title)))
+            .child(render_operation_header(&text))
             .child(
                 div()
-                    .mt(px(8.0))
-                    .text_color(rgb(0x5f5f5f))
-                    .child(SharedString::from(text.detail)),
+                    .mt(px(CONFLICT_TITLE_TOP_MARGIN))
+                    .text_size(px(CONFLICT_TITLE_TEXT_SIZE))
+                    .child(SharedString::from(text.title)),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.0))
-                    .mt(px(18.0))
+                    .gap(px(CONFLICT_COMMAND_GAP))
+                    .mt(px(CONFLICT_COMMANDS_TOP_MARGIN))
                     .child(
-                        dialog_wide_button("file-conflict-replace", text.replace_label).on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                        dialog_command_row(
+                            "file-conflict-replace",
+                            "✓",
+                            SHELL_DIALOG_ICON_GREEN,
+                            text.replace_label,
+                            true,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
                                 this.replace_conflicts(window, cx);
                                 cx.stop_propagation();
-                            }),
-                        ),
+                            },
+                        )),
                     )
                     .child(
-                        dialog_wide_button("file-conflict-skip", text.skip_label).on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                        dialog_command_row(
+                            "file-conflict-skip",
+                            "↶",
+                            SHELL_DIALOG_LINK_BLUE,
+                            text.skip_label,
+                            false,
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
                                 this.cancel(window, cx);
                                 cx.stop_propagation();
-                            }),
-                        ),
+                            },
+                        )),
                     ),
             )
             .into_any_element()
@@ -324,29 +371,86 @@ fn dialog_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(3.0))
+        .rounded(px(1.0))
         .border_1()
-        .border_color(rgb(0xadadad))
-        .bg(rgb(0xf5f5f5))
-        .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
+        .border_color(rgb(SHELL_DIALOG_BUTTON_BORDER))
+        .bg(rgb(SHELL_DIALOG_BUTTON_BG))
+        .hover(|style| {
+            style
+                .bg(rgb(SHELL_DIALOG_COMMAND_HOVER_BG))
+                .border_color(rgb(SHELL_DIALOG_BUTTON_HOVER_BORDER))
+        })
         .cursor_default()
         .child(label)
 }
 
-fn dialog_wide_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .text_size(px(CONFLICT_HEADER_TEXT_SIZE))
+        .child(text.operation)
+        .child(" ")
+        .child(SharedString::from(text.item_count.clone()))
+        .child(" from ")
+        .child(
+            div()
+                .text_color(rgb(SHELL_DIALOG_LINK_BLUE))
+                .child(SharedString::from(text.source_name.clone())),
+        )
+        .child(" to ")
+        .child(
+            div()
+                .text_color(rgb(SHELL_DIALOG_LINK_BLUE))
+                .child(SharedString::from(text.destination_name.clone())),
+        )
+        .into_any_element()
+}
+
+fn dialog_command_row(
+    id: &'static str,
+    icon: &'static str,
+    icon_color: u32,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .min_h(px(32.0))
+        .h(px(CONFLICT_COMMAND_ROW_HEIGHT))
+        .w_full()
         .flex()
         .items_center()
-        .px(px(10.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(rgb(0xadadad))
-        .bg(rgb(0xf5f5f5))
-        .hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7)))
+        .gap(px(10.0))
+        .px(px(CONFLICT_COMMAND_ROW_HORIZONTAL_PADDING))
+        .rounded(px(0.0))
+        .when(selected, |this| {
+            this.border_1()
+                .border_color(rgb(0x000000))
+                .bg(rgb(SHELL_DIALOG_COMMAND_SELECTED_BG))
+        })
+        .when(!selected, |this| {
+            this.border_1()
+                .border_color(rgb(0xffffff))
+                .hover(|style| style.bg(rgb(SHELL_DIALOG_COMMAND_HOVER_BG)))
+        })
         .cursor_default()
-        .child(label)
+        .child(
+            div()
+                .w(px(CONFLICT_COMMAND_ICON_SLOT_WIDTH))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(CONFLICT_COMMAND_ICON_TEXT_SIZE))
+                .text_color(rgb(icon_color))
+                .child(icon),
+        )
+        .child(
+            div()
+                .text_size(px(CONFLICT_COMMAND_LABEL_TEXT_SIZE))
+                .text_color(rgb(SHELL_DIALOG_COMMAND_BLUE))
+                .child(label),
+        )
 }
 
 pub(super) fn permanent_delete_dialog_text(
@@ -367,17 +471,12 @@ pub(super) fn permanent_delete_dialog_text(
 pub(super) fn file_conflict_dialog_text(conflicts: &FileConflictBatch) -> FileConflictDialogText {
     let count = conflicts.len();
     let title = if count == 1 {
-        "There is already a file with the same name in this location.".to_owned()
-    } else {
-        format!("There are {count} files with the same names in this location.")
-    };
-    let detail = if count == 1 {
         format!(
-            "Choose what to do with {}.",
+            "The destination already has a file named \"{}\"",
             conflicts.first_destination_name()
         )
     } else {
-        "The choice you make will apply to all conflicts in this operation.".to_owned()
+        "The destination already has files with the same names".to_owned()
     };
     let replace_label = if count == 1 {
         "Replace the file in the destination"
@@ -391,8 +490,11 @@ pub(super) fn file_conflict_dialog_text(conflicts: &FileConflictBatch) -> FileCo
     };
 
     FileConflictDialogText {
+        operation: conflicts.operation_label(),
+        item_count: conflicts.item_count_label(),
+        source_name: conflicts.source_location_name(),
+        destination_name: conflicts.destination_location_name(),
         title,
-        detail,
         replace_label,
         skip_label,
     }
@@ -402,7 +504,7 @@ pub(super) fn file_conflict_dialog_text(conflicts: &FileConflictBatch) -> FileCo
 mod tests {
     use super::*;
     use crate::explorer::{
-        filesystem::{FileOperationOutcome, move_paths_to_directory},
+        filesystem::{FileOperationOutcome, copy_paths_to_directory, move_paths_to_directory},
         test_support::TempDir,
     };
     use std::{fs, path::PathBuf};
@@ -438,11 +540,14 @@ mod tests {
         let conflicts = single_conflict_batch();
         let text = file_conflict_dialog_text(&conflicts);
 
+        assert_eq!(text.operation, "Moving");
+        assert_eq!(text.item_count, "1 item");
+        assert_eq!(text.source_name, "source");
+        assert_eq!(text.destination_name, "destination");
         assert_eq!(
             text.title,
-            "There is already a file with the same name in this location."
+            "The destination already has a file named \"file.txt\""
         );
-        assert_eq!(text.detail, "Choose what to do with file.txt.");
         assert_eq!(text.replace_label, "Replace the file in the destination");
         assert_eq!(text.skip_label, "Skip this file");
     }
@@ -452,16 +557,36 @@ mod tests {
         let conflicts = multi_conflict_batch();
         let text = file_conflict_dialog_text(&conflicts);
 
+        assert_eq!(text.operation, "Moving");
+        assert_eq!(text.item_count, "2 items");
+        assert_eq!(text.source_name, "source");
+        assert_eq!(text.destination_name, "destination");
         assert_eq!(
             text.title,
-            "There are 2 files with the same names in this location."
-        );
-        assert_eq!(
-            text.detail,
-            "The choice you make will apply to all conflicts in this operation."
+            "The destination already has files with the same names"
         );
         assert_eq!(text.replace_label, "Replace the files in the destination");
         assert_eq!(text.skip_label, "Skip these files");
+    }
+
+    #[test]
+    fn file_conflict_text_uses_copying_operation() {
+        let conflicts = conflict_batch(&["file.txt"], copy_paths_to_directory);
+        let text = file_conflict_dialog_text(&conflicts);
+
+        assert_eq!(text.operation, "Copying");
+        assert_eq!(text.item_count, "1 item");
+    }
+
+    #[test]
+    fn file_conflict_text_reports_multiple_source_locations() {
+        let conflicts = multi_source_conflict_batch();
+        let text = file_conflict_dialog_text(&conflicts);
+
+        assert_eq!(text.operation, "Moving");
+        assert_eq!(text.item_count, "2 items");
+        assert_eq!(text.source_name, "multiple locations");
+        assert_eq!(text.destination_name, "destination");
     }
 
     #[test]
@@ -499,14 +624,17 @@ mod tests {
     }
 
     fn single_conflict_batch() -> FileConflictBatch {
-        conflict_batch(&["file.txt"])
+        conflict_batch(&["file.txt"], move_paths_to_directory)
     }
 
     fn multi_conflict_batch() -> FileConflictBatch {
-        conflict_batch(&["a.txt", "b.txt"])
+        conflict_batch(&["a.txt", "b.txt"], move_paths_to_directory)
     }
 
-    fn conflict_batch(names: &[&str]) -> FileConflictBatch {
+    fn conflict_batch(
+        names: &[&str],
+        operation: fn(&[PathBuf], &std::path::Path) -> Result<FileOperationOutcome, String>,
+    ) -> FileConflictBatch {
         let temp = TempDir::new();
         let source_dir = temp.path().join("source");
         let destination_dir = temp.path().join("destination");
@@ -522,9 +650,37 @@ mod tests {
             sources.push(source);
         }
 
-        match move_paths_to_directory(&sources, &destination_dir)
-            .expect("move operation should succeed")
-        {
+        conflict_batch_from_result(operation(&sources, &destination_dir))
+    }
+
+    fn multi_source_conflict_batch() -> FileConflictBatch {
+        let temp = TempDir::new();
+        let first_source_dir = temp.path().join("source-a");
+        let second_source_dir = temp.path().join("source-b");
+        let destination_dir = temp.path().join("destination");
+        fs::create_dir(&first_source_dir).expect("create first source folder");
+        fs::create_dir(&second_source_dir).expect("create second source folder");
+        fs::create_dir(&destination_dir).expect("create destination folder");
+
+        let first_source = first_source_dir.join("a.txt");
+        let second_source = second_source_dir.join("b.txt");
+        fs::write(&first_source, b"source").expect("create first source file");
+        fs::write(&second_source, b"source").expect("create second source file");
+        fs::write(destination_dir.join("a.txt"), b"destination")
+            .expect("create first destination file");
+        fs::write(destination_dir.join("b.txt"), b"destination")
+            .expect("create second destination file");
+
+        conflict_batch_from_result(move_paths_to_directory(
+            &[first_source, second_source],
+            &destination_dir,
+        ))
+    }
+
+    fn conflict_batch_from_result(
+        result: Result<FileOperationOutcome, String>,
+    ) -> FileConflictBatch {
+        match result.expect("operation should succeed") {
             FileOperationOutcome::Conflicts(conflicts) => conflicts,
             FileOperationOutcome::Finished(_) => panic!("expected conflict batch"),
         }
