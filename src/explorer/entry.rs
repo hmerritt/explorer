@@ -92,6 +92,15 @@ impl FileEntry {
         matches!(self.kind, EntryKind::DirectoryLink(_))
     }
 
+    pub(super) fn uses_app_bundle_icon(&self) -> bool {
+        self.is_directory_like()
+            && self
+                .path
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    }
+
     pub(super) fn display_name(&self) -> &str {
         let suffix_start = self.name.len().saturating_sub(4);
 
@@ -279,6 +288,14 @@ mod tests {
         assert!(!entry.is_directory_like());
         assert!(!entry.sorts_as_directory());
         assert!(!entry.uses_directory_shortcut_icon());
+    }
+
+    #[test]
+    fn app_bundle_icon_detection_matches_app_directories_only() {
+        assert!(FileEntry::test("Preview.app", true, None, None).uses_app_bundle_icon());
+        assert!(FileEntry::test("preview.APP", true, None, None).uses_app_bundle_icon());
+        assert!(!FileEntry::test("Preview.app", false, Some(1), None).uses_app_bundle_icon());
+        assert!(!FileEntry::test("folder", true, None, None).uses_app_bundle_icon());
     }
 
     #[test]

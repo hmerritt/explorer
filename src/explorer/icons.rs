@@ -1,4 +1,9 @@
-use gpui::{AnyElement, Div, FontFallbacks, Pixels, div, font, prelude::*, px, rgb};
+use std::sync::{Arc, LazyLock};
+
+use gpui::{
+    AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, Pixels, StyledImage, div, font,
+    img, prelude::*, px, rgb,
+};
 
 use crate::explorer::constants::{FILE_ICON_SLOT_HEIGHT_PHYSICAL, FILE_ICON_SLOT_WIDTH_PHYSICAL};
 
@@ -35,6 +40,21 @@ const DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL: f32 = 2.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL: f32 = 3.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR: u32 = 0xe5ffff;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
+const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/applications.png");
+const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/bin.png");
+
+static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        APPLICATIONS_SIDEBAR_ICON_BYTES.to_vec(),
+    ))
+});
+static BIN_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        BIN_SIDEBAR_ICON_BYTES.to_vec(),
+    ))
+});
 
 impl NavIcon {
     pub(super) fn glyph(self) -> &'static str {
@@ -112,6 +132,28 @@ pub(super) fn documents_folder_icon(scale_factor: f32) -> AnyElement {
 
 pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
     downloads_folder_fallback_icon(scale_factor).into_any_element()
+}
+
+pub(super) fn applications_sidebar_icon(scale_factor: f32) -> AnyElement {
+    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 22.0, 20.0, scale_factor)
+}
+
+pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
+    image_icon(BIN_SIDEBAR_ICON.clone(), 22.0, 20.0, scale_factor)
+}
+
+pub(super) fn image_icon(
+    image: Arc<Image>,
+    width_physical: f32,
+    height_physical: f32,
+    scale_factor: f32,
+) -> AnyElement {
+    img(image)
+        .w(device_px(width_physical, scale_factor))
+        .h(device_px(height_physical, scale_factor))
+        .flex_shrink_0()
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
 }
 
 fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
@@ -446,5 +488,11 @@ mod tests {
     fn special_folder_fallback_icons_use_sidebar_icon_slot() {
         assert_eq!(device_px_value(22.0, 1.0), 22.0);
         assert_eq!(device_px_value(20.0, 1.0), 20.0);
+    }
+
+    #[test]
+    fn sidebar_image_icons_use_bundled_png_assets() {
+        assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
+        assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
     }
 }

@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, ops::Range};
+use std::{collections::BTreeSet, ops::Range, sync::Arc};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
-    Focusable, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString, TextRun, Window,
-    canvas, div, font, prelude::*, px, rgb, uniform_list,
+    Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString,
+    TextRun, Window, canvas, div, font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::explorer::{
@@ -17,14 +17,14 @@ use crate::explorer::{
         DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
         DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
         DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
-        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_WIDTH_PHYSICAL, HEADER_HEIGHT,
-        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
-        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
-        NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT,
-        SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
-        SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
-        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
-        effective_name_column_width,
+        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT_PHYSICAL, FILE_ICON_SLOT_WIDTH_PHYSICAL,
+        HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE,
+        NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT,
+        NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING,
+        OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SIDEBAR_HORIZONTAL_PADDING,
+        SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
+        STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
+        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, effective_name_column_width,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -33,15 +33,17 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        NavIcon, desktop_folder_icon, device_px, device_px_value, directory_shortcut_icon,
-        documents_folder_icon, downloads_folder_icon, drive_icon, file_icon, folder_icon,
-        nav_icon_font,
+        NavIcon, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon, device_px,
+        device_px_value, directory_shortcut_icon, documents_folder_icon, downloads_folder_icon,
+        drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
-    sidebar::{SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections},
+    sidebar::{
+        MacosSystemLocationKind, SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections,
+    },
     view::{ExplorerContentBranch, ExplorerView},
 };
 
@@ -139,12 +141,20 @@ impl ExplorerView {
             children.push(self.render_sidebar_row(index, item, scale_factor, cx));
         }
 
+        if !children.is_empty() && !sections.macos_system_locations.is_empty() {
+            children.push(sidebar_separator().into_any_element());
+        }
+
+        for (index, item) in sections.macos_system_locations.into_iter().enumerate() {
+            children.push(self.render_sidebar_row(index + 1_000, item, scale_factor, cx));
+        }
+
         if !children.is_empty() && !sections.drives.is_empty() {
             children.push(sidebar_separator().into_any_element());
         }
 
         for (index, item) in sections.drives.into_iter().enumerate() {
-            children.push(self.render_sidebar_row(index + 1_000, item, scale_factor, cx));
+            children.push(self.render_sidebar_row(index + 2_000, item, scale_factor, cx));
         }
 
         div()
@@ -175,6 +185,10 @@ impl ExplorerView {
         let path = item.path.clone();
         let icon_item = item.clone();
         let is_user_directory = matches!(item.kind, SidebarItemKind::UserDirectory(_));
+        let is_bin = matches!(
+            item.kind,
+            SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin)
+        );
         let destination = DropDestination::Directory {
             item_path: path.clone(),
             target_path: path.clone(),
@@ -278,17 +292,46 @@ impl ExplorerView {
                 }));
         }
 
+        if is_bin {
+            row = row
+                .can_drop({
+                    let entity = entity.clone();
+                    move |dragged_value, _, cx| {
+                        entity.update(cx, |this, _| this.can_trash_drop_value(dragged_value))
+                    }
+                })
+                .drag_over::<DraggedEntries>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .drag_over::<ExternalPaths>(|style, _, _, _| {
+                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+                })
+                .on_drop(cx.listener(|this, dragged: &DraggedEntries, _, cx| {
+                    this.clear_drop_indicator();
+                    this.request_trash_paths_with_confirmation(dragged.paths.clone(), cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.clear_drop_indicator();
+                    this.request_trash_paths_with_confirmation(paths.paths().to_vec(), cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }));
+        }
+
         row.into_any_element()
     }
 
     fn render_row(
-        &self,
+        &mut self,
         ix: usize,
         scale_factor: f32,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
+        let app_icon = self.app_icon_cache.icon_for_entry(&entry);
         let is_selected = self.entry_is_selected(ix);
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
@@ -477,7 +520,7 @@ impl ExplorerView {
             )
         };
 
-        row.child(name_cell(&entry, scale_factor, window))
+        row.child(name_cell(&entry, app_icon, scale_factor, window))
             .child(date_cell)
             .child(type_cell)
             .child(size_cell)
@@ -1043,6 +1086,12 @@ fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
             folder_icon(scale_factor).into_any_element()
         }
+        SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Applications) => {
+            applications_sidebar_icon(scale_factor)
+        }
+        SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin) => {
+            bin_sidebar_icon(scale_factor)
+        }
         SidebarItemKind::Drive => drive_icon(scale_factor).into_any_element(),
     }
 }
@@ -1335,7 +1384,12 @@ fn name_header_cell() -> Div {
         .child("Name")
 }
 
-fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
+fn name_cell(
+    entry: &FileEntry,
+    app_icon: Option<Arc<Image>>,
+    scale_factor: f32,
+    window: &Window,
+) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
     let text_width = available_filename_text_width(list_viewport_width, scale_factor);
     let filename = truncated_text(entry.display_name(), text_width, 0x000000, window);
@@ -1348,13 +1402,7 @@ fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(if entry.uses_directory_shortcut_icon() {
-            directory_shortcut_icon(scale_factor)
-        } else if entry.is_directory_like() {
-            folder_icon(scale_factor)
-        } else {
-            file_icon(scale_factor)
-        })
+        .child(entry_icon(entry, app_icon, scale_factor))
         .child(
             div()
                 .flex_1()
@@ -1364,6 +1412,25 @@ fn name_cell(entry: &FileEntry, scale_factor: f32, window: &Window) -> Div {
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(filename),
         )
+}
+
+fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>, scale_factor: f32) -> AnyElement {
+    if let Some(app_icon) = app_icon {
+        return image_icon(
+            app_icon,
+            FILE_ICON_SLOT_WIDTH_PHYSICAL,
+            FILE_ICON_SLOT_HEIGHT_PHYSICAL,
+            scale_factor,
+        );
+    }
+
+    if entry.uses_directory_shortcut_icon() {
+        directory_shortcut_icon(scale_factor).into_any_element()
+    } else if entry.is_directory_like() {
+        folder_icon(scale_factor).into_any_element()
+    } else {
+        file_icon(scale_factor).into_any_element()
+    }
 }
 
 fn filename_text_width(name_column_width: f32, scale_factor: f32) -> f32 {

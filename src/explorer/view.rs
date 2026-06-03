@@ -7,6 +7,7 @@ use std::{
 use gpui::{AnyWindowHandle, FocusHandle, Task, UniformListScrollHandle};
 
 use crate::explorer::{
+    app_icons::AppIconCache,
     drag_drop::DropIndicator,
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
@@ -31,7 +32,9 @@ pub struct ExplorerView {
     pub(super) suppress_next_click: bool,
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) active_drop_indicator: Option<DropIndicator>,
+    pub(super) app_icon_cache: AppIconCache,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
+    pub(super) pending_trash: Option<PendingTrash>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
     pub(super) active_file_operation: Option<FileOperationState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
@@ -45,6 +48,12 @@ pub(super) struct FileOperationState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingPermanentDelete {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) fallback_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingTrash {
     pub(super) paths: Vec<PathBuf>,
     pub(super) fallback_index: Option<usize>,
 }
@@ -83,7 +92,9 @@ impl ExplorerView {
             suppress_next_click: false,
             cut_paths: BTreeSet::new(),
             active_drop_indicator: None,
+            app_icon_cache: AppIconCache::default(),
             pending_permanent_delete: None,
+            pending_trash: None,
             pending_file_conflict: None,
             active_file_operation: None,
             active_dialog_window: None,

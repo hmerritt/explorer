@@ -298,6 +298,16 @@ impl ExplorerView {
         .is_some()
     }
 
+    pub(super) fn can_trash_drop_value(&self, dragged_value: &dyn Any) -> bool {
+        if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+            return !dragged.paths.is_empty();
+        }
+
+        dragged_value
+            .downcast_ref::<gpui::ExternalPaths>()
+            .is_some_and(|paths| !paths.paths().is_empty())
+    }
+
     pub(super) fn drop_indicator_for_value(
         &self,
         dragged_value: &dyn Any,

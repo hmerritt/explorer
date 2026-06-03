@@ -1,4 +1,5 @@
 mod actions;
+mod app_icons;
 mod breadcrumb;
 mod clipboard;
 mod constants;

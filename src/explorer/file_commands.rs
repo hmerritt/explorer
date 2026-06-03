@@ -21,7 +21,7 @@ use crate::explorer::{
         prepare_copy_paths_to_directory_for_paste, prepare_move_paths_to_directory,
         remove_paths_permanently, trash_paths,
     },
-    view::{ExplorerView, FileOperationState, PendingPermanentDelete},
+    view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
 
 #[cfg(test)]
@@ -102,6 +102,46 @@ impl ExplorerView {
                 self.reload();
             }
         }
+    }
+
+    pub(super) fn request_trash_paths_with_confirmation(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+
+        self.pending_trash = Some(PendingTrash {
+            fallback_index: self.selection_fallback_index_for_paths(&paths),
+            paths,
+        });
+        self.open_error = None;
+        self.open_pending_dialog_window(cx);
+    }
+
+    pub(super) fn confirm_pending_trash(&mut self) {
+        let Some(pending) = self.pending_trash.take() else {
+            return;
+        };
+
+        match trash_paths(&pending.paths) {
+            Ok(()) => {
+                self.remove_cut_paths(&pending.paths);
+                self.reload();
+                self.select_fallback_index(pending.fallback_index);
+                self.open_error = None;
+            }
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload();
+            }
+        }
+    }
+
+    pub(super) fn cancel_pending_trash(&mut self) {
+        self.pending_trash = None;
     }
 
     pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
@@ -345,6 +385,12 @@ impl ExplorerView {
         self.selection.selected_indices.first().copied()
     }
 
+    fn selection_fallback_index_for_paths(&self, paths: &[PathBuf]) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| paths.iter().any(|path| path == &entry.path))
+    }
+
     fn select_fallback_index(&mut self, fallback_index: Option<usize>) {
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
@@ -409,6 +455,19 @@ mod tests {
         assert_eq!(
             clipboard.paths,
             vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]
+        );
+    }
+
+    #[test]
+    fn path_delete_fallback_uses_first_matching_entry_index() {
+        let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+
+        assert_eq!(
+            view.selection_fallback_index_for_paths(&[
+                PathBuf::from("missing.txt"),
+                PathBuf::from("b.txt"),
+            ]),
+            Some(1)
         );
     }
 

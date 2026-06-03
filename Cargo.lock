@@ -1534,9 +1534,11 @@ name = "explorer"
 version = "0.5.0"
 dependencies = [
  "chrono",
+ "cocoa 0.26.0",
  "embed-resource",
  "filetime",
  "gpui",
+ "objc",
  "open",
  "serde",
  "serde_json",

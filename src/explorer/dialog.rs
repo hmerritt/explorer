@@ -18,7 +18,7 @@ use crate::explorer::{
     filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::format_size,
-    view::{ExplorerView, PendingPermanentDelete},
+    view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
 
 actions!(dialog, [DialogCancel]);
@@ -72,6 +72,7 @@ const PROGRESS_DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerDialogKind {
     PermanentDelete(PendingPermanentDelete),
+    Trash(PendingTrash),
     FileConflict(FileConflictBatch),
     FileOperation(FileOperationProgress),
 }
@@ -142,6 +143,8 @@ impl ExplorerView {
 
         let kind = if let Some(pending) = self.pending_permanent_delete.clone() {
             ExplorerDialogKind::PermanentDelete(pending)
+        } else if let Some(pending) = self.pending_trash.clone() {
+            ExplorerDialogKind::Trash(pending)
         } else if let Some(conflicts) = self.pending_file_conflict.clone() {
             ExplorerDialogKind::FileConflict(conflicts)
         } else {
@@ -189,6 +192,7 @@ impl ExplorerView {
         if !completed {
             match kind {
                 ExplorerDialogKind::PermanentDelete(_) => self.cancel_pending_permanent_delete(),
+                ExplorerDialogKind::Trash(_) => self.cancel_pending_trash(),
                 ExplorerDialogKind::FileConflict(_) => {}
                 ExplorerDialogKind::FileOperation(_) => self.cancel_active_file_operation(),
             }
@@ -240,6 +244,16 @@ impl ExplorerDialog {
         window.remove_window();
     }
 
+    fn confirm_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.completed = true;
+        let _ = self.explorer.update(cx, |explorer, cx| {
+            explorer.confirm_pending_trash();
+            explorer.clear_active_dialog_window();
+            cx.notify();
+        });
+        window.remove_window();
+    }
+
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
         self.cancel_folder_size_task();
@@ -248,6 +262,10 @@ impl ExplorerDialog {
             match kind {
                 ExplorerDialogKind::PermanentDelete(_) => {
                     explorer.cancel_pending_permanent_delete();
+                    explorer.clear_active_dialog_window();
+                }
+                ExplorerDialogKind::Trash(_) => {
+                    explorer.cancel_pending_trash();
                     explorer.clear_active_dialog_window();
                 }
                 ExplorerDialogKind::FileConflict(_) => {
@@ -450,6 +468,7 @@ impl Render for ExplorerDialog {
                 ExplorerDialogKind::PermanentDelete(pending) => {
                     self.render_permanent_delete(pending, window, cx)
                 }
+                ExplorerDialogKind::Trash(pending) => self.render_trash(pending, window, cx),
                 ExplorerDialogKind::FileConflict(conflicts) => {
                     self.render_file_conflict(conflicts, cx)
                 }
@@ -514,6 +533,52 @@ impl ExplorerDialog {
                             },
                         )),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_trash(
+        &self,
+        pending: PendingTrash,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let text = trash_dialog_text(&pending);
+        let item_name = text
+            .item_name
+            .as_deref()
+            .map(|name| truncated_permanent_delete_file_name(name, window));
+        let body = if text.has_file_details() {
+            render_permanent_delete_file_body(text, item_name)
+        } else {
+            render_permanent_delete_compact_body(text.message)
+        };
+
+        div()
+            .id("trash-confirmation")
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(body)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
+                    .child(dialog_button("trash-yes", "Yes").on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.confirm_trash(window, cx);
+                            cx.stop_propagation();
+                        },
+                    )))
+                    .child(dialog_button("trash-no", "No").on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.cancel(window, cx);
+                            cx.stop_propagation();
+                        },
+                    ))),
             )
             .into_any_element()
     }
@@ -684,6 +749,11 @@ fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
             let height = permanent_delete_dialog_height(&text, cx);
             (DELETE_DIALOG_WIDTH, height)
         }
+        ExplorerDialogKind::Trash(pending) => {
+            let text = trash_dialog_text(pending);
+            let height = permanent_delete_dialog_height(&text, cx);
+            (DELETE_DIALOG_WIDTH, height)
+        }
         ExplorerDialogKind::FileConflict(conflicts) => {
             let text = file_conflict_dialog_text(conflicts);
             let height = file_conflict_dialog_height(&text.title, cx);
@@ -797,6 +867,7 @@ impl ExplorerDialogKind {
     fn window_title(&self) -> &'static str {
         match self {
             ExplorerDialogKind::PermanentDelete(_) => "Delete File",
+            ExplorerDialogKind::Trash(_) => "Delete File",
             ExplorerDialogKind::FileConflict(_) => "Replace or Skip Files",
             ExplorerDialogKind::FileOperation(_) => "File Operation",
         }
@@ -1094,6 +1165,36 @@ pub(super) fn permanent_delete_dialog_text(
     }
 }
 
+pub(super) fn trash_dialog_text(pending: &PendingTrash) -> PermanentDeleteDialogText {
+    let (item_name, item_kind) = if let [path] = pending.paths.as_slice() {
+        let detail = permanent_delete_file_detail(path);
+        (Some(detail.item_name), Some(detail.item_kind))
+    } else {
+        (None, None)
+    };
+
+    let message = match item_kind {
+        Some(PermanentDeleteItemKind::File) => {
+            "Are you sure you want to move this file to the Recycle Bin?".to_owned()
+        }
+        Some(PermanentDeleteItemKind::Folder) => {
+            "Are you sure you want to move this folder to the Recycle Bin?".to_owned()
+        }
+        None => format!(
+            "Are you sure you want to move these {} items to the Recycle Bin?",
+            pending.paths.len()
+        ),
+    };
+
+    PermanentDeleteDialogText {
+        message,
+        item_name,
+        item_kind,
+        size_label: None,
+        folder_size_path: None,
+    }
+}
+
 fn permanent_delete_folder_size_path(kind: &ExplorerDialogKind) -> Option<PathBuf> {
     let ExplorerDialogKind::PermanentDelete(pending) = kind else {
         return None;
@@ -1274,6 +1375,44 @@ mod tests {
         assert_eq!(
             text.message,
             "Are you sure you want to permanently delete these 2 items?"
+        );
+        assert_eq!(text.item_name, None);
+        assert_eq!(text.item_kind, None);
+        assert_eq!(text.size_label, None);
+        assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn trash_text_uses_recycle_bin_message_without_size_details() {
+        let temp = TempDir::new();
+        let path = temp.path().join("a.txt");
+        fs::write(&path, []).expect("create selected file");
+
+        let text = trash_dialog_text(&PendingTrash {
+            paths: vec![path],
+            fallback_index: None,
+        });
+
+        assert_eq!(
+            text.message,
+            "Are you sure you want to move this file to the Recycle Bin?"
+        );
+        assert_eq!(text.item_name, Some("a.txt".to_owned()));
+        assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
+        assert_eq!(text.size_label, None);
+        assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn trash_text_uses_plural_recycle_bin_message() {
+        let text = trash_dialog_text(&PendingTrash {
+            paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            fallback_index: None,
+        });
+
+        assert_eq!(
+            text.message,
+            "Are you sure you want to move these 2 items to the Recycle Bin?"
         );
         assert_eq!(text.item_name, None);
         assert_eq!(text.item_kind, None);
