@@ -119,9 +119,16 @@ class Explorer < Formula
         chmod 0755, bin/"explorer-register-desktop"
       end
     else
-      odie "Expected Explorer.app in archive; found: #{Dir.children(".").sort.join(", ")}" unless File.directory?("Explorer.app")
+      explorer_app = libexec/"Explorer.app"
+      if File.directory?("Explorer.app")
+        libexec.install "Explorer.app"
+      elsif File.exist?("Contents/Info.plist")
+        explorer_app.mkpath
+        explorer_app.install "Contents"
+      else
+        odie "Expected Explorer.app or Contents/Info.plist in archive; found: #{Dir.children(".").sort.join(", ")}"
+      end
 
-      libexec.install "Explorer.app"
       (bin/"explorer").write <<~SH
         #!/usr/bin/env sh
         set -eu
