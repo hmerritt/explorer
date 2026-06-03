@@ -147,6 +147,16 @@ class Explorer < Formula
   end
 
   def caveats
+    if OS.mac?
+      return <<~EOS
+        This formula installs Explorer under Homebrew's Cellar and exposes the
+        explorer command.
+
+        For a Finder-visible /Applications install, use the cask:
+          brew install --cask hmerritt/tap/explorer
+      EOS
+    end
+
     return unless OS.linux?
 
     <<~EOS

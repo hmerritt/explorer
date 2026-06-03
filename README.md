@@ -26,7 +26,7 @@ Or via one of the supported package managers:
 #### ➡️ macOS via [Homebrew](https://brew.sh/)
 
 ```sh
-brew install hmerritt/tap/explorer
+brew install --cask hmerritt/tap/explorer
 ```
 
 macOS release downloads contain `Explorer.app`; open the app bundle from Finder
