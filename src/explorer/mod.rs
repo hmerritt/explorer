@@ -7,6 +7,7 @@ mod drag_drop;
 mod entry;
 mod file_commands;
 mod filesystem;
+mod folder_size;
 mod formatting;
 mod icons;
 mod mouse_selection;

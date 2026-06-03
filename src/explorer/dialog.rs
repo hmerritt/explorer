@@ -1,14 +1,21 @@
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, LineFragment, Render, SharedString, TextRun, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, font, prelude::*, px,
-    rgb, size,
+    IntoElement, LineFragment, Render, SharedString, Task, TextRun, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, font,
+    prelude::*, px, rgb, size,
 };
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use crate::explorer::{
     entry::FileEntry,
     filesystem::FileConflictBatch,
+    folder_size::{FolderSizeError, calculate_folder_size},
     formatting::format_size,
     view::{ExplorerView, PendingPermanentDelete},
 };
@@ -62,19 +69,38 @@ pub(super) struct ExplorerDialog {
     explorer: WeakEntity<ExplorerView>,
     focus_handle: FocusHandle,
     completed: bool,
+    folder_size_state: FolderSizeState,
+    folder_size_task: Option<Task<()>>,
+    folder_size_cancel: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PermanentDeleteItemKind {
+    File,
+    Folder,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct PermanentDeleteDialogText {
     pub(super) message: String,
-    pub(super) file_name: Option<String>,
+    pub(super) item_name: Option<String>,
+    pub(super) item_kind: Option<PermanentDeleteItemKind>,
     pub(super) size_label: Option<String>,
+    pub(super) folder_size_path: Option<PathBuf>,
 }
 
 impl PermanentDeleteDialogText {
     fn has_file_details(&self) -> bool {
-        self.file_name.is_some() || self.size_label.is_some()
+        self.item_name.is_some() || self.size_label.is_some()
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum FolderSizeState {
+    NotNeeded,
+    Calculating { path: PathBuf },
+    Ready { path: PathBuf, size: u64 },
+    Failed { path: PathBuf },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -134,13 +160,19 @@ impl ExplorerDialog {
         kind: ExplorerDialogKind,
         explorer: WeakEntity<ExplorerView>,
         focus_handle: FocusHandle,
+        cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut dialog = Self {
             kind,
             explorer,
             focus_handle,
             completed: false,
-        }
+            folder_size_state: FolderSizeState::NotNeeded,
+            folder_size_task: None,
+            folder_size_cancel: None,
+        };
+        dialog.start_folder_size_task(cx);
+        dialog
     }
 
     fn handle_cancel(&mut self, _: &DialogCancel, window: &mut Window, cx: &mut Context<Self>) {
@@ -149,6 +181,7 @@ impl ExplorerDialog {
 
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
+        self.cancel_folder_size_task();
         let _ = self.explorer.update(cx, |explorer, cx| {
             explorer.confirm_pending_permanent_delete();
             explorer.clear_active_dialog_window();
@@ -159,6 +192,7 @@ impl ExplorerDialog {
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
+        self.cancel_folder_size_task();
         let kind = self.kind.clone();
         let _ = self.explorer.update(cx, |explorer, cx| {
             match kind {
@@ -184,12 +218,99 @@ impl ExplorerDialog {
     }
 
     fn release(&mut self, cx: &mut App) {
+        self.cancel_folder_size_task();
         let kind = self.kind.clone();
         let completed = self.completed;
         let _ = self.explorer.update(cx, move |explorer, cx| {
             explorer.dialog_window_released(kind, completed);
             cx.notify();
         });
+    }
+
+    fn start_folder_size_task(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = permanent_delete_folder_size_path(&self.kind) else {
+            return;
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.folder_size_state = FolderSizeState::Calculating { path: path.clone() };
+        self.folder_size_cancel = Some(cancel.clone());
+
+        let task = cx.spawn({
+            let path = path.clone();
+            async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        let cancel = cancel.clone();
+                        async move { calculate_folder_size(&path, &cancel) }
+                    })
+                    .await;
+
+                let _ = this.update(cx, |dialog, cx| {
+                    if dialog.completed || dialog.folder_size_cancelled() {
+                        return;
+                    }
+                    if !dialog.folder_size_state_matches_path(&path) {
+                        return;
+                    }
+
+                    dialog.folder_size_state = match result {
+                        Ok(size) => FolderSizeState::Ready {
+                            path: path.clone(),
+                            size,
+                        },
+                        Err(FolderSizeError::Cancelled) => return,
+                        Err(FolderSizeError::Unavailable) => {
+                            FolderSizeState::Failed { path: path.clone() }
+                        }
+                    };
+                    cx.notify();
+                });
+            }
+        });
+        self.folder_size_task = Some(task);
+    }
+
+    fn cancel_folder_size_task(&mut self) {
+        if let Some(cancel) = self.folder_size_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.folder_size_task = None;
+    }
+
+    fn folder_size_cancelled(&self) -> bool {
+        self.folder_size_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+    }
+
+    fn folder_size_state_matches_path(&self, path: &Path) -> bool {
+        match &self.folder_size_state {
+            FolderSizeState::Calculating { path: state_path }
+            | FolderSizeState::Ready {
+                path: state_path, ..
+            }
+            | FolderSizeState::Failed { path: state_path } => state_path == path,
+            FolderSizeState::NotNeeded => false,
+        }
+    }
+
+    fn folder_size_label(&self, path: &Path) -> String {
+        match &self.folder_size_state {
+            FolderSizeState::Ready {
+                path: state_path,
+                size,
+            } if state_path == path => format!("Size: {}", format_size(Some(*size))),
+            FolderSizeState::Failed { path: state_path } if state_path == path => {
+                "Size: unavailable".to_owned()
+            }
+            FolderSizeState::Calculating { path: state_path } if state_path == path => {
+                "Size: calculating...".to_owned()
+            }
+            _ => "Size: calculating...".to_owned(),
+        }
     }
 }
 
@@ -231,13 +352,16 @@ impl ExplorerDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = permanent_delete_dialog_text(&pending);
-        let file_name = text
-            .file_name
+        let mut text = permanent_delete_dialog_text(&pending);
+        if let Some(path) = text.folder_size_path.as_deref() {
+            text.size_label = Some(self.folder_size_label(path));
+        }
+        let item_name = text
+            .item_name
             .as_deref()
             .map(|name| truncated_permanent_delete_file_name(name, window));
         let body = if text.has_file_details() {
-            render_permanent_delete_file_body(text, file_name)
+            render_permanent_delete_file_body(text, item_name)
         } else {
             render_permanent_delete_compact_body(text.message)
         };
@@ -349,7 +473,7 @@ fn open_dialog_window(
             cx.new(|cx| {
                 cx.on_release(|dialog: &mut ExplorerDialog, cx| dialog.release(cx))
                     .detach();
-                ExplorerDialog::new(kind, explorer.downgrade(), focus_handle)
+                ExplorerDialog::new(kind, explorer.downgrade(), focus_handle, cx)
             })
         })
         .map_err(|error| error.to_string())?;
@@ -698,45 +822,83 @@ fn dialog_command_row(
 pub(super) fn permanent_delete_dialog_text(
     pending: &PendingPermanentDelete,
 ) -> PermanentDeleteDialogText {
-    let (file_name, size_label) = if let [path] = pending.paths.as_slice() {
-        let detail = permanent_delete_file_detail(path);
-        (Some(detail.file_name), Some(detail.size_label))
-    } else {
-        (None, None)
-    };
+    let (item_name, item_kind, size_label, folder_size_path) =
+        if let [path] = pending.paths.as_slice() {
+            let detail = permanent_delete_file_detail(path);
+            (
+                Some(detail.item_name),
+                Some(detail.item_kind),
+                Some(detail.size_label),
+                detail.folder_size_path,
+            )
+        } else {
+            (None, None, None, None)
+        };
 
-    let message = if file_name.is_some() {
-        "Are you sure you want to permanently delete this file?".to_owned()
-    } else {
-        format!(
+    let message = match item_kind {
+        Some(PermanentDeleteItemKind::File) => {
+            "Are you sure you want to permanently delete this file?".to_owned()
+        }
+        Some(PermanentDeleteItemKind::Folder) => {
+            "Are you sure you want to permanently delete this folder?".to_owned()
+        }
+        None => format!(
             "Are you sure you want to permanently delete these {} items?",
             pending.paths.len()
-        )
+        ),
     };
 
     PermanentDeleteDialogText {
         message,
-        file_name,
+        item_name,
+        item_kind,
         size_label,
+        folder_size_path,
     }
 }
 
+fn permanent_delete_folder_size_path(kind: &ExplorerDialogKind) -> Option<PathBuf> {
+    let ExplorerDialogKind::PermanentDelete(pending) = kind else {
+        return None;
+    };
+    let [path] = pending.paths.as_slice() else {
+        return None;
+    };
+    let entry = FileEntry::from_path(path.clone())?;
+    entry.is_directory_like().then(|| path.clone())
+}
+
 struct PermanentDeleteFileDetail {
-    file_name: String,
+    item_name: String,
+    item_kind: PermanentDeleteItemKind,
     size_label: String,
+    folder_size_path: Option<PathBuf>,
 }
 
 fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
     if let Some(entry) = FileEntry::from_path(path.to_path_buf()) {
+        let is_folder = entry.is_directory_like();
         return PermanentDeleteFileDetail {
-            file_name: entry.display_name().to_owned(),
-            size_label: format!("Size: {}", format_size(entry.size)),
+            item_name: entry.display_name().to_owned(),
+            item_kind: if is_folder {
+                PermanentDeleteItemKind::Folder
+            } else {
+                PermanentDeleteItemKind::File
+            },
+            size_label: if is_folder {
+                "Size: calculating...".to_owned()
+            } else {
+                format!("Size: {}", format_size(entry.size))
+            },
+            folder_size_path: is_folder.then(|| path.to_path_buf()),
         };
     }
 
     PermanentDeleteFileDetail {
-        file_name: path_display_name(path),
+        item_name: path_display_name(path),
+        item_kind: PermanentDeleteItemKind::File,
         size_label: "Size: ".to_owned(),
+        folder_size_path: None,
     }
 }
 
@@ -803,8 +965,31 @@ mod tests {
             text.message,
             "Are you sure you want to permanently delete this file?"
         );
-        assert_eq!(text.file_name, Some("a.tif".to_owned()));
+        assert_eq!(text.item_name, Some("a.tif".to_owned()));
+        assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: 0 bytes".to_owned()));
+        assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn permanent_delete_text_uses_singular_folder_message_and_calculating_size() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        let text = permanent_delete_dialog_text(&PendingPermanentDelete {
+            paths: vec![folder.clone()],
+            fallback_index: None,
+        });
+
+        assert_eq!(
+            text.message,
+            "Are you sure you want to permanently delete this folder?"
+        );
+        assert_eq!(text.item_name, Some("folder".to_owned()));
+        assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::Folder));
+        assert_eq!(text.size_label, Some("Size: calculating...".to_owned()));
+        assert_eq!(text.folder_size_path, Some(folder));
     }
 
     #[test]
@@ -814,8 +999,10 @@ mod tests {
             fallback_index: None,
         });
 
-        assert_eq!(text.file_name, Some("missing.txt".to_owned()));
+        assert_eq!(text.item_name, Some("missing.txt".to_owned()));
+        assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: ".to_owned()));
+        assert_eq!(text.folder_size_path, None);
     }
 
     #[test]
@@ -830,7 +1017,7 @@ mod tests {
             text.message,
             "Are you sure you want to permanently delete this file?"
         );
-        assert_eq!(text.file_name, Some(long_name));
+        assert_eq!(text.item_name, Some(long_name));
     }
 
     #[test]
@@ -851,8 +1038,10 @@ mod tests {
             text.message,
             "Are you sure you want to permanently delete these 2 items?"
         );
-        assert_eq!(text.file_name, None);
+        assert_eq!(text.item_name, None);
+        assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
+        assert_eq!(text.folder_size_path, None);
     }
 
     #[test]
