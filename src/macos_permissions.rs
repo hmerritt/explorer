@@ -1,11 +1,10 @@
-use std::io;
-
 #[cfg(target_os = "macos")]
-use std::{
-    fs::{self, File},
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::fs::{self, File};
+use std::io;
+#[cfg(target_os = "macos")]
+use std::io::Read;
+#[cfg(any(target_os = "macos", test))]
+use std::path::{Path, PathBuf};
 
 const FULL_DISK_ACCESS_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
@@ -19,14 +18,14 @@ pub enum MacosFullDiskAccessStatus {
     Unknown,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProbeKind {
     Directory,
     File,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProtectedProbePath {
     path: PathBuf,
@@ -51,34 +50,63 @@ pub fn open_macos_full_disk_access_settings() -> io::Result<()> {
     open_macos_full_disk_access_settings_with(|url| open::that_detached(url))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn protected_probe_paths(home_dir: Option<&Path>) -> Vec<ProtectedProbePath> {
-    let Some(home_dir) = home_dir else {
-        return Vec::new();
-    };
+    let mut probes = Vec::new();
 
-    vec![
+    if let Some(home_dir) = home_dir {
+        probes.extend([
+            ProtectedProbePath {
+                path: home_dir
+                    .join("Library")
+                    .join("Application Support")
+                    .join("com.apple.TCC")
+                    .join("TCC.db"),
+                kind: ProbeKind::File,
+            },
+            ProtectedProbePath {
+                path: home_dir.join("Library").join("Mail"),
+                kind: ProbeKind::Directory,
+            },
+            ProtectedProbePath {
+                path: home_dir.join("Library").join("Messages"),
+                kind: ProbeKind::Directory,
+            },
+            ProtectedProbePath {
+                path: home_dir.join("Library").join("Safari"),
+                kind: ProbeKind::Directory,
+            },
+            ProtectedProbePath {
+                path: home_dir.join("Library").join("Safari").join("CloudTabs.db"),
+                kind: ProbeKind::File,
+            },
+            ProtectedProbePath {
+                path: home_dir
+                    .join("Library")
+                    .join("Safari")
+                    .join("Bookmarks.plist"),
+                kind: ProbeKind::File,
+            },
+        ]);
+    }
+
+    probes.extend([
         ProtectedProbePath {
-            path: home_dir
-                .join("Library")
+            path: PathBuf::from("/Library")
                 .join("Application Support")
                 .join("com.apple.TCC")
                 .join("TCC.db"),
             kind: ProbeKind::File,
         },
         ProtectedProbePath {
-            path: home_dir.join("Library").join("Mail"),
-            kind: ProbeKind::Directory,
+            path: PathBuf::from("/Library")
+                .join("Preferences")
+                .join("com.apple.TimeMachine.plist"),
+            kind: ProbeKind::File,
         },
-        ProtectedProbePath {
-            path: home_dir.join("Library").join("Messages"),
-            kind: ProbeKind::Directory,
-        },
-        ProtectedProbePath {
-            path: home_dir.join("Library").join("Safari"),
-            kind: ProbeKind::Directory,
-        },
-    ]
+    ]);
+
+    probes
 }
 
 #[cfg(target_os = "macos")]
@@ -198,6 +226,32 @@ mod tests {
     }
 
     #[test]
+    fn protected_probe_paths_include_home_and_system_locations() {
+        let home = Path::new("/Users/example");
+        let probes = protected_probe_paths(Some(home));
+        let paths = probe_paths(&probes);
+
+        assert!(paths.contains(&home_tcc_db(home)));
+        assert!(paths.contains(&home.join("Library").join("Mail")));
+        assert!(paths.contains(&home.join("Library").join("Messages")));
+        assert!(paths.contains(&home.join("Library").join("Safari")));
+        assert!(paths.contains(&home.join("Library").join("Safari").join("CloudTabs.db")));
+        assert!(paths.contains(&home.join("Library").join("Safari").join("Bookmarks.plist")));
+        assert!(paths.contains(&system_tcc_db()));
+        assert!(paths.contains(&system_time_machine_preferences()));
+    }
+
+    #[test]
+    fn protected_probe_paths_keep_system_locations_without_home() {
+        let probes = protected_probe_paths(None);
+        let paths = probe_paths(&probes);
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&system_tcc_db()));
+        assert!(paths.contains(&system_time_machine_preferences()));
+    }
+
+    #[test]
     fn settings_opener_uses_fallback_when_full_disk_access_url_fails() {
         let opened_urls = RefCell::new(Vec::new());
 
@@ -233,5 +287,29 @@ mod tests {
             opened_urls.into_inner(),
             vec![FULL_DISK_ACCESS_SETTINGS_URL, PRIVACY_SETTINGS_URL]
         );
+    }
+
+    fn probe_paths(probes: &[ProtectedProbePath]) -> Vec<PathBuf> {
+        probes.iter().map(|probe| probe.path.clone()).collect()
+    }
+
+    fn home_tcc_db(home: &Path) -> PathBuf {
+        home.join("Library")
+            .join("Application Support")
+            .join("com.apple.TCC")
+            .join("TCC.db")
+    }
+
+    fn system_tcc_db() -> PathBuf {
+        PathBuf::from("/Library")
+            .join("Application Support")
+            .join("com.apple.TCC")
+            .join("TCC.db")
+    }
+
+    fn system_time_machine_preferences() -> PathBuf {
+        PathBuf::from("/Library")
+            .join("Preferences")
+            .join("com.apple.TimeMachine.plist")
     }
 }

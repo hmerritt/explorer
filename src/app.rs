@@ -23,9 +23,11 @@ use crate::explorer::{
     OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
     default_start_path,
 };
+#[cfg(any(target_os = "macos", test))]
+use crate::macos_permissions::MacosFullDiskAccessStatus;
 #[cfg(target_os = "macos")]
 use crate::macos_permissions::{
-    MacosFullDiskAccessStatus, macos_full_disk_access_status, open_macos_full_disk_access_settings,
+    macos_full_disk_access_status, open_macos_full_disk_access_settings,
 };
 
 const APP_ID: &str = "com.hmerritt.explorer";
@@ -477,14 +479,16 @@ fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Resu
 
 #[cfg(target_os = "macos")]
 fn maybe_open_full_disk_access_prompt(cx: &mut App) {
-    if matches!(
-        macos_full_disk_access_status(),
-        MacosFullDiskAccessStatus::Granted
-    ) {
+    if !should_show_full_disk_access_prompt(macos_full_disk_access_status()) {
         return;
     }
 
     let _ = open_full_disk_access_prompt(cx);
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_show_full_disk_access_prompt(status: MacosFullDiskAccessStatus) -> bool {
+    matches!(status, MacosFullDiskAccessStatus::Missing)
 }
 
 #[cfg(target_os = "macos")]
@@ -626,6 +630,19 @@ mod tests {
         assert!(!SEGOE_FLUENT_ICONS.is_empty());
         assert!(!SEGOE_MDL2_ASSETS.is_empty());
         assert!(SEGOE_FLUENT_ICONS.len() > SEGOE_MDL2_ASSETS.len());
+    }
+
+    #[test]
+    fn full_disk_access_prompt_shows_only_when_access_is_missing() {
+        assert!(should_show_full_disk_access_prompt(
+            MacosFullDiskAccessStatus::Missing
+        ));
+        assert!(!should_show_full_disk_access_prompt(
+            MacosFullDiskAccessStatus::Granted
+        ));
+        assert!(!should_show_full_disk_access_prompt(
+            MacosFullDiskAccessStatus::Unknown
+        ));
     }
 
     #[test]
