@@ -1528,7 +1528,8 @@ fn utility_text_button(
         .child(
             div()
                 .font(nav_icon_font())
-                .text_size(px(9.0))
+                .text_size(px(7.0))
+                .mt(px(2.0))
                 .text_color(rgb(0x505050))
                 .child(UTILITY_ICON_CHEVRON_DOWN),
         )
