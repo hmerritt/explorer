@@ -1636,8 +1636,6 @@ fn utility_checkbox_row(
             div()
                 .w(px(16.0))
                 .h(px(16.0))
-                .border_1()
-                .border_color(rgb(0x707070))
                 .rounded(px(2.0))
                 .into_any_element()
         }),
