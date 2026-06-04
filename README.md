@@ -12,10 +12,11 @@
 
 ## Features ⚡
 
-- [x] GPU accelerated file explorer
-- [ ] Tabs
-- [ ] Copy/Cut/Paste
-- [ ] Archive compress/decompress support
+- [x] Explorer
+    - [x] Tabs
+    - [x] Copy/Cut/Paste/Rename
+- [x] GPU acceleration (via [GPUI](https://www.gpui.rs/))
+- [ ] Archive support (compress/decompress)
 
 ## Download 💾
 
