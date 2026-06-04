@@ -202,7 +202,7 @@ impl ExplorerView {
             .flex_row()
             .items_center()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .mx(px(4.0))
+            .mx(px(8.0))
             .px(px(SIDEBAR_HORIZONTAL_PADDING))
             .rounded(px(4.0))
             .cursor_default()

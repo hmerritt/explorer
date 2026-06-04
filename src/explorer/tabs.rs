@@ -16,7 +16,7 @@ use crate::explorer::{
 };
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
-const TAB_WIDTH: f32 = 210.0;
+const TAB_WIDTH: f32 = 225.0;
 const TAB_MIN_WIDTH: f32 = 160.0;
 const TAB_HORIZONTAL_PADDING: f32 = 10.0;
 const TAB_ICON_GAP: f32 = 8.0;
