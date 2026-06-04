@@ -1,10 +1,11 @@
 use std::{collections::BTreeSet, ops::Range, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths,
-    FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString,
-    TextRun, Window, canvas, div, font, prelude::*, px, rgb, uniform_list,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
+    ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent,
+    SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb, transparent_black,
+    uniform_list,
 };
 
 use crate::explorer::{
@@ -12,6 +13,7 @@ use crate::explorer::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
     },
+    clipboard::file_clipboard_from_item,
     constants::{
         COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
         DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
@@ -24,7 +26,10 @@ use crate::explorer::{
         OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SIDEBAR_HORIZONTAL_PADDING,
         SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
         STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
-        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, effective_name_column_width,
+        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT,
+        UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT,
+        UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
+        effective_name_column_width,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -45,7 +50,7 @@ use crate::explorer::{
     sidebar::{
         MacosSystemLocationKind, SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections,
     },
-    view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent},
+    view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -59,6 +64,23 @@ const DROP_INDICATOR_TEXT_SIZE: f32 = 12.0;
 const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
+const UTILITY_TEXT_BUTTON_WIDTH: f32 = 78.0;
+const UTILITY_SEPARATOR_OUTER_WIDTH: f32 = 17.0;
+const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
+const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
+    + UTILITY_TEXT_BUTTON_WIDTH
+    + UTILITY_SEPARATOR_OUTER_WIDTH
+    + (UTILITY_ICON_BUTTON_SIZE * 5.0)
+    + UTILITY_SEPARATOR_OUTER_WIDTH
+    + (UTILITY_BAR_ITEM_GAP * 8.0);
+const UTILITY_ICON_CUT: &str = "\u{E8C6}";
+const UTILITY_ICON_COPY: &str = "\u{E8C8}";
+const UTILITY_ICON_PASTE: &str = "\u{E77F}";
+const UTILITY_ICON_RENAME: &str = "\u{E8AC}";
+const UTILITY_ICON_DELETE: &str = "\u{E74D}";
+const UTILITY_ICON_FILE: &str = "\u{E8A5}";
+const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
+const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 
 impl ExplorerView {
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -114,6 +136,218 @@ impl ExplorerView {
                 }),
             ))
             .child(directory_bar(breadcrumb, cx))
+    }
+
+    fn render_utility_bar(&self, cx: &mut Context<Self>) -> Div {
+        let has_selection = !self.selection.selected_indices.is_empty();
+        let can_rename = self.can_start_selected_rename();
+        let clipboard = cx.read_from_clipboard();
+        let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(UTILITY_BAR_HEIGHT))
+            .w_full()
+            .flex_shrink_0()
+            .bg(rgb(0xf8f8f8))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(0xe9e9e9))
+            .px(px(UTILITY_BAR_HORIZONTAL_PADDING))
+            .gap(px(UTILITY_BAR_ITEM_GAP))
+            .child(utility_text_button(
+                "utility-new",
+                "New",
+                self.open_utility_menu == Some(UtilityMenu::New),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
+                        None
+                    } else {
+                        Some(UtilityMenu::New)
+                    };
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_separator())
+            .child(utility_icon_button(
+                "utility-cut",
+                UTILITY_ICON_CUT,
+                has_selection,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_utility_menu = None;
+                    if this.commit_active_rename_before_interaction(window, cx) {
+                        this.cut_selected_to_clipboard(cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_icon_button(
+                "utility-copy",
+                UTILITY_ICON_COPY,
+                has_selection,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_utility_menu = None;
+                    if this.commit_active_rename_before_interaction(window, cx) {
+                        this.copy_selected_to_clipboard(cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_icon_button(
+                "utility-paste",
+                UTILITY_ICON_PASTE,
+                can_paste,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_utility_menu = None;
+                    if this.commit_active_rename_before_interaction(window, cx) {
+                        this.paste_clipboard_files(cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_icon_button(
+                "utility-rename",
+                UTILITY_ICON_RENAME,
+                can_rename,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_utility_menu = None;
+                    if this.commit_active_rename_before_interaction(window, cx) {
+                        this.start_rename_selected(window, cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_icon_button(
+                "utility-delete",
+                UTILITY_ICON_DELETE,
+                has_selection,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_utility_menu = None;
+                    if this.commit_active_rename_before_interaction(window, cx) {
+                        this.trash_selected_paths(cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_separator())
+            .child(utility_text_button(
+                "utility-view",
+                "View",
+                self.open_utility_menu == Some(UtilityMenu::View),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
+                        None
+                    } else {
+                        Some(UtilityMenu::View)
+                    };
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+    }
+
+    fn render_utility_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.open_utility_menu?;
+        let left = match menu {
+            UtilityMenu::New => UTILITY_NEW_MENU_LEFT,
+            UtilityMenu::View => UTILITY_VIEW_MENU_LEFT,
+        };
+
+        let menu = match menu {
+            UtilityMenu::New => utility_dropdown()
+                .child(utility_menu_row(
+                    "utility-new-folder",
+                    Some(folder_icon(1.0).into_any_element()),
+                    "Folder",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.create_new_folder(window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_menu_row(
+                    "utility-new-file",
+                    Some(utility_menu_glyph_icon(UTILITY_ICON_FILE)),
+                    "File",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.create_new_file(window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )),
+            UtilityMenu::View => utility_dropdown()
+                .child(utility_checkbox_row(
+                    "utility-hidden-files",
+                    self.show_hidden_files,
+                    "Hidden files",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.show_hidden_files = !this.show_hidden_files;
+                            this.reload();
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_checkbox_row(
+                    "utility-file-name-extensions",
+                    self.show_file_name_extensions,
+                    "File Name extensions",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.show_file_name_extensions = !this.show_file_name_extensions;
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )),
+        };
+
+        let click_catcher = div()
+            .id("utility-menu-click-catcher")
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .size_full()
+            .cursor_default()
+            .bg(transparent_black())
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.open_utility_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            }));
+
+        Some(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .size_full()
+                .child(click_catcher)
+                .child(
+                    menu.absolute()
+                        .left(px(left))
+                        .top(px(NAVBAR_HEIGHT + UTILITY_BAR_HEIGHT - 2.0)),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_header(&self) -> Div {
@@ -564,52 +798,58 @@ impl ExplorerView {
         } else {
             let name_click_entry = entry.clone();
             let name_middle_clicked_entry = entry.clone();
-            name_cell(&entry, app_icon, scale_factor, window)
-                .id(("explorer-entry-name", ix))
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    if !is_normal_entry_click(event) {
-                        cx.stop_propagation();
-                        return;
-                    }
+            name_cell(
+                &entry,
+                app_icon,
+                scale_factor,
+                self.show_file_name_extensions,
+                window,
+            )
+            .id(("explorer-entry-name", ix))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !is_normal_entry_click(event) {
+                    cx.stop_propagation();
+                    return;
+                }
 
-                    if this.suppress_next_click() {
+                if this.suppress_next_click() {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
+                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
+                    &name_click_entry,
+                    event.click_count(),
+                    selection_modifiers_for_click(event),
+                    window,
+                    cx,
+                ) {
+                    this.open_file_with_default_app(&path);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if !this.commit_active_rename_before_interaction(window, cx) {
                         cx.stop_propagation();
                         cx.notify();
                         return;
                     }
 
-                    if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
-                        &name_click_entry,
-                        event.click_count(),
-                        selection_modifiers_for_click(event),
-                        window,
-                        cx,
+                    if let Some(path) = this.handle_entry_middle_click(
+                        &name_middle_clicked_entry,
+                        SelectionModifiers::from_gpui(event.modifiers),
                     ) {
-                        this.open_file_with_default_app(&path);
+                        cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
                     }
                     cx.stop_propagation();
                     cx.notify();
-                }))
-                .on_mouse_down(
-                    MouseButton::Middle,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        if !this.commit_active_rename_before_interaction(window, cx) {
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-
-                        if let Some(path) = this.handle_entry_middle_click(
-                            &name_middle_clicked_entry,
-                            SelectionModifiers::from_gpui(event.modifiers),
-                        ) {
-                            cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .into_any_element()
+                }),
+            )
+            .into_any_element()
         };
 
         row.child(name_cell)
@@ -1031,6 +1271,7 @@ impl Render for ExplorerView {
             .text_color(rgb(0x000000))
             .overflow_hidden()
             .child(self.render_navbar(window, cx))
+            .child(self.render_utility_bar(cx))
             .child(
                 div()
                     .flex()
@@ -1075,6 +1316,9 @@ impl Render for ExplorerView {
                             .child(self.render_status_bar()),
                     ),
             )
+            .when_some(self.render_utility_menu_overlay(cx), |this, menu| {
+                this.child(menu)
+            })
     }
 }
 
@@ -1244,6 +1488,187 @@ fn render_open_error(error: &str) -> Div {
         .text_size(px(12.0))
         .text_color(rgb(0x6f1d1d))
         .child(SharedString::from(error.to_owned()))
+}
+
+fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
+    item.and_then(file_clipboard_from_item).is_some()
+}
+
+fn utility_text_button(
+    id: &'static str,
+    label: &'static str,
+    is_open: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w(px(UTILITY_TEXT_BUTTON_WIDTH))
+        .h(px(UTILITY_BUTTON_HEIGHT))
+        .gap(px(6.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .bg(if is_open {
+            rgb(0xe5f3ff)
+        } else {
+            rgb(0xf8f8f8)
+        })
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_click(on_click)
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(label),
+        )
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(px(9.0))
+                .text_color(rgb(0x505050))
+                .child(UTILITY_ICON_CHEVRON_DOWN),
+        )
+        .into_any_element()
+}
+
+fn utility_icon_button(
+    id: &'static str,
+    icon: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(UTILITY_ICON_BUTTON_SIZE))
+        .h(px(UTILITY_ICON_BUTTON_SIZE))
+        .rounded(px(4.0))
+        .cursor_default()
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+                .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+                .on_click(on_click)
+        })
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(px(14.0))
+                .text_color(if enabled {
+                    rgb(NAV_ICON_ENABLED_COLOR)
+                } else {
+                    rgb(NAV_ICON_DISABLED_COLOR)
+                })
+                .child(icon),
+        )
+        .into_any_element()
+}
+
+fn utility_separator() -> Div {
+    div()
+        .h(px(22.0))
+        .w(px(1.0))
+        .mx(px(8.0))
+        .flex_shrink_0()
+        .bg(rgb(0xd8d8d8))
+}
+
+fn utility_dropdown() -> Div {
+    div()
+        .w(px(UTILITY_MENU_WIDTH))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xd8d8d8))
+        .shadow_md()
+        .occlude()
+}
+
+fn utility_menu_row(
+    id: &'static str,
+    icon: Option<AnyElement>,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(UTILITY_MENU_ROW_HEIGHT))
+        .mx(px(4.0))
+        .px(px(8.0))
+        .gap(px(8.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(0xe5f3ff)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_click(on_click)
+        .child(utility_menu_icon_slot(icon))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(label),
+        )
+        .into_any_element()
+}
+
+fn utility_checkbox_row(
+    id: &'static str,
+    checked: bool,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    utility_menu_row(
+        id,
+        Some(if checked {
+            utility_menu_glyph_icon(UTILITY_ICON_CHECK)
+        } else {
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .border_1()
+                .border_color(rgb(0x707070))
+                .rounded(px(2.0))
+                .into_any_element()
+        }),
+        label,
+        on_click,
+    )
+}
+
+fn utility_menu_icon_slot(icon: Option<AnyElement>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .when_some(icon, |this, icon| this.child(icon))
+}
+
+fn utility_menu_glyph_icon(icon: &'static str) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(16.0))
+        .h(px(16.0))
+        .font(nav_icon_font())
+        .text_size(px(13.0))
+        .text_color(rgb(0x1f1f1f))
+        .child(icon)
+        .into_any_element()
 }
 
 fn nav_button(
@@ -1507,11 +1932,17 @@ fn name_cell(
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
     scale_factor: f32,
+    show_file_name_extensions: bool,
     window: &Window,
 ) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
     let text_width = available_filename_text_width(list_viewport_width, scale_factor);
-    let filename = truncated_text(entry.display_name(), text_width, 0x000000, window);
+    let filename = truncated_text(
+        entry.display_name_with_extensions(show_file_name_extensions),
+        text_width,
+        0x000000,
+        window,
+    );
 
     div()
         .flex()
@@ -1777,14 +2208,15 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     use gpui::{
-        ClickEvent, KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent,
-        MouseUpEvent,
+        ClickEvent, ClipboardItem, KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent,
+        MouseDownEvent, MouseUpEvent,
     };
 
     use crate::explorer::{
+        clipboard::{FileClipboard, FileClipboardOperation, clipboard_item_for_files},
         constants::{
             COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
             EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
@@ -1797,9 +2229,9 @@ mod tests {
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width, drop_indicator_target_width,
-        filename_text_width, folder_status_summary, is_normal_entry_click,
-        selection_modifiers_for_click, text_cell_width,
+        NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width, clipboard_has_file_clipboard,
+        drop_indicator_target_width, filename_text_width, folder_status_summary,
+        is_normal_entry_click, selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -1812,6 +2244,20 @@ mod tests {
     fn cut_item_opacity_dims_rows() {
         assert_eq!(CUT_ITEM_OPACITY, 0.7);
         assert!(CUT_ITEM_OPACITY < 1.0);
+    }
+
+    #[test]
+    fn paste_button_availability_requires_explorer_file_clipboard() {
+        let explorer_item = clipboard_item_for_files(&FileClipboard::new(
+            FileClipboardOperation::Copy,
+            vec![PathBuf::from("a.txt")],
+        ))
+        .expect("clipboard item");
+        let plain_item = ClipboardItem::new_string("a.txt".to_owned());
+
+        assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
+        assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
+        assert!(!clipboard_has_file_clipboard(None));
     }
 
     #[test]

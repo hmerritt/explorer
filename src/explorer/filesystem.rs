@@ -185,8 +185,11 @@ pub(super) fn local_drive_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
 }
 
-pub(super) fn load_entries(path: &Path) -> std::io::Result<Vec<FileEntry>> {
-    load_entries_with_options(path, EntryLoadOptions::for_path(path))
+pub(super) fn load_entries(
+    path: &Path,
+    show_hidden_files: bool,
+) -> std::io::Result<Vec<FileEntry>> {
+    load_entries_with_options(path, EntryLoadOptions::for_path(path, show_hidden_files))
 }
 
 #[derive(Clone, Copy)]
@@ -196,9 +199,9 @@ struct EntryLoadOptions {
 }
 
 impl EntryLoadOptions {
-    fn for_path(path: &Path) -> Self {
+    fn for_path(path: &Path, show_hidden_files: bool) -> Self {
         Self {
-            hide_hidden_entries: should_hide_hidden_entries(path),
+            hide_hidden_entries: !show_hidden_files,
             applications_view: should_use_applications_view(path),
         }
     }
@@ -272,16 +275,6 @@ fn should_use_applications_view(path: &Path) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn should_use_applications_view(_: &Path) -> bool {
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn should_hide_hidden_entries(path: &Path) -> bool {
-    path == Path::new("/Applications")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn should_hide_hidden_entries(_: &Path) -> bool {
     false
 }
 
@@ -1293,6 +1286,41 @@ mod tests {
             },
         )
         .expect("load entries");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![".hidden", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn load_entries_omits_hidden_entries_when_show_hidden_files_is_false() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let entries = load_entries(temp.path(), false).expect("load entries");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+    }
+
+    #[test]
+    fn load_entries_keeps_hidden_entries_when_show_hidden_files_is_true() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join(".DS_Store"), b"metadata").expect("create metadata file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let entries = load_entries(temp.path(), true).expect("load entries");
 
         assert_eq!(
             entries

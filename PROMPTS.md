@@ -2,23 +2,6 @@
 
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
----
-
-Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
-
-- New
-- Cut
-- Copy
-- Paste
-- Rename
-- Delete
-- View (dropdown)
-    - Show/hide hidden files
-    - File Name extensions
-- Select All
-- Select None
-- Invert Selection
-
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.
@@ -36,6 +19,11 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 
 ## Ideas
 
+- Settings file
+    - Sidebar items
+    - Hidden files
+    - File extensions
+    - <any and all options>
 - Split-screen (Zed style)
 - Shell-extension system
 - 7zip built-in

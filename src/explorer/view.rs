@@ -44,6 +44,9 @@ pub struct ExplorerView {
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
+    pub(super) show_hidden_files: bool,
+    pub(super) show_file_name_extensions: bool,
+    pub(super) open_utility_menu: Option<UtilityMenu>,
 }
 
 pub(super) struct FileOperationState {
@@ -77,6 +80,12 @@ pub(super) enum ExplorerContentBranch {
     Error,
     Empty,
     List,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UtilityMenu {
+    New,
+    View,
 }
 
 impl ExplorerView {
@@ -114,6 +123,9 @@ impl ExplorerView {
             active_dialog_window: None,
             active_rename: None,
             rename_focus_out: None,
+            show_hidden_files: true,
+            show_file_name_extensions: true,
+            open_utility_menu: None,
         };
         view.reload();
         view
@@ -123,7 +135,7 @@ impl ExplorerView {
         self.open_error = None;
         let selected_paths = self.selected_paths();
 
-        match load_entries(&self.path) {
+        match load_entries(&self.path, self.show_hidden_files) {
             Ok(entries) => {
                 self.entries = entries;
                 self.read_error = None;
@@ -214,6 +226,15 @@ mod tests {
         view.read_error = None;
 
         assert!(view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn view_options_default_to_showing_hidden_files_and_extensions() {
+        let view = ExplorerView::new(PathBuf::from("defaults"));
+
+        assert!(view.show_hidden_files);
+        assert!(view.show_file_name_extensions);
+        assert_eq!(view.open_utility_menu, None);
     }
 
     #[test]

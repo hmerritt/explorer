@@ -41,9 +41,15 @@ pub(super) struct RenameState {
 }
 
 impl RenameState {
-    fn new(entry: &FileEntry, focus_handle: Option<FocusHandle>) -> Self {
-        let content = entry.display_name().to_owned();
-        let hidden_suffix = hidden_rename_suffix(entry);
+    fn new(
+        entry: &FileEntry,
+        show_file_name_extensions: bool,
+        focus_handle: Option<FocusHandle>,
+    ) -> Self {
+        let content = entry
+            .display_name_with_extensions(show_file_name_extensions)
+            .to_owned();
+        let hidden_suffix = hidden_rename_suffix(entry, show_file_name_extensions);
         let selected_range = initial_rename_selection(entry, &content, hidden_suffix.is_some());
 
         Self {
@@ -572,7 +578,6 @@ impl ExplorerView {
             .and_then(|rename| rename.focus_handle.clone())
     }
 
-    #[cfg(test)]
     pub(super) fn can_start_selected_rename(&self) -> bool {
         self.selection.selected_indices.len() == 1
     }
@@ -678,7 +683,11 @@ impl ExplorerView {
     #[cfg(test)]
     fn start_rename_for_entry_without_focus(&mut self, entry: FileEntry) {
         self.rename_focus_out = None;
-        self.active_rename = Some(RenameState::new(&entry, None));
+        self.active_rename = Some(RenameState::new(
+            &entry,
+            self.show_file_name_extensions,
+            None,
+        ));
         self.open_error = None;
     }
 
@@ -690,7 +699,11 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.rename_focus_out = None;
-        self.active_rename = Some(RenameState::new(&entry, focus_handle.clone()));
+        self.active_rename = Some(RenameState::new(
+            &entry,
+            self.show_file_name_extensions,
+            focus_handle.clone(),
+        ));
         self.open_error = None;
 
         if let Some(focus_handle) = focus_handle {
@@ -1190,14 +1203,20 @@ fn rename_text_x_for_mouse_x(
     mouse_x - bounds_left + scroll_offset
 }
 
-fn hidden_rename_suffix(entry: &FileEntry) -> Option<String> {
-    let suffix_start = entry.name.len().checked_sub(4)?;
-    let suffix = entry.name.get(suffix_start..)?;
-
-    if suffix.eq_ignore_ascii_case(".lnk")
-        || (entry.is_app_bundle() && suffix.eq_ignore_ascii_case(".app"))
+fn hidden_rename_suffix(entry: &FileEntry, show_file_name_extensions: bool) -> Option<String> {
+    if let Some(suffix_start) = entry.name.len().checked_sub(4)
+        && let Some(suffix) = entry.name.get(suffix_start..)
+        && (suffix.eq_ignore_ascii_case(".lnk")
+            || (entry.is_app_bundle() && suffix.eq_ignore_ascii_case(".app")))
     {
-        Some(suffix.to_owned())
+        return Some(suffix.to_owned());
+    }
+
+    if !show_file_name_extensions && !entry.is_directory_like() {
+        match entry.name.rfind('.') {
+            Some(0) | None => None,
+            Some(dot) => Some(entry.name[dot..].to_owned()),
+        }
     } else {
         None
     }
@@ -1307,9 +1326,21 @@ mod tests {
 
     #[test]
     fn target_name_preserves_hidden_suffixes() {
-        let shortcut = RenameState::new(&FileEntry::test("target.LNK", false, Some(1), None), None);
-        let app = RenameState::new(&FileEntry::test("Preview.app", true, None, None), None);
-        let file = RenameState::new(&FileEntry::test("readme.md", false, Some(1), None), None);
+        let shortcut = RenameState::new(
+            &FileEntry::test("target.LNK", false, Some(1), None),
+            true,
+            None,
+        );
+        let app = RenameState::new(
+            &FileEntry::test("Preview.app", true, None, None),
+            true,
+            None,
+        );
+        let file = RenameState::new(
+            &FileEntry::test("readme.md", false, Some(1), None),
+            true,
+            None,
+        );
 
         let mut shortcut = shortcut;
         shortcut.content = "renamed".to_owned();
@@ -1325,16 +1356,51 @@ mod tests {
     }
 
     #[test]
+    fn target_name_preserves_normal_extension_when_extensions_are_hidden() {
+        let mut file = RenameState::new(
+            &FileEntry::test("readme.md", false, Some(1), None),
+            false,
+            None,
+        );
+        file.content = "notes".to_owned();
+
+        let mut short_extension =
+            RenameState::new(&FileEntry::test("a.b", false, Some(1), None), false, None);
+        short_extension.content = "c".to_owned();
+
+        let dotfile = RenameState::new(
+            &FileEntry::test(".gitignore", false, Some(1), None),
+            false,
+            None,
+        );
+
+        assert_eq!(file.content, "notes");
+        assert_eq!(file.target_file_name(), "notes.md");
+        assert_eq!(short_extension.target_file_name(), "c.b");
+        assert_eq!(dotfile.content, ".gitignore");
+        assert_eq!(dotfile.target_file_name(), ".gitignore");
+    }
+
+    #[test]
     fn initial_selection_selects_stem_for_files_and_all_for_hidden_suffixes() {
         let file = RenameState::new(
             &FileEntry::test("archive.tar.gz", false, Some(1), None),
+            true,
             None,
         );
-        let folder = RenameState::new(&FileEntry::test("folder", true, None, None), None);
+        let folder = RenameState::new(&FileEntry::test("folder", true, None, None), true, None);
         let extensionless =
-            RenameState::new(&FileEntry::test("README", false, Some(1), None), None);
-        let dotfile = RenameState::new(&FileEntry::test(".gitignore", false, Some(1), None), None);
-        let shortcut = RenameState::new(&FileEntry::test("target.lnk", false, Some(1), None), None);
+            RenameState::new(&FileEntry::test("README", false, Some(1), None), true, None);
+        let dotfile = RenameState::new(
+            &FileEntry::test(".gitignore", false, Some(1), None),
+            true,
+            None,
+        );
+        let shortcut = RenameState::new(
+            &FileEntry::test("target.lnk", false, Some(1), None),
+            true,
+            None,
+        );
 
         assert_eq!(file.selected_range, 0.."archive.tar".len());
         assert_eq!(folder.selected_range, 0.."folder".len());
@@ -1347,6 +1413,7 @@ mod tests {
     fn word_boundaries_skip_spaces_punctuation_and_extensions() {
         let mut rename = RenameState::new(
             &FileEntry::test("hello world.txt", false, Some(1), None),
+            true,
             None,
         );
         rename.content = "hello world.txt".to_owned();
@@ -1370,6 +1437,7 @@ mod tests {
     fn word_boundaries_handle_punctuation_and_unicode_safely() {
         let mut rename = RenameState::new(
             &FileEntry::test("file-name café.txt", false, Some(1), None),
+            true,
             None,
         );
         rename.content = "file-name café.txt".to_owned();
@@ -1419,6 +1487,7 @@ mod tests {
     fn ctrl_left_and_right_move_by_word() {
         let mut rename = RenameState::new(
             &FileEntry::test("alpha beta.txt", false, Some(1), None),
+            true,
             None,
         );
         rename.content = "alpha beta.txt".to_owned();
@@ -1441,6 +1510,7 @@ mod tests {
     fn ctrl_shift_left_and_right_extend_selection_by_word() {
         let mut rename = RenameState::new(
             &FileEntry::test("alpha beta.txt", false, Some(1), None),
+            true,
             None,
         );
         rename.content = "alpha beta.txt".to_owned();
@@ -1494,6 +1564,7 @@ mod tests {
     fn rename_scroll_uses_active_selection_end() {
         let mut rename = RenameState::new(
             &FileEntry::test("alpha beta gamma.txt", false, Some(1), None),
+            true,
             None,
         );
         rename.content = "alpha beta gamma.txt".to_owned();

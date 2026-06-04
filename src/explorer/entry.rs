@@ -126,6 +126,19 @@ impl FileEntry {
         }
     }
 
+    pub(super) fn display_name_with_extensions(&self, show_file_name_extensions: bool) -> &str {
+        let display_name = self.display_name();
+
+        if show_file_name_extensions || self.is_directory_like() {
+            return display_name;
+        }
+
+        match display_name.rfind('.') {
+            Some(0) | None => display_name,
+            Some(dot) => &display_name[..dot],
+        }
+    }
+
     pub(super) fn navigation_path(&self) -> &Path {
         match &self.kind {
             EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target }) => target,
@@ -358,6 +371,56 @@ mod tests {
         assert_eq!(
             FileEntry::test("readme.md", false, Some(1), None).display_name(),
             "readme.md"
+        );
+    }
+
+    #[test]
+    fn display_name_with_extensions_keeps_current_special_suffix_hiding_when_enabled() {
+        assert_eq!(
+            FileEntry::test("target.lnk", false, Some(1), None).display_name_with_extensions(true),
+            "target"
+        );
+        assert_eq!(
+            FileEntry::test("Preview.app", true, None, None).display_name_with_extensions(true),
+            "Preview"
+        );
+        assert_eq!(
+            FileEntry::test("readme.md", false, Some(1), None).display_name_with_extensions(true),
+            "readme.md"
+        );
+    }
+
+    #[test]
+    fn display_name_with_extensions_hides_normal_file_extensions_when_disabled() {
+        assert_eq!(
+            FileEntry::test("readme.md", false, Some(1), None).display_name_with_extensions(false),
+            "readme"
+        );
+        assert_eq!(
+            FileEntry::test("archive.tar.gz", false, Some(1), None)
+                .display_name_with_extensions(false),
+            "archive.tar"
+        );
+        assert_eq!(
+            FileEntry::test("README", false, Some(1), None).display_name_with_extensions(false),
+            "README"
+        );
+        assert_eq!(
+            FileEntry::test(".env", false, Some(1), None).display_name_with_extensions(false),
+            ".env"
+        );
+    }
+
+    #[test]
+    fn display_name_with_extensions_keeps_directory_names_when_disabled() {
+        assert_eq!(
+            FileEntry::test("folder.with.dots", true, None, None)
+                .display_name_with_extensions(false),
+            "folder.with.dots"
+        );
+        assert_eq!(
+            FileEntry::test("Terminal.app", true, None, None).display_name_with_extensions(false),
+            "Terminal"
         );
     }
 
