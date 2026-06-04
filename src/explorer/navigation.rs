@@ -108,6 +108,23 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn handle_entry_middle_click(
+        &mut self,
+        entry: &FileEntry,
+        modifiers: SelectionModifiers,
+    ) -> Option<PathBuf> {
+        let target = directory_new_tab_target(entry)?;
+
+        if let Some(ix) = self.entry_index_by_path(&entry.path) {
+            self.apply_click_selection(ix, modifiers);
+        } else {
+            self.clear_selection();
+        }
+        self.open_error = None;
+
+        Some(target)
+    }
+
     pub(super) fn activate_focused_entry(&mut self, open_files: bool) -> Option<EntryAction> {
         let entry = self.focused_entry()?.clone();
         self.open_error = None;
@@ -141,6 +158,11 @@ impl ExplorerView {
             }
         }
     }
+}
+
+pub(super) fn directory_new_tab_target(entry: &FileEntry) -> Option<PathBuf> {
+    (entry.is_directory_like() && !entry.is_app_bundle())
+        .then(|| entry.navigation_path().to_path_buf())
 }
 
 #[cfg(test)]
@@ -279,6 +301,85 @@ mod tests {
         assert_eq!(view.selected_paths(), vec![app]);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn middle_click_target_uses_real_directory_path() {
+        let entry = FileEntry::test("folder", true, None, None);
+
+        assert_eq!(
+            directory_new_tab_target(&entry),
+            Some(PathBuf::from("folder"))
+        );
+    }
+
+    #[test]
+    fn middle_click_target_uses_filesystem_directory_link_path() {
+        let entry = FileEntry::test_directory_link("linked", DirectoryLinkKind::FilesystemLink);
+
+        assert_eq!(
+            directory_new_tab_target(&entry),
+            Some(PathBuf::from("linked"))
+        );
+    }
+
+    #[test]
+    fn middle_click_target_uses_shell_directory_shortcut_target() {
+        let entry = FileEntry::test_directory_link(
+            "shortcut.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target"),
+            },
+        );
+
+        assert_eq!(
+            directory_new_tab_target(&entry),
+            Some(PathBuf::from("target"))
+        );
+    }
+
+    #[test]
+    fn middle_click_target_ignores_files_and_app_bundles() {
+        let file = FileEntry::test("file.txt", false, Some(4), None);
+        let app = FileEntry::test("Preview.app", true, None, None);
+
+        assert_eq!(directory_new_tab_target(&file), None);
+        assert_eq!(directory_new_tab_target(&app), None);
+    }
+
+    #[test]
+    fn middle_click_selects_directory_and_returns_background_tab_target() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![
+            FileEntry::test("first", true, None, None),
+            FileEntry::test("second", true, None, None),
+        ];
+        view.select_single_index(0);
+
+        let entry = view.entries[1].clone();
+        let target = view.handle_entry_middle_click(&entry, SelectionModifiers::default());
+
+        assert_eq!(target, Some(PathBuf::from("second")));
+        assert_eq!(view.path, PathBuf::from("root"));
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("second")]);
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn middle_click_ignores_file_selection() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("file.txt", false, Some(4), None),
+        ];
+        view.select_single_index(0);
+
+        let entry = view.entries[1].clone();
+        let target = view.handle_entry_middle_click(&entry, SelectionModifiers::default());
+
+        assert_eq!(target, None);
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("folder")]);
     }
 
     #[test]

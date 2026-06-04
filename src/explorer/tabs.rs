@@ -88,18 +88,32 @@ impl ExplorerTabs {
     }
 
     fn add_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_foreground_tab(default_start_path(), window, cx);
+    }
+
+    fn add_foreground_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
-        let view =
-            cx.new(|_| ExplorerView::new_with_focus_handle(default_start_path(), focus_handle));
+        let view = cx.new(|_| ExplorerView::new_with_focus_handle(path, focus_handle));
         observe_tab_view(&view, cx);
 
         self.tabs.push(ExplorerTab { id, view });
         self.active_tab = id;
         self.scroll_active_tab_into_view();
+    }
+
+    fn add_background_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+
+        let focus_handle = cx.focus_handle();
+        let view = cx.new(|_| ExplorerView::new_with_focus_handle(path, focus_handle));
+        observe_tab_view(&view, cx);
+
+        self.tabs.push(ExplorerTab { id, view });
     }
 
     fn activate_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,6 +540,10 @@ fn observe_tab_view(view: &Entity<ExplorerView>, cx: &mut Context<ExplorerTabs>)
     cx.subscribe(view, |this, _, event, cx| match event {
         ExplorerViewEvent::FilesystemChanged => {
             this.reload_all_tabs(cx);
+            cx.notify();
+        }
+        ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
+            this.add_background_tab(path.clone(), cx);
             cx.notify();
         }
     })

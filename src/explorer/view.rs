@@ -52,9 +52,10 @@ pub(super) struct FileOperationState {
     pub(super) task: Option<Task<()>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerViewEvent {
     FilesystemChanged,
+    OpenDirectoryInNewTab(PathBuf),
 }
 
 impl EventEmitter<ExplorerViewEvent> for ExplorerView {}

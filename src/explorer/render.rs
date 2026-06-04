@@ -45,7 +45,7 @@ use crate::explorer::{
     sidebar::{
         MacosSystemLocationKind, SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections,
     },
-    view::{ExplorerContentBranch, ExplorerView},
+    view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent},
 };
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -336,6 +336,7 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
+        let middle_clicked_entry = entry.clone();
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
@@ -371,6 +372,11 @@ impl ExplorerView {
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !is_normal_entry_click(event) {
+                    cx.stop_propagation();
+                    return;
+                }
+
                 if this.suppress_next_click() {
                     cx.stop_propagation();
                     cx.notify();
@@ -393,6 +399,25 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if !this.commit_active_rename_before_interaction(window, cx) {
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(path) = this.handle_entry_middle_click(
+                        &middle_clicked_entry,
+                        SelectionModifiers::from_gpui(event.modifiers),
+                    ) {
+                        cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .on_drag_move::<DraggedEntries>({
                 let destination = destination.clone();
                 let entity = entity.clone();
@@ -538,9 +563,15 @@ impl ExplorerView {
             .into_any_element()
         } else {
             let name_click_entry = entry.clone();
+            let name_middle_clicked_entry = entry.clone();
             name_cell(&entry, app_icon, scale_factor, window)
                 .id(("explorer-entry-name", ix))
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if !is_normal_entry_click(event) {
+                        cx.stop_propagation();
+                        return;
+                    }
+
                     if this.suppress_next_click() {
                         cx.stop_propagation();
                         cx.notify();
@@ -559,6 +590,25 @@ impl ExplorerView {
                     cx.stop_propagation();
                     cx.notify();
                 }))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        if !this.commit_active_rename_before_interaction(window, cx) {
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+
+                        if let Some(path) = this.handle_entry_middle_click(
+                            &name_middle_clicked_entry,
+                            SelectionModifiers::from_gpui(event.modifiers),
+                        ) {
+                            cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
                 .into_any_element()
         };
 
@@ -1617,6 +1667,13 @@ fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
     }
 }
 
+fn is_normal_entry_click(event: &ClickEvent) -> bool {
+    match event {
+        ClickEvent::Mouse(event) => event.down.button == MouseButton::Left,
+        ClickEvent::Keyboard(_) => true,
+    }
+}
+
 fn add_item_drag(
     cell: Div,
     id: impl Into<gpui::ElementId>,
@@ -1721,7 +1778,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use gpui::{
-        ClickEvent, KeyboardClickEvent, Modifiers, MouseClickEvent, MouseDownEvent, MouseUpEvent,
+        ClickEvent, KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent,
+        MouseUpEvent,
     };
 
     use crate::explorer::{
@@ -1738,7 +1796,8 @@ mod tests {
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
         NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width, drop_indicator_target_width,
-        filename_text_width, folder_status_summary, selection_modifiers_for_click, text_cell_width,
+        filename_text_width, folder_status_summary, is_normal_entry_click,
+        selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -1875,6 +1934,34 @@ mod tests {
             selection_modifiers_for_click(&event),
             SelectionModifiers::default()
         );
+    }
+
+    #[test]
+    fn normal_entry_click_accepts_left_mouse_and_keyboard_clicks() {
+        let left = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+        let keyboard = ClickEvent::Keyboard(KeyboardClickEvent::default());
+
+        assert!(is_normal_entry_click(&left));
+        assert!(is_normal_entry_click(&keyboard));
+    }
+
+    #[test]
+    fn normal_entry_click_rejects_middle_mouse_clicks() {
+        let middle = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Middle,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+
+        assert!(!is_normal_entry_click(&middle));
     }
 
     #[test]
