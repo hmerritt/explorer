@@ -35,6 +35,7 @@ pub(super) struct RenameState {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll_offset: Pixels,
     is_selecting: bool,
     pub(super) focus_handle: Option<FocusHandle>,
 }
@@ -55,6 +56,7 @@ impl RenameState {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_offset: px(0.0),
             is_selecting: false,
             focus_handle,
         }
@@ -72,6 +74,7 @@ impl RenameState {
         let offset = self.clamp_to_boundary(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.scroll_cursor_into_view();
     }
 
     fn select_to(&mut self, offset: usize) {
@@ -86,11 +89,13 @@ impl RenameState {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.scroll_cursor_into_view();
     }
 
     fn select_all(&mut self) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
+        self.scroll_cursor_into_view();
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -228,7 +233,11 @@ impl RenameState {
             return self.content.len();
         }
 
-        self.clamp_to_boundary(line.closest_index_for_x(position.x - bounds.left()))
+        self.clamp_to_boundary(line.closest_index_for_x(rename_text_x_for_mouse_x(
+            position.x,
+            bounds.left(),
+            self.scroll_offset,
+        )))
     }
 
     fn target_file_name(&self) -> String {
@@ -236,6 +245,20 @@ impl RenameState {
             Some(suffix) => format!("{}{}", self.content, suffix),
             None => self.content.clone(),
         }
+    }
+
+    fn scroll_cursor_into_view(&mut self) {
+        let (Some(line), Some(bounds)) = (self.last_layout.as_ref(), self.last_bounds.as_ref())
+        else {
+            return;
+        };
+
+        self.scroll_offset = scroll_offset_for_cursor(
+            self.scroll_offset,
+            line.x_for_index(self.cursor_offset()),
+            line.width,
+            bounds.right() - bounds.left(),
+        );
     }
 }
 
@@ -772,6 +795,7 @@ impl ExplorerView {
         if let Some(rename) = self.active_rename.as_mut() {
             rename.last_layout = Some(line);
             rename.last_bounds = Some(bounds);
+            rename.scroll_cursor_into_view();
         }
     }
 }
@@ -863,6 +887,7 @@ impl EntityInputHandler for ExplorerView {
                 .map(|new_range| new_range.start + range.start..new_range.end + range.start)
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
             rename.selection_reversed = false;
+            rename.scroll_cursor_into_view();
             cx.notify();
         }
     }
@@ -878,8 +903,14 @@ impl EntityInputHandler for ExplorerView {
         let line = rename.last_layout.as_ref()?;
         let range = rename.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(
+                bounds.left() + line.x_for_index(range.start) - rename.scroll_offset,
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + line.x_for_index(range.end) - rename.scroll_offset,
+                bounds.bottom(),
+            ),
         ))
     }
 
@@ -909,6 +940,7 @@ pub(super) struct RenamePrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_offset: Pixels,
 }
 
 impl IntoElement for RenameTextElement {
@@ -1001,13 +1033,19 @@ impl Element for RenameTextElement {
         let line = window
             .text_system()
             .shape_line(content, font_size, &runs, None);
+        let scroll_offset = scroll_offset_for_cursor(
+            rename.scroll_offset,
+            line.x_for_index(cursor),
+            line.width,
+            bounds.right() - bounds.left(),
+        );
         let cursor_pos = line.x_for_index(cursor);
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(bounds.left() + cursor_pos - scroll_offset, bounds.top()),
                         size(px(1.0), bounds.bottom() - bounds.top()),
                     ),
                     gpui::blue(),
@@ -1018,11 +1056,11 @@ impl Element for RenameTextElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left() + line.x_for_index(selected_range.start) - scroll_offset,
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left() + line.x_for_index(selected_range.end) - scroll_offset,
                             bounds.bottom(),
                         ),
                     ),
@@ -1036,6 +1074,7 @@ impl Element for RenameTextElement {
             line: Some(line),
             cursor,
             selection,
+            scroll_offset,
         }
     }
 
@@ -1061,8 +1100,13 @@ impl Element for RenameTextElement {
             window.paint_quad(selection);
         }
         let line = prepaint.line.take().expect("rename text line");
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .expect("paint rename text");
+        line.paint(
+            point(bounds.origin.x - prepaint.scroll_offset, bounds.origin.y),
+            window.line_height(),
+            window,
+            cx,
+        )
+        .expect("paint rename text");
 
         if let Some(focus_handle) = self.entity.read(cx).active_rename_focus_handle()
             && focus_handle.is_focused(window)
@@ -1086,6 +1130,39 @@ fn replace_rename_text(rename: &mut RenameState, range: Option<Range<usize>>, ne
     rename.selected_range = cursor..cursor;
     rename.selection_reversed = false;
     rename.marked_range = None;
+    rename.scroll_cursor_into_view();
+}
+
+fn scroll_offset_for_cursor(
+    current_offset: Pixels,
+    cursor_x: Pixels,
+    content_width: Pixels,
+    viewport_width: Pixels,
+) -> Pixels {
+    let margin = px(4.0);
+    if content_width <= viewport_width {
+        return px(0.0);
+    }
+
+    let max_offset = (content_width - viewport_width + margin).max(px(0.0));
+    let left_edge = current_offset + margin;
+    let right_edge = current_offset + viewport_width - margin;
+
+    if cursor_x < left_edge {
+        (cursor_x - margin).max(px(0.0))
+    } else if cursor_x > right_edge {
+        (cursor_x - viewport_width + margin).clamp(px(0.0), max_offset)
+    } else {
+        current_offset.clamp(px(0.0), max_offset)
+    }
+}
+
+fn rename_text_x_for_mouse_x(
+    mouse_x: Pixels,
+    bounds_left: Pixels,
+    scroll_offset: Pixels,
+) -> Pixels {
+    mouse_x - bounds_left + scroll_offset
 }
 
 fn hidden_rename_suffix(entry: &FileEntry) -> Option<String> {
@@ -1350,6 +1427,65 @@ mod tests {
         rename.move_to("alpha beta.".len());
         rename.select_to(rename.previous_word_boundary(rename.cursor_offset()));
         assert_eq!(rename.selected_range, "alpha ".len().."alpha beta.".len());
+    }
+
+    #[test]
+    fn rename_scroll_does_not_scroll_when_text_fits() {
+        assert_eq!(
+            scroll_offset_for_cursor(px(12.0), px(40.0), px(90.0), px(100.0)),
+            px(0.0)
+        );
+    }
+
+    #[test]
+    fn rename_scroll_moves_right_to_keep_cursor_visible() {
+        assert_eq!(
+            scroll_offset_for_cursor(px(0.0), px(140.0), px(200.0), px(100.0)),
+            px(44.0)
+        );
+    }
+
+    #[test]
+    fn rename_scroll_moves_left_to_keep_cursor_visible() {
+        assert_eq!(
+            scroll_offset_for_cursor(px(80.0), px(20.0), px(200.0), px(100.0)),
+            px(16.0)
+        );
+    }
+
+    #[test]
+    fn rename_scroll_clamps_at_zero_and_maximum() {
+        assert_eq!(
+            scroll_offset_for_cursor(px(40.0), px(2.0), px(200.0), px(100.0)),
+            px(0.0)
+        );
+        assert_eq!(
+            scroll_offset_for_cursor(px(0.0), px(220.0), px(200.0), px(100.0)),
+            px(104.0)
+        );
+    }
+
+    #[test]
+    fn rename_scroll_uses_active_selection_end() {
+        let mut rename = RenameState::new(
+            &FileEntry::test("alpha beta gamma.txt", false, Some(1), None),
+            None,
+        );
+        rename.content = "alpha beta gamma.txt".to_owned();
+        rename.selected_range = 0.."alpha beta gamma".len();
+        rename.selection_reversed = false;
+        assert_eq!(rename.cursor_offset(), "alpha beta gamma".len());
+
+        rename.selection_reversed = true;
+        assert_eq!(rename.cursor_offset(), 0);
+    }
+
+    #[test]
+    fn mouse_text_x_includes_scroll_offset() {
+        assert_eq!(
+            rename_text_x_for_mouse_x(px(60.0), px(20.0), px(80.0)),
+            px(120.0)
+        );
     }
 
     #[test]
