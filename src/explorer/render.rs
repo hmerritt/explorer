@@ -1573,7 +1573,7 @@ fn utility_separator() -> Div {
     div()
         .h(px(22.0))
         .w(px(1.0))
-        .mx(px(8.0))
+        .mx(px(0.0))
         .flex_shrink_0()
         .bg(rgb(0xd8d8d8))
 }
