@@ -25,11 +25,11 @@ mod test_support;
 mod view;
 
 pub use actions::{
-    CancelDrag, CloseTab, CopySelected, CutSelected, EnterSelected, ExtendDown, ExtendEnd,
-    ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab,
-    OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace,
-    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
-    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
+    CancelDrag, CloseTab, CopySelected, CreateNewFile, CreateNewFolder, CutSelected, EnterSelected,
+    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
+    MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh,
+    RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd,
+    RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
     RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
     RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
     SelectNextTab, SelectPreviousTab, TrashSelected,

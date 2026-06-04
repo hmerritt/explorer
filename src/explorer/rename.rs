@@ -648,6 +648,24 @@ impl ExplorerView {
         true
     }
 
+    pub(super) fn start_rename_for_path(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(entry) = self
+            .entry_index_by_path(path)
+            .and_then(|ix| self.entries.get(ix))
+            .cloned()
+        else {
+            return false;
+        };
+
+        self.start_rename_for_entry(entry, Some(cx.focus_handle()), window, cx);
+        true
+    }
+
     #[cfg(test)]
     pub(super) fn start_test_rename_for_index(&mut self, ix: usize) -> bool {
         let Some(entry) = self.entries.get(ix).cloned() else {

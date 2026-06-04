@@ -13,7 +13,7 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 - Rename
 - Delete
 - View (dropdown)
-    - Show hidden files
+    - Show/hide hidden files
     - File Name extensions
 - Select All
 - Select None
@@ -48,8 +48,6 @@ Utility bar underneeth navigation bar. Same as Windows Explorer, this has:
 - Large icons grid view (alternate to the current Details view)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
 - ssh drive support
-- rsync for basic file operations?
-- OS level hook for file operations?
 - rclone hook for drive, B2, S3, etc...
 
 ## File move/copy/sync engine

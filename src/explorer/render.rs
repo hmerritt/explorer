@@ -968,6 +968,8 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_paste_clipboard))
             .on_action(cx.listener(Self::handle_trash_selected))
             .on_action(cx.listener(Self::handle_permanently_delete_selected))
+            .on_action(cx.listener(Self::handle_create_new_folder))
+            .on_action(cx.listener(Self::handle_create_new_file))
             .on_action(cx.listener(Self::handle_rename_selected))
             .on_action(cx.listener(Self::handle_rename_commit))
             .on_action(cx.listener(Self::handle_rename_cancel))

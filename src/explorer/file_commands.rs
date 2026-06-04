@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeSet,
+    fs::{self, OpenOptions},
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -9,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use gpui::Context;
+use gpui::{Context, Window};
 
 use crate::explorer::{
     clipboard::{
@@ -29,7 +31,64 @@ use crate::explorer::filesystem::{FileOperationOutcome, move_paths_to_directory}
 
 const FILE_OPERATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewItemKind {
+    Folder,
+    File,
+}
+
+impl NewItemKind {
+    fn base_name(self) -> &'static str {
+        match self {
+            Self::Folder => "New folder",
+            Self::File => "New file",
+        }
+    }
+
+    fn create(self, path: &Path) -> io::Result<()> {
+        match self {
+            Self::Folder => fs::create_dir(path),
+            Self::File => OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map(drop),
+        }
+    }
+
+    fn operation_label(self) -> &'static str {
+        match self {
+            Self::Folder => "folder",
+            Self::File => "file",
+        }
+    }
+}
+
 impl ExplorerView {
+    pub(super) fn create_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_new_item(NewItemKind::Folder, window, cx);
+    }
+
+    pub(super) fn create_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_new_item(NewItemKind::File, window, cx);
+    }
+
+    fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
+        match create_new_item_in_directory(&self.path, kind) {
+            Ok(path) => {
+                self.open_error = None;
+                self.reload();
+                self.select_single_path(&path);
+                self.start_rename_for_path(&path, window, cx);
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload();
+            }
+        }
+    }
+
     pub(super) fn copy_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(clipboard) = self.selected_file_clipboard(FileClipboardOperation::Copy) else {
             return;
@@ -408,6 +467,48 @@ impl ExplorerView {
     }
 }
 
+fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<PathBuf, String> {
+    let mut index = 1usize;
+
+    loop {
+        let name = new_item_name(kind.base_name(), index);
+        let path = parent.join(&name);
+
+        if path.exists() {
+            index = next_new_item_index(index, &name)?;
+            continue;
+        }
+
+        match kind.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                index = next_new_item_index(index, &name)?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Could not create {} \"{}\": {error}",
+                    kind.operation_label(),
+                    name
+                ));
+            }
+        }
+    }
+}
+
+fn next_new_item_index(index: usize, name: &str) -> Result<usize, String> {
+    index
+        .checked_add(1)
+        .ok_or_else(|| format!("Could not create {name}: too many existing names"))
+}
+
+fn new_item_name(base_name: &str, index: usize) -> String {
+    if index == 1 {
+        base_name.to_owned()
+    } else {
+        format!("{base_name} ({index})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +518,130 @@ mod tests {
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
     use std::fs;
+
+    #[test]
+    fn new_folder_uses_base_name_in_empty_directory() {
+        let temp = TempDir::new();
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New folder");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn new_file_uses_base_name_in_empty_directory() {
+        let temp = TempDir::new();
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New file");
+        assert!(path.is_file());
+        assert_eq!(fs::read(&path).unwrap(), b"");
+    }
+
+    #[test]
+    fn new_folder_first_duplicate_uses_two() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("New folder")).expect("create base folder");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New folder (2)");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn new_file_first_duplicate_uses_two() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("New file"), b"existing").expect("create base file");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New file (2)");
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn new_folder_existing_base_and_two_uses_three() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("New folder")).expect("create base folder");
+        fs::create_dir(temp.path().join("New folder (2)")).expect("create second folder");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New folder (3)");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn new_file_existing_base_and_two_uses_three() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("New file"), b"base").expect("create base file");
+        fs::write(temp.path().join("New file (2)"), b"second").expect("create second file");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New file (3)");
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn new_folder_uses_first_free_suffix() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("New folder")).expect("create base folder");
+        fs::create_dir(temp.path().join("New folder (3)")).expect("create third folder");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New folder (2)");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn new_file_uses_first_free_suffix() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("New file"), b"base").expect("create base file");
+        fs::write(temp.path().join("New file (3)"), b"third").expect("create third file");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New file (2)");
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn new_folder_conflicts_with_existing_file_name() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("New folder"), b"file").expect("create conflicting file");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New folder (2)");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn new_file_conflicts_with_existing_folder_name() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("New file")).expect("create conflicting folder");
+
+        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "New file (2)");
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn created_new_item_can_be_reloaded_and_selected() {
+        let temp = TempDir::new();
+        let created = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.select_single_path(&created);
+
+        assert_eq!(selected_names(&view), vec!["New folder"]);
+    }
 
     #[test]
     fn selected_file_clipboard_is_empty_without_selection() {

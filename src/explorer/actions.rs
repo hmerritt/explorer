@@ -30,6 +30,8 @@ actions!(
         PasteClipboard,
         TrashSelected,
         PermanentlyDeleteSelected,
+        CreateNewFolder,
+        CreateNewFile,
         RenameSelected,
         RenameCommit,
         RenameCancel,
@@ -250,6 +252,26 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.request_permanent_delete_selected(cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_create_new_folder(
+        &mut self,
+        _: &CreateNewFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_new_folder(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_create_new_file(
+        &mut self,
+        _: &CreateNewFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_new_file(window, cx);
         cx.notify();
     }
 }

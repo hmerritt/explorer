@@ -15,14 +15,15 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::{
-    CancelDrag, CloseTab, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerTabs,
-    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
-    MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh,
-    RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd,
-    RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
-    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, TrashSelected, default_start_path,
+    CancelDrag, CloseTab, CopySelected, CreateNewFile, CreateNewFolder, CutSelected, DialogCancel,
+    EnterSelected, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward,
+    GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard,
+    PermanentlyDeleteSelected, Refresh, RenameBackspace, RenameCancel, RenameCommit, RenameCopy,
+    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
+    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
+    RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
+    RenameWordRight, SelectAll, SelectNextTab, SelectPreviousTab, TrashSelected,
+    default_start_path,
 };
 
 const APP_ID: &str = "com.hmerritt.explorer";
@@ -449,6 +450,8 @@ pub fn run() {
             KeyBinding::new("ctrl-v", PasteClipboard, None),
             KeyBinding::new("delete", TrashSelected, None),
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
+            KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
+            KeyBinding::new("ctrl-shift-f", CreateNewFile, Some("Explorer")),
             KeyBinding::new("ctrl-t", NewTab, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", SelectNextTab, None),
