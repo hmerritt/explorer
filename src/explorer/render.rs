@@ -279,7 +279,7 @@ impl ExplorerView {
             UtilityMenu::New => utility_dropdown()
                 .child(utility_menu_row(
                     "utility-new-folder",
-                    Some(folder_icon(1.0).into_any_element()),
+                    Some(folder_icon(1.4).into_any_element()),
                     "Folder",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
@@ -1525,7 +1525,7 @@ fn utility_text_button(
         .flex_row()
         .items_center()
         .justify_center()
-        .w(px(UTILITY_TEXT_BUTTON_WIDTH))
+        .px(px(8.0))
         .h(px(UTILITY_BUTTON_HEIGHT))
         .gap(px(6.0))
         .rounded(px(4.0))
