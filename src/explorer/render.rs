@@ -64,7 +64,7 @@ const DROP_INDICATOR_TEXT_SIZE: f32 = 12.0;
 const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
-const UTILITY_TEXT_BUTTON_WIDTH: f32 = 78.0;
+const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
 const UTILITY_SEPARATOR_OUTER_WIDTH: f32 = 17.0;
 const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
 const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
@@ -81,6 +81,19 @@ const UTILITY_ICON_DELETE: &str = "\u{E74D}";
 const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
+const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
+const UTILITY_NEW_ICON_CIRCLE_OFFSET: f32 = 0.5;
+const UTILITY_NEW_ICON_CIRCLE_SIZE: f32 = 15.0;
+const UTILITY_NEW_ICON_PLUS_LENGTH: f32 = 8.0;
+const UTILITY_NEW_ICON_PLUS_THICKNESS: f32 = 1.5;
+const UTILITY_NEW_ICON_PLUS_LONG_OFFSET: f32 =
+    (UTILITY_TEXT_BUTTON_ICON_SIZE - UTILITY_NEW_ICON_PLUS_LENGTH) / 2.0;
+const UTILITY_NEW_ICON_PLUS_SHORT_OFFSET: f32 =
+    (UTILITY_TEXT_BUTTON_ICON_SIZE - UTILITY_NEW_ICON_PLUS_THICKNESS) / 2.0;
+const UTILITY_NEW_ICON_BLUE: u32 = 0x0078d4;
+const UTILITY_NEW_ICON_BLACK: u32 = 0x555555;
+const UTILITY_VIEW_ICON_LINE_COLOR: u32 = 0x555555;
+const UTILITY_VIEW_ICON_LINE_TOPS: [f32; 4] = [3.5, 6.5, 9.5, 12.5];
 
 impl ExplorerView {
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -159,6 +172,7 @@ impl ExplorerView {
             .gap(px(UTILITY_BAR_ITEM_GAP))
             .child(utility_text_button(
                 "utility-new",
+                Some(utility_new_icon().into_any_element()),
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -240,6 +254,7 @@ impl ExplorerView {
             .child(utility_separator())
             .child(utility_text_button(
                 "utility-view",
+                Some(utility_view_icon().into_any_element()),
                 "View",
                 self.open_utility_menu == Some(UtilityMenu::View),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1496,6 +1511,7 @@ fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
 
 fn utility_text_button(
     id: &'static str,
+    left_icon: Option<AnyElement>,
     label: &'static str,
     is_open: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -1519,6 +1535,7 @@ fn utility_text_button(
         .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
         .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
         .on_click(on_click)
+        .when_some(left_icon, |this, icon| this.child(icon))
         .child(
             div()
                 .text_size(px(12.0))
@@ -1534,6 +1551,65 @@ fn utility_text_button(
                 .child(UTILITY_ICON_CHEVRON_DOWN),
         )
         .into_any_element()
+}
+
+fn utility_new_icon() -> Div {
+    div()
+        .relative()
+        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .flex_shrink_0()
+        .child(
+            div()
+                .absolute()
+                .left(px(UTILITY_NEW_ICON_CIRCLE_OFFSET))
+                .top(px(UTILITY_NEW_ICON_CIRCLE_OFFSET))
+                .w(px(UTILITY_NEW_ICON_CIRCLE_SIZE))
+                .h(px(UTILITY_NEW_ICON_CIRCLE_SIZE))
+                .rounded(px(UTILITY_NEW_ICON_CIRCLE_SIZE / 2.0))
+                .border_1()
+                .border_color(rgb(UTILITY_NEW_ICON_BLACK)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(UTILITY_NEW_ICON_PLUS_LONG_OFFSET))
+                .top(px(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET))
+                .w(px(UTILITY_NEW_ICON_PLUS_LENGTH))
+                .h(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
+                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET))
+                .top(px(UTILITY_NEW_ICON_PLUS_LONG_OFFSET))
+                .w(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
+                .h(px(UTILITY_NEW_ICON_PLUS_LENGTH))
+                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
+        )
+}
+
+fn utility_view_icon() -> Div {
+    div()
+        .relative()
+        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .flex_shrink_0()
+        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[0]))
+        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[1]))
+        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[2]))
+        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[3]))
+}
+
+fn utility_view_icon_line(top: f32) -> Div {
+    div()
+        .absolute()
+        .left(px(1.0))
+        .top(px(top))
+        .w(px(14.0))
+        .h(px(1.0))
+        .bg(rgb(UTILITY_VIEW_ICON_LINE_COLOR))
 }
 
 fn utility_icon_button(
@@ -2228,9 +2304,14 @@ mod tests {
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP_PHYSICAL, available_filename_text_width, clipboard_has_file_clipboard,
-        drop_indicator_target_width, filename_text_width, folder_status_summary,
-        is_normal_entry_click, selection_modifiers_for_click, text_cell_width,
+        NAME_ICON_TEXT_GAP_PHYSICAL, UTILITY_NEW_ICON_BLACK, UTILITY_NEW_ICON_BLUE,
+        UTILITY_NEW_ICON_CIRCLE_OFFSET, UTILITY_NEW_ICON_CIRCLE_SIZE, UTILITY_NEW_ICON_PLUS_LENGTH,
+        UTILITY_NEW_ICON_PLUS_LONG_OFFSET, UTILITY_NEW_ICON_PLUS_SHORT_OFFSET,
+        UTILITY_NEW_ICON_PLUS_THICKNESS, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
+        UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS, available_filename_text_width,
+        clipboard_has_file_clipboard, drop_indicator_target_width, filename_text_width,
+        folder_status_summary, is_normal_entry_click, selection_modifiers_for_click,
+        text_cell_width,
     };
 
     #[test]
@@ -2257,6 +2338,22 @@ mod tests {
         assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
         assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
         assert!(!clipboard_has_file_clipboard(None));
+    }
+
+    #[test]
+    fn utility_text_button_icon_geometry_fits_button() {
+        assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
+        assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
+        assert_eq!(UTILITY_NEW_ICON_CIRCLE_OFFSET, 0.5);
+        assert_eq!(UTILITY_NEW_ICON_CIRCLE_SIZE, 15.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_LENGTH, 8.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_THICKNESS, 1.5);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_LONG_OFFSET, 4.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET, 7.25);
+        assert_eq!(UTILITY_NEW_ICON_BLUE, 0x0078d4);
+        assert_eq!(UTILITY_NEW_ICON_BLACK, 0x1f1f1f);
+        assert_eq!(UTILITY_VIEW_ICON_LINE_COLOR, 0x1f1f1f);
+        assert_eq!(UTILITY_VIEW_ICON_LINE_TOPS, [3.5, 6.5, 9.5, 12.5]);
     }
 
     #[test]

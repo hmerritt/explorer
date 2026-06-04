@@ -1,14 +1,5 @@
 ## New
 
-Utility bar improvements:
-
-- New icon. Plus circle (plus is light blue, circle is black) (same as Windows Explorer)
-- View icon. Four long horizontal lines (same as Windows Explorer)
-- Dropdown button chevron a lil smaller
-- Dropdown menu checkboxes. When unchecked just render nothing (instead of a square), render check as-is
-
----
-
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ## Specific / for-later
