@@ -1023,13 +1023,10 @@ impl Render for ExplorerView {
                             .child(self.render_status_bar()),
                     ),
             )
-            .when_some(self.active_drop_indicator.clone(), |this, indicator| {
-                this.child(render_drop_indicator(indicator, window))
-            })
     }
 }
 
-fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElement {
+pub(super) fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElement {
     let origin = drop_indicator_origin(indicator.mouse_position);
     let (icon, action_label) = match indicator.operation {
         FileOperationKind::Move => (NavIcon::Forward.glyph(), "Move to"),

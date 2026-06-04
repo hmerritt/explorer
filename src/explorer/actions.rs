@@ -51,7 +51,11 @@ actions!(
         RenameCopy,
         RenameCut,
         RenamePaste,
-        RenameNoop
+        RenameNoop,
+        NewTab,
+        CloseTab,
+        SelectNextTab,
+        SelectPreviousTab
     ]
 );
 

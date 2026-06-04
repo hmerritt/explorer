@@ -18,14 +18,14 @@ use serde::{Deserialize, Serialize};
 use gpui::{ClickEvent, FocusHandle, WindowKind, div, rgb};
 
 use crate::explorer::{
-    CancelDrag, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerView, ExtendDown,
-    ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
-    OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace,
-    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
-    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
+    CancelDrag, CloseTab, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerTabs,
+    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
+    MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh,
+    RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd,
+    RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
     RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
     RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
-    TrashSelected, default_start_path,
+    SelectNextTab, SelectPreviousTab, TrashSelected, default_start_path,
 };
 #[cfg(any(target_os = "macos", test))]
 use crate::macos_permissions::MacosFullDiskAccessStatus;
@@ -117,7 +117,7 @@ impl StoredWindowState {
 }
 
 struct Explorer {
-    explorer: gpui::Entity<ExplorerView>,
+    explorer: gpui::Entity<ExplorerTabs>,
 }
 
 #[cfg(target_os = "macos")]
@@ -582,6 +582,10 @@ pub fn run() {
             KeyBinding::new("ctrl-v", PasteClipboard, None),
             KeyBinding::new("delete", TrashSelected, None),
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
+            KeyBinding::new("ctrl-t", NewTab, None),
+            KeyBinding::new("ctrl-w", CloseTab, None),
+            KeyBinding::new("ctrl-tab", SelectNextTab, None),
+            KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, None),
             KeyBinding::new("f2", RenameSelected, Some("Explorer")),
             KeyBinding::new("enter", RenameCommit, Some("ExplorerRenameInput")),
             KeyBinding::new("escape", RenameCancel, Some("ExplorerRenameInput")),
@@ -639,7 +643,7 @@ pub fn run() {
                 let explorer = cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window);
-                    ExplorerView::new_with_focus_handle(default_start_path(), focus_handle)
+                    ExplorerTabs::new(default_start_path(), focus_handle, cx)
                 });
 
                 cx.new(|cx| {

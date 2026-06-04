@@ -1290,6 +1290,18 @@ mod tests {
     }
 
     #[test]
+    fn drop_indicator_origin_uses_root_space_mouse_position_without_view_offset() {
+        let root_space_position = gpui::point(px(120.0), px(68.0));
+        let indicator_origin = drop_indicator_origin(root_space_position);
+
+        assert_eq!(indicator_origin.0, 120.0);
+        assert_eq!(
+            indicator_origin.1,
+            drag_preview_origin(root_space_position).1 + DRAG_PREVIEW_HEIGHT - 1.0
+        );
+    }
+
+    #[test]
     fn drop_indicator_top_overlaps_drag_preview_bottom_by_one_pixel() {
         let mouse_position = gpui::point(px(120.0), px(32.0));
         let drag_origin = drag_preview_origin(mouse_position);

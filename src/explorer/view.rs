@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -125,6 +125,48 @@ impl ExplorerView {
             }
         }
     }
+
+    pub(super) fn tab_label(&self) -> String {
+        tab_label_for_path(&self.path)
+    }
+
+    pub(super) fn has_active_file_operation(&self) -> bool {
+        self.active_file_operation.is_some()
+    }
+
+    pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
+        self.active_drop_indicator.clone()
+    }
+
+    pub(super) fn prepare_for_tab_close(&mut self, cx: &mut gpui::Context<Self>) {
+        self.cancel_active_rename();
+        self.cancel_mouse_selection_drag();
+        self.clear_drop_indicator();
+        self.pending_permanent_delete = None;
+        self.pending_trash = None;
+        self.pending_file_conflict = None;
+
+        if self.active_file_operation.is_none()
+            && let Some(handle) = self.active_dialog_window.take()
+        {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+}
+
+pub(super) fn tab_label_for_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let display = path.display().to_string();
+            if display.is_empty() {
+                ".".to_owned()
+            } else {
+                display
+            }
+        })
 }
 
 impl ExplorerView {

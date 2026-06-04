@@ -685,7 +685,7 @@ impl ExplorerView {
         }
     }
 
-    fn cancel_active_rename(&mut self) {
+    pub(super) fn cancel_active_rename(&mut self) {
         self.rename_focus_out = None;
         self.active_rename = None;
         self.open_error = None;
