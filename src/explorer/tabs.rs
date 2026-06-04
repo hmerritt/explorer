@@ -25,6 +25,7 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_BUTTON_HOVER_BG: u32 = 0xe5e5e5;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
+const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
 const CLOSE_GLYPH: &str = "\u{E711}";
 const NEW_TAB_GLYPH: &str = "\u{E710}";
 
@@ -363,13 +364,17 @@ impl ExplorerTabs {
                 .on_drag_move::<TabDrag>({
                     let entity = cx.entity();
                     move |event: &DragMoveEvent<TabDrag>, _: &mut Window, cx: &mut App| {
-                        if !event.bounds.contains(&event.event.position) {
+                        let left = f32::from(event.bounds.origin.x);
+                        let top = f32::from(event.bounds.origin.y);
+                        let width = f32::from(event.bounds.size.width);
+                        let height = f32::from(event.bounds.size.height);
+                        let cursor_x = f32::from(event.event.position.x);
+                        let cursor_y = f32::from(event.event.position.y);
+
+                        if !tab_reorder_hit_test(left, top, width, height, cursor_x, cursor_y) {
                             return;
                         }
 
-                        let left = f32::from(event.bounds.origin.x);
-                        let width = f32::from(event.bounds.size.width);
-                        let cursor_x = f32::from(event.event.position.x);
                         let before = cursor_x < left + (width / 2.0);
                         let dragged_id = event.drag(cx).id;
 
@@ -581,6 +586,23 @@ fn clear_dragging_tab(dragging_tab: &mut Option<TabId>) -> bool {
     dragging_tab.take().is_some()
 }
 
+fn tab_reorder_hit_test(
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    cursor_x: f32,
+    cursor_y: f32,
+) -> bool {
+    let right = left + width;
+    let bottom = top + height;
+
+    cursor_x >= left
+        && cursor_x <= right
+        && cursor_y >= top - TAB_REORDER_VERTICAL_TOLERANCE
+        && cursor_y <= bottom + TAB_REORDER_VERTICAL_TOLERANCE
+}
+
 fn active_id_after_close_from_removed(tabs: &[ExplorerTab], removed_index: usize) -> Option<TabId> {
     active_id_after_close_from_removed_ids(
         &tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
@@ -701,6 +723,78 @@ mod tests {
         assert!(clear_dragging_tab(&mut dragging_tab));
         assert_eq!(dragging_tab, None);
         assert!(!clear_dragging_tab(&mut dragging_tab));
+    }
+
+    #[test]
+    fn tab_reorder_hit_test_allows_vertical_tolerance() {
+        let left = 20.0;
+        let top = 10.0;
+        let width = 200.0;
+        let height = 36.0;
+        let cursor_x = left + (width / 2.0);
+
+        assert!(tab_reorder_hit_test(
+            left, top, width, height, cursor_x, top
+        ));
+        assert!(tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            cursor_x,
+            top - TAB_REORDER_VERTICAL_TOLERANCE
+        ));
+        assert!(tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            cursor_x,
+            top + height + TAB_REORDER_VERTICAL_TOLERANCE
+        ));
+    }
+
+    #[test]
+    fn tab_reorder_hit_test_rejects_outside_tolerance_or_horizontal_bounds() {
+        let left = 20.0;
+        let top = 10.0;
+        let width = 200.0;
+        let height = 36.0;
+        let cursor_x = left + (width / 2.0);
+        let cursor_y = top + (height / 2.0);
+
+        assert!(!tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            cursor_x,
+            top - TAB_REORDER_VERTICAL_TOLERANCE - 1.0
+        ));
+        assert!(!tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            cursor_x,
+            top + height + TAB_REORDER_VERTICAL_TOLERANCE + 1.0
+        ));
+        assert!(!tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            left - 1.0,
+            cursor_y
+        ));
+        assert!(!tab_reorder_hit_test(
+            left,
+            top,
+            width,
+            height,
+            left + width + 1.0,
+            cursor_y
+        ));
     }
 
     #[test]
