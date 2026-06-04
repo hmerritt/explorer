@@ -82,14 +82,11 @@ const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
-const UTILITY_NEW_ICON_CIRCLE_OFFSET: f32 = 0.5;
-const UTILITY_NEW_ICON_CIRCLE_SIZE: f32 = 15.0;
-const UTILITY_NEW_ICON_PLUS_LENGTH: f32 = 8.0;
-const UTILITY_NEW_ICON_PLUS_THICKNESS: f32 = 1.5;
-const UTILITY_NEW_ICON_PLUS_LONG_OFFSET: f32 =
-    (UTILITY_TEXT_BUTTON_ICON_SIZE - UTILITY_NEW_ICON_PLUS_LENGTH) / 2.0;
-const UTILITY_NEW_ICON_PLUS_SHORT_OFFSET: f32 =
-    (UTILITY_TEXT_BUTTON_ICON_SIZE - UTILITY_NEW_ICON_PLUS_THICKNESS) / 2.0;
+const UTILITY_NEW_ICON_CIRCLE_SIZE: f32 = 14.0;
+const UTILITY_NEW_ICON_PLUS_SIZE: f32 = 8.0;
+const UTILITY_NEW_ICON_PLUS_THICKNESS: f32 = 2.0;
+const UTILITY_NEW_ICON_PLUS_CENTER_OFFSET: f32 =
+    (UTILITY_NEW_ICON_PLUS_SIZE - UTILITY_NEW_ICON_PLUS_THICKNESS) / 2.0;
 const UTILITY_NEW_ICON_BLUE: u32 = 0x0078d4;
 const UTILITY_NEW_ICON_BLACK: u32 = 0x555555;
 const UTILITY_VIEW_ICON_LINE_COLOR: u32 = 0x555555;
@@ -1555,38 +1552,47 @@ fn utility_text_button(
 
 fn utility_new_icon() -> Div {
     div()
-        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
         .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
         .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
         .flex_shrink_0()
         .child(
             div()
-                .absolute()
-                .left(px(UTILITY_NEW_ICON_CIRCLE_OFFSET))
-                .top(px(UTILITY_NEW_ICON_CIRCLE_OFFSET))
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
                 .w(px(UTILITY_NEW_ICON_CIRCLE_SIZE))
                 .h(px(UTILITY_NEW_ICON_CIRCLE_SIZE))
                 .rounded(px(UTILITY_NEW_ICON_CIRCLE_SIZE / 2.0))
                 .border_1()
-                .border_color(rgb(UTILITY_NEW_ICON_BLACK)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(UTILITY_NEW_ICON_PLUS_LONG_OFFSET))
-                .top(px(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET))
-                .w(px(UTILITY_NEW_ICON_PLUS_LENGTH))
-                .h(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
-                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET))
-                .top(px(UTILITY_NEW_ICON_PLUS_LONG_OFFSET))
-                .w(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
-                .h(px(UTILITY_NEW_ICON_PLUS_LENGTH))
-                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
+                .border_color(rgb(UTILITY_NEW_ICON_BLACK))
+                .child(
+                    div()
+                        .relative()
+                        .w(px(UTILITY_NEW_ICON_PLUS_SIZE))
+                        .h(px(UTILITY_NEW_ICON_PLUS_SIZE))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(UTILITY_NEW_ICON_PLUS_CENTER_OFFSET))
+                                .w(px(UTILITY_NEW_ICON_PLUS_SIZE))
+                                .h(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
+                                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(UTILITY_NEW_ICON_PLUS_CENTER_OFFSET))
+                                .top(px(0.0))
+                                .w(px(UTILITY_NEW_ICON_PLUS_THICKNESS))
+                                .h(px(UTILITY_NEW_ICON_PLUS_SIZE))
+                                .bg(rgb(UTILITY_NEW_ICON_BLUE)),
+                        ),
+                ),
         )
 }
 
@@ -2305,13 +2311,12 @@ mod tests {
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
         NAME_ICON_TEXT_GAP_PHYSICAL, UTILITY_NEW_ICON_BLACK, UTILITY_NEW_ICON_BLUE,
-        UTILITY_NEW_ICON_CIRCLE_OFFSET, UTILITY_NEW_ICON_CIRCLE_SIZE, UTILITY_NEW_ICON_PLUS_LENGTH,
-        UTILITY_NEW_ICON_PLUS_LONG_OFFSET, UTILITY_NEW_ICON_PLUS_SHORT_OFFSET,
-        UTILITY_NEW_ICON_PLUS_THICKNESS, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS, available_filename_text_width,
-        clipboard_has_file_clipboard, drop_indicator_target_width, filename_text_width,
-        folder_status_summary, is_normal_entry_click, selection_modifiers_for_click,
-        text_cell_width,
+        UTILITY_NEW_ICON_CIRCLE_SIZE, UTILITY_NEW_ICON_PLUS_CENTER_OFFSET,
+        UTILITY_NEW_ICON_PLUS_SIZE, UTILITY_NEW_ICON_PLUS_THICKNESS, UTILITY_TEXT_BUTTON_ICON_SIZE,
+        UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
+        available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
+        filename_text_width, folder_status_summary, is_normal_entry_click,
+        selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -2344,15 +2349,13 @@ mod tests {
     fn utility_text_button_icon_geometry_fits_button() {
         assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
         assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
-        assert_eq!(UTILITY_NEW_ICON_CIRCLE_OFFSET, 0.5);
-        assert_eq!(UTILITY_NEW_ICON_CIRCLE_SIZE, 15.0);
-        assert_eq!(UTILITY_NEW_ICON_PLUS_LENGTH, 8.0);
-        assert_eq!(UTILITY_NEW_ICON_PLUS_THICKNESS, 1.5);
-        assert_eq!(UTILITY_NEW_ICON_PLUS_LONG_OFFSET, 4.0);
-        assert_eq!(UTILITY_NEW_ICON_PLUS_SHORT_OFFSET, 7.25);
+        assert_eq!(UTILITY_NEW_ICON_CIRCLE_SIZE, 14.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_SIZE, 8.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_THICKNESS, 2.0);
+        assert_eq!(UTILITY_NEW_ICON_PLUS_CENTER_OFFSET, 3.0);
         assert_eq!(UTILITY_NEW_ICON_BLUE, 0x0078d4);
-        assert_eq!(UTILITY_NEW_ICON_BLACK, 0x1f1f1f);
-        assert_eq!(UTILITY_VIEW_ICON_LINE_COLOR, 0x1f1f1f);
+        assert_eq!(UTILITY_NEW_ICON_BLACK, 0x555555);
+        assert_eq!(UTILITY_VIEW_ICON_LINE_COLOR, 0x555555);
         assert_eq!(UTILITY_VIEW_ICON_LINE_TOPS, [3.5, 6.5, 9.5, 12.5]);
     }
 
