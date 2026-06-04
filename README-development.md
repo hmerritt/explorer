@@ -28,7 +28,7 @@ or `$XDG_RUNTIME_DIR/wayland-0` is available, Explorer starts on Wayland. Set
 unavailable `wayland` or `x11` backends fail startup instead of falling back. If
 neither backend is available, startup exits with a fatal error.
 
-The canonical app icon source is `assets/explorer.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/icon.ico` is a derived Windows executable resource.
+The canonical app icon source is `assets/explorer.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/explorer.ico` is a derived Windows executable resource.
 
 ---
 

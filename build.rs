@@ -4,7 +4,7 @@ fn main() {
         let resource = "assets/windows/app.rc";
 
         println!("cargo:rerun-if-changed={resource}");
-        println!("cargo:rerun-if-changed=assets/icon.ico");
+        println!("cargo:rerun-if-changed=assets/explorer.ico");
 
         embed_resource::compile(resource, embed_resource::NONE)
             .manifest_optional()
