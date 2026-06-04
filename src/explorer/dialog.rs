@@ -237,7 +237,7 @@ impl ExplorerDialog {
         self.completed = true;
         self.cancel_folder_size_task();
         let _ = self.explorer.update(cx, |explorer, cx| {
-            explorer.confirm_pending_permanent_delete();
+            explorer.confirm_pending_permanent_delete(cx);
             explorer.clear_active_dialog_window();
             cx.notify();
         });
@@ -247,7 +247,7 @@ impl ExplorerDialog {
     fn confirm_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
         let _ = self.explorer.update(cx, |explorer, cx| {
-            explorer.confirm_pending_trash();
+            explorer.confirm_pending_trash(cx);
             explorer.clear_active_dialog_window();
             cx.notify();
         });

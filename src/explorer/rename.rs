@@ -692,7 +692,14 @@ impl ExplorerView {
     }
 
     fn commit_active_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let will_change_filesystem = self
+            .active_rename
+            .as_ref()
+            .is_some_and(|rename| rename.target_file_name() != rename.original_name);
         let committed = self.apply_active_rename_commit();
+        if committed && will_change_filesystem {
+            self.emit_filesystem_changed(cx);
+        }
         if !committed {
             self.refocus_rename_input(window);
             cx.notify();

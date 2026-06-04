@@ -83,7 +83,7 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn trash_selected_paths(&mut self) {
+    pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
@@ -96,6 +96,7 @@ impl ExplorerView {
                 self.reload();
                 self.select_fallback_index(fallback_index);
                 self.open_error = None;
+                self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
@@ -121,7 +122,7 @@ impl ExplorerView {
         self.open_pending_dialog_window(cx);
     }
 
-    pub(super) fn confirm_pending_trash(&mut self) {
+    pub(super) fn confirm_pending_trash(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_trash.take() else {
             return;
         };
@@ -132,6 +133,7 @@ impl ExplorerView {
                 self.reload();
                 self.select_fallback_index(pending.fallback_index);
                 self.open_error = None;
+                self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
@@ -158,7 +160,7 @@ impl ExplorerView {
         self.open_pending_dialog_window(cx);
     }
 
-    pub(super) fn confirm_pending_permanent_delete(&mut self) {
+    pub(super) fn confirm_pending_permanent_delete(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_permanent_delete.take() else {
             return;
         };
@@ -169,6 +171,7 @@ impl ExplorerView {
                 self.reload();
                 self.select_fallback_index(pending.fallback_index);
                 self.open_error = None;
+                self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
@@ -362,7 +365,10 @@ impl ExplorerView {
         self.active_file_operation = None;
 
         match result {
-            Ok(summary) => self.finish_file_operation(summary),
+            Ok(summary) => {
+                self.finish_file_operation(summary);
+                self.emit_filesystem_changed(cx);
+            }
             Err(FileOperationError::Cancelled) => {
                 self.open_error = None;
                 self.reload();

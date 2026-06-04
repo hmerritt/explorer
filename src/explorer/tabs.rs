@@ -7,8 +7,10 @@ use gpui::{
 };
 
 use crate::explorer::{
-    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, default_start_path, icons::folder_icon,
-    render::render_drop_indicator, view::ExplorerView,
+    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, default_start_path,
+    icons::folder_icon,
+    render::render_drop_indicator,
+    view::{ExplorerView, ExplorerViewEvent},
 };
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
@@ -185,28 +187,25 @@ impl ExplorerTabs {
         }
     }
 
+    fn reload_all_tabs(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            let _ = tab.view.update(cx, |view, cx| {
+                view.reload();
+                cx.notify();
+            });
+        }
+    }
+
     fn cleanup_completed_background_operations(&mut self, cx: &mut Context<Self>) {
-        let mut completed_any = false;
         let mut still_running = Vec::new();
 
         for view in std::mem::take(&mut self.background_operation_tabs) {
             if view.read(cx).has_active_file_operation() {
                 still_running.push(view);
-            } else {
-                completed_any = true;
             }
         }
 
         self.background_operation_tabs = still_running;
-
-        if completed_any {
-            for tab in &self.tabs {
-                let _ = tab.view.update(cx, |view, cx| {
-                    view.reload();
-                    cx.notify();
-                });
-            }
-        }
     }
 
     fn handle_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -520,6 +519,14 @@ fn observe_tab_view(view: &Entity<ExplorerView>, cx: &mut Context<ExplorerTabs>)
     cx.observe(view, |this, _, cx| {
         this.cleanup_completed_background_operations(cx);
         cx.notify();
+    })
+    .detach();
+
+    cx.subscribe(view, |this, _, event, cx| match event {
+        ExplorerViewEvent::FilesystemChanged => {
+            this.reload_all_tabs(cx);
+            cx.notify();
+        }
     })
     .detach();
 }

@@ -4,7 +4,10 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use gpui::{AnyWindowHandle, FocusHandle, Subscription, Task, UniformListScrollHandle};
+use gpui::{
+    AnyWindowHandle, Context, EventEmitter, FocusHandle, Subscription, Task,
+    UniformListScrollHandle,
+};
 
 use crate::explorer::{
     app_icons::AppIconCache,
@@ -48,6 +51,13 @@ pub(super) struct FileOperationState {
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ExplorerViewEvent {
+    FilesystemChanged,
+}
+
+impl EventEmitter<ExplorerViewEvent> for ExplorerView {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingPermanentDelete {
@@ -126,6 +136,10 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn emit_filesystem_changed(&self, cx: &mut Context<Self>) {
+        cx.emit(ExplorerViewEvent::FilesystemChanged);
+    }
+
     pub(super) fn tab_label(&self) -> String {
         tab_label_for_path(&self.path)
     }
@@ -138,7 +152,7 @@ impl ExplorerView {
         self.active_drop_indicator.clone()
     }
 
-    pub(super) fn prepare_for_tab_close(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
         self.cancel_mouse_selection_drag();
         self.clear_drop_indicator();

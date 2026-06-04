@@ -239,7 +239,7 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.trash_selected_paths();
+        self.trash_selected_paths(cx);
         cx.notify();
     }
 
