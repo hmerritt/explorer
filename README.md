@@ -1,4 +1,4 @@
-<img src="./assets/icon.png" draggable="false" width="100px" />
+<img src="./assets/explorer.png" draggable="false" width="100px" />
 
 # Explorer
 

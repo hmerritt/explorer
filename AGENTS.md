@@ -24,7 +24,7 @@ truth for visible behavior and interaction design.
 - Window and application setup lives in `src/app.rs`.
 - Explorer UI, navigation, rendering, sorting, formatting, and filesystem
   behavior are currently concentrated in `src/explorer.rs`.
-- `assets/icon.png` is the canonical app icon source. Windows `.ico` and
+- `assets/explorer.png` is the canonical app icon source. Windows `.ico` and
   resource files are derived or platform-specific assets.
 
 ## Development Commands

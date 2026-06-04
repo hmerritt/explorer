@@ -40,8 +40,9 @@ const DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL: f32 = 2.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL: f32 = 3.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR: u32 = 0xe5ffff;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
-const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/applications.png");
-const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/bin.png");
+const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] =
+    include_bytes!("../../assets/icons/macos-applications.png");
+const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/bin.png");
 
 static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(

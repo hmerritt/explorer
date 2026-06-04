@@ -84,7 +84,7 @@ jobs:
                     "$app_dir/share/icons/hicolor/512x512/apps"
 
                   install -m 755 "target/${{ matrix.target }}/release/explorer" "$binary"
-                  cp assets/icon.png "$app_dir/share/icons/hicolor/512x512/apps/explorer.png"
+                  cp assets/explorer.png "$app_dir/share/icons/hicolor/512x512/apps/explorer.png"
 
                   cat > "$app_dir/bin/explorer" <<'EOF'
                   #!/usr/bin/env sh
@@ -249,16 +249,16 @@ jobs:
                   mkdir -p dist "$macos_dir" "$resources_dir" "$iconset_dir"
                   install -m 755 "target/${{ matrix.target }}/release/explorer" "$macos_dir/explorer"
 
-                  sips -z 16 16 assets/icon.png --out "$iconset_dir/icon_16x16.png"
-                  sips -z 32 32 assets/icon.png --out "$iconset_dir/icon_16x16@2x.png"
-                  sips -z 32 32 assets/icon.png --out "$iconset_dir/icon_32x32.png"
-                  sips -z 64 64 assets/icon.png --out "$iconset_dir/icon_32x32@2x.png"
-                  sips -z 128 128 assets/icon.png --out "$iconset_dir/icon_128x128.png"
-                  sips -z 256 256 assets/icon.png --out "$iconset_dir/icon_128x128@2x.png"
-                  sips -z 256 256 assets/icon.png --out "$iconset_dir/icon_256x256.png"
-                  sips -z 512 512 assets/icon.png --out "$iconset_dir/icon_256x256@2x.png"
-                  sips -z 512 512 assets/icon.png --out "$iconset_dir/icon_512x512.png"
-                  sips -z 1024 1024 assets/icon.png --out "$iconset_dir/icon_512x512@2x.png"
+                  sips -z 16 16 assets/explorer.png --out "$iconset_dir/icon_16x16.png"
+                  sips -z 32 32 assets/explorer.png --out "$iconset_dir/icon_16x16@2x.png"
+                  sips -z 32 32 assets/explorer.png --out "$iconset_dir/icon_32x32.png"
+                  sips -z 64 64 assets/explorer.png --out "$iconset_dir/icon_32x32@2x.png"
+                  sips -z 128 128 assets/explorer.png --out "$iconset_dir/icon_128x128.png"
+                  sips -z 256 256 assets/explorer.png --out "$iconset_dir/icon_128x128@2x.png"
+                  sips -z 256 256 assets/explorer.png --out "$iconset_dir/icon_256x256.png"
+                  sips -z 512 512 assets/explorer.png --out "$iconset_dir/icon_256x256@2x.png"
+                  sips -z 512 512 assets/explorer.png --out "$iconset_dir/icon_512x512.png"
+                  sips -z 1024 1024 assets/explorer.png --out "$iconset_dir/icon_512x512@2x.png"
                   iconutil -c icns "$iconset_dir" -o "$resources_dir/explorer.icns"
 
                   cat > "$contents_dir/Info.plist" <<'EOF'

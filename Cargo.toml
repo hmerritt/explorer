@@ -11,7 +11,7 @@ license = "MIT"
 [package.metadata.bundle]
 name = "Explorer"
 identifier = "com.hmerritt.explorer"
-icon = ["assets/icon.png"]
+icon = ["assets/explorer.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }

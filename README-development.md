@@ -1,4 +1,4 @@
-<img src="./assets/icon.png" draggable="false" width="100px" />
+<img src="./assets/explorer.png" draggable="false" width="100px" />
 
 # Explorer
 
@@ -28,7 +28,7 @@ or `$XDG_RUNTIME_DIR/wayland-0` is available, Explorer starts on Wayland. Set
 unavailable `wayland` or `x11` backends fail startup instead of falling back. If
 neither backend is available, startup exits with a fatal error.
 
-The canonical app icon source is `assets/icon.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/icon.ico` is a derived Windows executable resource.
+The canonical app icon source is `assets/explorer.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/icon.ico` is a derived Windows executable resource.
 
 ---
 
@@ -36,7 +36,7 @@ The canonical app icon source is `assets/icon.png`. It is referenced as package/
 
 macOS release artifacts ship `Explorer.app` so Finder and Launch Services start
 Explorer as a GUI application instead of a terminal-launched executable. Release
-builds generate the app icon from `assets/icon.png`, include an `Info.plist`, and
+builds generate the app icon from `assets/explorer.png`, include an `Info.plist`, and
 ad-hoc sign the bundle so its local signing metadata is coherent.
 
 A better long-term macOS distribution should use a Developer ID certificate,
