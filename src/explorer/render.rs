@@ -173,6 +173,7 @@ impl ExplorerView {
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
                         None
                     } else {
@@ -255,6 +256,7 @@ impl ExplorerView {
                 "View",
                 self.open_utility_menu == Some(UtilityMenu::View),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
                         None
                     } else {
@@ -341,6 +343,7 @@ impl ExplorerView {
             .bg(transparent_black())
             .occlude()
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.cancel_pending_click_rename();
                 this.open_utility_menu = None;
                 cx.stop_propagation();
                 cx.notify();
@@ -624,6 +627,7 @@ impl ExplorerView {
                 }
 
                 if this.suppress_next_click() {
+                    this.cancel_pending_click_rename();
                     cx.stop_propagation();
                     cx.notify();
                     return;
@@ -825,6 +829,7 @@ impl ExplorerView {
                 }
 
                 if this.suppress_next_click() {
+                    this.cancel_pending_click_rename();
                     cx.stop_propagation();
                     cx.notify();
                     return;
@@ -958,6 +963,7 @@ impl ExplorerView {
                     }))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         if this.suppress_next_click() {
+                            this.cancel_pending_click_rename();
                             cx.stop_propagation();
                             cx.notify();
                             return;

@@ -2,12 +2,13 @@ use std::{
     fs, io,
     ops::Range,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, GlobalElementId, IntoElement, LayoutId, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, Task, TextRun,
     UTF16Selection, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
 };
 
@@ -24,6 +25,8 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
+const CLICK_RENAME_DELAY: Duration = Duration::from_millis(280);
+
 #[derive(Clone)]
 pub(super) struct RenameState {
     pub(super) original_path: PathBuf,
@@ -38,6 +41,12 @@ pub(super) struct RenameState {
     scroll_offset: Pixels,
     is_selecting: bool,
     pub(super) focus_handle: Option<FocusHandle>,
+}
+
+pub(super) struct PendingClickRename {
+    pub(super) path: PathBuf,
+    pub(super) request_id: u64,
+    pub(super) task: Task<()>,
 }
 
 impl RenameState {
@@ -275,6 +284,7 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_pending_click_rename();
         self.start_rename_selected(window, cx);
         cx.notify();
     }
@@ -298,6 +308,7 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_pending_click_rename();
         self.cancel_active_rename();
         self.focus_explorer(window);
         cx.stop_propagation();
@@ -595,6 +606,90 @@ impl ExplorerView {
             && self.selection.selected_indices.contains(&ix)
     }
 
+    pub(super) fn cancel_pending_click_rename(&mut self) {
+        if let Some(pending) = self.pending_click_rename.take() {
+            drop(pending.task);
+        }
+    }
+
+    fn schedule_click_rename_for_entry(
+        &mut self,
+        entry: FileEntry,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_pending_click_rename();
+
+        let path = entry.path;
+        let request_id = self.next_pending_click_rename_id;
+        self.next_pending_click_rename_id = self.next_pending_click_rename_id.wrapping_add(1);
+
+        let task_path = path.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(CLICK_RENAME_DELAY).await;
+
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.complete_pending_click_rename(&task_path, request_id, window, cx) {
+                        cx.notify();
+                    }
+                });
+            });
+        });
+
+        self.pending_click_rename = Some(PendingClickRename {
+            path,
+            request_id,
+            task,
+        });
+    }
+
+    fn pending_click_rename_entry(&self, path: &Path, request_id: u64) -> Option<FileEntry> {
+        let pending = self.pending_click_rename.as_ref()?;
+        if pending.request_id != request_id || pending.path != path {
+            return None;
+        }
+
+        if self.active_rename.is_some() {
+            return None;
+        }
+
+        let ix = self.entry_index_by_path(path)?;
+        if self.selection.selected_indices.len() != 1
+            || !self.selection.selected_indices.contains(&ix)
+        {
+            return None;
+        }
+
+        self.entries.get(ix).cloned()
+    }
+
+    fn complete_pending_click_rename(
+        &mut self,
+        path: &Path,
+        request_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let matches_pending = self
+            .pending_click_rename
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id && pending.path == path);
+        if !matches_pending {
+            return false;
+        }
+
+        let entry = self.pending_click_rename_entry(path, request_id);
+        self.cancel_pending_click_rename();
+
+        let Some(entry) = entry else {
+            return false;
+        };
+
+        self.start_rename_for_entry(entry, Some(cx.focus_handle()), window, cx);
+        true
+    }
+
     pub(super) fn handle_entry_name_click(
         &mut self,
         entry: &FileEntry,
@@ -613,7 +708,7 @@ impl ExplorerView {
         if let Some(ix) = ix
             && self.can_start_rename_from_name_click(ix, click_count, modifiers)
         {
-            self.start_rename_for_entry(entry.clone(), Some(cx.focus_handle()), window, cx);
+            self.schedule_click_rename_for_entry(entry.clone(), window, cx);
             return None;
         }
 
@@ -625,6 +720,8 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.cancel_pending_click_rename();
+
         if self.active_rename.is_some() {
             self.commit_active_rename(window, cx)
         } else {
@@ -637,6 +734,8 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.cancel_pending_click_rename();
+
         let Some(ix) = self.selection.selected_indices.iter().next().copied() else {
             return false;
         };
@@ -659,6 +758,8 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.cancel_pending_click_rename();
+
         let Some(entry) = self
             .entry_index_by_path(path)
             .and_then(|ix| self.entries.get(ix))
@@ -717,6 +818,7 @@ impl ExplorerView {
     }
 
     pub(super) fn cancel_active_rename(&mut self) {
+        self.cancel_pending_click_rename();
         self.rename_focus_out = None;
         self.active_rename = None;
         self.open_error = None;
@@ -1322,6 +1424,56 @@ mod tests {
                 extend: false,
             },
         ));
+    }
+
+    #[test]
+    fn pending_click_rename_resolves_matching_selected_entry() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+        let path = view.entries[0].path.clone();
+        view.pending_click_rename = Some(PendingClickRename {
+            path: path.clone(),
+            request_id: 7,
+            task: Task::ready(()),
+        });
+
+        let entry = view
+            .pending_click_rename_entry(&path, 7)
+            .expect("matching pending rename entry");
+
+        assert_eq!(entry.path, path);
+        assert!(view.active_rename.is_none());
+    }
+
+    #[test]
+    fn pending_click_rename_rejects_stale_request_id_and_path() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+        let path = view.entries[0].path.clone();
+        let other_path = view.entries[1].path.clone();
+        view.pending_click_rename = Some(PendingClickRename {
+            path: path.clone(),
+            request_id: 7,
+            task: Task::ready(()),
+        });
+
+        assert!(view.pending_click_rename_entry(&path, 8).is_none());
+        assert!(view.pending_click_rename_entry(&other_path, 7).is_none());
+    }
+
+    #[test]
+    fn pending_click_rename_rejects_changed_selection() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.select_single_index(0);
+        let path = view.entries[0].path.clone();
+        view.pending_click_rename = Some(PendingClickRename {
+            path: path.clone(),
+            request_id: 7,
+            task: Task::ready(()),
+        });
+        view.selection.selected_indices = std::collections::BTreeSet::from([1]);
+
+        assert!(view.pending_click_rename_entry(&path, 7).is_none());
     }
 
     #[test]

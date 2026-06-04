@@ -66,6 +66,8 @@ impl ExplorerView {
     }
 
     pub(super) fn restore_selection_from_paths(&mut self, paths: &[PathBuf]) {
+        self.cancel_pending_click_rename();
+
         let mut indices = paths
             .iter()
             .filter_map(|path| self.entry_index_by_path(path))
@@ -104,6 +106,8 @@ impl ExplorerView {
     }
 
     pub(super) fn select_single_index(&mut self, ix: usize) {
+        self.cancel_pending_click_rename();
+
         if ix >= self.entries.len() {
             self.clear_selection();
             return;
@@ -126,6 +130,8 @@ impl ExplorerView {
     }
 
     pub(super) fn extend_selection_to_index(&mut self, ix: usize) {
+        self.cancel_pending_click_rename();
+
         if ix >= self.entries.len() {
             return;
         }
@@ -144,6 +150,8 @@ impl ExplorerView {
     }
 
     pub(super) fn add_selection_range_to_index(&mut self, ix: usize) {
+        self.cancel_pending_click_rename();
+
         if ix >= self.entries.len() {
             return;
         }
@@ -162,6 +170,8 @@ impl ExplorerView {
     }
 
     pub(super) fn toggle_selection_index(&mut self, ix: usize) {
+        self.cancel_pending_click_rename();
+
         if ix >= self.entries.len() {
             return;
         }
@@ -189,6 +199,8 @@ impl ExplorerView {
     }
 
     pub(super) fn replace_selection_with_indices(&mut self, selected_indices: BTreeSet<usize>) {
+        self.cancel_pending_click_rename();
+
         let Some(anchor) = selected_indices.first().copied() else {
             self.clear_selection();
             return;
@@ -203,6 +215,8 @@ impl ExplorerView {
     }
 
     pub(super) fn select_all_entries(&mut self) {
+        self.cancel_pending_click_rename();
+
         if self.entries.is_empty() {
             self.clear_selection();
             return;
@@ -234,6 +248,7 @@ impl ExplorerView {
     }
 
     pub(super) fn clear_selection(&mut self) {
+        self.cancel_pending_click_rename();
         self.selection = SelectionState::default();
     }
 

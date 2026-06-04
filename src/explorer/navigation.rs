@@ -87,6 +87,8 @@ impl ExplorerView {
         click_count: usize,
         modifiers: SelectionModifiers,
     ) -> Option<EntryAction> {
+        self.cancel_pending_click_rename();
+
         if let Some(ix) = self.entry_index_by_path(&entry.path) {
             self.apply_click_selection(ix, modifiers);
         } else {
@@ -113,6 +115,8 @@ impl ExplorerView {
         entry: &FileEntry,
         modifiers: SelectionModifiers,
     ) -> Option<PathBuf> {
+        self.cancel_pending_click_rename();
+
         let target = directory_new_tab_target(entry)?;
 
         if let Some(ix) = self.entry_index_by_path(&entry.path) {
