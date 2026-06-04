@@ -286,7 +286,12 @@ fn should_hide_hidden_entries(_: &Path) -> bool {
 }
 
 fn should_skip_directory_entry(entry: &fs::DirEntry, options: EntryLoadOptions) -> bool {
-    options.hide_hidden_entries && is_hidden_directory_entry(entry)
+    is_always_hidden_metadata_entry_name(&entry.file_name())
+        || options.hide_hidden_entries && is_hidden_directory_entry(entry)
+}
+
+fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
+    name == OsStr::new(".localized") || name == OsStr::new(".DS_Store")
 }
 
 fn is_hidden_directory_entry(entry: &fs::DirEntry) -> bool {
@@ -1278,6 +1283,32 @@ mod tests {
     fn hidden_entry_filter_keeps_dot_prefixed_entries_when_disabled() {
         let temp = TempDir::new();
         fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let entries = load_entries_with_options(
+            temp.path(),
+            EntryLoadOptions {
+                hide_hidden_entries: false,
+                applications_view: false,
+            },
+        )
+        .expect("load entries");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![".hidden", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn metadata_entry_filter_omits_macos_metadata_names_even_when_hidden_filter_is_disabled() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".DS_Store"), b"metadata").expect("create ds store file");
+        fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
+        fs::write(temp.path().join(".localized"), b"metadata").expect("create localized file");
         fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
 
         let entries = load_entries_with_options(
