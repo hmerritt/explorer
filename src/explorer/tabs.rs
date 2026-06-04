@@ -7,7 +7,9 @@ use gpui::{
 };
 
 use crate::explorer::{
-    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, default_start_path,
+    CloseTab, NewTab, SelectNextTab, SelectPreviousTab,
+    constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
+    default_start_path,
     icons::folder_icon,
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
@@ -25,7 +27,6 @@ const TAB_INACTIVE_BG: u32 = 0xffffff;
 const TAB_BORDER: u32 = 0xe7e7e7;
 const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
-const TAB_BUTTON_HOVER_BG: u32 = 0xe5e5e5;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
 const CLOSE_GLYPH: &str = "\u{E711}";
@@ -544,7 +545,8 @@ fn close_tab_button(tab_id: TabId, cx: &mut Context<ExplorerTabs>) -> AnyElement
         .font(tab_icon_font())
         .text_size(px(TAB_ICON_TEXT_SIZE))
         .text_color(rgb(0x404040))
-        .hover(|style| style.bg(rgb(TAB_BUTTON_HOVER_BG)))
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
         .child(CLOSE_GLYPH)
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.close_tab(tab_id, window, cx);
@@ -566,7 +568,8 @@ fn new_tab_button(cx: &mut Context<ExplorerTabs>) -> AnyElement {
         .font(tab_icon_font())
         .text_size(px(13.0))
         .text_color(rgb(0x404040))
-        .hover(|style| style.bg(rgb(TAB_HOVER_BG)))
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
         .child(NEW_TAB_GLYPH)
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.add_new_tab(window, cx);
