@@ -2,18 +2,26 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Styled, Window,
-    div, font, prelude::*, px, rgb,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render,
+    ScrollHandle, SharedString, Styled, Window, canvas, div, font, point, prelude::*, px, rgb,
 };
 
 use crate::explorer::{
-    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, default_start_path, icons::folder_icon,
-    render::render_drop_indicator, view::ExplorerView,
+    CloseTab, NewTab, SelectNextTab, SelectPreviousTab,
+    constants::{
+        SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_MIN_THUMB_HEIGHT, SCROLLBAR_THUMB_ACTIVE_BG,
+        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
+        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+    },
+    default_start_path,
+    icons::folder_icon,
+    render::render_drop_indicator,
+    view::ExplorerView,
 };
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_WIDTH: f32 = 210.0;
-const TAB_MIN_WIDTH: f32 = 96.0;
+const TAB_MIN_WIDTH: f32 = 160.0;
 const TAB_HORIZONTAL_PADDING: f32 = 10.0;
 const TAB_ICON_GAP: f32 = 8.0;
 const TAB_CLOSE_SIZE: f32 = 22.0;
@@ -51,12 +59,87 @@ struct TabDragPreview {
     scale_factor: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabScrollbarDrag {
+    pointer_offset_from_thumb_left: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabScrollbarMetrics {
+    viewport_width: f32,
+    content_width: f32,
+    scroll_left: f32,
+    scroll_max: f32,
+    track_width: f32,
+    thumb_left: f32,
+    thumb_width: f32,
+}
+
+impl TabScrollbarMetrics {
+    fn new(viewport_width: f32, content_width: f32, scroll_left: f32) -> Option<Self> {
+        if viewport_width <= 0.0 || content_width <= viewport_width {
+            return None;
+        }
+
+        let track_width = viewport_width;
+        if track_width <= 0.0 {
+            return None;
+        }
+
+        let scroll_max = content_width - viewport_width;
+        let scroll_left = scroll_left.clamp(0.0, scroll_max);
+        let thumb_width = (track_width * viewport_width / content_width)
+            .clamp(SCROLLBAR_MIN_THUMB_HEIGHT.min(track_width), track_width);
+        let thumb_travel = track_width - thumb_width;
+        let thumb_left = if thumb_travel <= 0.0 {
+            0.0
+        } else {
+            (scroll_left / scroll_max) * thumb_travel
+        };
+
+        Some(Self {
+            viewport_width,
+            content_width,
+            scroll_left,
+            scroll_max,
+            track_width,
+            thumb_left,
+            thumb_width,
+        })
+    }
+
+    fn thumb_right(self) -> f32 {
+        self.thumb_left + self.thumb_width
+    }
+
+    fn clamp_scroll_left(self, scroll_left: f32) -> f32 {
+        scroll_left.clamp(0.0, self.scroll_max)
+    }
+
+    fn scroll_by(self, delta: f32) -> f32 {
+        self.clamp_scroll_left(self.scroll_left + delta)
+    }
+
+    fn scroll_left_for_thumb_left(self, thumb_left: f32) -> f32 {
+        let thumb_travel = self.track_width - self.thumb_width;
+        if thumb_travel <= 0.0 {
+            return 0.0;
+        }
+
+        let thumb_left = thumb_left.clamp(0.0, thumb_travel);
+        (thumb_left / thumb_travel) * self.scroll_max
+    }
+}
+
 pub struct ExplorerTabs {
     tabs: Vec<ExplorerTab>,
     active_tab: TabId,
     next_tab_id: u64,
     background_operation_tabs: Vec<Entity<ExplorerView>>,
     dragging_tab: Option<TabId>,
+    tab_scroll_handle: ScrollHandle,
+    tab_scrollbar_hovered: bool,
+    tab_scrollbar_drag: Option<TabScrollbarDrag>,
 }
 
 impl ExplorerTabs {
@@ -71,6 +154,9 @@ impl ExplorerTabs {
             next_tab_id: 2,
             background_operation_tabs: Vec::new(),
             dragging_tab: None,
+            tab_scroll_handle: ScrollHandle::new(),
+            tab_scrollbar_hovered: false,
+            tab_scrollbar_drag: None,
         }
     }
 
@@ -94,6 +180,7 @@ impl ExplorerTabs {
 
         self.tabs.push(ExplorerTab { id, view });
         self.active_tab = id;
+        self.scroll_active_tab_into_view();
     }
 
     fn activate_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -102,6 +189,7 @@ impl ExplorerTabs {
         }
 
         self.active_tab = id;
+        self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
     }
 
@@ -141,7 +229,10 @@ impl ExplorerTabs {
             if let Some(next_active) = active_id_after_close_from_removed(&self.tabs, index) {
                 self.active_tab = next_active;
             }
+            self.scroll_active_tab_into_view();
             self.focus_active_tab(window, cx);
+        } else {
+            self.scroll_active_tab_into_view();
         }
     }
 
@@ -156,6 +247,7 @@ impl ExplorerTabs {
         };
         let next_index = adjacent_tab_index(active_index, self.tabs.len(), direction);
         self.active_tab = self.tabs[next_index].id;
+        self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
     }
 
@@ -169,6 +261,49 @@ impl ExplorerTabs {
 
     fn clear_tab_drag(&mut self) -> bool {
         clear_dragging_tab(&mut self.dragging_tab)
+    }
+
+    fn scroll_active_tab_into_view(&self) {
+        if let Some(index) = self.active_tab_index() {
+            self.tab_scroll_handle.scroll_to_item(index);
+        }
+    }
+
+    fn tab_scrollbar_metrics(&self) -> Option<TabScrollbarMetrics> {
+        let viewport_width = f32::from(self.tab_scroll_handle.bounds().size.width);
+        let scroll_max = f32::from(self.tab_scroll_handle.max_offset().width);
+        let scroll_left = -f32::from(self.tab_scroll_handle.offset().x);
+
+        TabScrollbarMetrics::new(viewport_width, viewport_width + scroll_max, scroll_left)
+    }
+
+    fn set_tab_scroll_offset(&self, scroll_left: f32) {
+        let scroll_max = f32::from(self.tab_scroll_handle.max_offset().width);
+        let scroll_left = scroll_left.clamp(0.0, scroll_max);
+        let offset = self.tab_scroll_handle.offset();
+        self.tab_scroll_handle
+            .set_offset(point(px(-scroll_left), offset.y));
+    }
+
+    fn handle_tab_scrollbar_mouse_down(&mut self, local_x: f32, metrics: TabScrollbarMetrics) {
+        if local_x >= metrics.thumb_left && local_x <= metrics.thumb_right() {
+            self.tab_scrollbar_drag = Some(TabScrollbarDrag {
+                pointer_offset_from_thumb_left: local_x - metrics.thumb_left,
+            });
+        } else if local_x < metrics.thumb_left {
+            self.set_tab_scroll_offset(metrics.scroll_by(-metrics.viewport_width));
+        } else {
+            self.set_tab_scroll_offset(metrics.scroll_by(metrics.viewport_width));
+        }
+    }
+
+    fn handle_tab_scrollbar_drag(&mut self, local_x: f32, metrics: TabScrollbarMetrics) {
+        let Some(drag) = self.tab_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_left = local_x - drag.pointer_offset_from_thumb_left;
+        self.set_tab_scroll_offset(metrics.scroll_left_for_thumb_left(thumb_left));
     }
 
     fn cleanup_completed_background_operations(&mut self, cx: &mut Context<Self>) {
@@ -229,13 +364,19 @@ impl ExplorerTabs {
         let scale_factor = window.scale_factor();
         let can_close = self.tabs.len() > 1;
         let can_drag = can_drag_tab(self.tabs.len());
+        let scrollbar_metrics = self.tab_scrollbar_metrics();
+        let tab_bar_height = TAB_BAR_HEIGHT
+            + if scrollbar_metrics.is_some() {
+                SCROLLBAR_GUTTER_WIDTH
+            } else {
+                0.0
+            };
 
         div()
             .id("explorer-tab-bar")
             .flex()
-            .flex_row()
-            .items_end()
-            .h(px(TAB_BAR_HEIGHT))
+            .flex_col()
+            .h(px(tab_bar_height))
             .w_full()
             .flex_shrink_0()
             .overflow_hidden()
@@ -247,21 +388,165 @@ impl ExplorerTabs {
                     .flex()
                     .flex_row()
                     .items_end()
-                    .min_w(px(0.0))
-                    .h_full()
+                    .h(px(TAB_BAR_HEIGHT))
+                    .w_full()
                     .overflow_hidden()
-                    .children(
-                        self.tabs
-                            .iter()
-                            .map(|tab| {
-                                self.render_tab(tab, can_close, can_drag, scale_factor, cx)
-                                    .into_any_element()
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
+                    .child(
+                        div()
+                            .id("explorer-tab-scroll")
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll_handle)
+                            .children(
+                                self.tabs
+                                    .iter()
+                                    .map(|tab| {
+                                        self.render_tab(tab, can_close, can_drag, scale_factor, cx)
+                                            .into_any_element()
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                    )
+                    .child(new_tab_button(cx)),
             )
-            .child(new_tab_button(cx))
+            .when_some(scrollbar_metrics, |this, metrics| {
+                this.child(self.render_tab_scrollbar(metrics, cx))
+            })
             .into_any_element()
+    }
+
+    fn render_tab_scrollbar(
+        &self,
+        metrics: TabScrollbarMetrics,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .h(px(SCROLLBAR_GUTTER_WIDTH))
+            .child(self.render_tab_scrollbar_track(metrics, cx))
+            .child(
+                div()
+                    .w(px(TAB_BAR_HEIGHT))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(rgb(SCROLLBAR_TRACK_BG)),
+            )
+            .into_any_element()
+    }
+
+    fn render_tab_scrollbar_track(
+        &self,
+        metrics: TabScrollbarMetrics,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hovered_or_dragged = self.tab_scrollbar_hovered || self.tab_scrollbar_drag.is_some();
+        let thumb_height = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_top = (SCROLLBAR_GUTTER_WIDTH - thumb_height) / 2.0;
+        let thumb_color = if self.tab_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+
+        div()
+            .id("explorer-tab-scrollbar")
+            .relative()
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.tab_scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(metrics.thumb_left))
+                    .top(px(thumb_top))
+                    .w(px(metrics.thumb_width))
+                    .h(px(thumb_height))
+                    .rounded(px(thumb_height / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_tab_scrollbar_hit_layer(cx))
+            .into_any_element()
+    }
+
+    fn render_tab_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_x = f32::from(event.position.x - bounds.origin.x);
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(metrics) = this.tab_scrollbar_metrics() {
+                                this.handle_tab_scrollbar_mouse_down(local_x, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_x = f32::from(event.position.x - bounds.origin.x);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.tab_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            if let Some(metrics) = this.tab_scrollbar_metrics() {
+                                this.handle_tab_scrollbar_drag(local_x, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.tab_scrollbar_drag.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 
     fn render_tab(
@@ -677,7 +962,7 @@ fn reorder_tab_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explorer::view::tab_label_for_path;
+    use crate::explorer::{test_support::assert_approx_eq, view::tab_label_for_path};
 
     #[test]
     fn tab_label_uses_last_path_component() {
@@ -712,6 +997,12 @@ mod tests {
         assert!(!can_drag_tab(0));
         assert!(!can_drag_tab(1));
         assert!(can_drag_tab(2));
+    }
+
+    #[test]
+    fn tab_min_width_keeps_labels_readable_before_overflow() {
+        assert_eq!(TAB_MIN_WIDTH, 160.0);
+        assert!(TAB_MIN_WIDTH < TAB_WIDTH);
     }
 
     #[test]
@@ -828,5 +1119,59 @@ mod tests {
         assert!(!reorder_tab_ids(&mut ids, TabId(1), TabId(1), true));
         assert!(!reorder_tab_ids(&mut ids, TabId(3), TabId(1), true));
         assert_eq!(ids, vec![TabId(1), TabId(2)]);
+    }
+
+    #[test]
+    fn tab_scrollbar_metrics_hide_without_overflow() {
+        assert!(TabScrollbarMetrics::new(200.0, 200.0, 0.0).is_none());
+        assert!(TabScrollbarMetrics::new(200.0, 180.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn tab_scrollbar_thumb_is_proportional_and_respects_minimum_width() {
+        let proportional = TabScrollbarMetrics::new(200.0, 400.0, 0.0).unwrap();
+        assert_approx_eq(proportional.thumb_width, 100.0);
+
+        let minimum = TabScrollbarMetrics::new(100.0, 10_000.0, 0.0).unwrap();
+        assert_approx_eq(minimum.thumb_width, SCROLLBAR_MIN_THUMB_HEIGHT);
+    }
+
+    #[test]
+    fn tab_scrollbar_thumb_left_clamps_to_scroll_bounds() {
+        let left = TabScrollbarMetrics::new(200.0, 1_000.0, -50.0).unwrap();
+        assert_approx_eq(left.scroll_left, 0.0);
+        assert_approx_eq(left.thumb_left, 0.0);
+
+        let right = TabScrollbarMetrics::new(200.0, 1_000.0, 900.0).unwrap();
+        assert_approx_eq(right.scroll_left, 800.0);
+        assert_approx_eq(right.thumb_right(), right.track_width);
+    }
+
+    #[test]
+    fn tab_scrollbar_drag_positions_map_to_scroll_offsets() {
+        let metrics = TabScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        let right_thumb_left = metrics.track_width - metrics.thumb_width;
+        let middle_thumb_left = right_thumb_left / 2.0;
+
+        assert_approx_eq(metrics.scroll_left_for_thumb_left(0.0), 0.0);
+        assert_approx_eq(
+            metrics.scroll_left_for_thumb_left(middle_thumb_left),
+            metrics.scroll_max / 2.0,
+        );
+        assert_approx_eq(
+            metrics.scroll_left_for_thumb_left(right_thumb_left),
+            metrics.scroll_max,
+        );
+    }
+
+    #[test]
+    fn tab_scrollbar_line_and_page_deltas_clamp_at_bounds() {
+        let left = TabScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        assert_approx_eq(left.scroll_by(-TAB_WIDTH), 0.0);
+        assert_approx_eq(left.scroll_by(200.0), 200.0);
+
+        let right = TabScrollbarMetrics::new(200.0, 1_000.0, 800.0).unwrap();
+        assert_approx_eq(right.scroll_by(TAB_WIDTH), right.scroll_max);
+        assert_approx_eq(right.scroll_by(-200.0), 600.0);
     }
 }
