@@ -368,11 +368,61 @@ fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Resu
     fs::write(path, json)
 }
 
+fn open_explorer_window(cx: &mut App) {
+    let window_bounds = startup_window_bounds(cx);
+
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(window_bounds),
+            window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(SharedString::from(APP_TITLE)),
+                ..Default::default()
+            }),
+            window_decorations: Some(WindowDecorations::Server),
+            app_id: Some(APP_ID.to_owned()),
+            ..Default::default()
+        },
+        |window, cx| {
+            let explorer = cx.new(|cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerTabs::new(default_start_path(), focus_handle, cx)
+            });
+
+            cx.new(|cx| {
+                cx.observe_window_bounds(window, |_, window, _| {
+                    save_window_bounds(window.window_bounds());
+                })
+                .detach();
+
+                Explorer { explorer }
+            })
+        },
+    )
+    .expect("failed to open Explorer window");
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_open_window_on_reopen(open_window_count: usize) -> bool {
+    open_window_count == 0
+}
+
 pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
 
-    Application::new().run(|cx: &mut App| {
+    let app = Application::new();
+
+    #[cfg(target_os = "macos")]
+    app.on_reopen(|cx| {
+        if should_open_window_on_reopen(cx.windows().len()) {
+            open_explorer_window(cx);
+        }
+        cx.activate(true);
+    });
+
+    app.run(|cx: &mut App| {
         register_embedded_fonts(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),
@@ -442,39 +492,7 @@ pub fn run() {
             KeyBinding::new("shift-down", RenameNoop, Some("ExplorerRenameInput")),
         ]);
 
-        let window_bounds = startup_window_bounds(cx);
-
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(window_bounds),
-                window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from(APP_TITLE)),
-                    ..Default::default()
-                }),
-                window_decorations: Some(WindowDecorations::Server),
-                app_id: Some(APP_ID.to_owned()),
-                ..Default::default()
-            },
-            |window, cx| {
-                let explorer = cx.new(|cx| {
-                    let focus_handle = cx.focus_handle();
-                    focus_handle.focus(window);
-                    ExplorerTabs::new(default_start_path(), focus_handle, cx)
-                });
-
-                cx.new(|cx| {
-                    cx.observe_window_bounds(window, |_, window, _| {
-                        save_window_bounds(window.window_bounds());
-                    })
-                    .detach();
-
-                    Explorer { explorer }
-                })
-            },
-        )
-        .expect("failed to open Explorer window");
-
+        open_explorer_window(cx);
         cx.activate(true);
     });
 }
@@ -648,6 +666,13 @@ mod tests {
             .and_then(Path::parent)
             .expect("state path has test root");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_reopen_only_opens_window_when_none_exist() {
+        assert!(should_open_window_on_reopen(0));
+        assert!(!should_open_window_on_reopen(1));
+        assert!(!should_open_window_on_reopen(2));
     }
 
     #[test]
