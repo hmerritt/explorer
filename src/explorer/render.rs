@@ -996,9 +996,6 @@ impl Render for ExplorerView {
                             .h_full()
                             .overflow_hidden()
                             .child(self.render_header())
-                            .when_some(self.open_error.clone(), |this, error| {
-                                this.child(render_open_error(&error))
-                            })
                             .child(
                                 match self.content_branch() {
                                     ExplorerContentBranch::Error => div().child(
@@ -1020,6 +1017,9 @@ impl Render for ExplorerView {
                                 .w_full()
                                 .overflow_hidden(),
                             )
+                            .when_some(self.open_error.clone(), |this, error| {
+                                this.child(render_open_error(&error))
+                            })
                             .child(self.render_status_bar()),
                     ),
             )
