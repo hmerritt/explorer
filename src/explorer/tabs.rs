@@ -37,18 +37,25 @@ struct ExplorerTab {
     view: Entity<ExplorerView>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TabDrag {
     id: TabId,
+    label: SharedString,
+    is_active: bool,
 }
 
-struct TabDragPreview;
+struct TabDragPreview {
+    label: SharedString,
+    is_active: bool,
+    scale_factor: f32,
+}
 
 pub struct ExplorerTabs {
     tabs: Vec<ExplorerTab>,
     active_tab: TabId,
     next_tab_id: u64,
     background_operation_tabs: Vec<Entity<ExplorerView>>,
+    dragging_tab: Option<TabId>,
 }
 
 impl ExplorerTabs {
@@ -62,6 +69,7 @@ impl ExplorerTabs {
             active_tab: first_id,
             next_tab_id: 2,
             background_operation_tabs: Vec::new(),
+            dragging_tab: None,
         }
     }
 
@@ -154,6 +162,14 @@ impl ExplorerTabs {
         reorder_tabs(&mut self.tabs, dragged_id, target_id, before)
     }
 
+    fn start_tab_drag(&mut self, id: TabId) {
+        start_dragging_tab(&mut self.dragging_tab, id);
+    }
+
+    fn clear_tab_drag(&mut self) -> bool {
+        clear_dragging_tab(&mut self.dragging_tab)
+    }
+
     fn cleanup_completed_background_operations(&mut self, cx: &mut Context<Self>) {
         let mut completed_any = false;
         let mut still_running = Vec::new();
@@ -211,6 +227,7 @@ impl ExplorerTabs {
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let scale_factor = window.scale_factor();
         let can_close = self.tabs.len() > 1;
+        let can_drag = can_drag_tab(self.tabs.len());
 
         div()
             .id("explorer-tab-bar")
@@ -236,7 +253,7 @@ impl ExplorerTabs {
                         self.tabs
                             .iter()
                             .map(|tab| {
-                                self.render_tab(tab, can_close, scale_factor, cx)
+                                self.render_tab(tab, can_close, can_drag, scale_factor, cx)
                                     .into_any_element()
                             })
                             .collect::<Vec<_>>(),
@@ -250,12 +267,14 @@ impl ExplorerTabs {
         &self,
         tab: &ExplorerTab,
         can_close: bool,
+        can_drag: bool,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = tab.id == self.active_tab;
-        let label = tab.view.read(cx).tab_label();
+        let label = SharedString::from(tab.view.read(cx).tab_label());
         let tab_id = tab.id;
+        let is_dragging = self.dragging_tab == Some(tab_id);
 
         let mut rendered_tab = div()
             .id(("explorer-tab", tab.id.0))
@@ -279,6 +298,7 @@ impl ExplorerTabs {
             })
             .border_r_1()
             .border_color(rgb(TAB_BORDER))
+            .when(is_dragging, |this| this.opacity(0.4))
             .when(!is_active, |this| {
                 this.hover(|style| style.bg(rgb(TAB_HOVER_BG)))
             })
@@ -295,25 +315,53 @@ impl ExplorerTabs {
                     cx.notify();
                 }),
             )
-            .child(folder_icon(scale_factor))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(TAB_TEXT_SIZE))
-                    .text_color(rgb(TAB_TEXT_COLOR))
-                    .child(SharedString::from(label)),
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                    if this.clear_tab_drag() {
+                        cx.notify();
+                    }
+                }),
             )
-            .when(can_close, |this| this.child(close_tab_button(tab_id, cx)));
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                    if this.clear_tab_drag() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(tab_inner_contents(
+                label.clone(),
+                scale_factor,
+                can_close.then(|| close_tab_button(tab_id, cx)),
+            ));
 
-        if can_close {
+        if can_drag {
             let entity = cx.entity();
+            let drag_label = label.clone();
             rendered_tab = rendered_tab
-                .on_drag(TabDrag { id: tab_id }, move |_, _, _, cx| {
-                    cx.new(|_| TabDragPreview)
-                })
-                .on_drag_move::<TabDrag>(
+                .on_drag(
+                    TabDrag {
+                        id: tab_id,
+                        label: drag_label,
+                        is_active,
+                    },
+                    move |drag, _, window, cx| {
+                        let scale_factor = window.scale_factor();
+                        let _ = entity.update(cx, |this, cx| {
+                            this.start_tab_drag(drag.id);
+                            cx.notify();
+                        });
+                        cx.new(|_| TabDragPreview {
+                            label: drag.label.clone(),
+                            is_active: drag.is_active,
+                            scale_factor,
+                        })
+                    },
+                )
+                .on_drag_move::<TabDrag>({
+                    let entity = cx.entity();
                     move |event: &DragMoveEvent<TabDrag>, _: &mut Window, cx: &mut App| {
                         if !event.bounds.contains(&event.event.position) {
                             return;
@@ -330,8 +378,8 @@ impl ExplorerTabs {
                                 cx.notify();
                             }
                         });
-                    },
-                );
+                    }
+                });
         }
 
         rendered_tab.into_any_element()
@@ -374,21 +422,76 @@ impl Render for ExplorerTabs {
 
 impl Render for TabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(24.0))
-            .w(px(92.0))
-            .flex()
-            .items_center()
-            .px(px(8.0))
-            .rounded(px(3.0))
-            .bg(rgb(0xffffff))
-            .border_1()
-            .border_color(rgb(0x8a8a8a))
-            .shadow_md()
-            .text_size(px(TAB_TEXT_SIZE))
-            .text_color(rgb(TAB_TEXT_COLOR))
-            .child("Tab")
+        tab_preview_visual(self.label.clone(), self.is_active, self.scale_factor)
     }
+}
+
+fn tab_preview_visual(label: SharedString, is_active: bool, scale_factor: f32) -> impl IntoElement {
+    div()
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(TAB_BAR_HEIGHT))
+        .w(px(TAB_WIDTH))
+        .px(px(TAB_HORIZONTAL_PADDING))
+        .gap(px(TAB_ICON_GAP))
+        .overflow_hidden()
+        .bg(if is_active {
+            rgb(TAB_ACTIVE_BG)
+        } else {
+            rgb(TAB_INACTIVE_BG)
+        })
+        .border_1()
+        .border_color(rgb(TAB_BORDER))
+        .shadow_md()
+        .child(tab_inner_contents(
+            label,
+            scale_factor,
+            Some(close_tab_glyph_visual().into_any_element()),
+        ))
+}
+
+fn tab_inner_contents(
+    label: SharedString,
+    scale_factor: f32,
+    close_glyph: Option<AnyElement>,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .gap(px(TAB_ICON_GAP))
+        .overflow_hidden()
+        .child(folder_icon(scale_factor))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(TAB_TEXT_SIZE))
+                .text_color(rgb(TAB_TEXT_COLOR))
+                .child(label),
+        )
+        .when_some(close_glyph, |this, close_glyph| this.child(close_glyph))
+        .into_any_element()
+}
+
+fn close_tab_glyph_visual() -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(TAB_CLOSE_SIZE))
+        .h(px(TAB_CLOSE_SIZE))
+        .flex_shrink_0()
+        .rounded(px(3.0))
+        .font(tab_icon_font())
+        .text_size(px(TAB_ICON_TEXT_SIZE))
+        .text_color(rgb(0x404040))
+        .child(CLOSE_GLYPH)
 }
 
 fn observe_tab_view(view: &Entity<ExplorerView>, cx: &mut Context<ExplorerTabs>) {
@@ -464,6 +567,18 @@ fn adjacent_tab_index(active_index: usize, len: usize, direction: TabDirection) 
 
 fn can_close_tab(tab_count: usize) -> bool {
     tab_count > 1
+}
+
+fn can_drag_tab(tab_count: usize) -> bool {
+    tab_count > 1
+}
+
+fn start_dragging_tab(dragging_tab: &mut Option<TabId>, id: TabId) {
+    *dragging_tab = Some(id);
+}
+
+fn clear_dragging_tab(dragging_tab: &mut Option<TabId>) -> bool {
+    dragging_tab.take().is_some()
 }
 
 fn active_id_after_close_from_removed(tabs: &[ExplorerTab], removed_index: usize) -> Option<TabId> {
@@ -568,6 +683,24 @@ mod tests {
         assert!(!can_close_tab(0));
         assert!(!can_close_tab(1));
         assert!(can_close_tab(2));
+    }
+
+    #[test]
+    fn single_tab_cannot_be_dragged() {
+        assert!(!can_drag_tab(0));
+        assert!(!can_drag_tab(1));
+        assert!(can_drag_tab(2));
+    }
+
+    #[test]
+    fn dragging_tab_state_sets_and_clears() {
+        let mut dragging_tab = None;
+
+        start_dragging_tab(&mut dragging_tab, TabId(2));
+        assert_eq!(dragging_tab, Some(TabId(2)));
+        assert!(clear_dragging_tab(&mut dragging_tab));
+        assert_eq!(dragging_tab, None);
+        assert!(!clear_dragging_tab(&mut dragging_tab));
     }
 
     #[test]
