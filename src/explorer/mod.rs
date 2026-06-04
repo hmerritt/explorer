@@ -13,6 +13,7 @@ mod formatting;
 mod icons;
 mod mouse_selection;
 mod navigation;
+mod rename;
 mod render;
 mod scrollbar;
 mod selection;
@@ -25,7 +26,11 @@ mod view;
 pub use actions::{
     CancelDrag, CopySelected, CutSelected, EnterSelected, ExtendDown, ExtendEnd, ExtendHome,
     ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, OpenSelected,
-    PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
+    PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace, RenameCancel,
+    RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft,
+    RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome,
+    RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight,
+    RenameSelected, RenameWordLeft, RenameWordRight, SelectAll, TrashSelected,
 };
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]

@@ -29,7 +29,29 @@ actions!(
         CutSelected,
         PasteClipboard,
         TrashSelected,
-        PermanentlyDeleteSelected
+        PermanentlyDeleteSelected,
+        RenameSelected,
+        RenameCommit,
+        RenameCancel,
+        RenameBackspace,
+        RenameDelete,
+        RenameLeft,
+        RenameRight,
+        RenameSelectLeft,
+        RenameSelectRight,
+        RenameWordLeft,
+        RenameWordRight,
+        RenameSelectWordLeft,
+        RenameSelectWordRight,
+        RenameHome,
+        RenameEnd,
+        RenameSelectHome,
+        RenameSelectEnd,
+        RenameSelectAll,
+        RenameCopy,
+        RenameCut,
+        RenamePaste,
+        RenameNoop
     ]
 );
 

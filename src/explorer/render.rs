@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, ops::Range, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle,
-    Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    AnyElement, App, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths,
+    FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent, SharedString,
     TextRun, Window, canvas, div, font, prelude::*, px, rgb, uniform_list,
 };
@@ -39,6 +39,7 @@ use crate::explorer::{
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
+    rename::rename_text_element,
     scrollbar::scrollbar_header_spacer,
     selection::SelectionModifiers,
     sidebar::{
@@ -369,8 +370,14 @@ impl ExplorerView {
             .border_color(rgb(0xffffff))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if this.suppress_next_click() {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
+                if !this.commit_active_rename_before_interaction(window, cx) {
                     cx.stop_propagation();
                     cx.notify();
                     return;
@@ -520,7 +527,42 @@ impl ExplorerView {
             )
         };
 
-        row.child(name_cell(&entry, app_icon, scale_factor, window))
+        let name_cell = if self.rename_is_active_for_path(&entry.path) {
+            rename_name_cell(
+                &entry,
+                app_icon,
+                scale_factor,
+                self.active_rename_focus_handle(),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            let name_click_entry = entry.clone();
+            name_cell(&entry, app_icon, scale_factor, window)
+                .id(("explorer-entry-name", ix))
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if this.suppress_next_click() {
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
+                    if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
+                        &name_click_entry,
+                        event.click_count(),
+                        selection_modifiers_for_click(event),
+                        window,
+                        cx,
+                    ) {
+                        this.open_file_with_default_app(&path);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+
+        row.child(name_cell)
             .child(date_cell)
             .child(type_cell)
             .child(size_cell)
@@ -612,8 +654,14 @@ impl ExplorerView {
                             cx.notify();
                         }
                     }))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         if this.suppress_next_click() {
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+
+                        if !this.commit_active_rename_before_interaction(window, cx) {
                             cx.stop_propagation();
                             cx.notify();
                             return;
@@ -870,6 +918,28 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_paste_clipboard))
             .on_action(cx.listener(Self::handle_trash_selected))
             .on_action(cx.listener(Self::handle_permanently_delete_selected))
+            .on_action(cx.listener(Self::handle_rename_selected))
+            .on_action(cx.listener(Self::handle_rename_commit))
+            .on_action(cx.listener(Self::handle_rename_cancel))
+            .on_action(cx.listener(Self::handle_rename_backspace))
+            .on_action(cx.listener(Self::handle_rename_delete))
+            .on_action(cx.listener(Self::handle_rename_left))
+            .on_action(cx.listener(Self::handle_rename_right))
+            .on_action(cx.listener(Self::handle_rename_select_left))
+            .on_action(cx.listener(Self::handle_rename_select_right))
+            .on_action(cx.listener(Self::handle_rename_word_left))
+            .on_action(cx.listener(Self::handle_rename_word_right))
+            .on_action(cx.listener(Self::handle_rename_select_word_left))
+            .on_action(cx.listener(Self::handle_rename_select_word_right))
+            .on_action(cx.listener(Self::handle_rename_home))
+            .on_action(cx.listener(Self::handle_rename_end))
+            .on_action(cx.listener(Self::handle_rename_select_home))
+            .on_action(cx.listener(Self::handle_rename_select_end))
+            .on_action(cx.listener(Self::handle_rename_select_all))
+            .on_action(cx.listener(Self::handle_rename_copy))
+            .on_action(cx.listener(Self::handle_rename_cut))
+            .on_action(cx.listener(Self::handle_rename_paste))
+            .on_action(cx.listener(Self::handle_rename_noop))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -1412,6 +1482,74 @@ fn name_cell(
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(filename),
         )
+}
+
+fn rename_name_cell(
+    entry: &FileEntry,
+    app_icon: Option<Arc<Image>>,
+    scale_factor: f32,
+    focus_handle: Option<FocusHandle>,
+    cx: &mut Context<ExplorerView>,
+) -> Div {
+    let entity = cx.entity();
+    let input = div()
+        .key_context("ExplorerRenameInput")
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(20.0))
+        .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+        .px(px(2.0))
+        .border_1()
+        .border_color(rgb(0x0078d7))
+        .bg(rgb(0xffffff))
+        .cursor(CursorStyle::IBeam)
+        .text_size(px(NAME_TEXT_SIZE))
+        .line_height(px(16.0))
+        .overflow_hidden()
+        .when_some(focus_handle.as_ref(), |this, focus_handle| {
+            this.track_focus(focus_handle)
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.on_rename_mouse_down(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            this.on_rename_mouse_move(event);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                this.on_rename_mouse_up(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                this.on_rename_mouse_up(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(rename_text_element(entity));
+
+    div()
+        .flex()
+        .items_center()
+        .h_full()
+        .flex_1()
+        .min_w(px(COLUMN_NAME_MIN_WIDTH))
+        .overflow_hidden()
+        .pl(px(NAME_CELL_LEFT_PADDING))
+        .child(entry_icon(entry, app_icon, scale_factor))
+        .child(input)
 }
 
 fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>, scale_factor: f32) -> AnyElement {

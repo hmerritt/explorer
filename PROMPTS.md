@@ -1,5 +1,7 @@
 ## New
 
+Move error pannel from the top of the file explorer to the bottom (above the status bar)
+
 Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ---

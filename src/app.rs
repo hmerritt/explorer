@@ -20,8 +20,12 @@ use gpui::{ClickEvent, FocusHandle, WindowKind, div, rgb};
 use crate::explorer::{
     CancelDrag, CopySelected, CutSelected, DialogCancel, EnterSelected, ExplorerView, ExtendDown,
     ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
-    OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, SelectAll, TrashSelected,
-    default_start_path,
+    OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace,
+    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
+    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
+    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
+    TrashSelected, default_start_path,
 };
 #[cfg(any(target_os = "macos", test))]
 use crate::macos_permissions::MacosFullDiskAccessStatus;
@@ -578,6 +582,43 @@ pub fn run() {
             KeyBinding::new("ctrl-v", PasteClipboard, None),
             KeyBinding::new("delete", TrashSelected, None),
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
+            KeyBinding::new("f2", RenameSelected, Some("Explorer")),
+            KeyBinding::new("enter", RenameCommit, Some("ExplorerRenameInput")),
+            KeyBinding::new("escape", RenameCancel, Some("ExplorerRenameInput")),
+            KeyBinding::new("backspace", RenameBackspace, Some("ExplorerRenameInput")),
+            KeyBinding::new("delete", RenameDelete, Some("ExplorerRenameInput")),
+            KeyBinding::new("left", RenameLeft, Some("ExplorerRenameInput")),
+            KeyBinding::new("right", RenameRight, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-left", RenameWordLeft, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-right", RenameWordRight, Some("ExplorerRenameInput")),
+            KeyBinding::new("shift-left", RenameSelectLeft, Some("ExplorerRenameInput")),
+            KeyBinding::new(
+                "shift-right",
+                RenameSelectRight,
+                Some("ExplorerRenameInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                RenameSelectWordLeft,
+                Some("ExplorerRenameInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                RenameSelectWordRight,
+                Some("ExplorerRenameInput"),
+            ),
+            KeyBinding::new("home", RenameHome, Some("ExplorerRenameInput")),
+            KeyBinding::new("end", RenameEnd, Some("ExplorerRenameInput")),
+            KeyBinding::new("shift-home", RenameSelectHome, Some("ExplorerRenameInput")),
+            KeyBinding::new("shift-end", RenameSelectEnd, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-a", RenameSelectAll, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-c", RenameCopy, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-x", RenameCut, Some("ExplorerRenameInput")),
+            KeyBinding::new("ctrl-v", RenamePaste, Some("ExplorerRenameInput")),
+            KeyBinding::new("up", RenameNoop, Some("ExplorerRenameInput")),
+            KeyBinding::new("down", RenameNoop, Some("ExplorerRenameInput")),
+            KeyBinding::new("shift-up", RenameNoop, Some("ExplorerRenameInput")),
+            KeyBinding::new("shift-down", RenameNoop, Some("ExplorerRenameInput")),
         ]);
 
         let window_bounds = startup_window_bounds(cx);

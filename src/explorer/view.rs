@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use gpui::{AnyWindowHandle, FocusHandle, Task, UniformListScrollHandle};
+use gpui::{AnyWindowHandle, FocusHandle, Subscription, Task, UniformListScrollHandle};
 
 use crate::explorer::{
     app_icons::AppIconCache,
@@ -12,6 +12,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
     mouse_selection::MouseSelectionDrag,
+    rename::RenameState,
     scrollbar::ScrollbarDrag,
     selection::SelectionState,
 };
@@ -38,6 +39,8 @@ pub struct ExplorerView {
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
     pub(super) active_file_operation: Option<FileOperationState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
+    pub(super) active_rename: Option<RenameState>,
+    pub(super) rename_focus_out: Option<Subscription>,
 }
 
 pub(super) struct FileOperationState {
@@ -98,6 +101,8 @@ impl ExplorerView {
             pending_file_conflict: None,
             active_file_operation: None,
             active_dialog_window: None,
+            active_rename: None,
+            rename_focus_out: None,
         };
         view.reload();
         view
