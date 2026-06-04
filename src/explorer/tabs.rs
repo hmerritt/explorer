@@ -23,7 +23,7 @@ const TAB_ICON_GAP: f32 = 8.0;
 const TAB_CLOSE_SIZE: f32 = 22.0;
 const TAB_TEXT_SIZE: f32 = 12.0;
 const TAB_ACTIVE_BG: u32 = 0xf8f8f8;
-const TAB_INACTIVE_BG: u32 = 0xffffff;
+const TAB_INACTIVE_BG: u32 = 0xe8e8e8;
 const TAB_BORDER: u32 = 0xe7e7e7;
 const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
@@ -276,9 +276,7 @@ impl ExplorerTabs {
             .w_full()
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(rgb(0xffffff))
-            .border_b_1()
-            .border_color(rgb(TAB_BORDER))
+            .bg(rgb(0xe8e8e8))
             .child(
                 div()
                     .id("explorer-tab-scroll")
