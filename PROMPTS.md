@@ -1,13 +1,6 @@
 ## New
 
-File/folder selection:
-
-- Currently Shift+select does not work, and Shift+Ctrl does? - it should work just with Shift+select
-- When multiselect fia Shift+select, currently if you change the selection to a lesser multiselect nothing happens, but it should remove the items above/below to match the new selection. For example: If I select a file 5 (out of 10 files), and then Shift+select file 8, files 5-8 are now selected, but if I then (while Shift is still active) select file 6, this changes the selecion to files 5-6
-
----
-
-Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
+When dragging a file/folder, if there are multiple tabs open, hovering over a tab will open it, and a user can drop the item in there
 
 ## Specific / for-later
 
@@ -16,6 +9,7 @@ Progress dialogue when moving files around. Perform async, only show dialogue if
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - When navigating to a directory, load in a non-blocking way. Keep the view the same initially, but if after 100ms it is still loading, preload the UI in the directory and display a loading spinner until completion. Since this is happening in a non-blocking thread, a user can choose to navigate away, in which case when the thread returns the result is simpily discarded
+- Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ## Didn't work first try
 
@@ -86,8 +80,8 @@ Best for sync/update scenarios, not ordinary Explorer copy.
 
 Major remaining Windows Explorer parity areas:
 
-1. **Search and editable address bar**
-   Current breadcrumb navigation exists, but not Explorer’s editable address bar, path autocomplete, dropdown history, search box, recursive folder search, indexed search behavior, filters, or search result view.
+1. **Search**
+   Search box, current folder search, optional recursive folder search, indexed search behavior, filters, or search result view.
 
 2. **View modes and folder presentation**
    The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.

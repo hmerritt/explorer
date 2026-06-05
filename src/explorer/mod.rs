@@ -28,19 +28,19 @@ mod view;
 mod watcher;
 
 pub use actions::{
-    AddressAcceptSuggestion, AddressBackspace, AddressCancel, AddressCommit, AddressCopy,
-    AddressCut, AddressDelete, AddressEdit, AddressEnd, AddressHome, AddressLeft, AddressPaste,
-    AddressRight, AddressSelectAll, AddressSelectEnd, AddressSelectHome, AddressSelectLeft,
-    AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight, AddressSuggestionDown,
-    AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag, CloseTab, CopySelected,
-    CreateNewFile, CreateNewFolder, CutSelected, EnterSelected, ExtendDown, ExtendEnd, ExtendHome,
-    ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab, OpenSelected,
-    PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace, RenameCancel,
-    RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft,
-    RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome,
-    RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight,
-    RenameSelected, RenameWordLeft, RenameWordRight, SelectAll, SelectNextTab, SelectPreviousTab,
-    SelectTabByIndex, TrashSelected,
+    AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel, AddressCommit,
+    AddressCopy, AddressCut, AddressDelete, AddressEdit, AddressEnd, AddressHome, AddressLeft,
+    AddressPaste, AddressRight, AddressSelectAll, AddressSelectEnd, AddressSelectHome,
+    AddressSelectLeft, AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight,
+    AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag,
+    CloseTab, CopySelected, CreateNewFile, CreateNewFolder, CutSelected, EnterSelected, ExtendDown,
+    ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp,
+    NewTab, OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh, RenameBackspace,
+    RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
+    RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
+    RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]

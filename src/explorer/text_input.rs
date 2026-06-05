@@ -327,6 +327,14 @@ impl EditableTextState {
         self.scroll_cursor_into_view();
     }
 
+    pub(super) fn delete_previous_word_or_selection(&mut self) {
+        if self.selected_range.is_empty() {
+            let offset = self.previous_word_boundary(self.cursor_offset());
+            self.select_to(offset);
+        }
+        self.replace_text(None, "");
+    }
+
     pub(super) fn replace_text_in_range_utf16(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -678,6 +686,51 @@ mod tests {
             "alpha beta".len().."alpha beta gamma".len()
         );
         assert!(!input.selection_reversed);
+    }
+
+    #[test]
+    fn delete_previous_word_removes_word_before_cursor() {
+        let mut input = EditableTextState::new("alpha beta.".to_owned());
+        input.move_to("alpha beta.".len());
+
+        input.delete_previous_word_or_selection();
+
+        assert_eq!(input.content, "alpha ");
+        assert_eq!(input.selected_range, "alpha ".len().."alpha ".len());
+        assert!(!input.selection_reversed);
+    }
+
+    #[test]
+    fn delete_previous_word_uses_existing_separator_boundaries() {
+        let mut input = EditableTextState::new("alpha--beta".to_owned());
+        input.move_to("alpha--beta".len());
+
+        input.delete_previous_word_or_selection();
+
+        assert_eq!(input.content, "alpha--");
+        assert_eq!(input.selected_range, "alpha--".len().."alpha--".len());
+    }
+
+    #[test]
+    fn delete_previous_word_deletes_existing_selection() {
+        let mut input = EditableTextState::new("alpha beta gamma".to_owned());
+        input.selected_range = "alpha ".len().."alpha beta ".len();
+
+        input.delete_previous_word_or_selection();
+
+        assert_eq!(input.content, "alpha gamma");
+        assert_eq!(input.selected_range, "alpha ".len().."alpha ".len());
+    }
+
+    #[test]
+    fn delete_previous_word_handles_utf8_boundaries() {
+        let mut input = EditableTextState::new("file café.".to_owned());
+        input.move_to("file café.".len());
+
+        input.delete_previous_word_or_selection();
+
+        assert_eq!(input.content, "file ");
+        assert_eq!(input.selected_range, "file ".len().."file ".len());
     }
 
     #[test]

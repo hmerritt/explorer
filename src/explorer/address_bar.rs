@@ -13,11 +13,12 @@ use gpui::{
 
 use crate::explorer::{
     actions::{
-        AddressAcceptSuggestion, AddressBackspace, AddressCancel, AddressCommit, AddressCopy,
-        AddressCut, AddressDelete, AddressEdit, AddressEnd, AddressHome, AddressLeft, AddressPaste,
-        AddressRight, AddressSelectAll, AddressSelectEnd, AddressSelectHome, AddressSelectLeft,
-        AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight, AddressSuggestionDown,
-        AddressSuggestionUp, AddressWordLeft, AddressWordRight,
+        AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel,
+        AddressCommit, AddressCopy, AddressCut, AddressDelete, AddressEdit, AddressEnd,
+        AddressHome, AddressLeft, AddressPaste, AddressRight, AddressSelectAll, AddressSelectEnd,
+        AddressSelectHome, AddressSelectLeft, AddressSelectRight, AddressSelectWordLeft,
+        AddressSelectWordRight, AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft,
+        AddressWordRight,
     },
     filesystem::should_hide_directory_entry,
     navigation::HistoryMode,
@@ -215,6 +216,17 @@ impl ExplorerView {
             replace_address_text(address, None, "");
             self.refresh_address_suggestions();
         }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_address_backspace_word(
+        &mut self,
+        _: &AddressBackspaceWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_previous_address_word_or_selection();
         cx.stop_propagation();
         cx.notify();
     }
@@ -806,6 +818,13 @@ impl ExplorerView {
     fn select_active_address_text(&mut self) {
         if let Some(address) = self.active_address_bar.as_mut() {
             address.select_all();
+        }
+    }
+
+    fn delete_previous_address_word_or_selection(&mut self) {
+        if let Some(address) = self.active_address_bar.as_mut() {
+            address.delete_previous_word_or_selection();
+            self.refresh_address_suggestions();
         }
     }
 }
@@ -1566,6 +1585,31 @@ mod tests {
 
         address.select_word_at("alpha/".len());
         assert_eq!(address.selected_range, "alpha/".len().."alpha/beta".len());
+    }
+
+    #[test]
+    fn ctrl_backspace_refreshes_address_suggestions() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child")).expect("create child");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let mut address = AddressBarState::new("child missing".to_owned(), None);
+        let offset = address.content.len();
+        address.move_to(offset);
+        view.active_address_bar = Some(address);
+
+        view.delete_previous_address_word_or_selection();
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.content, "child ");
+        assert_eq!(
+            address
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
     }
 
     #[test]

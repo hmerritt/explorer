@@ -16,9 +16,9 @@ use gpui::{
 use crate::explorer::text_input::text_x_for_mouse_x;
 use crate::explorer::{
     actions::{
-        RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
-        RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
-        RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
+        RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
+        RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
+        RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
         RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
         RenameWordRight,
     },
@@ -141,6 +141,19 @@ impl ExplorerView {
                 rename.select_to(offset);
             }
             replace_rename_text(rename, None, "");
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_backspace_word(
+        &mut self,
+        _: &RenameBackspaceWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.delete_previous_word_or_selection();
         }
         cx.stop_propagation();
         cx.notify();
