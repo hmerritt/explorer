@@ -29,7 +29,7 @@ Progress dialogue when moving files around. Perform async, only show dialogue if
 - 7zip built-in
 - rsync copy/sync builtin
 - Network drives (rclone https://rclone.org/ builtin)
-- rclone https://rclone.org/ builtin, adding support for 
+- rclone https://rclone.org/ builtin, adding support for
 
 - Context menu
 - File icons
@@ -74,3 +74,39 @@ Destination is split into blocks.
 Compute weak rolling checksum plus strong hash per block.
 Scan source and emit “reuse destination block” or “write literal bytes.”
 Best for sync/update scenarios, not ordinary Explorer copy.
+
+## Left to implement
+
+Major remaining Windows Explorer parity areas:
+
+1. **Search and editable address bar**
+   Current breadcrumb navigation exists, but not Explorer’s editable address bar, path autocomplete, dropdown history, search box, recursive folder search, indexed search behavior, filters, or search result view.
+
+2. **View modes and folder presentation**
+   The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
+
+3. **Context menus and shell verbs**
+   No full right-click model yet: Open with, Properties, Copy as path, Send to, Share, Pin, New item templates, terminal/open here, app-specific verbs, and empty-folder/background context menus.
+
+4. **Properties and metadata**
+   Missing file/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
+
+5. **Navigation shell surfaces**
+   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: Quick Access/Home, pinned folders, recent/frequent folders, This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion, and richer breadcrumb segment dropdowns.
+
+6. **File operation parity**
+   Current copy/move/delete is strong, but Explorer has much more: undo/redo for file operations, “keep both” conflict handling, per-file conflict choices, richer copy collision naming, pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, shortcut creation via Alt-drag, and more exact same-volume/network behavior.
+
+7. **Keyboard and mouse completeness**
+   Implemented keys cover common navigation and rename, but Explorer has a large set left: type-to-select, incremental search, Ctrl+L/F4 address focus, Ctrl+F search, Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window, Alt+D, Ctrl+Shift+number view modes, and detailed click timing/focus edge cases.
+
+8. **Shell integration and platform associations**
+   Opening files uses the default app, but there is no full file association management, “Open with” picker, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.
+
+9. **Archive support**
+   Explicitly still unchecked in [README.md](C:/Users/hrmer/Documents/my/projects/explorer/README.md:19): compress/decompress zip/archive behavior.
+
+10. **Persistence and settings**
+    Window state persists, but Explorer-style per-folder view settings, hidden/extensions defaults, column layout, sort/group choices, sidebar pins, history/session restore, and user preferences are not yet represented.
+
+The biggest product gaps are not the basic explorer loop anymore. They are search, view modes/thumbnails, context menus/properties, richer sidebar/navigation concepts, and exact file-operation semantics.

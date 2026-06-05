@@ -18,6 +18,14 @@
 - [x] GPU acceleration (via [GPUI](https://www.gpui.rs/))
 - [ ] Archive support (compress/decompress)
 
+## Anti Features I will NOT implement
+
+- [x] 3D Objects
+- [x] File grouping
+- [x] List, Titles, and Content file view modes
+- [x] Search that takes as long as a 'quick stop' at IKEA
+- [x] Context menus that take longer to open than a DMV line on a Monday
+
 ## Download 💾
 
 #### [➡️ Manually Download The Latest Release Here](https://github.com/hmerritt/explorer/releases/latest)

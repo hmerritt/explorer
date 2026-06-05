@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::explorer::{
+    address_bar::address_text_element,
     breadcrumb::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
@@ -145,7 +146,11 @@ impl ExplorerView {
                     cx.notify();
                 }),
             ))
-            .child(directory_bar(breadcrumb, cx))
+            .child(if self.address_bar_is_editing() {
+                editable_directory_bar(self.active_address_focus_handle(), cx)
+            } else {
+                directory_bar(breadcrumb, cx)
+            })
     }
 
     fn render_utility_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -361,6 +366,53 @@ impl ExplorerView {
                         .left(px(left))
                         .top(px(NAVBAR_HEIGHT + UTILITY_BAR_HEIGHT - 2.0)),
                 )
+                .into_any_element(),
+        )
+    }
+
+    fn render_address_suggestions_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let address = self.active_address_bar.as_ref()?;
+        if address.suggestions.is_empty() {
+            return None;
+        }
+
+        let left = NAVBAR_HORIZONTAL_PADDING + (NAV_BUTTON_SIZE * 4.0) + (NAVBAR_ITEM_GAP * 4.0);
+        let width =
+            (f32::from(window.bounds().size.width) - left - NAVBAR_HORIZONTAL_PADDING).max(0.0);
+        let top = ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT;
+
+        let mut dropdown = div()
+            .w(px(width))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0xd8d8d8))
+            .shadow_md()
+            .occlude();
+
+        for (index, suggestion) in address.suggestions.iter().enumerate() {
+            let highlighted = address.highlighted_suggestion == Some(index);
+            dropdown = dropdown.child(address_suggestion_row(
+                index,
+                suggestion.label.clone(),
+                suggestion.path.display().to_string(),
+                highlighted,
+                cx,
+            ));
+        }
+
+        Some(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .size_full()
+                .child(dropdown.absolute().left(px(left)).top(px(top)))
                 .into_any_element(),
         )
     }
@@ -1271,6 +1323,30 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_rename_cut))
             .on_action(cx.listener(Self::handle_rename_paste))
             .on_action(cx.listener(Self::handle_rename_noop))
+            .on_action(cx.listener(Self::handle_address_edit))
+            .on_action(cx.listener(Self::handle_address_commit))
+            .on_action(cx.listener(Self::handle_address_cancel))
+            .on_action(cx.listener(Self::handle_address_backspace))
+            .on_action(cx.listener(Self::handle_address_delete))
+            .on_action(cx.listener(Self::handle_address_left))
+            .on_action(cx.listener(Self::handle_address_right))
+            .on_action(cx.listener(Self::handle_address_select_left))
+            .on_action(cx.listener(Self::handle_address_select_right))
+            .on_action(cx.listener(Self::handle_address_word_left))
+            .on_action(cx.listener(Self::handle_address_word_right))
+            .on_action(cx.listener(Self::handle_address_select_word_left))
+            .on_action(cx.listener(Self::handle_address_select_word_right))
+            .on_action(cx.listener(Self::handle_address_home))
+            .on_action(cx.listener(Self::handle_address_end))
+            .on_action(cx.listener(Self::handle_address_select_home))
+            .on_action(cx.listener(Self::handle_address_select_end))
+            .on_action(cx.listener(Self::handle_address_select_all))
+            .on_action(cx.listener(Self::handle_address_copy))
+            .on_action(cx.listener(Self::handle_address_cut))
+            .on_action(cx.listener(Self::handle_address_paste))
+            .on_action(cx.listener(Self::handle_address_suggestion_up))
+            .on_action(cx.listener(Self::handle_address_suggestion_down))
+            .on_action(cx.listener(Self::handle_address_accept_suggestion))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -1358,6 +1434,10 @@ impl Render for ExplorerView {
             .when_some(self.render_utility_menu_overlay(cx), |this, menu| {
                 this.child(menu)
             })
+            .when_some(
+                self.render_address_suggestions_overlay(window, cx),
+                |this, menu| this.child(menu),
+            )
     }
 }
 
@@ -1732,6 +1812,59 @@ fn utility_menu_row(
         .into_any_element()
 }
 
+fn address_suggestion_row(
+    index: usize,
+    label: String,
+    path: String,
+    highlighted: bool,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    div()
+        .id(("address-suggestion", index))
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(30.0))
+        .mx(px(4.0))
+        .px(px(8.0))
+        .gap(px(10.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .bg(if highlighted {
+            rgb(0xcce8ff)
+        } else {
+            rgb(0xffffff)
+        })
+        .when(!highlighted, |this| {
+            this.hover(|style| style.bg(rgb(0xe5f3ff)))
+        })
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.navigate_to_address_suggestion(index, window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(140.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(SharedString::from(label)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(0x707070))
+                .child(SharedString::from(path)),
+        )
+        .into_any_element()
+}
+
 fn utility_checkbox_row(
     id: &'static str,
     checked: bool,
@@ -1813,8 +1946,9 @@ fn nav_button(
         .into_any_element()
 }
 
-fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> Div {
+fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> AnyElement {
     div()
+        .id("directory-bar")
         .flex()
         .flex_row()
         .items_center()
@@ -1826,7 +1960,73 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) 
         .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.start_address_bar_edit(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
         .children(directory_bar_children(breadcrumb, cx))
+        .into_any_element()
+}
+
+fn editable_directory_bar(
+    focus_handle: Option<FocusHandle>,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let entity = cx.entity();
+
+    div()
+        .id("directory-bar-input")
+        .key_context("ExplorerAddressInput")
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(DIRECTORY_BAR_HEIGHT))
+        .flex_1()
+        .overflow_hidden()
+        .rounded(px(DIRECTORY_BAR_RADIUS))
+        .border_1()
+        .border_color(rgb(0x0078d7))
+        .bg(rgb(0xffffff))
+        .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
+        .cursor(CursorStyle::IBeam)
+        .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
+        .line_height(px(20.0))
+        .text_color(rgb(0x1f1f1f))
+        .when_some(focus_handle.as_ref(), |this, focus_handle| {
+            this.track_focus(focus_handle)
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.on_address_mouse_down(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            this.on_address_mouse_move(event);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                this.on_address_mouse_up(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                this.on_address_mouse_up(event);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(address_text_element(entity))
+        .into_any_element()
 }
 
 fn directory_bar_children(

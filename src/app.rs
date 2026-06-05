@@ -15,15 +15,19 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 use crate::explorer::{
-    CancelDrag, CloseTab, CopySelected, CreateNewFile, CreateNewFolder, CutSelected, DialogCancel,
-    EnterSelected, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward,
-    GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard,
-    PermanentlyDeleteSelected, Refresh, RenameBackspace, RenameCancel, RenameCommit, RenameCopy,
-    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
-    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
-    RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
-    RenameWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
-    default_start_path,
+    AddressAcceptSuggestion, AddressBackspace, AddressCancel, AddressCommit, AddressCopy,
+    AddressCut, AddressDelete, AddressEdit, AddressEnd, AddressHome, AddressLeft, AddressPaste,
+    AddressRight, AddressSelectAll, AddressSelectEnd, AddressSelectHome, AddressSelectLeft,
+    AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight, AddressSuggestionDown,
+    AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag, CloseTab, CopySelected,
+    CreateNewFile, CreateNewFolder, CutSelected, DialogCancel, EnterSelected, ExplorerTabs,
+    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
+    MoveHome, MoveUp, NewTab, OpenSelected, PasteClipboard, PermanentlyDeleteSelected, Refresh,
+    RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd,
+    RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
+    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, default_start_path,
 };
 
 const APP_ID: &str = "com.hmerritt.explorer";
@@ -450,6 +454,8 @@ pub fn run() {
             KeyBinding::new("ctrl-v", PasteClipboard, None),
             KeyBinding::new("delete", TrashSelected, None),
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
+            KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),
+            KeyBinding::new("ctrl-l", AddressEdit, Some("Explorer")),
             KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
             KeyBinding::new("ctrl-shift-f", CreateNewFile, Some("Explorer")),
             KeyBinding::new("ctrl-t", NewTab, None),
@@ -502,6 +508,49 @@ pub fn run() {
             KeyBinding::new("down", RenameNoop, Some("ExplorerRenameInput")),
             KeyBinding::new("shift-up", RenameNoop, Some("ExplorerRenameInput")),
             KeyBinding::new("shift-down", RenameNoop, Some("ExplorerRenameInput")),
+            KeyBinding::new("enter", AddressCommit, Some("ExplorerAddressInput")),
+            KeyBinding::new("escape", AddressCancel, Some("ExplorerAddressInput")),
+            KeyBinding::new("backspace", AddressBackspace, Some("ExplorerAddressInput")),
+            KeyBinding::new("delete", AddressDelete, Some("ExplorerAddressInput")),
+            KeyBinding::new("left", AddressLeft, Some("ExplorerAddressInput")),
+            KeyBinding::new("right", AddressRight, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-left", AddressWordLeft, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-right", AddressWordRight, Some("ExplorerAddressInput")),
+            KeyBinding::new(
+                "shift-left",
+                AddressSelectLeft,
+                Some("ExplorerAddressInput"),
+            ),
+            KeyBinding::new(
+                "shift-right",
+                AddressSelectRight,
+                Some("ExplorerAddressInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                AddressSelectWordLeft,
+                Some("ExplorerAddressInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                AddressSelectWordRight,
+                Some("ExplorerAddressInput"),
+            ),
+            KeyBinding::new("home", AddressHome, Some("ExplorerAddressInput")),
+            KeyBinding::new("end", AddressEnd, Some("ExplorerAddressInput")),
+            KeyBinding::new(
+                "shift-home",
+                AddressSelectHome,
+                Some("ExplorerAddressInput"),
+            ),
+            KeyBinding::new("shift-end", AddressSelectEnd, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-a", AddressSelectAll, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-c", AddressCopy, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-x", AddressCut, Some("ExplorerAddressInput")),
+            KeyBinding::new("ctrl-v", AddressPaste, Some("ExplorerAddressInput")),
+            KeyBinding::new("up", AddressSuggestionUp, Some("ExplorerAddressInput")),
+            KeyBinding::new("down", AddressSuggestionDown, Some("ExplorerAddressInput")),
+            KeyBinding::new("tab", AddressAcceptSuggestion, Some("ExplorerAddressInput")),
         ]);
 
         open_explorer_window(cx);

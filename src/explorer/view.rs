@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::explorer::{
+    address_bar::AddressBarState,
     app_icons::AppIconCache,
     drag_drop::DropIndicator,
     entry::FileEntry,
@@ -45,6 +46,7 @@ pub struct ExplorerView {
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
+    pub(super) active_address_bar: Option<AddressBarState>,
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
     pub(super) show_hidden_files: bool,
@@ -133,6 +135,7 @@ impl ExplorerView {
             active_dialog_window: None,
             active_rename: None,
             rename_focus_out: None,
+            active_address_bar: None,
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
             show_hidden_files: true,
@@ -188,6 +191,7 @@ impl ExplorerView {
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
+        self.cancel_address_bar_edit();
         self.cancel_mouse_selection_drag();
         self.clear_drop_indicator();
         self.pending_permanent_delete = None;
