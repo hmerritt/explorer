@@ -127,7 +127,6 @@ jobs:
                   test "$(find "$app_dir/lib" -type f | wc -l)" -gt 0
 
                   tar -C package -czf "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" explorer.app
-                  cp "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.tar.gz"
 
             - name: Upload release asset
               if: steps.tag_check.outputs.valid == 'true'
