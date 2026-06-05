@@ -2200,9 +2200,12 @@ fn add_item_drag(
     drag_payload: DraggedEntries,
     entity: Entity<ExplorerView>,
 ) -> AnyElement {
+    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+
     cell.id(id)
-        .on_drag(
+        .on_drag_with_external_paths(
             drag_payload,
+            external_paths,
             move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                 entity.update(cx, |this, _| {
                     this.begin_individual_item_drag(dragged);
