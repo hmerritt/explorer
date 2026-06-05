@@ -84,7 +84,7 @@ impl ExplorerView {
     ) -> bool {
         match self.pointer_drag_intent(local_position, viewport_size) {
             Some(PointerDragIntent::RubberBand) => {
-                if !modifiers.toggle {
+                if !modifiers.toggle && !modifiers.extend {
                     self.clear_selection();
                 }
                 self.begin_mouse_selection_drag(local_position, modifiers);
@@ -539,6 +539,48 @@ mod tests {
                 .initial_selection,
             BTreeSet::from([0])
         );
+    }
+
+    #[test]
+    fn shift_mouse_down_preserves_anchor_for_click_selection() {
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+        view.select_single_index(4);
+
+        view.begin_mouse_selection_drag_for_intent(
+            gpui::point(px(1.0), px(ROW_HEIGHT * 7.0 + 1.0)),
+            size(px(800.0), px(300.0)),
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(selected_names(&view), vec!["e.txt"]);
+        assert_eq!(
+            view.mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag")
+                .initial_selection,
+            BTreeSet::from([4])
+        );
+
+        view.end_mouse_selection_drag();
+        view.apply_click_selection(
+            7,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(
+            selected_names(&view),
+            vec!["e.txt", "f.txt", "g.txt", "h.txt"]
+        );
+        assert_eq!(view.selection.anchor_index, Some(4));
+        assert_eq!(view.selection.focused_index, Some(7));
     }
 
     #[test]

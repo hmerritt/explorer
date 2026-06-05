@@ -149,26 +149,6 @@ impl ExplorerView {
         self.scroll_index_into_view(ix);
     }
 
-    pub(super) fn add_selection_range_to_index(&mut self, ix: usize) {
-        self.cancel_pending_click_rename();
-
-        if ix >= self.entries.len() {
-            return;
-        }
-
-        let anchor = self
-            .selection
-            .anchor_index
-            .or(self.selection.focused_index)
-            .unwrap_or(ix);
-        self.selection
-            .selected_indices
-            .extend(indices_in_range(anchor, ix));
-        self.selection.anchor_index = Some(anchor);
-        self.selection.focused_index = Some(ix);
-        self.scroll_index_into_view(ix);
-    }
-
     pub(super) fn toggle_selection_index(&mut self, ix: usize) {
         self.cancel_pending_click_rename();
 
@@ -194,7 +174,7 @@ impl ExplorerView {
             (false, false) => self.select_single_index(ix),
             (true, false) => self.toggle_selection_index(ix),
             (false, true) => self.extend_selection_to_index(ix),
-            (true, true) => self.add_selection_range_to_index(ix),
+            (true, true) => {}
         }
     }
 
@@ -432,6 +412,38 @@ mod tests {
     }
 
     #[test]
+    fn repeated_shift_click_shrinks_selection_to_anchor_range() {
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+
+        view.select_single_index(4);
+        view.apply_click_selection(
+            7,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+        assert_eq!(
+            selected_names(&view),
+            vec!["e.txt", "f.txt", "g.txt", "h.txt"]
+        );
+
+        view.apply_click_selection(
+            5,
+            SelectionModifiers {
+                toggle: false,
+                extend: true,
+            },
+        );
+
+        assert_eq!(selected_names(&view), vec!["e.txt", "f.txt"]);
+        assert_eq!(view.selection.anchor_index, Some(4));
+        assert_eq!(view.selection.focused_index, Some(5));
+    }
+
+    #[test]
     fn shift_click_below_selected_file_selects_inclusive_range() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
 
@@ -501,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_click_adds_anchor_range() {
+    fn ctrl_shift_click_does_not_change_selection() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
 
         view.select_single_index(1);
@@ -512,6 +524,8 @@ mod tests {
                 extend: false,
             },
         );
+        let selection_before = view.selection.clone();
+
         view.apply_click_selection(
             3,
             SelectionModifiers {
@@ -520,9 +534,10 @@ mod tests {
             },
         );
 
-        assert_eq!(selected_names(&view), vec!["b.txt", "d.txt", "e.txt"]);
+        assert_eq!(selected_names(&view), vec!["b.txt", "e.txt"]);
+        assert_eq!(view.selection, selection_before);
         assert_eq!(view.selection.anchor_index, Some(4));
-        assert_eq!(view.selection.focused_index, Some(3));
+        assert_eq!(view.selection.focused_index, Some(4));
     }
 
     #[test]

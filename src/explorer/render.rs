@@ -2405,10 +2405,7 @@ fn text_cell_width(column_width: f32) -> f32 {
 }
 
 fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
-    match event {
-        ClickEvent::Mouse(event) => SelectionModifiers::from_gpui(event.down.modifiers),
-        ClickEvent::Keyboard(_) => SelectionModifiers::default(),
-    }
+    SelectionModifiers::from_gpui(event.modifiers())
 }
 
 fn is_normal_entry_click(event: &ClickEvent) -> bool {
@@ -2662,16 +2659,16 @@ mod tests {
     }
 
     #[test]
-    fn click_selection_modifiers_use_mouse_down_shift() {
+    fn click_selection_modifiers_use_click_shift() {
         let event = ClickEvent::Mouse(MouseClickEvent {
-            down: MouseDownEvent {
+            down: MouseDownEvent::default(),
+            up: MouseUpEvent {
                 modifiers: Modifiers {
                     shift: true,
                     ..Modifiers::default()
                 },
-                ..MouseDownEvent::default()
+                ..MouseUpEvent::default()
             },
-            up: MouseUpEvent::default(),
         });
 
         assert_eq!(
@@ -2684,17 +2681,17 @@ mod tests {
     }
 
     #[test]
-    fn click_selection_modifiers_use_mouse_down_secondary_modifier() {
+    fn click_selection_modifiers_use_click_secondary_modifier() {
         let event = ClickEvent::Mouse(MouseClickEvent {
-            down: MouseDownEvent {
+            down: MouseDownEvent::default(),
+            up: MouseUpEvent {
                 modifiers: Modifiers {
                     control: true,
                     platform: cfg!(target_os = "macos"),
                     ..Modifiers::default()
                 },
-                ..MouseDownEvent::default()
+                ..MouseUpEvent::default()
             },
-            up: MouseUpEvent::default(),
         });
 
         assert_eq!(
