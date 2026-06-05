@@ -20,6 +20,7 @@ use crate::explorer::{
         AddressSuggestionUp, AddressWordLeft, AddressWordRight,
     },
     navigation::HistoryMode,
+    scrollbar::{ScrollbarDrag, ScrollbarMetrics},
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
         scroll_offset_for_cursor,
@@ -27,7 +28,9 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
-const MAX_ADDRESS_SUGGESTIONS: usize = 8;
+pub(super) const ADDRESS_SUGGESTION_ROW_HEIGHT: f32 = 30.0;
+pub(super) const ADDRESS_SUGGESTION_VISIBLE_ROWS: usize = 10;
+pub(super) const ADDRESS_SUGGESTIONS_VERTICAL_PADDING: f32 = 4.0;
 
 pub(super) struct AddressBarState {
     text: EditableTextState,
@@ -35,6 +38,9 @@ pub(super) struct AddressBarState {
     pub(super) focus_out: Option<Subscription>,
     pub(super) suggestions: Vec<AddressBarSuggestion>,
     pub(super) highlighted_suggestion: Option<usize>,
+    pub(super) suggestions_scroll_top: f32,
+    pub(super) suggestions_scrollbar_hovered: bool,
+    pub(super) suggestions_scrollbar_drag: Option<ScrollbarDrag>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +57,97 @@ impl AddressBarState {
             focus_out: None,
             suggestions: Vec::new(),
             highlighted_suggestion: None,
+            suggestions_scroll_top: 0.0,
+            suggestions_scrollbar_hovered: false,
+            suggestions_scrollbar_drag: None,
         }
+    }
+
+    pub(super) fn suggestions_viewport_height(&self) -> f32 {
+        self.suggestions.len().min(ADDRESS_SUGGESTION_VISIBLE_ROWS) as f32
+            * ADDRESS_SUGGESTION_ROW_HEIGHT
+    }
+
+    pub(super) fn suggestions_content_height(&self) -> f32 {
+        self.suggestions.len() as f32 * ADDRESS_SUGGESTION_ROW_HEIGHT
+    }
+
+    pub(super) fn suggestions_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        ScrollbarMetrics::new(
+            ADDRESS_SUGGESTION_VISIBLE_ROWS as f32 * ADDRESS_SUGGESTION_ROW_HEIGHT,
+            self.suggestions_content_height(),
+            self.suggestions_scroll_top,
+        )
+    }
+
+    pub(super) fn set_suggestions_scroll_top(&mut self, scroll_top: f32) {
+        self.suggestions_scroll_top = self
+            .suggestions_scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
+    }
+
+    pub(super) fn scroll_suggestions_by(&mut self, delta: f32) {
+        self.set_suggestions_scroll_top(self.suggestions_scroll_top + delta);
+    }
+
+    pub(super) fn clamp_suggestions_scroll(&mut self) {
+        self.set_suggestions_scroll_top(self.suggestions_scroll_top);
+        if self.suggestions_scrollbar_metrics().is_none() {
+            self.suggestions_scrollbar_drag = None;
+        }
+    }
+
+    pub(super) fn scroll_highlighted_suggestion_into_view(&mut self) {
+        let Some(index) = self.highlighted_suggestion else {
+            return;
+        };
+
+        let row_top = index as f32 * ADDRESS_SUGGESTION_ROW_HEIGHT;
+        let row_bottom = row_top + ADDRESS_SUGGESTION_ROW_HEIGHT;
+        let viewport_height =
+            ADDRESS_SUGGESTION_VISIBLE_ROWS as f32 * ADDRESS_SUGGESTION_ROW_HEIGHT;
+        let viewport_bottom = self.suggestions_scroll_top + viewport_height;
+
+        if row_top < self.suggestions_scroll_top {
+            self.set_suggestions_scroll_top(row_top);
+        } else if row_bottom > viewport_bottom {
+            self.set_suggestions_scroll_top(row_bottom - viewport_height);
+        }
+    }
+
+    pub(super) fn handle_suggestions_scrollbar_mouse_down(
+        &mut self,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+    ) {
+        use crate::explorer::constants::SCROLLBAR_ARROW_HEIGHT;
+
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_suggestions_scroll_top(metrics.scroll_by(-ADDRESS_SUGGESTION_ROW_HEIGHT));
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_suggestions_scroll_top(metrics.scroll_by(ADDRESS_SUGGESTION_ROW_HEIGHT));
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.suggestions_scrollbar_drag = Some(ScrollbarDrag {
+                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+            });
+        } else if local_y < metrics.thumb_top {
+            self.set_suggestions_scroll_top(metrics.scroll_by(-metrics.viewport_height));
+        } else {
+            self.set_suggestions_scroll_top(metrics.scroll_by(metrics.viewport_height));
+        }
+    }
+
+    pub(super) fn handle_suggestions_scrollbar_drag(
+        &mut self,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+    ) {
+        let Some(drag) = self.suggestions_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
+        self.set_suggestions_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
     }
 }
 
@@ -146,13 +242,10 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(address) = self.active_address_bar.as_mut() {
-            let offset = if address.selected_range.is_empty() {
-                address.previous_boundary(address.cursor_offset())
-            } else {
-                address.selected_range.start
-            };
-            address.move_to(offset);
+        if let Some(path) = self.highlighted_address_suggestion_path() {
+            self.navigate_to_address_suggestion_inline(path, cx);
+        } else {
+            self.move_address_cursor_left();
         }
         cx.stop_propagation();
         cx.notify();
@@ -164,13 +257,10 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(address) = self.active_address_bar.as_mut() {
-            let offset = if address.selected_range.is_empty() {
-                address.next_boundary(address.cursor_offset())
-            } else {
-                address.selected_range.end
-            };
-            address.move_to(offset);
+        if let Some(path) = self.highlighted_address_suggestion_path() {
+            self.navigate_to_address_suggestion_inline(path, cx);
+        } else {
+            self.move_address_cursor_right();
         }
         cx.stop_propagation();
         cx.notify();
@@ -384,6 +474,7 @@ impl ExplorerView {
                 address.highlighted_suggestion,
                 address.suggestions.len(),
             );
+            address.scroll_highlighted_suggestion_into_view();
         }
         cx.stop_propagation();
         cx.notify();
@@ -398,6 +489,7 @@ impl ExplorerView {
         if let Some(address) = self.active_address_bar.as_mut() {
             address.highlighted_suggestion =
                 next_suggestion_index(address.highlighted_suggestion, address.suggestions.len());
+            address.scroll_highlighted_suggestion_into_view();
         }
         cx.stop_propagation();
         cx.notify();
@@ -462,23 +554,48 @@ impl ExplorerView {
         true
     }
 
-    pub(super) fn navigate_to_address_suggestion(
+    pub(super) fn navigate_to_address_suggestion_path(
         &mut self,
-        index: usize,
+        path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(path) = self
-            .active_address_bar
-            .as_ref()
-            .and_then(|address| address.suggestions.get(index))
-            .map(|suggestion| suggestion.path.clone())
-        else {
-            return false;
-        };
-
         self.finish_address_navigation(path, window, cx);
         true
+    }
+
+    fn navigate_to_address_suggestion_inline(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.navigate_to_directory_with_watcher(path.clone(), HistoryMode::Record, cx);
+        if let Some(address) = self.active_address_bar.as_mut() {
+            address.content = path.display().to_string();
+            address.selected_range = address.content.len()..address.content.len();
+            address.selection_reversed = false;
+            address.marked_range = None;
+            address.highlighted_suggestion = None;
+            self.refresh_address_suggestions();
+        }
+    }
+
+    fn move_address_cursor_left(&mut self) {
+        if let Some(address) = self.active_address_bar.as_mut() {
+            let offset = if address.selected_range.is_empty() {
+                address.previous_boundary(address.cursor_offset())
+            } else {
+                address.selected_range.start
+            };
+            address.move_to(offset);
+        }
+    }
+
+    fn move_address_cursor_right(&mut self) {
+        if let Some(address) = self.active_address_bar.as_mut() {
+            let offset = if address.selected_range.is_empty() {
+                address.next_boundary(address.cursor_offset())
+            } else {
+                address.selected_range.end
+            };
+            address.move_to(offset);
+        }
     }
 
     fn finish_address_navigation(
@@ -673,7 +790,12 @@ impl ExplorerView {
                 .is_some_and(|index| index >= address.suggestions.len())
             {
                 address.highlighted_suggestion = None;
+                address.suggestions_scroll_top = 0.0;
             }
+            if address.highlighted_suggestion.is_none() {
+                address.suggestions_scroll_top = 0.0;
+            }
+            address.clamp_suggestions_scroll();
         }
     }
 
@@ -727,7 +849,7 @@ pub(super) fn folder_suggestions_for_input(
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || paths_match_for_address_suggestions(&path, current_path) {
                 return None;
             }
 
@@ -746,8 +868,14 @@ pub(super) fn folder_suggestions_for_input(
             .cmp(&right.label.to_lowercase())
             .then_with(|| left.label.cmp(&right.label))
     });
-    suggestions.truncate(MAX_ADDRESS_SUGGESTIONS);
     suggestions
+}
+
+fn paths_match_for_address_suggestions(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn suggestion_parent_and_prefix(input: &str, current_path: &Path) -> (PathBuf, String) {
@@ -756,6 +884,15 @@ fn suggestion_parent_and_prefix(input: &str, current_path: &Path) -> (PathBuf, S
     }
 
     let typed_path = Path::new(input);
+    let candidate = if typed_path.is_absolute() {
+        typed_path.to_path_buf()
+    } else {
+        current_path.join(typed_path)
+    };
+    if candidate.is_dir() && paths_match_for_address_suggestions(&candidate, current_path) {
+        return (current_path.to_path_buf(), String::new());
+    }
+
     let (parent, prefix) = if has_trailing_separator(input) {
         (typed_path.to_path_buf(), String::new())
     } else {
@@ -1091,7 +1228,58 @@ mod tests {
     }
 
     #[test]
-    fn folder_suggestions_limit_results_deterministically() {
+    fn folder_suggestions_for_current_path_show_children_without_trailing_separator() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child-a")).expect("create child a");
+        fs::create_dir(temp.path().join("child-b")).expect("create child b");
+
+        let suggestions =
+            folder_suggestions_for_input(&temp.path().display().to_string(), temp.path());
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["child-a", "child-b"]);
+    }
+
+    #[test]
+    fn folder_suggestions_for_current_path_show_children_with_trailing_separator() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child-a")).expect("create child a");
+        fs::create_dir(temp.path().join("child-b")).expect("create child b");
+
+        let suggestions = folder_suggestions_for_input(
+            &format!("{}{}", temp.path().display(), std::path::MAIN_SEPARATOR),
+            temp.path(),
+        );
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["child-a", "child-b"]);
+    }
+
+    #[test]
+    fn folder_suggestions_keep_partial_folder_name_as_sibling_prefix_match() {
+        let temp = TempDir::new();
+        let alpha = temp.path().join("alpha");
+        fs::create_dir(&alpha).expect("create alpha");
+        fs::create_dir(alpha.join("inside")).expect("create inside");
+        fs::create_dir(temp.path().join("apricot")).expect("create apricot");
+
+        let suggestions = folder_suggestions_for_input("a", temp.path());
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["alpha", "apricot"]);
+    }
+
+    #[test]
+    fn folder_suggestions_return_all_results_deterministically() {
         let temp = TempDir::new();
         for index in 0..12 {
             fs::create_dir(temp.path().join(format!("folder-{index:02}"))).expect("create folder");
@@ -1099,9 +1287,84 @@ mod tests {
 
         let suggestions = folder_suggestions_for_input("folder", temp.path());
 
-        assert_eq!(suggestions.len(), MAX_ADDRESS_SUGGESTIONS);
+        assert_eq!(suggestions.len(), 12);
         assert_eq!(suggestions[0].label, "folder-00");
-        assert_eq!(suggestions[7].label, "folder-07");
+        assert_eq!(suggestions[11].label, "folder-11");
+    }
+
+    #[test]
+    fn folder_suggestions_omit_current_folder_from_child_matches() {
+        let temp = TempDir::new();
+        let current = temp.path().join("current");
+        fs::create_dir(&current).expect("create current");
+        fs::create_dir(current.join("child")).expect("create child");
+
+        let suggestions = folder_suggestions_for_input(&current.display().to_string(), &current);
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["child"]);
+    }
+
+    #[test]
+    fn folder_suggestions_do_not_include_parent_directory_row() {
+        let temp = TempDir::new();
+        let current = temp.path().join("current");
+        fs::create_dir(&current).expect("create current");
+        fs::create_dir(current.join("child")).expect("create child");
+
+        let suggestions = folder_suggestions_for_input("ch", &current);
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].label, "child");
+        assert_eq!(suggestions[0].path, current.join("child"));
+    }
+
+    #[test]
+    fn address_suggestions_scrollbar_appears_only_after_visible_rows_overflow() {
+        let mut address = AddressBarState::new(String::new(), None);
+        address.suggestions = address_suggestions_for_test(ADDRESS_SUGGESTION_VISIBLE_ROWS);
+        assert!(address.suggestions_scrollbar_metrics().is_none());
+
+        address.suggestions = address_suggestions_for_test(ADDRESS_SUGGESTION_VISIBLE_ROWS + 1);
+        assert!(address.suggestions_scrollbar_metrics().is_some());
+    }
+
+    #[test]
+    fn address_suggestions_scroll_top_clamps_to_overflow_bounds() {
+        let mut address = AddressBarState::new(String::new(), None);
+        address.suggestions = address_suggestions_for_test(ADDRESS_SUGGESTION_VISIBLE_ROWS + 1);
+
+        address.set_suggestions_scroll_top(1000.0);
+        assert_eq!(
+            address.suggestions_scroll_top,
+            ADDRESS_SUGGESTION_ROW_HEIGHT
+        );
+
+        address.set_suggestions_scroll_top(-1000.0);
+        assert_eq!(address.suggestions_scroll_top, 0.0);
+    }
+
+    #[test]
+    fn highlighted_address_suggestion_scrolls_into_view() {
+        let mut address = AddressBarState::new(String::new(), None);
+        address.suggestions = address_suggestions_for_test(20);
+
+        address.highlighted_suggestion = Some(11);
+        address.scroll_highlighted_suggestion_into_view();
+        assert_eq!(
+            address.suggestions_scroll_top,
+            ADDRESS_SUGGESTION_ROW_HEIGHT * 2.0
+        );
+
+        address.highlighted_suggestion = Some(1);
+        address.scroll_highlighted_suggestion_into_view();
+        assert_eq!(
+            address.suggestions_scroll_top,
+            ADDRESS_SUGGESTION_ROW_HEIGHT
+        );
     }
 
     #[test]
@@ -1127,6 +1390,85 @@ mod tests {
         assert_eq!(view.path, temp.path());
         assert!(view.active_address_bar.is_some());
         assert!(view.open_error.is_some());
+    }
+
+    #[test]
+    fn highlighted_address_suggestion_path_requires_highlight() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let mut address = AddressBarState::new("ch".to_owned(), None);
+        address.suggestions = folder_suggestions_for_input(&address.content, temp.path());
+        view.active_address_bar = Some(address);
+
+        assert_eq!(view.highlighted_address_suggestion_path(), None);
+
+        view.active_address_bar
+            .as_mut()
+            .expect("address edit")
+            .highlighted_suggestion = Some(0);
+
+        assert_eq!(view.highlighted_address_suggestion_path(), Some(child));
+    }
+
+    #[test]
+    fn address_left_without_highlight_moves_text_cursor() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let mut address = AddressBarState::new("alpha".to_owned(), None);
+        address.move_to(1);
+        view.active_address_bar = Some(address);
+
+        assert_eq!(view.highlighted_address_suggestion_path(), None);
+
+        view.move_address_cursor_left();
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.selected_range, 0..0);
+    }
+
+    #[test]
+    fn address_right_without_highlight_moves_text_cursor() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let mut address = AddressBarState::new("alpha".to_owned(), None);
+        address.move_to(0);
+        view.active_address_bar = Some(address);
+
+        assert_eq!(view.highlighted_address_suggestion_path(), None);
+
+        view.move_address_cursor_right();
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.selected_range, 1..1);
+    }
+
+    #[test]
+    fn captured_address_suggestion_path_can_navigate_after_edit_clears() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let mut address = AddressBarState::new("ch".to_owned(), None);
+        address.suggestions = folder_suggestions_for_input(&address.content, temp.path());
+        let captured_path = address.suggestions[0].path.clone();
+        view.active_address_bar = Some(address);
+
+        view.cancel_address_bar_edit();
+        view.navigate_to_directory(captured_path.clone(), HistoryMode::Record);
+
+        assert_eq!(view.path, captured_path);
+        assert!(view.active_address_bar.is_none());
+    }
+
+    fn address_suggestions_for_test(count: usize) -> Vec<AddressBarSuggestion> {
+        (0..count)
+            .map(|index| AddressBarSuggestion {
+                label: format!("folder-{index:02}"),
+                path: PathBuf::from(format!("folder-{index:02}")),
+            })
+            .collect()
     }
 
     #[test]

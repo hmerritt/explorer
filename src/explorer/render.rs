@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, ops::Range, sync::Arc};
+use std::{collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
@@ -9,7 +9,9 @@ use gpui::{
 };
 
 use crate::explorer::{
-    address_bar::address_text_element,
+    address_bar::{
+        ADDRESS_SUGGESTION_ROW_HEIGHT, ADDRESS_SUGGESTIONS_VERTICAL_PADDING, address_text_element,
+    },
     breadcrumb::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
@@ -24,13 +26,15 @@ use crate::explorer::{
         HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE,
         NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT,
         NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING,
-        OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SIDEBAR_HORIZONTAL_PADDING,
-        SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
-        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT,
-        UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT,
-        UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
-        effective_name_column_width,
+        OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
+        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
+        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
+        SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
+        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
+        UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
+        UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
+        UTILITY_MENU_WIDTH, effective_name_column_width,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -46,7 +50,7 @@ use crate::explorer::{
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     rename::rename_text_element,
-    scrollbar::scrollbar_header_spacer,
+    scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
     selection::SelectionModifiers,
     sidebar::{
         MacosSystemLocationKind, SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections,
@@ -387,7 +391,7 @@ impl ExplorerView {
 
         let mut dropdown = div()
             .w(px(width))
-            .py(px(4.0))
+            .py(px(ADDRESS_SUGGESTIONS_VERTICAL_PADDING))
             .rounded(px(6.0))
             .bg(rgb(0xffffff))
             .border_1()
@@ -395,16 +399,52 @@ impl ExplorerView {
             .shadow_md()
             .occlude();
 
+        let viewport_height = address.suggestions_viewport_height();
+        let scroll_top = address.suggestions_scroll_top;
+        let has_scrollbar = address.suggestions_scrollbar_metrics().is_some();
+
+        let mut rows = div()
+            .absolute()
+            .top(px(-scroll_top))
+            .left(px(0.0))
+            .right(px(0.0));
         for (index, suggestion) in address.suggestions.iter().enumerate() {
             let highlighted = address.highlighted_suggestion == Some(index);
-            dropdown = dropdown.child(address_suggestion_row(
+            rows = rows.child(address_suggestion_row(
                 index,
                 suggestion.label.clone(),
-                suggestion.path.display().to_string(),
+                suggestion.path.clone(),
                 highlighted,
                 cx,
             ));
         }
+
+        let viewport = div()
+            .relative()
+            .flex_1()
+            .h(px(viewport_height))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let delta_y = event.delta.pixel_delta(px(ADDRESS_SUGGESTION_ROW_HEIGHT)).y;
+                if let Some(address) = this.active_address_bar.as_mut() {
+                    address.scroll_suggestions_by(-f32::from(delta_y));
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(rows);
+
+        dropdown = dropdown.child(
+            div()
+                .flex()
+                .flex_row()
+                .h(px(viewport_height))
+                .child(viewport)
+                .when(has_scrollbar, |this| {
+                    this.child(self.render_address_suggestions_scrollbar(cx))
+                }),
+        );
 
         Some(
             div()
@@ -414,6 +454,136 @@ impl ExplorerView {
                 .child(dropdown)
                 .into_any_element(),
         )
+    }
+
+    fn render_address_suggestions_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(address) = self.active_address_bar.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(metrics) = address.suggestions_scrollbar_metrics() else {
+            return div().into_any_element();
+        };
+
+        let hovered_or_dragged =
+            address.suggestions_scrollbar_hovered || address.suggestions_scrollbar_drag.is_some();
+        let thumb_width = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
+        let thumb_color = if address.suggestions_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("address-suggestions-scrollbar")
+            .relative()
+            .w(px(SCROLLBAR_GUTTER_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if let Some(address) = this.active_address_bar.as_mut() {
+                    address.suggestions_scrollbar_hovered = *hovered;
+                    cx.notify();
+                }
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
+                    .child(scrollbar_arrow_button(
+                        bottom_arrow_top,
+                        ScrollbarArrow::Down,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(metrics.thumb_top))
+                    .right(px(thumb_right))
+                    .w(px(thumb_width))
+                    .h(px(metrics.thumb_height))
+                    .rounded(px(thumb_width / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_address_suggestions_scrollbar_hit_layer(cx))
+            .into_any_element()
+    }
+
+    fn render_address_suggestions_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            let Some(address) = this.active_address_bar.as_mut() else {
+                                return;
+                            };
+                            if let Some(metrics) = address.suggestions_scrollbar_metrics() {
+                                address.handle_suggestions_scrollbar_mouse_down(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            let Some(address) = this.active_address_bar.as_mut() else {
+                                return;
+                            };
+                            if address.suggestions_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            if let Some(metrics) = address.suggestions_scrollbar_metrics() {
+                                address.handle_suggestions_scrollbar_drag(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if let Some(address) = this.active_address_bar.as_mut()
+                            && address.suggestions_scrollbar_drag.take().is_some()
+                        {
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 
     fn render_header(&self) -> Div {
@@ -1814,7 +1984,7 @@ fn utility_menu_row(
 fn address_suggestion_row(
     index: usize,
     label: String,
-    path: String,
+    path: PathBuf,
     highlighted: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
@@ -1838,19 +2008,13 @@ fn address_suggestion_row(
             this.hover(|style| style.bg(rgb(0xe5f3ff)))
         })
         .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.navigate_to_address_suggestion(index, window, cx);
-            cx.stop_propagation();
-            cx.notify();
-        }))
-        .child(
-            div()
-                .flex_shrink_0()
-                .w(px(140.0))
-                .truncate()
-                .text_size(px(12.0))
-                .text_color(rgb(0x1f1f1f))
-                .child(SharedString::from(label)),
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.navigate_to_address_suggestion_path(path.clone(), window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }),
         )
         .child(
             div()
@@ -1858,8 +2022,8 @@ fn address_suggestion_row(
                 .min_w(px(0.0))
                 .truncate()
                 .text_size(px(12.0))
-                .text_color(rgb(0x707070))
-                .child(SharedString::from(path)),
+                .text_color(rgb(0x1f1f1f))
+                .child(SharedString::from(label)),
         )
         .into_any_element()
 }
