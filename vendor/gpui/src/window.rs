@@ -61,6 +61,50 @@ pub use prompts::*;
 
 pub(crate) const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(864.));
 
+pub(crate) fn should_start_external_paths_drag(
+    cursor_position: Point<Pixels>,
+    window_size: Size<Pixels>,
+) -> bool {
+    !Bounds {
+        origin: point(px(0.), px(0.)),
+        size: window_size,
+    }
+    .contains(&cursor_position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_paths_drag_handoff_stays_inside_window() {
+        assert!(!should_start_external_paths_drag(
+            point(px(20.), px(20.)),
+            size(px(100.), px(80.))
+        ));
+        assert!(!should_start_external_paths_drag(
+            point(px(100.), px(80.)),
+            size(px(100.), px(80.))
+        ));
+    }
+
+    #[test]
+    fn external_paths_drag_handoff_starts_outside_window() {
+        assert!(should_start_external_paths_drag(
+            point(px(-1.), px(20.)),
+            size(px(100.), px(80.))
+        ));
+        assert!(should_start_external_paths_drag(
+            point(px(101.), px(20.)),
+            size(px(100.), px(80.))
+        ));
+        assert!(should_start_external_paths_drag(
+            point(px(20.), px(81.)),
+            size(px(100.), px(80.))
+        ));
+    }
+}
+
 /// Represents the two different phases when dispatching events.
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DispatchPhase {
@@ -3586,6 +3630,7 @@ impl Window {
         // Handlers may set this to true by calling `prevent_default`.
         self.default_prevented = false;
 
+        let mut present_after_file_drop_exit = false;
         let event = match event {
             // Track the mouse position with our own state, since accessing the platform
             // API for the mouse position can only occur on the main thread.
@@ -3658,6 +3703,7 @@ impl Window {
                 }
                 FileDropEvent::Exited => {
                     cx.active_drag.take();
+                    present_after_file_drop_exit = true;
                     PlatformInput::FileDrop(FileDropEvent::Exited)
                 }
             },
@@ -3668,6 +3714,12 @@ impl Window {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
+        }
+
+        if present_after_file_drop_exit {
+            let arena_clear_needed = self.draw(cx);
+            self.present();
+            arena_clear_needed.clear();
         }
 
         DispatchEventResult {
@@ -3716,20 +3768,17 @@ impl Window {
         self.rendered_frame.mouse_listeners = mouse_listeners;
 
         if cx.has_active_drag() {
-            if event.is::<MouseMoveEvent>() {
+            if let Some(event) = event.downcast_ref::<MouseMoveEvent>() {
+                if should_start_external_paths_drag(event.position, self.bounds().size) {
+                    self.cancel_window_drag_and_start_external_paths_drag(cx);
+                    return;
+                }
+
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();
             } else if event.is::<MouseExitEvent>() {
-                if let Some(paths) = cx
-                    .active_drag
-                    .as_ref()
-                    .and_then(|drag| drag.external_paths.clone())
-                    && self.platform_window.start_external_paths_drag(paths)
-                {
-                    cx.active_drag = None;
-                    self.refresh();
-                }
+                self.cancel_window_drag_and_start_external_paths_drag(cx);
             } else if event.is::<MouseUpEvent>() {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
@@ -3737,6 +3786,22 @@ impl Window {
                 self.refresh();
             }
         }
+    }
+
+    fn cancel_window_drag_and_start_external_paths_drag(&mut self, cx: &mut App) -> bool {
+        let Some(drag) = cx.active_drag.take() else {
+            return false;
+        };
+        let external_paths = drag.external_paths;
+
+        let arena_clear_needed = self.draw(cx);
+        self.present();
+        arena_clear_needed.clear();
+
+        if let Some(paths) = external_paths {
+            self.platform_window.start_external_paths_drag(paths);
+        }
+        true
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {

@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString,
-    Styled, Window, div, font, prelude::*, px, rgb,
+    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, FileDropEvent, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, ScrollHandle,
+    SharedString, Styled, Window, div, font, prelude::*, px, rgb,
 };
 
 use crate::explorer::{
@@ -424,6 +424,7 @@ impl Render for ExplorerTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.cleanup_completed_background_operations(cx);
         let active_view = self.active_tab().map(|tab| tab.view.clone());
+        let drop_exit_view = active_view.clone();
         let active_drop_indicator = active_view
             .as_ref()
             .and_then(|view| view.read(cx).active_drop_indicator());
@@ -434,6 +435,17 @@ impl Render for ExplorerTabs {
             .on_action(cx.listener(Self::handle_close_tab))
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
+            .on_file_drop(move |event, _, cx| {
+                if let FileDropEvent::Exited = event
+                    && let Some(active_view) = &drop_exit_view
+                {
+                    active_view.update(cx, |view, cx| {
+                        if view.clear_drop_indicator() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
             .size_full()
             .flex()
             .flex_col()

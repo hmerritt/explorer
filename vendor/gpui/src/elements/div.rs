@@ -18,7 +18,7 @@
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
     DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
-    Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
+    FileDropEvent, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
     KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow,
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
@@ -301,6 +301,22 @@ impl Interactivity {
                         window,
                         cx,
                     );
+                }
+            }));
+    }
+
+    /// Bind the given callback to platform file drop events during the capture phase.
+    /// The imperative API equivalent to [`InteractiveElement::on_file_drop`]
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    pub fn on_file_drop(
+        &mut self,
+        listener: impl Fn(&FileDropEvent, &mut Window, &mut App) + 'static,
+    ) {
+        self.file_drop_listeners
+            .push(Box::new(move |event, phase, _hitbox, window, cx| {
+                if phase == DispatchPhase::Capture {
+                    (listener)(event, window, cx);
                 }
             }));
     }
@@ -839,6 +855,18 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Bind the given callback to platform file drop events during the capture phase.
+    /// The fluent API equivalent to [`Interactivity::on_file_drop`]
+    ///
+    /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    fn on_file_drop(
+        mut self,
+        listener: impl Fn(&FileDropEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.interactivity().on_file_drop(listener);
+        self
+    }
+
     /// Bind the given callback to scroll wheel events during the bubble phase
     /// The fluent API equivalent to [`Interactivity::on_scroll_wheel`]
     ///
@@ -1223,6 +1251,9 @@ pub(crate) type MouseUpListener =
 pub(crate) type MouseMoveListener =
     Box<dyn Fn(&MouseMoveEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
+pub(crate) type FileDropListener =
+    Box<dyn Fn(&FileDropEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
+
 pub(crate) type ScrollWheelListener =
     Box<dyn Fn(&ScrollWheelEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
@@ -1543,6 +1574,7 @@ pub struct Interactivity {
     pub(crate) mouse_down_listeners: Vec<MouseDownListener>,
     pub(crate) mouse_up_listeners: Vec<MouseUpListener>,
     pub(crate) mouse_move_listeners: Vec<MouseMoveListener>,
+    pub(crate) file_drop_listeners: Vec<FileDropListener>,
     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
     pub(crate) key_down_listeners: Vec<KeyDownListener>,
     pub(crate) key_up_listeners: Vec<KeyUpListener>,
@@ -1737,6 +1769,7 @@ impl Interactivity {
             || !self.mouse_up_listeners.is_empty()
             || !self.mouse_down_listeners.is_empty()
             || !self.mouse_move_listeners.is_empty()
+            || !self.file_drop_listeners.is_empty()
             || !self.click_listeners.is_empty()
             || !self.scroll_wheel_listeners.is_empty()
             || self.drag_listener.is_some()
@@ -2088,6 +2121,13 @@ impl Interactivity {
         for listener in self.mouse_move_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                listener(event, phase, &hitbox, window, cx);
+            })
+        }
+
+        for listener in self.file_drop_listeners.drain(..) {
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |event: &FileDropEvent, phase, window, cx| {
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3282,5 +3322,19 @@ impl ScrollHandle {
     /// Get the count of children for scrollable item.
     pub fn children_count(&self) -> usize {
         self.0.borrow().child_bounds.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Interactivity;
+
+    #[test]
+    fn file_drop_listener_is_stored_in_interactivity() {
+        let mut interactivity = Interactivity::default();
+
+        interactivity.on_file_drop(|_, _, _| {});
+
+        assert_eq!(interactivity.file_drop_listeners.len(), 1);
     }
 }

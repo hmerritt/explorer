@@ -684,7 +684,8 @@ impl ExplorerView {
             });
 
         if let Some(drag_payload) = selected_drag_payload {
-            row = row.on_drag(drag_payload, {
+            let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+            row = row.on_drag_with_external_paths(drag_payload, external_paths, {
                 let entity = entity.clone();
                 move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                     entity.update(cx, |this, _| {

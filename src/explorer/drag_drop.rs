@@ -1287,6 +1287,20 @@ mod tests {
     }
 
     #[test]
+    fn external_drag_exit_clears_active_drop_indicator() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Copy,
+            target_label: "target".to_owned(),
+            mouse_position: gpui::point(px(32.0), px(48.0)),
+        });
+
+        assert!(view.clear_drop_indicator());
+        assert_eq!(view.active_drop_indicator, None);
+        assert!(!view.clear_drop_indicator());
+    }
+
+    #[test]
     fn invalid_drop_has_no_drop_indicator() {
         let temp = TempDir::new();
         let folder = temp.path().join("folder");

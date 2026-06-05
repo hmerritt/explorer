@@ -1,7 +1,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    mem,
     num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -20,7 +21,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::{Com::*, LibraryLoader::*, Ole::*, SystemServices::*},
+        System::{Com::*, LibraryLoader::*, Memory::*, Ole::*, SystemServices::*},
         UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -892,48 +893,238 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
     }
 }
 
-fn start_windows_external_paths_drag(hwnd: HWND, paths: &[PathBuf]) -> bool {
-    let mut pidls = paths
-        .iter()
-        .filter_map(|path| {
-            let mut encoded = path
-                .to_string_lossy()
-                .encode_utf16()
-                .collect::<Vec<u16>>();
-            encoded.push(0);
-            let pidl = unsafe { ILCreateFromPathW(PCWSTR(encoded.as_ptr())) };
-            (!pidl.is_null()).then_some(pidl)
+#[implement(IDataObject)]
+struct WindowsFileDataObject {
+    paths: Vec<PathBuf>,
+}
+
+#[allow(non_snake_case)]
+impl IDataObject_Impl for WindowsFileDataObject_Impl {
+    fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
+        if self.QueryGetData(pformatetcin) != S_OK {
+            return Err(DV_E_FORMATETC.into());
+        }
+
+        let hglobal = allocate_hdrop(self.paths.as_slice())?;
+        Ok(STGMEDIUM {
+            tymed: TYMED_HGLOBAL.0 as u32,
+            u: STGMEDIUM_0 { hGlobal: hglobal },
+            pUnkForRelease: Default::default(),
         })
+    }
+
+    fn GetDataHere(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _pmedium: *mut STGMEDIUM,
+    ) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::HRESULT {
+        if is_hdrop_format(pformatetc) {
+            S_OK
+        } else {
+            DV_E_FORMATETC
+        }
+    }
+
+    fn GetCanonicalFormatEtc(
+        &self,
+        _pformatectin: *const FORMATETC,
+        _pformatetcout: *mut FORMATETC,
+    ) -> windows::core::HRESULT {
+        E_NOTIMPL
+    }
+
+    fn SetData(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _pmedium: *const STGMEDIUM,
+        _frelease: BOOL,
+    ) -> windows::core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
+        if dwdirection == DATADIR_GET.0 as u32 {
+            Ok(WindowsFormatEtcEnumerator::new().into())
+        } else {
+            Err(E_NOTIMPL.into())
+        }
+    }
+
+    fn DAdvise(
+        &self,
+        _pformatetc: *const FORMATETC,
+        _advf: u32,
+        _padvsink: windows::core::Ref<'_, IAdviseSink>,
+    ) -> windows::core::Result<u32> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+
+    fn DUnadvise(&self, _dwconnection: u32) -> windows::core::Result<()> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+
+    fn EnumDAdvise(&self) -> windows::core::Result<IEnumSTATDATA> {
+        Err(OLE_E_ADVISENOTSUPPORTED.into())
+    }
+}
+
+#[implement(IEnumFORMATETC)]
+struct WindowsFormatEtcEnumerator {
+    next_index: Cell<usize>,
+}
+
+impl WindowsFormatEtcEnumerator {
+    fn new() -> Self {
+        Self {
+            next_index: Cell::new(0),
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
+    fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> windows::core::HRESULT {
+        if rgelt.is_null() || (celt > 1 && pceltfetched.is_null()) {
+            return E_INVALIDARG;
+        }
+
+        let mut fetched = 0;
+        if celt > 0 && self.next_index.get() == 0 {
+            unsafe {
+                rgelt.write(hdrop_format_etc());
+            }
+            self.next_index.set(1);
+            fetched = 1;
+        }
+
+        if !pceltfetched.is_null() {
+            unsafe {
+                pceltfetched.write(fetched);
+            }
+        }
+
+        if fetched == celt { S_OK } else { S_FALSE }
+    }
+
+    fn Skip(&self, celt: u32) -> windows::core::Result<()> {
+        let remaining = 1usize.saturating_sub(self.next_index.get());
+        self.next_index
+            .set((self.next_index.get() + celt as usize).min(1));
+        if celt as usize <= remaining {
+            Ok(())
+        } else {
+            Err(S_FALSE.into())
+        }
+    }
+
+    fn Reset(&self) -> windows::core::Result<()> {
+        self.next_index.set(0);
+        Ok(())
+    }
+
+    fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
+        Ok(WindowsFormatEtcEnumerator {
+            next_index: Cell::new(self.next_index.get()),
+        }
+        .into())
+    }
+}
+
+fn start_windows_external_paths_drag(hwnd: HWND, paths: &[PathBuf]) -> bool {
+    let paths = paths
+        .iter()
+        .filter(|path| path.as_os_str().len() > 0)
+        .cloned()
         .collect::<Vec<_>>();
 
-    if pidls.is_empty() {
+    if paths.is_empty() {
         return false;
     }
 
-    let pidl_refs = pidls
-        .iter()
-        .map(|pidl| *pidl as *const Common::ITEMIDLIST)
-        .collect::<Vec<_>>();
-
     let result = unsafe {
-        SHCreateDataObject(None, Some(&pidl_refs), None::<&IDataObject>).and_then(
-            |data_object: IDataObject| {
-                let drop_source: IDropSource = WindowsFileDragSource.into();
-                SHDoDragDrop(
-                    Some(hwnd),
-                    &data_object,
-                    &drop_source,
-                    DROPEFFECT_COPY | DROPEFFECT_MOVE,
-                )
-            },
+        let data_object: IDataObject = WindowsFileDataObject { paths }.into();
+        let drop_source: IDropSource = WindowsFileDragSource.into();
+        SHDoDragDrop(
+            Some(hwnd),
+            &data_object,
+            &drop_source,
+            DROPEFFECT_COPY | DROPEFFECT_MOVE,
         )
     };
 
-    for pidl in pidls.drain(..) {
-        unsafe { ILFree(Some(pidl)) };
-    }
-
     result.log_err().is_some()
+}
+
+fn is_hdrop_format(format: *const FORMATETC) -> bool {
+    let Some(format) = (unsafe { format.as_ref() }) else {
+        return false;
+    };
+
+    format.cfFormat == CF_HDROP.0
+        && format.dwAspect == DVASPECT_CONTENT.0
+        && (format.tymed & TYMED_HGLOBAL.0 as u32) != 0
+}
+
+fn hdrop_format_etc() -> FORMATETC {
+    FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+fn build_hdrop_payload(paths: &[PathBuf]) -> Vec<u8> {
+    let mut encoded_paths = Vec::<u16>::new();
+    for path in paths {
+        encoded_paths.extend(path.to_string_lossy().encode_utf16());
+        encoded_paths.push(0);
+    }
+    encoded_paths.push(0);
+
+    let header = DROPFILES {
+        pFiles: mem::size_of::<DROPFILES>() as u32,
+        pt: POINT { x: 0, y: 0 },
+        fNC: BOOL(0),
+        fWide: BOOL(1),
+    };
+
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!(header).cast::<u8>(),
+            mem::size_of::<DROPFILES>(),
+        )
+    };
+    let path_bytes = unsafe {
+        std::slice::from_raw_parts(
+            encoded_paths.as_ptr().cast::<u8>(),
+            encoded_paths.len() * mem::size_of::<u16>(),
+        )
+    };
+
+    let mut payload = Vec::with_capacity(header_bytes.len() + path_bytes.len());
+    payload.extend_from_slice(header_bytes);
+    payload.extend_from_slice(path_bytes);
+    payload
+}
+
+fn allocate_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
+    let payload = build_hdrop_payload(paths);
+    unsafe {
+        let global = GlobalAlloc(GMEM_MOVEABLE, payload.len())?;
+        let handle = GlobalLock(global);
+        if handle.is_null() {
+            return Err(windows::core::Error::from_win32());
+        }
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), handle.cast::<u8>(), payload.len());
+        let _ = GlobalUnlock(global);
+        Ok(global)
+    }
 }
 
 #[implement(IDropTarget)]
@@ -1080,6 +1271,50 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         self.handle_drag_drop(input);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod external_paths_drag_tests {
+    use super::{build_hdrop_payload, DROPFILES};
+    use std::{mem, path::PathBuf};
+
+    fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
+        let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
+        let path_words = path_bytes
+            .chunks_exact(mem::size_of::<u16>())
+            .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+
+        path_words
+            .split(|word| *word == 0)
+            .take_while(|path| !path.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect()
+    }
+
+    #[test]
+    fn hdrop_payload_encodes_single_path() {
+        let payload = build_hdrop_payload(&[PathBuf::from(r"C:\Users\test\file.txt")]);
+
+        let pfiles = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        assert_eq!(pfiles, mem::size_of::<DROPFILES>() as u32);
+        assert_eq!(hdrop_paths_from_payload(&payload), [r"C:\Users\test\file.txt"]);
+        assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hdrop_payload_encodes_multiple_paths() {
+        let payload = build_hdrop_payload(&[
+            PathBuf::from(r"C:\Users\test\one.txt"),
+            PathBuf::from(r"C:\Users\test\two.txt"),
+        ]);
+
+        assert_eq!(
+            hdrop_paths_from_payload(&payload),
+            [r"C:\Users\test\one.txt", r"C:\Users\test\two.txt"]
+        );
+        assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
     }
 }
 
