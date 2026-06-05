@@ -22,7 +22,7 @@ use cocoa::{
     foundation::{
         NSArray, NSAutoreleasePool, NSDictionary, NSFastEnumeration, NSInteger, NSNotFound,
         NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSUInteger,
-        NSUserDefaults,
+        NSURL, NSUserDefaults,
     },
 };
 
@@ -84,6 +84,8 @@ type NSDragOperation = NSUInteger;
 const NSDragOperationNone: NSDragOperation = 0;
 #[allow(non_upper_case_globals)]
 const NSDragOperationCopy: NSDragOperation = 1;
+#[allow(non_upper_case_globals)]
+const NSDragOperationMove: NSDragOperation = 16;
 #[derive(PartialEq)]
 pub enum UserTabbingPreference {
     Never,
@@ -243,6 +245,13 @@ unsafe fn build_classes() {
                 decl.add_method(
                     sel!(acceptsFirstMouse:),
                     accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
+                );
+
+                decl.add_protocol(Protocol::get("NSDraggingSource").unwrap());
+                decl.add_method(
+                    sel!(draggingSession:sourceOperationMaskForDraggingContext:),
+                    dragging_session_source_operation_mask
+                        as extern "C" fn(&Object, Sel, id, NSInteger) -> NSDragOperation,
                 );
 
                 decl.add_method(
@@ -1116,6 +1125,11 @@ impl PlatformWindow for MacWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.0.as_ref().lock().input_handler.take()
+    }
+
+    fn start_external_paths_drag(&self, paths: ExternalPaths) -> bool {
+        let native_view = self.0.lock().native_view.as_ptr();
+        start_macos_external_paths_drag(native_view, paths.paths())
     }
 
     fn prompt(
@@ -2354,6 +2368,15 @@ extern "C" fn character_index_for_point(this: &Object, _: Sel, position: NSPoint
     .unwrap_or(NSNotFound as u64)
 }
 
+extern "C" fn dragging_session_source_operation_mask(
+    _: &Object,
+    _: Sel,
+    _: id,
+    _: NSInteger,
+) -> NSDragOperation {
+    NSDragOperationCopy | NSDragOperationMove
+}
+
 fn screen_point_to_gpui_point(this: &Object, position: NSPoint) -> Point<Pixels> {
     let frame = get_frame(this);
     let window_x = position.x - frame.origin.x;
@@ -2423,6 +2446,68 @@ fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths
         paths.push(PathBuf::from(path))
     }
     Some(ExternalPaths(paths))
+}
+
+fn start_macos_external_paths_drag(native_view: *mut Object, paths: &[PathBuf]) -> bool {
+    let mut dragging_items = Vec::new();
+
+    unsafe {
+        for path in paths {
+            let Some(path) = path.to_str().filter(|path| !path.is_empty()) else {
+                continue;
+            };
+
+            let file_url = NSURL::fileURLWithPath_(nil, ns_string(path));
+            if file_url == nil {
+                continue;
+            }
+
+            let dragging_item: id = msg_send![class!(NSDraggingItem), alloc];
+            let dragging_item: id = msg_send![dragging_item, initWithPasteboardWriter: file_url];
+            if dragging_item == nil {
+                continue;
+            }
+
+            let image = file_drag_image(path);
+            let _: () = msg_send![
+                dragging_item,
+                setDraggingFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.))
+                contents: image
+            ];
+            let dragging_item: id = msg_send![dragging_item, autorelease];
+            dragging_items.push(dragging_item);
+        }
+
+        if dragging_items.is_empty() {
+            return false;
+        }
+
+        let app = NSApplication::sharedApplication(nil);
+        let event: id = msg_send![app, currentEvent];
+        if event == nil {
+            return false;
+        }
+
+        let items = NSArray::arrayWithObjects(nil, &dragging_items);
+        let session: id = msg_send![
+            native_view,
+            beginDraggingSessionWithItems: items
+            event: event
+            source: native_view
+        ];
+        session != nil
+    }
+}
+
+unsafe fn file_drag_image(path: &str) -> id {
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let image: id = msg_send![workspace, iconForFile: ns_string(path)];
+        if image != nil {
+            let _: () = msg_send![image, setSize: NSSize::new(32., 32.)];
+        }
+        image
+    }
 }
 
 extern "C" fn conclude_drag_operation(this: &Object, _: Sel, _: id) {
