@@ -113,6 +113,82 @@ impl RenameState {
         self.scroll_cursor_into_view();
     }
 
+    fn select_word_at(&mut self, offset: usize) {
+        let offset = self.clamp_to_boundary(offset);
+        let Some(word_offset) = self.word_offset_near(offset) else {
+            self.move_to(offset);
+            return;
+        };
+        let start = self.word_start(word_offset);
+        let end = self.word_end(word_offset);
+        self.selected_range = start..end;
+        self.selection_reversed = false;
+        self.scroll_cursor_into_view();
+    }
+
+    fn word_offset_near(&self, offset: usize) -> Option<usize> {
+        let offset = self.clamp_to_boundary(offset);
+
+        if let Some((_, ch)) = self.next_char(offset)
+            && ch.is_alphanumeric()
+        {
+            return Some(offset);
+        }
+
+        let previous =
+            self.content
+                .get(..offset)?
+                .char_indices()
+                .rev()
+                .find_map(|(previous_offset, ch)| {
+                    ch.is_alphanumeric().then_some((
+                        previous_offset,
+                        offset.saturating_sub(previous_offset + ch.len_utf8()),
+                    ))
+                });
+        let next = self
+            .content
+            .get(offset..)?
+            .char_indices()
+            .find_map(|(relative_offset, ch)| {
+                ch.is_alphanumeric()
+                    .then_some((offset + relative_offset, relative_offset))
+            });
+
+        match (previous, next) {
+            (Some((previous_offset, previous_distance)), Some((next_offset, next_distance))) => {
+                if previous_distance <= next_distance {
+                    Some(previous_offset)
+                } else {
+                    Some(next_offset)
+                }
+            }
+            (Some((previous_offset, _)), None) => Some(previous_offset),
+            (None, Some((next_offset, _))) => Some(next_offset),
+            (None, None) => None,
+        }
+    }
+
+    fn word_start(&self, mut offset: usize) -> usize {
+        while let Some((previous_offset, ch)) = self.previous_char(offset) {
+            if !ch.is_alphanumeric() {
+                break;
+            }
+            offset = previous_offset;
+        }
+        offset
+    }
+
+    fn word_end(&self, mut offset: usize) -> usize {
+        while let Some((next_offset, ch)) = self.next_char(offset) {
+            if !ch.is_alphanumeric() {
+                break;
+            }
+            offset = next_offset;
+        }
+        offset
+    }
+
     fn previous_boundary(&self, offset: usize) -> usize {
         self.content
             .char_indices()
@@ -908,10 +984,15 @@ impl ExplorerView {
         };
 
         rename.is_selecting = true;
-        if event.modifiers.shift {
-            rename.select_to(rename.index_for_mouse_position(event.position));
+        let offset = rename.index_for_mouse_position(event.position);
+        if event.click_count >= 3 {
+            rename.select_all();
+        } else if event.click_count == 2 {
+            rename.select_word_at(offset);
+        } else if event.modifiers.shift {
+            rename.select_to(offset);
         } else {
-            rename.move_to(rename.index_for_mouse_position(event.position));
+            rename.move_to(offset);
         }
     }
 
@@ -1431,6 +1512,7 @@ mod tests {
         entry::FileEntry,
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
+    use gpui::MouseButton;
     use std::fs;
 
     #[test]
@@ -1651,6 +1733,38 @@ mod tests {
             rename.previous_word_boundary(inside_multi_byte),
             "file-name ".len()
         );
+    }
+
+    #[test]
+    fn double_click_word_selection_selects_rename_word_at_offset() {
+        let mut rename = RenameState::new(
+            &FileEntry::test("alpha beta.txt", false, Some(1), None),
+            true,
+            None,
+        );
+        rename.content = "alpha beta.txt".to_owned();
+
+        rename.select_word_at("al".len());
+        assert_eq!(rename.selected_range, 0.."alpha".len());
+
+        rename.select_word_at("alpha ".len());
+        assert_eq!(rename.selected_range, "alpha ".len().."alpha beta".len());
+    }
+
+    #[test]
+    fn triple_click_selection_selects_entire_rename_text() {
+        let mut view = test_view_with_entries(&["alpha beta.txt"]);
+        view.select_single_index(0);
+        assert!(view.start_test_rename_for_index(0));
+
+        view.on_rename_mouse_down(&MouseDownEvent {
+            button: MouseButton::Left,
+            click_count: 3,
+            ..MouseDownEvent::default()
+        });
+
+        let rename = view.active_rename.as_ref().expect("rename edit");
+        assert_eq!(rename.selected_range, 0..rename.content.len());
     }
 
     #[test]
