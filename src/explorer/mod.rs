@@ -23,6 +23,7 @@ mod tabs;
 #[cfg(test)]
 mod test_support;
 mod view;
+mod watcher;
 
 pub use actions::{
     CancelDrag, CloseTab, CopySelected, CreateNewFile, CreateNewFolder, CutSelected, EnterSelected,

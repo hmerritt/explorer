@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use gpui::Context;
+
 use crate::explorer::{
     entry::FileEntry,
     filesystem::{format_open_error, open_path_with_default_app},
@@ -19,9 +21,31 @@ pub(super) enum EntryAction {
 }
 
 impl ExplorerView {
+    #[cfg(test)]
     pub(super) fn navigate_to_directory(&mut self, path: PathBuf, history_mode: HistoryMode) {
+        self.navigate_to_directory_inner(path, history_mode, None);
+    }
+
+    pub(super) fn navigate_to_directory_with_watcher(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to_directory_inner(path, history_mode, Some(cx));
+    }
+
+    fn navigate_to_directory_inner(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        mut cx: Option<&mut Context<Self>>,
+    ) {
         if path == self.path {
             self.reload();
+            if let Some(cx) = cx.as_deref_mut() {
+                self.restart_directory_watcher(cx);
+            }
             return;
         }
 
@@ -39,16 +63,29 @@ impl ExplorerView {
         self.open_error = None;
         self.scroll_to_top();
         self.reload();
+        if let Some(cx) = cx.as_deref_mut() {
+            self.restart_directory_watcher(cx);
+        }
 
         if let Some(path) = select_entry_after_reload {
             self.select_single_path(&path);
         }
     }
 
+    #[cfg(test)]
     pub(super) fn navigate_to_sidebar_path(&mut self, path: PathBuf) {
         self.navigate_to_directory(path, HistoryMode::Record);
     }
 
+    pub(super) fn navigate_to_sidebar_path_with_watcher(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    #[cfg(test)]
     pub(super) fn navigate_back(&mut self) {
         if let Some(path) = self.back_stack.pop() {
             self.forward_stack.push(self.path.clone());
@@ -56,6 +93,14 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn navigate_back_with_watcher(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.back_stack.pop() {
+            self.forward_stack.push(self.path.clone());
+            self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx);
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn navigate_forward(&mut self) {
         if let Some(path) = self.forward_stack.pop() {
             self.back_stack.push(self.path.clone());
@@ -63,9 +108,23 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn navigate_forward_with_watcher(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.forward_stack.pop() {
+            self.back_stack.push(self.path.clone());
+            self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx);
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn navigate_up(&mut self) {
         if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
             self.navigate_to_directory(parent, HistoryMode::Record);
+        }
+    }
+
+    pub(super) fn navigate_up_with_watcher(&mut self, cx: &mut Context<Self>) {
+        if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
+            self.navigate_to_directory_with_watcher(parent, HistoryMode::Record, cx);
         }
     }
 
@@ -81,11 +140,32 @@ impl ExplorerView {
         self.path.parent().is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn handle_entry_click(
         &mut self,
         entry: &FileEntry,
         click_count: usize,
         modifiers: SelectionModifiers,
+    ) -> Option<EntryAction> {
+        self.handle_entry_click_inner(entry, click_count, modifiers, None)
+    }
+
+    pub(super) fn handle_entry_click_with_watcher(
+        &mut self,
+        entry: &FileEntry,
+        click_count: usize,
+        modifiers: SelectionModifiers,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryAction> {
+        self.handle_entry_click_inner(entry, click_count, modifiers, Some(cx))
+    }
+
+    fn handle_entry_click_inner(
+        &mut self,
+        entry: &FileEntry,
+        click_count: usize,
+        modifiers: SelectionModifiers,
+        cx: Option<&mut Context<Self>>,
     ) -> Option<EntryAction> {
         self.cancel_pending_click_rename();
 
@@ -103,7 +183,11 @@ impl ExplorerView {
         if entry.is_app_bundle() {
             Some(EntryAction::OpenFile(entry.path.clone()))
         } else if entry.is_directory_like() {
-            self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
+            self.navigate_to_directory_inner(
+                entry.navigation_path().to_path_buf(),
+                HistoryMode::Record,
+                cx,
+            );
             None
         } else {
             Some(EntryAction::OpenFile(entry.path.clone()))
@@ -129,7 +213,24 @@ impl ExplorerView {
         Some(target)
     }
 
+    #[cfg(test)]
     pub(super) fn activate_focused_entry(&mut self, open_files: bool) -> Option<EntryAction> {
+        self.activate_focused_entry_inner(open_files, None)
+    }
+
+    pub(super) fn activate_focused_entry_with_watcher(
+        &mut self,
+        open_files: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryAction> {
+        self.activate_focused_entry_inner(open_files, Some(cx))
+    }
+
+    fn activate_focused_entry_inner(
+        &mut self,
+        open_files: bool,
+        cx: Option<&mut Context<Self>>,
+    ) -> Option<EntryAction> {
         let entry = self.focused_entry()?.clone();
         self.open_error = None;
 
@@ -140,7 +241,11 @@ impl ExplorerView {
                 None
             }
         } else if entry.is_directory_like() {
-            self.navigate_to_directory(entry.navigation_path().to_path_buf(), HistoryMode::Record);
+            self.navigate_to_directory_inner(
+                entry.navigation_path().to_path_buf(),
+                HistoryMode::Record,
+                cx,
+            );
             None
         } else if open_files {
             Some(EntryAction::OpenFile(entry.path))

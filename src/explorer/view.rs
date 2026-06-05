@@ -18,6 +18,7 @@ use crate::explorer::{
     rename::{PendingClickRename, RenameState},
     scrollbar::ScrollbarDrag,
     selection::SelectionState,
+    watcher::DirectoryWatcher,
 };
 
 pub struct ExplorerView {
@@ -49,6 +50,7 @@ pub struct ExplorerView {
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
+    pub(super) directory_watcher: Option<DirectoryWatcher>,
 }
 
 pub(super) struct FileOperationState {
@@ -96,8 +98,14 @@ impl ExplorerView {
         Self::new_inner(initial_path, None)
     }
 
-    pub fn new_with_focus_handle(initial_path: PathBuf, focus_handle: FocusHandle) -> Self {
-        Self::new_inner(initial_path, Some(focus_handle))
+    pub fn new_watched_with_focus_handle(
+        initial_path: PathBuf,
+        focus_handle: FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new_inner(initial_path, Some(focus_handle));
+        view.restart_directory_watcher(cx);
+        view
     }
 
     fn new_inner(initial_path: PathBuf, focus_handle: Option<FocusHandle>) -> Self {
@@ -130,6 +138,7 @@ impl ExplorerView {
             show_hidden_files: true,
             show_file_name_extensions: true,
             open_utility_menu: None,
+            directory_watcher: None,
         };
         view.reload();
         view
@@ -157,6 +166,14 @@ impl ExplorerView {
         cx.emit(ExplorerViewEvent::FilesystemChanged);
     }
 
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) {
+        self.directory_watcher = DirectoryWatcher::start(self.path.clone(), cx);
+    }
+
     pub(super) fn tab_label(&self) -> String {
         tab_label_for_path(&self.path)
     }
@@ -182,6 +199,8 @@ impl ExplorerView {
         {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
+
+        self.directory_watcher = None;
     }
 }
 
@@ -239,6 +258,7 @@ mod tests {
         assert!(view.show_hidden_files);
         assert!(view.show_file_name_extensions);
         assert_eq!(view.open_utility_menu, None);
+        assert!(view.directory_watcher.is_none());
     }
 
     #[test]

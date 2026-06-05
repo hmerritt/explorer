@@ -133,7 +133,7 @@ impl ExplorerView {
     }
 
     pub(super) fn handle_go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_back();
+        self.navigate_back_with_watcher(cx);
         cx.notify();
     }
 
@@ -143,12 +143,12 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_forward();
+        self.navigate_forward_with_watcher(cx);
         cx.notify();
     }
 
     pub(super) fn handle_go_up(&mut self, _: &GoUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_up();
+        self.navigate_up_with_watcher(cx);
         cx.notify();
     }
 
@@ -174,7 +174,7 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.activate_focused_entry(false);
+        let _ = self.activate_focused_entry_with_watcher(false, cx);
         cx.notify();
     }
 
@@ -184,7 +184,9 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(EntryAction::OpenFile(path)) = self.activate_focused_entry(true) {
+        if let Some(EntryAction::OpenFile(path)) =
+            self.activate_focused_entry_with_watcher(true, cx)
+        {
             self.open_file_with_default_app(&path);
         }
         cx.notify();

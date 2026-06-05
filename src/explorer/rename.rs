@@ -712,7 +712,7 @@ impl ExplorerView {
             return None;
         }
 
-        self.handle_entry_click(entry, click_count, modifiers)
+        self.handle_entry_click_with_watcher(entry, click_count, modifiers, cx)
     }
 
     pub(super) fn commit_active_rename_before_interaction(

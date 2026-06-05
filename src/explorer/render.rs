@@ -114,7 +114,7 @@ impl ExplorerView {
                 NavIcon::Back,
                 self.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.navigate_back();
+                    this.navigate_back_with_watcher(cx);
                     cx.notify();
                 }),
             ))
@@ -123,7 +123,7 @@ impl ExplorerView {
                 NavIcon::Forward,
                 self.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.navigate_forward();
+                    this.navigate_forward_with_watcher(cx);
                     cx.notify();
                 }),
             ))
@@ -132,7 +132,7 @@ impl ExplorerView {
                 NavIcon::Up,
                 self.can_go_up(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.navigate_up();
+                    this.navigate_up_with_watcher(cx);
                     cx.notify();
                 }),
             ))
@@ -465,7 +465,7 @@ impl ExplorerView {
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.navigate_to_sidebar_path(path.clone());
+                this.navigate_to_sidebar_path_with_watcher(path.clone(), cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -636,10 +636,11 @@ impl ExplorerView {
                     return;
                 }
 
-                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click(
+                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click_with_watcher(
                     &clicked_entry,
                     event.click_count(),
                     selection_modifiers_for_click(event),
+                    cx,
                 ) {
                     this.open_file_with_default_app(&path);
                 }
@@ -1273,14 +1274,14 @@ impl Render for ExplorerView {
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.navigate_back();
+                    this.navigate_back_with_watcher(cx);
                     cx.notify();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.navigate_forward();
+                    this.navigate_forward_with_watcher(cx);
                     cx.notify();
                 }),
             )
@@ -1944,7 +1945,11 @@ fn directory_bar_label(
             }
         }))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.navigate_to_directory(navigation_target.clone(), HistoryMode::Record);
+            this.navigate_to_directory_with_watcher(
+                navigation_target.clone(),
+                HistoryMode::Record,
+                cx,
+            );
             cx.stop_propagation();
             cx.notify();
         }))

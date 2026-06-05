@@ -66,7 +66,8 @@ pub struct ExplorerTabs {
 impl ExplorerTabs {
     pub fn new(initial_path: PathBuf, focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
         let first_id = TabId(1);
-        let view = cx.new(|_| ExplorerView::new_with_focus_handle(initial_path, focus_handle));
+        let view = cx
+            .new(|cx| ExplorerView::new_watched_with_focus_handle(initial_path, focus_handle, cx));
         observe_tab_view(&view, cx);
 
         Self {
@@ -97,7 +98,7 @@ impl ExplorerTabs {
 
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
-        let view = cx.new(|_| ExplorerView::new_with_focus_handle(path, focus_handle));
+        let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
         observe_tab_view(&view, cx);
 
         self.tabs.push(ExplorerTab { id, view });
@@ -110,7 +111,7 @@ impl ExplorerTabs {
         self.next_tab_id += 1;
 
         let focus_handle = cx.focus_handle();
-        let view = cx.new(|_| ExplorerView::new_with_focus_handle(path, focus_handle));
+        let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
         observe_tab_view(&view, cx);
 
         self.tabs.push(ExplorerTab { id, view });
