@@ -23,12 +23,13 @@ Progress dialogue when moving files around. Perform async, only show dialogue if
     - Sidebar items
     - Hidden files
     - File extensions
-    - <any and all options>
+    - <any and all options you can think of>
 - Split-screen (Zed style)
 - Shell-extension system
 - 7zip built-in
 - rsync copy/sync builtin
-- Network drives (rclone builtin)
+- Network drives (rclone https://rclone.org/ builtin)
+- rclone https://rclone.org/ builtin, adding support for 
 
 - Context menu
 - File icons

@@ -5,6 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::path::{Component, Prefix};
+
 use gpui::{
     Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, TextRun, Window, div,
     font, prelude::*, px, rgb,
@@ -167,6 +172,17 @@ impl DropDestination {
             Self::CurrentDirectory => current_directory.to_path_buf(),
             Self::Directory { item_path, .. } => item_path.clone(),
         }
+    }
+}
+
+pub(super) fn row_drop_destination_for_entry(entry: &FileEntry) -> DropDestination {
+    if entry.is_directory_like() {
+        DropDestination::Directory {
+            item_path: entry.path.clone(),
+            target_path: entry.drop_target_path().to_path_buf(),
+        }
+    } else {
+        DropDestination::CurrentDirectory
     }
 }
 
@@ -427,17 +443,22 @@ impl ExplorerView {
         destination: DropDestination,
         modifiers: Modifiers,
     ) {
+        let paths = normalize_external_drop_paths(paths);
+        if paths.is_empty() {
+            return;
+        }
+
         let resolved_destination = destination.resolve(&self.path);
         if destination_contains_all_external_path_sources(
             &destination,
             &self.path,
             &resolved_destination,
-            paths,
+            &paths,
         ) {
             return;
         }
 
-        self.perform_file_drop(paths, &resolved_destination, modifiers);
+        self.perform_file_drop(&paths, &resolved_destination, modifiers);
     }
 
     pub(super) fn drop_external_paths_and_open_dialog(
@@ -447,22 +468,28 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
+        let paths = normalize_external_drop_paths(paths);
+        if paths.is_empty() {
+            return;
+        }
+
         let resolved_destination = destination.resolve(&self.path);
         if destination_contains_all_external_path_sources(
             &destination,
             &self.path,
             &resolved_destination,
-            paths,
+            &paths,
         ) {
             return;
         }
 
-        self.perform_file_drop_and_open_dialog(paths, &resolved_destination, modifiers, cx);
+        self.perform_file_drop_and_open_dialog(&paths, &resolved_destination, modifiers, cx);
     }
 
     #[cfg(test)]
     fn perform_file_drop(&mut self, paths: &[PathBuf], destination: &Path, modifiers: Modifiers) {
-        match resolve_drop_operation(modifiers, destination.is_dir()) {
+        match resolve_drop_operation_for_paths(modifiers, destination.is_dir(), paths, destination)
+        {
             ResolvedDrop::Move => {
                 self.handle_file_command_result(move_paths_to_directory(paths, destination));
             }
@@ -485,7 +512,8 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        match resolve_drop_operation(modifiers, destination.is_dir()) {
+        match resolve_drop_operation_for_paths(modifiers, destination.is_dir(), paths, destination)
+        {
             ResolvedDrop::Move => {
                 self.handle_prepared_file_command_result_and_open_dialog(
                     prepare_move_paths_to_directory(paths, destination),
@@ -509,6 +537,15 @@ impl ExplorerView {
 }
 
 pub(super) fn resolve_drop_operation(modifiers: Modifiers, valid_target: bool) -> ResolvedDrop {
+    resolve_drop_operation_for_paths(modifiers, valid_target, &[], Path::new(""))
+}
+
+pub(super) fn resolve_drop_operation_for_paths(
+    modifiers: Modifiers,
+    valid_target: bool,
+    source_paths: &[PathBuf],
+    destination: &Path,
+) -> ResolvedDrop {
     if !valid_target {
         return ResolvedDrop::Invalid;
     }
@@ -518,6 +555,10 @@ pub(super) fn resolve_drop_operation(modifiers: Modifiers, valid_target: bool) -
     }
 
     if modifiers.secondary() {
+        ResolvedDrop::Copy
+    } else if modifiers.shift {
+        ResolvedDrop::Move
+    } else if drop_should_copy_by_default(source_paths, destination) {
         ResolvedDrop::Copy
     } else {
         ResolvedDrop::Move
@@ -546,17 +587,85 @@ fn resolve_dragged_value_drop(
             && dragged_value
                 .downcast_ref::<gpui::ExternalPaths>()
                 .is_some_and(|paths| {
-                    !paths.paths().is_empty()
+                    let paths = normalize_external_drop_paths(paths.paths());
+                    !paths.is_empty()
                         && !destination_contains_all_external_path_sources(
                             destination_kind,
                             current_directory,
                             destination,
-                            paths.paths(),
+                            &paths,
                         )
                 })
     };
 
-    resolve_drop_operation(modifiers, valid_target)
+    let source_paths = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+        dragged.paths.as_slice()
+    } else if let Some(paths) = dragged_value.downcast_ref::<gpui::ExternalPaths>() {
+        paths.paths()
+    } else {
+        &[]
+    };
+
+    resolve_drop_operation_for_paths(modifiers, valid_target, source_paths, destination)
+}
+
+fn normalize_external_drop_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            fs::canonicalize(path)
+                .ok()
+                .or_else(|| path.exists().then(|| path.clone()))
+        })
+        .collect()
+}
+
+fn drop_should_copy_by_default(source_paths: &[PathBuf], destination: &Path) -> bool {
+    !source_paths.is_empty()
+        && source_paths
+            .iter()
+            .any(|source| !paths_are_on_same_volume(source, destination))
+}
+
+fn paths_are_on_same_volume(source: &Path, destination: &Path) -> bool {
+    match (path_volume_key(source), path_volume_key(destination)) {
+        (Some(source), Some(destination)) => source == destination,
+        _ => true,
+    }
+}
+
+#[cfg(windows)]
+fn path_volume_key(path: &Path) -> Option<String> {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+
+    Some(match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            char::from(letter).to_ascii_uppercase().to_string()
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            format!(
+                r"\\{}\{}",
+                server.to_string_lossy().to_ascii_lowercase(),
+                share.to_string_lossy().to_ascii_lowercase()
+            )
+        }
+        _ => prefix.as_os_str().to_string_lossy().to_ascii_lowercase(),
+    })
+}
+
+#[cfg(unix)]
+fn path_volume_key(path: &Path) -> Option<u64> {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let metadata = fs::metadata(path).ok()?;
+    Some(metadata.dev())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn path_volume_key(_: &Path) -> Option<()> {
+    None
 }
 
 fn destination_contains_internal_drag_source(
@@ -634,7 +743,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         constants::ROW_HEIGHT,
-        entry::FileEntry,
+        entry::{DirectoryLinkKind, FileEntry},
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
@@ -692,6 +801,105 @@ mod tests {
         assert_eq!(
             resolve_drop_operation(Modifiers::default(), false),
             ResolvedDrop::Invalid
+        );
+    }
+
+    #[test]
+    fn source_aware_drop_defaults_to_move_on_same_volume() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"data").expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+
+        assert_eq!(
+            resolve_drop_operation_for_paths(
+                Modifiers::default(),
+                true,
+                std::slice::from_ref(&source),
+                &destination,
+            ),
+            ResolvedDrop::Move
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_aware_drop_defaults_to_copy_across_windows_volumes() {
+        assert_eq!(
+            resolve_drop_operation_for_paths(
+                Modifiers::default(),
+                true,
+                &[PathBuf::from(r"C:\source\file.txt")],
+                Path::new(r"D:\destination"),
+            ),
+            ResolvedDrop::Copy
+        );
+    }
+
+    #[test]
+    fn shift_forces_move_even_when_default_would_copy() {
+        assert_eq!(
+            resolve_drop_operation_for_paths(
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                true,
+                &[PathBuf::from(r"C:\source\file.txt")],
+                Path::new(r"D:\destination"),
+            ),
+            ResolvedDrop::Move
+        );
+    }
+
+    #[test]
+    fn external_paths_constructor_preserves_paths() {
+        let paths = vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")];
+        let external_paths = gpui::ExternalPaths::new(paths.clone());
+
+        assert_eq!(external_paths.paths(), paths.as_slice());
+    }
+
+    #[test]
+    fn file_row_drop_target_is_current_directory() {
+        let entry = FileEntry::test("file.txt", false, Some(1), None);
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::CurrentDirectory
+        );
+    }
+
+    #[test]
+    fn directory_row_drop_target_is_directory() {
+        let entry = FileEntry::test("folder", true, None, None);
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::Directory {
+                item_path: PathBuf::from("folder"),
+                target_path: PathBuf::from("folder"),
+            }
+        );
+    }
+
+    #[test]
+    fn directory_link_row_drop_target_is_directory() {
+        let target = PathBuf::from("target");
+        let entry = FileEntry::test_directory_link(
+            "shortcut",
+            DirectoryLinkKind::ShellShortcut {
+                target: target.clone(),
+            },
+        );
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::Directory {
+                item_path: PathBuf::from("shortcut"),
+                target_path: target,
+            }
         );
     }
 
@@ -1129,6 +1337,20 @@ mod tests {
         assert!(!view.clear_stale_drop_indicator(mouse_position));
 
         assert!(view.active_drop_indicator.is_some());
+    }
+
+    #[test]
+    fn external_drag_exit_clears_active_drop_indicator() {
+        let mut view = test_view_with_entries(&["file.txt"]);
+        view.active_drop_indicator = Some(DropIndicator {
+            operation: FileOperationKind::Copy,
+            target_label: "target".to_owned(),
+            mouse_position: gpui::point(px(32.0), px(48.0)),
+        });
+
+        assert!(view.clear_drop_indicator());
+        assert_eq!(view.active_drop_indicator, None);
+        assert!(!view.clear_drop_indicator());
     }
 
     #[test]

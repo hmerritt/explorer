@@ -33,7 +33,7 @@ use crate::explorer::{
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
-        drop_indicator_origin,
+        drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
     formatting::{format_modified, format_size},
@@ -594,10 +594,7 @@ impl ExplorerView {
             .can_start_individual_item_drag_for_index(ix)
             .then(|| self.dragged_entry_for_index(ix))
             .flatten();
-        let destination = DropDestination::Directory {
-            item_path: entry.path.clone(),
-            target_path: entry.drop_target_path().to_path_buf(),
-        };
+        let destination = row_drop_destination_for_entry(&entry);
         let entity = cx.entity();
 
         let mut row = div()
@@ -684,7 +681,8 @@ impl ExplorerView {
             });
 
         if let Some(drag_payload) = selected_drag_payload {
-            row = row.on_drag(drag_payload, {
+            let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+            row = row.on_drag_with_external_paths(drag_payload, external_paths, {
                 let entity = entity.clone();
                 move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                     entity.update(cx, |this, _| {
@@ -744,23 +742,45 @@ impl ExplorerView {
                 }));
         } else {
             row = row
-                .can_drop(|dragged_value, _, _| {
-                    dragged_value.is::<DraggedEntries>() || dragged_value.is::<ExternalPaths>()
+                .can_drop({
+                    let destination = destination.clone();
+                    let entity = entity.clone();
+                    move |dragged_value, window, cx| {
+                        entity.update(cx, |this, _| {
+                            this.can_drop_value(dragged_value, &destination, window.modifiers())
+                        })
+                    }
                 })
-                .on_drop(
-                    cx.listener(|this: &mut Self, _: &DraggedEntries, _: &mut Window, cx| {
+                .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, dragged: &DraggedEntries, window, cx| {
                         this.clear_drop_indicator();
+                        this.drop_internal_entries_and_open_dialog(
+                            dragged,
+                            destination.clone(),
+                            window.modifiers(),
+                            cx,
+                        );
                         cx.stop_propagation();
                         cx.notify();
-                    }),
-                )
-                .on_drop(
-                    cx.listener(|this: &mut Self, _: &ExternalPaths, _: &mut Window, cx| {
+                    }
+                }))
+                .on_drop(cx.listener({
+                    let destination = destination.clone();
+                    move |this, paths: &ExternalPaths, window, cx| {
                         this.clear_drop_indicator();
+                        this.drop_external_paths_and_open_dialog(
+                            paths.paths(),
+                            destination.clone(),
+                            window.modifiers(),
+                            cx,
+                        );
                         cx.stop_propagation();
                         cx.notify();
-                    }),
-                );
+                    }
+                }));
         }
 
         let date_cell = text_cell(
@@ -2200,9 +2220,12 @@ fn add_item_drag(
     drag_payload: DraggedEntries,
     entity: Entity<ExplorerView>,
 ) -> AnyElement {
+    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+
     cell.id(id)
-        .on_drag(
+        .on_drag_with_external_paths(
             drag_payload,
+            external_paths,
             move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                 entity.update(cx, |this, _| {
                     this.begin_individual_item_drag(dragged);
