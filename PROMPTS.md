@@ -1,7 +1,5 @@
 ## New
 
-When dragging a file/folder, if there are multiple tabs open, hovering over a tab will open it, and a user can drop the item in there
-
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.
