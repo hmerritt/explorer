@@ -33,7 +33,7 @@ pub use actions::{
     RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
     RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
     RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, TrashSelected,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]

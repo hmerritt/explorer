@@ -61,6 +61,12 @@ actions!(
     ]
 );
 
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = explorer, no_json)]
+pub struct SelectTabByIndex {
+    pub index: usize,
+}
+
 impl ExplorerView {
     pub(super) fn handle_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(SelectionDirection::Up);

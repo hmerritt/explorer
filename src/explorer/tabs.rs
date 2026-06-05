@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::explorer::{
-    CloseTab, NewTab, SelectNextTab, SelectPreviousTab,
+    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     default_start_path,
     icons::folder_icon,
@@ -185,6 +185,22 @@ impl ExplorerTabs {
         self.focus_active_tab(window, cx);
     }
 
+    fn select_tab_by_index(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target_id) = selectable_tab_id_by_index(&self.tabs, self.active_tab, index) else {
+            return false;
+        };
+
+        self.active_tab = target_id;
+        self.scroll_active_tab_into_view();
+        self.focus_active_tab(window, cx);
+        true
+    }
+
     fn reorder_dragged_tab(&mut self, dragged_id: TabId, target_id: TabId, before: bool) -> bool {
         reorder_tabs(&mut self.tabs, dragged_id, target_id, before)
     }
@@ -252,6 +268,17 @@ impl ExplorerTabs {
     ) {
         self.select_adjacent_tab(TabDirection::Previous, window, cx);
         cx.notify();
+    }
+
+    fn handle_select_tab_by_index(
+        &mut self,
+        action: &SelectTabByIndex,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.select_tab_by_index(action.index, window, cx) {
+            cx.notify();
+        }
     }
 
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -436,6 +463,7 @@ impl Render for ExplorerTabs {
             .on_action(cx.listener(Self::handle_close_tab))
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
+            .on_action(cx.listener(Self::handle_select_tab_by_index))
             .on_file_drop(move |event, _, cx| {
                 if let FileDropEvent::Exited = event
                     && let Some(active_view) = &drop_exit_view
@@ -626,6 +654,33 @@ fn adjacent_tab_index(active_index: usize, len: usize, direction: TabDirection) 
     }
 }
 
+fn selectable_tab_id_by_index(
+    tabs: &[ExplorerTab],
+    active_tab: TabId,
+    index: usize,
+) -> Option<TabId> {
+    if tabs.len() <= 1 {
+        return None;
+    }
+
+    let target_id = tabs.get(index)?.id;
+    (target_id != active_tab).then_some(target_id)
+}
+
+#[cfg(test)]
+fn selectable_tab_id_by_index_from_ids(
+    tab_ids: &[TabId],
+    active_tab: TabId,
+    index: usize,
+) -> Option<TabId> {
+    if tab_ids.len() <= 1 {
+        return None;
+    }
+
+    let target_id = *tab_ids.get(index)?;
+    (target_id != active_tab).then_some(target_id)
+}
+
 fn can_close_tab(tab_count: usize) -> bool {
     tab_count > 1
 }
@@ -754,6 +809,35 @@ mod tests {
     fn adjacent_tab_selection_wraps() {
         assert_eq!(adjacent_tab_index(2, 3, TabDirection::Next), 0);
         assert_eq!(adjacent_tab_index(0, 3, TabDirection::Previous), 2);
+    }
+
+    #[test]
+    fn indexed_tab_selection_uses_direct_position() {
+        let ids = [TabId(1), TabId(2), TabId(3), TabId(4), TabId(5)];
+
+        assert_eq!(
+            selectable_tab_id_by_index_from_ids(&ids, TabId(5), 0),
+            Some(TabId(1))
+        );
+        assert_eq!(
+            selectable_tab_id_by_index_from_ids(&ids, TabId(1), 3),
+            Some(TabId(4))
+        );
+    }
+
+    #[test]
+    fn indexed_tab_selection_no_ops_for_active_or_missing_tab() {
+        let ids = [TabId(1), TabId(2), TabId(3)];
+
+        assert_eq!(selectable_tab_id_by_index_from_ids(&ids, TabId(2), 1), None);
+        assert_eq!(selectable_tab_id_by_index_from_ids(&ids, TabId(1), 3), None);
+    }
+
+    #[test]
+    fn indexed_tab_selection_no_ops_for_single_tab() {
+        let ids = [TabId(1)];
+
+        assert_eq!(selectable_tab_id_by_index_from_ids(&ids, TabId(1), 0), None);
     }
 
     #[test]
