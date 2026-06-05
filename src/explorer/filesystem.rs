@@ -279,8 +279,12 @@ fn should_use_applications_view(_: &Path) -> bool {
 }
 
 fn should_skip_directory_entry(entry: &fs::DirEntry, options: EntryLoadOptions) -> bool {
+    should_hide_directory_entry(entry, !options.hide_hidden_entries)
+}
+
+pub(super) fn should_hide_directory_entry(entry: &fs::DirEntry, show_hidden_files: bool) -> bool {
     is_always_hidden_metadata_entry_name(&entry.file_name())
-        || options.hide_hidden_entries && is_hidden_directory_entry(entry)
+        || !show_hidden_files && is_hidden_directory_entry(entry)
 }
 
 fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {

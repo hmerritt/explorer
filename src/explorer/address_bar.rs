@@ -19,6 +19,7 @@ use crate::explorer::{
         AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight, AddressSuggestionDown,
         AddressSuggestionUp, AddressWordLeft, AddressWordRight,
     },
+    filesystem::should_hide_directory_entry,
     navigation::HistoryMode,
     scrollbar::{ScrollbarDrag, ScrollbarMetrics},
     text_input::{
@@ -521,7 +522,8 @@ impl ExplorerView {
         let focus_handle = cx.focus_handle();
         let mut address =
             AddressBarState::new(self.path.display().to_string(), Some(focus_handle.clone()));
-        address.suggestions = folder_suggestions_for_input(&address.content, &self.path);
+        address.suggestions =
+            folder_suggestions_for_input(&address.content, &self.path, self.show_hidden_files);
 
         focus_handle.focus(window);
         let subscription = cx.on_focus_out(&focus_handle, window, |this, _, window, cx| {
@@ -783,8 +785,10 @@ impl ExplorerView {
 
     fn refresh_address_suggestions(&mut self) {
         let current_path = self.path.clone();
+        let show_hidden_files = self.show_hidden_files;
         if let Some(address) = self.active_address_bar.as_mut() {
-            address.suggestions = folder_suggestions_for_input(&address.content, &current_path);
+            address.suggestions =
+                folder_suggestions_for_input(&address.content, &current_path, show_hidden_files);
             if address
                 .highlighted_suggestion
                 .is_some_and(|index| index >= address.suggestions.len())
@@ -833,6 +837,7 @@ pub(super) fn resolve_address_input(input: &str, current_path: &Path) -> Result<
 pub(super) fn folder_suggestions_for_input(
     input: &str,
     current_path: &Path,
+    show_hidden_files: bool,
 ) -> Vec<AddressBarSuggestion> {
     let cleaned = cleaned_address_input(input);
     let (parent, prefix) = suggestion_parent_and_prefix(&cleaned, current_path);
@@ -848,6 +853,10 @@ pub(super) fn folder_suggestions_for_input(
     let mut suggestions = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
+            if should_hide_directory_entry(&entry, show_hidden_files) {
+                return None;
+            }
+
             let path = entry.path();
             if !path.is_dir() || paths_match_for_address_suggestions(&path, current_path) {
                 return None;
@@ -1200,7 +1209,7 @@ mod tests {
         fs::create_dir(temp.path().join("apricot")).expect("create apricot");
         fs::write(temp.path().join("apple.txt"), b"data").expect("write file");
 
-        let suggestions = folder_suggestions_for_input("a", temp.path());
+        let suggestions = folder_suggestions_for_input("a", temp.path(), true);
         let labels = suggestions
             .iter()
             .map(|suggestion| suggestion.label.as_str())
@@ -1220,6 +1229,7 @@ mod tests {
         let suggestions = folder_suggestions_for_input(
             &format!("parent{}", std::path::MAIN_SEPARATOR),
             temp.path(),
+            true,
         );
 
         assert_eq!(suggestions.len(), 2);
@@ -1234,7 +1244,7 @@ mod tests {
         fs::create_dir(temp.path().join("child-b")).expect("create child b");
 
         let suggestions =
-            folder_suggestions_for_input(&temp.path().display().to_string(), temp.path());
+            folder_suggestions_for_input(&temp.path().display().to_string(), temp.path(), true);
         let labels = suggestions
             .iter()
             .map(|suggestion| suggestion.label.as_str())
@@ -1252,6 +1262,7 @@ mod tests {
         let suggestions = folder_suggestions_for_input(
             &format!("{}{}", temp.path().display(), std::path::MAIN_SEPARATOR),
             temp.path(),
+            true,
         );
         let labels = suggestions
             .iter()
@@ -1269,7 +1280,7 @@ mod tests {
         fs::create_dir(alpha.join("inside")).expect("create inside");
         fs::create_dir(temp.path().join("apricot")).expect("create apricot");
 
-        let suggestions = folder_suggestions_for_input("a", temp.path());
+        let suggestions = folder_suggestions_for_input("a", temp.path(), true);
         let labels = suggestions
             .iter()
             .map(|suggestion| suggestion.label.as_str())
@@ -1279,13 +1290,50 @@ mod tests {
     }
 
     #[test]
+    fn folder_suggestions_follow_show_hidden_files_setting() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join(".hidden")).expect("create hidden");
+        fs::create_dir(temp.path().join("visible")).expect("create visible");
+
+        let hidden_off = folder_suggestions_for_input("", temp.path(), false);
+        let hidden_off_labels = hidden_off
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        let hidden_on = folder_suggestions_for_input("", temp.path(), true);
+        let hidden_on_labels = hidden_on
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hidden_off_labels, vec!["visible"]);
+        assert_eq!(hidden_on_labels, vec![".hidden", "visible"]);
+    }
+
+    #[test]
+    fn folder_suggestions_always_omit_metadata_entries() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join(".localized")).expect("create localized");
+        fs::create_dir(temp.path().join("visible")).expect("create visible");
+
+        let suggestions = folder_suggestions_for_input("", temp.path(), true);
+        let labels = suggestions
+            .iter()
+            .map(|suggestion| suggestion.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["visible"]);
+    }
+
+    #[test]
     fn folder_suggestions_return_all_results_deterministically() {
         let temp = TempDir::new();
         for index in 0..12 {
             fs::create_dir(temp.path().join(format!("folder-{index:02}"))).expect("create folder");
         }
 
-        let suggestions = folder_suggestions_for_input("folder", temp.path());
+        let suggestions = folder_suggestions_for_input("folder", temp.path(), true);
 
         assert_eq!(suggestions.len(), 12);
         assert_eq!(suggestions[0].label, "folder-00");
@@ -1299,7 +1347,8 @@ mod tests {
         fs::create_dir(&current).expect("create current");
         fs::create_dir(current.join("child")).expect("create child");
 
-        let suggestions = folder_suggestions_for_input(&current.display().to_string(), &current);
+        let suggestions =
+            folder_suggestions_for_input(&current.display().to_string(), &current, false);
         let labels = suggestions
             .iter()
             .map(|suggestion| suggestion.label.as_str())
@@ -1315,7 +1364,7 @@ mod tests {
         fs::create_dir(&current).expect("create current");
         fs::create_dir(current.join("child")).expect("create child");
 
-        let suggestions = folder_suggestions_for_input("ch", &current);
+        let suggestions = folder_suggestions_for_input("ch", &current, true);
 
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].label, "child");
@@ -1400,7 +1449,7 @@ mod tests {
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         let mut address = AddressBarState::new("ch".to_owned(), None);
-        address.suggestions = folder_suggestions_for_input(&address.content, temp.path());
+        address.suggestions = folder_suggestions_for_input(&address.content, temp.path(), true);
         view.active_address_bar = Some(address);
 
         assert_eq!(view.highlighted_address_suggestion_path(), None);
@@ -1451,7 +1500,7 @@ mod tests {
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         let mut address = AddressBarState::new("ch".to_owned(), None);
-        address.suggestions = folder_suggestions_for_input(&address.content, temp.path());
+        address.suggestions = folder_suggestions_for_input(&address.content, temp.path(), true);
         let captured_path = address.suggestions[0].path.clone();
         view.active_address_bar = Some(address);
 
