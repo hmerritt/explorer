@@ -8,7 +8,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, GlobalElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, Subscription, TextRun,
-    UTF16Selection, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
+    UTF16Selection, Window, fill, point, px, relative, rgb, size,
 };
 
 use crate::explorer::{
@@ -20,7 +20,10 @@ use crate::explorer::{
         AddressSuggestionUp, AddressWordLeft, AddressWordRight,
     },
     navigation::HistoryMode,
-    text_input::{EditableTextState, scroll_offset_for_cursor},
+    text_input::{
+        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
+        scroll_offset_for_cursor,
+    },
     view::ExplorerView,
 };
 
@@ -901,32 +904,12 @@ impl Element for AddressTextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = address.marked_range.as_ref() {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(run.color),
-                        thickness: px(1.0),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: content.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect::<Vec<_>>()
-        } else {
-            vec![run]
-        };
+        let runs = editable_text_runs(
+            content.len(),
+            run,
+            &selected_range,
+            address.marked_range.as_ref(),
+        );
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
@@ -963,7 +946,7 @@ impl Element for AddressTextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgb(0x0078d7),
+                    rgb(EDITABLE_TEXT_SELECTION_BACKGROUND),
                 )),
                 None,
             )

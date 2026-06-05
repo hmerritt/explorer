@@ -1,6 +1,11 @@
 use std::ops::Range;
 
-use gpui::{Bounds, Pixels, Point, ShapedLine, UTF16Selection, point, px};
+use gpui::{
+    Bounds, Pixels, Point, ShapedLine, TextRun, UTF16Selection, UnderlineStyle, point, px, rgb,
+};
+
+pub(super) const EDITABLE_TEXT_SELECTION_BACKGROUND: u32 = 0x0078d7;
+pub(super) const EDITABLE_TEXT_SELECTION_FOREGROUND: u32 = 0xffffff;
 
 #[derive(Clone)]
 pub(super) struct EditableTextState {
@@ -428,6 +433,69 @@ pub(super) fn scroll_offset_for_cursor(
     }
 }
 
+pub(super) fn editable_text_runs(
+    content_len: usize,
+    base_run: TextRun,
+    selected_range: &Range<usize>,
+    marked_range: Option<&Range<usize>>,
+) -> Vec<TextRun> {
+    if content_len == 0 {
+        return vec![base_run];
+    }
+
+    let selected_range = clamp_range(selected_range, content_len);
+    let marked_range = marked_range.map(|range| clamp_range(range, content_len));
+
+    let mut boundaries = vec![0, content_len];
+    push_range_boundaries(&mut boundaries, &selected_range);
+    if let Some(marked_range) = marked_range.as_ref() {
+        push_range_boundaries(&mut boundaries, marked_range);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    boundaries
+        .windows(2)
+        .filter_map(|window| {
+            let start = window[0];
+            let end = window[1];
+            (end > start).then(|| {
+                let mut run = base_run.clone();
+                run.len = end - start;
+                if range_contains_segment(&selected_range, start, end) {
+                    run.color = rgb(EDITABLE_TEXT_SELECTION_FOREGROUND).into();
+                }
+                if marked_range
+                    .as_ref()
+                    .is_some_and(|range| range_contains_segment(range, start, end))
+                {
+                    run.underline = Some(UnderlineStyle {
+                        color: Some(run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    });
+                }
+                run
+            })
+        })
+        .collect()
+}
+
+fn clamp_range(range: &Range<usize>, len: usize) -> Range<usize> {
+    range.start.min(len)..range.end.min(len)
+}
+
+fn push_range_boundaries(boundaries: &mut Vec<usize>, range: &Range<usize>) {
+    if !range.is_empty() {
+        boundaries.push(range.start);
+        boundaries.push(range.end);
+    }
+}
+
+fn range_contains_segment(range: &Range<usize>, start: usize, end: usize) -> bool {
+    !range.is_empty() && range.start <= start && end <= range.end
+}
+
 #[cfg(test)]
 pub(super) fn text_x_for_mouse_x(
     mouse_x: Pixels,
@@ -440,6 +508,127 @@ pub(super) fn text_x_for_mouse_x(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::font;
+
+    fn test_run(len: usize) -> TextRun {
+        TextRun {
+            len,
+            font: font(".SystemUIFont"),
+            color: rgb(0x1f1f1f).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
+    fn run_colors(runs: &[TextRun]) -> Vec<u32> {
+        runs.iter()
+            .map(|run| {
+                if run.color == rgb(EDITABLE_TEXT_SELECTION_FOREGROUND).into() {
+                    EDITABLE_TEXT_SELECTION_FOREGROUND
+                } else if run.color == rgb(0x1f1f1f).into() {
+                    0x1f1f1f
+                } else {
+                    panic!("unexpected run color: {:?}", run.color);
+                }
+            })
+            .collect()
+    }
+
+    fn run_lengths(runs: &[TextRun]) -> Vec<usize> {
+        runs.iter().map(|run| run.len).collect()
+    }
+
+    fn run_underlines(runs: &[TextRun]) -> Vec<bool> {
+        runs.iter().map(|run| run.underline.is_some()).collect()
+    }
+
+    #[test]
+    fn editable_selection_colors_are_exact() {
+        assert_eq!(EDITABLE_TEXT_SELECTION_FOREGROUND, 0xffffff);
+        assert_eq!(EDITABLE_TEXT_SELECTION_BACKGROUND, 0x0078d7);
+    }
+
+    #[test]
+    fn editable_text_runs_without_selection_keep_base_color() {
+        let runs = editable_text_runs("alpha".len(), test_run("alpha".len()), &(2..2), None);
+
+        assert_eq!(run_lengths(&runs), vec!["alpha".len()]);
+        assert_eq!(run_colors(&runs), vec![0x1f1f1f]);
+        assert_eq!(run_underlines(&runs), vec![false]);
+    }
+
+    #[test]
+    fn editable_text_runs_color_full_selection_white() {
+        let runs = editable_text_runs("alpha".len(), test_run("alpha".len()), &(0..5), None);
+
+        assert_eq!(run_lengths(&runs), vec!["alpha".len()]);
+        assert_eq!(run_colors(&runs), vec![EDITABLE_TEXT_SELECTION_FOREGROUND]);
+        assert_eq!(run_underlines(&runs), vec![false]);
+    }
+
+    #[test]
+    fn editable_text_runs_split_partial_selection() {
+        let runs = editable_text_runs("abcdef".len(), test_run("abcdef".len()), &(2..5), None);
+
+        assert_eq!(run_lengths(&runs), vec![2, 3, 1]);
+        assert_eq!(
+            run_colors(&runs),
+            vec![0x1f1f1f, EDITABLE_TEXT_SELECTION_FOREGROUND, 0x1f1f1f]
+        );
+        assert_eq!(run_underlines(&runs), vec![false, false, false]);
+    }
+
+    #[test]
+    fn editable_text_runs_preserve_marked_underline_without_selection() {
+        let runs = editable_text_runs(
+            "abcdef".len(),
+            test_run("abcdef".len()),
+            &(2..2),
+            Some(&(1..4)),
+        );
+
+        assert_eq!(run_lengths(&runs), vec![1, 3, 2]);
+        assert_eq!(run_colors(&runs), vec![0x1f1f1f, 0x1f1f1f, 0x1f1f1f]);
+        assert_eq!(run_underlines(&runs), vec![false, true, false]);
+    }
+
+    #[test]
+    fn editable_text_runs_preserve_marked_underline_across_selection_overlap() {
+        let runs = editable_text_runs(
+            "abcdef".len(),
+            test_run("abcdef".len()),
+            &(2..5),
+            Some(&(1..4)),
+        );
+
+        assert_eq!(run_lengths(&runs), vec![1, 1, 2, 1, 1]);
+        assert_eq!(
+            run_colors(&runs),
+            vec![
+                0x1f1f1f,
+                0x1f1f1f,
+                EDITABLE_TEXT_SELECTION_FOREGROUND,
+                EDITABLE_TEXT_SELECTION_FOREGROUND,
+                0x1f1f1f
+            ]
+        );
+        assert_eq!(run_underlines(&runs), vec![false, true, true, false, false]);
+    }
+
+    #[test]
+    fn editable_text_runs_filter_zero_length_boundaries() {
+        let runs = editable_text_runs(
+            "alpha".len(),
+            test_run("alpha".len()),
+            &(2..2),
+            Some(&(3..3)),
+        );
+
+        assert_eq!(run_lengths(&runs), vec!["alpha".len()]);
+        assert_eq!(run_colors(&runs), vec![0x1f1f1f]);
+        assert_eq!(run_underlines(&runs), vec![false]);
+    }
 
     #[test]
     fn word_selection_selects_alphanumeric_runs() {
