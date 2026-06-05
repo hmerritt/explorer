@@ -175,6 +175,17 @@ impl DropDestination {
     }
 }
 
+pub(super) fn row_drop_destination_for_entry(entry: &FileEntry) -> DropDestination {
+    if entry.is_directory_like() {
+        DropDestination::Directory {
+            item_path: entry.path.clone(),
+            target_path: entry.drop_target_path().to_path_buf(),
+        }
+    } else {
+        DropDestination::CurrentDirectory
+    }
+}
+
 impl ResolvedDrop {
     pub(super) fn operation(self) -> Option<FileOperationKind> {
         match self {
@@ -732,7 +743,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         constants::ROW_HEIGHT,
-        entry::FileEntry,
+        entry::{DirectoryLinkKind, FileEntry},
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
@@ -848,6 +859,48 @@ mod tests {
         let external_paths = gpui::ExternalPaths::new(paths.clone());
 
         assert_eq!(external_paths.paths(), paths.as_slice());
+    }
+
+    #[test]
+    fn file_row_drop_target_is_current_directory() {
+        let entry = FileEntry::test("file.txt", false, Some(1), None);
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::CurrentDirectory
+        );
+    }
+
+    #[test]
+    fn directory_row_drop_target_is_directory() {
+        let entry = FileEntry::test("folder", true, None, None);
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::Directory {
+                item_path: PathBuf::from("folder"),
+                target_path: PathBuf::from("folder"),
+            }
+        );
+    }
+
+    #[test]
+    fn directory_link_row_drop_target_is_directory() {
+        let target = PathBuf::from("target");
+        let entry = FileEntry::test_directory_link(
+            "shortcut",
+            DirectoryLinkKind::ShellShortcut {
+                target: target.clone(),
+            },
+        );
+
+        assert_eq!(
+            row_drop_destination_for_entry(&entry),
+            DropDestination::Directory {
+                item_path: PathBuf::from("shortcut"),
+                target_path: target,
+            }
+        );
     }
 
     #[test]
