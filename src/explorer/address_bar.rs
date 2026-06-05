@@ -1270,6 +1270,7 @@ impl Element for AddressTextElement {
 mod tests {
     use super::*;
     use crate::explorer::{test_support::TempDir, view::ExplorerView};
+    use gpui::{Modifiers, MouseButton};
     use std::fs;
 
     #[test]
@@ -1389,5 +1390,41 @@ mod tests {
         assert_eq!(view.path, temp.path());
         assert!(view.active_address_bar.is_some());
         assert!(view.open_error.is_some());
+    }
+
+    #[test]
+    fn address_mouse_down_without_shift_collapses_selection_to_click_position() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.active_address_bar = Some(AddressBarState::new("alpha beta".to_owned(), None));
+
+        view.on_address_mouse_down(&MouseDownEvent {
+            button: MouseButton::Left,
+            ..MouseDownEvent::default()
+        });
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.selected_range, 0..0);
+        assert!(!address.selection_reversed);
+    }
+
+    #[test]
+    fn address_shift_mouse_down_extends_selection_to_click_position() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let mut address = AddressBarState::new("alpha beta".to_owned(), None);
+        address.move_to(address.content.len());
+        view.active_address_bar = Some(address);
+
+        view.on_address_mouse_down(&MouseDownEvent {
+            button: MouseButton::Left,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            ..MouseDownEvent::default()
+        });
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.selected_range, 0.."alpha beta".len());
+        assert!(address.selection_reversed);
     }
 }

@@ -409,10 +409,9 @@ impl ExplorerView {
         Some(
             div()
                 .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .size_full()
-                .child(dropdown.absolute().left(px(left)).top(px(top)))
+                .left(px(left))
+                .top(px(top))
+                .child(dropdown)
                 .into_any_element(),
         )
     }
