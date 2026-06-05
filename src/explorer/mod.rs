@@ -23,6 +23,7 @@ mod sorting;
 mod tabs;
 #[cfg(test)]
 mod test_support;
+mod text_input;
 mod view;
 mod watcher;
 

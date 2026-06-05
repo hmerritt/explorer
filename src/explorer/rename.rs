@@ -1,6 +1,6 @@
 use std::{
     fs, io,
-    ops::Range,
+    ops::{Deref, DerefMut, Range},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,6 +12,8 @@ use gpui::{
     UTF16Selection, UnderlineStyle, Window, fill, point, px, relative, rgb, size,
 };
 
+#[cfg(test)]
+use crate::explorer::text_input::text_x_for_mouse_x;
 use crate::explorer::{
     actions::{
         RenameBackspace, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
@@ -22,6 +24,7 @@ use crate::explorer::{
     },
     entry::FileEntry,
     selection::SelectionModifiers,
+    text_input::{EditableTextState, scroll_offset_for_cursor},
     view::ExplorerView,
 };
 
@@ -32,14 +35,7 @@ pub(super) struct RenameState {
     pub(super) original_path: PathBuf,
     original_name: String,
     hidden_suffix: Option<String>,
-    pub(super) content: String,
-    pub(super) selected_range: Range<usize>,
-    selection_reversed: bool,
-    marked_range: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
-    scroll_offset: Pixels,
-    is_selecting: bool,
+    text: EditableTextState,
     pub(super) focus_handle: Option<FocusHandle>,
 }
 
@@ -65,270 +61,9 @@ impl RenameState {
             original_path: entry.path.clone(),
             original_name: entry.name.clone(),
             hidden_suffix,
-            content,
-            selected_range,
-            selection_reversed: false,
-            marked_range: None,
-            last_layout: None,
-            last_bounds: None,
-            scroll_offset: px(0.0),
-            is_selecting: false,
+            text: EditableTextState::with_selection(content, selected_range),
             focus_handle,
         }
-    }
-
-    fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
-            self.selected_range.start
-        } else {
-            self.selected_range.end
-        }
-    }
-
-    fn move_to(&mut self, offset: usize) {
-        let offset = self.clamp_to_boundary(offset);
-        self.selected_range = offset..offset;
-        self.selection_reversed = false;
-        self.scroll_cursor_into_view();
-    }
-
-    fn select_to(&mut self, offset: usize) {
-        let offset = self.clamp_to_boundary(offset);
-        if self.selection_reversed {
-            self.selected_range.start = offset;
-        } else {
-            self.selected_range.end = offset;
-        }
-
-        if self.selected_range.end < self.selected_range.start {
-            self.selection_reversed = !self.selection_reversed;
-            self.selected_range = self.selected_range.end..self.selected_range.start;
-        }
-        self.scroll_cursor_into_view();
-    }
-
-    fn select_all(&mut self) {
-        self.selected_range = 0..self.content.len();
-        self.selection_reversed = false;
-        self.scroll_cursor_into_view();
-    }
-
-    fn select_word_at(&mut self, offset: usize) {
-        let offset = self.clamp_to_boundary(offset);
-        let Some(word_offset) = self.word_offset_near(offset) else {
-            self.move_to(offset);
-            return;
-        };
-        let start = self.word_start(word_offset);
-        let end = self.word_end(word_offset);
-        self.selected_range = start..end;
-        self.selection_reversed = false;
-        self.scroll_cursor_into_view();
-    }
-
-    fn word_offset_near(&self, offset: usize) -> Option<usize> {
-        let offset = self.clamp_to_boundary(offset);
-
-        if let Some((_, ch)) = self.next_char(offset)
-            && ch.is_alphanumeric()
-        {
-            return Some(offset);
-        }
-
-        let previous =
-            self.content
-                .get(..offset)?
-                .char_indices()
-                .rev()
-                .find_map(|(previous_offset, ch)| {
-                    ch.is_alphanumeric().then_some((
-                        previous_offset,
-                        offset.saturating_sub(previous_offset + ch.len_utf8()),
-                    ))
-                });
-        let next = self
-            .content
-            .get(offset..)?
-            .char_indices()
-            .find_map(|(relative_offset, ch)| {
-                ch.is_alphanumeric()
-                    .then_some((offset + relative_offset, relative_offset))
-            });
-
-        match (previous, next) {
-            (Some((previous_offset, previous_distance)), Some((next_offset, next_distance))) => {
-                if previous_distance <= next_distance {
-                    Some(previous_offset)
-                } else {
-                    Some(next_offset)
-                }
-            }
-            (Some((previous_offset, _)), None) => Some(previous_offset),
-            (None, Some((next_offset, _))) => Some(next_offset),
-            (None, None) => None,
-        }
-    }
-
-    fn word_start(&self, mut offset: usize) -> usize {
-        while let Some((previous_offset, ch)) = self.previous_char(offset) {
-            if !ch.is_alphanumeric() {
-                break;
-            }
-            offset = previous_offset;
-        }
-        offset
-    }
-
-    fn word_end(&self, mut offset: usize) -> usize {
-        while let Some((next_offset, ch)) = self.next_char(offset) {
-            if !ch.is_alphanumeric() {
-                break;
-            }
-            offset = next_offset;
-        }
-        offset
-    }
-
-    fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .rev()
-            .find_map(|(ix, _)| (ix < offset).then_some(ix))
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, offset: usize) -> usize {
-        self.content
-            .char_indices()
-            .find_map(|(ix, _)| (ix > offset).then_some(ix))
-            .unwrap_or(self.content.len())
-    }
-
-    fn previous_word_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.clamp_to_boundary(offset);
-
-        while let Some((previous_offset, ch)) = self.previous_char(offset) {
-            if ch.is_alphanumeric() {
-                break;
-            }
-            offset = previous_offset;
-        }
-
-        while let Some((previous_offset, ch)) = self.previous_char(offset) {
-            if !ch.is_alphanumeric() {
-                break;
-            }
-            offset = previous_offset;
-        }
-
-        offset
-    }
-
-    fn next_word_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.clamp_to_boundary(offset);
-
-        while let Some((next_offset, ch)) = self.next_char(offset) {
-            if !ch.is_alphanumeric() {
-                break;
-            }
-            offset = next_offset;
-        }
-
-        while let Some((next_offset, ch)) = self.next_char(offset) {
-            if ch.is_alphanumeric() {
-                break;
-            }
-            offset = next_offset;
-        }
-
-        offset
-    }
-
-    fn previous_char(&self, offset: usize) -> Option<(usize, char)> {
-        self.content
-            .get(..offset)?
-            .char_indices()
-            .next_back()
-            .map(|(ix, ch)| (ix, ch))
-    }
-
-    fn next_char(&self, offset: usize) -> Option<(usize, char)> {
-        let ch = self.content.get(offset..)?.chars().next()?;
-        Some((offset + ch.len_utf8(), ch))
-    }
-
-    fn clamp_to_boundary(&self, offset: usize) -> usize {
-        if offset >= self.content.len() {
-            return self.content.len();
-        }
-
-        if self.content.is_char_boundary(offset) {
-            offset
-        } else {
-            self.previous_boundary(offset)
-        }
-    }
-
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-
-        utf8_offset
-    }
-
-    fn offset_to_utf16(&self, offset: usize) -> usize {
-        let mut utf16_offset = 0;
-        let mut utf8_count = 0;
-
-        for ch in self.content.chars() {
-            if utf8_count >= offset {
-                break;
-            }
-            utf8_count += ch.len_utf8();
-            utf16_offset += ch.len_utf16();
-        }
-
-        utf16_offset
-    }
-
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
-    }
-
-    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
-    }
-
-    fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
-        if self.content.is_empty() {
-            return 0;
-        }
-
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
-            return 0;
-        };
-
-        if position.y < bounds.top() {
-            return 0;
-        }
-        if position.y > bounds.bottom() {
-            return self.content.len();
-        }
-
-        self.clamp_to_boundary(line.closest_index_for_x(rename_text_x_for_mouse_x(
-            position.x,
-            bounds.left(),
-            self.scroll_offset,
-        )))
     }
 
     fn target_file_name(&self) -> String {
@@ -337,19 +72,19 @@ impl RenameState {
             None => self.content.clone(),
         }
     }
+}
 
-    fn scroll_cursor_into_view(&mut self) {
-        let (Some(line), Some(bounds)) = (self.last_layout.as_ref(), self.last_bounds.as_ref())
-        else {
-            return;
-        };
+impl Deref for RenameState {
+    type Target = EditableTextState;
 
-        self.scroll_offset = scroll_offset_for_cursor(
-            self.scroll_offset,
-            line.x_for_index(self.cursor_offset()),
-            line.width,
-            bounds.right() - bounds.left(),
-        );
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+impl DerefMut for RenameState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.text
     }
 }
 
@@ -399,7 +134,8 @@ impl ExplorerView {
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
             if rename.selected_range.is_empty() {
-                rename.select_to(rename.previous_boundary(rename.cursor_offset()));
+                let offset = rename.previous_boundary(rename.cursor_offset());
+                rename.select_to(offset);
             }
             replace_rename_text(rename, None, "");
         }
@@ -415,7 +151,8 @@ impl ExplorerView {
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
             if rename.selected_range.is_empty() {
-                rename.select_to(rename.next_boundary(rename.cursor_offset()));
+                let offset = rename.next_boundary(rename.cursor_offset());
+                rename.select_to(offset);
             }
             replace_rename_text(rename, None, "");
         }
@@ -430,11 +167,12 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            if rename.selected_range.is_empty() {
-                rename.move_to(rename.previous_boundary(rename.cursor_offset()));
+            let offset = if rename.selected_range.is_empty() {
+                rename.previous_boundary(rename.cursor_offset())
             } else {
-                rename.move_to(rename.selected_range.start);
-            }
+                rename.selected_range.start
+            };
+            rename.move_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -447,11 +185,12 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            if rename.selected_range.is_empty() {
-                rename.move_to(rename.next_boundary(rename.cursor_offset()));
+            let offset = if rename.selected_range.is_empty() {
+                rename.next_boundary(rename.cursor_offset())
             } else {
-                rename.move_to(rename.selected_range.end);
-            }
+                rename.selected_range.end
+            };
+            rename.move_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -464,7 +203,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.select_to(rename.previous_boundary(rename.cursor_offset()));
+            let offset = rename.previous_boundary(rename.cursor_offset());
+            rename.select_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -477,7 +217,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.select_to(rename.next_boundary(rename.cursor_offset()));
+            let offset = rename.next_boundary(rename.cursor_offset());
+            rename.select_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -490,7 +231,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.move_to(rename.previous_word_boundary(rename.cursor_offset()));
+            let offset = rename.previous_word_boundary(rename.cursor_offset());
+            rename.move_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -503,7 +245,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.move_to(rename.next_word_boundary(rename.cursor_offset()));
+            let offset = rename.next_word_boundary(rename.cursor_offset());
+            rename.move_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -516,7 +259,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.select_to(rename.previous_word_boundary(rename.cursor_offset()));
+            let offset = rename.previous_word_boundary(rename.cursor_offset());
+            rename.select_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -529,7 +273,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.select_to(rename.next_word_boundary(rename.cursor_offset()));
+            let offset = rename.next_word_boundary(rename.cursor_offset());
+            rename.select_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -555,7 +300,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.move_to(rename.content.len());
+            let offset = rename.content.len();
+            rename.move_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -581,7 +327,8 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.select_to(rename.content.len());
+            let offset = rename.content.len();
+            rename.select_to(offset);
         }
         cx.stop_propagation();
         cx.notify();
@@ -973,9 +720,7 @@ impl ExplorerView {
     }
 
     fn selected_rename_text(&self) -> Option<String> {
-        let rename = self.active_rename.as_ref()?;
-        (!rename.selected_range.is_empty())
-            .then(|| rename.content[rename.selected_range.clone()].to_owned())
+        self.active_rename.as_ref()?.selected_text()
     }
 
     pub(super) fn on_rename_mouse_down(&mut self, event: &MouseDownEvent) {
@@ -1002,7 +747,8 @@ impl ExplorerView {
         };
 
         if rename.is_selecting {
-            rename.select_to(rename.index_for_mouse_position(event.position));
+            let offset = rename.index_for_mouse_position(event.position);
+            rename.select_to(offset);
         }
     }
 
@@ -1014,9 +760,7 @@ impl ExplorerView {
 
     fn update_rename_layout(&mut self, line: ShapedLine, bounds: Bounds<Pixels>) {
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.last_layout = Some(line);
-            rename.last_bounds = Some(bounds);
-            rename.scroll_cursor_into_view();
+            rename.update_layout(line, bounds);
         }
     }
 }
@@ -1050,10 +794,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         let rename = self.active_rename.as_ref()?;
-        Some(UTF16Selection {
-            range: rename.range_to_utf16(&rename.selected_range),
-            reversed: rename.selection_reversed,
-        })
+        Some(rename.selected_text_range_utf16())
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
@@ -1062,10 +803,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         let rename = self.active_rename.as_ref()?;
-        rename
-            .marked_range
-            .as_ref()
-            .map(|range| rename.range_to_utf16(range))
+        rename.marked_text_range_utf16()
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
@@ -1075,7 +813,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         if let Some(rename) = self.active_rename.as_mut() {
-            rename.marked_range = None;
+            rename.unmark_text();
         }
     }
 
@@ -1093,11 +831,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         if let Some(rename) = self.active_rename.as_mut() {
-            let range = range_utf16
-                .as_ref()
-                .map(|range_utf16| rename.range_from_utf16(range_utf16))
-                .or(rename.marked_range.clone());
-            replace_rename_text(rename, range, &text.replace(['\r', '\n'], " "));
+            rename.replace_text_in_range_utf16(range_utf16, &text.replace(['\r', '\n'], " "));
             cx.notify();
         }
     }
@@ -1121,27 +855,12 @@ impl EntityInputHandler for ExplorerView {
         }
 
         if let Some(rename) = self.active_rename.as_mut() {
-            let range = range_utf16
-                .as_ref()
-                .map(|range_utf16| rename.range_from_utf16(range_utf16))
-                .or(rename.marked_range.clone())
-                .unwrap_or_else(|| rename.selected_range.clone());
             let new_text = new_text.replace(['\r', '\n'], " ");
-            rename
-                .content
-                .replace_range(range.clone(), new_text.as_str());
-            if new_text.is_empty() {
-                rename.marked_range = None;
-            } else {
-                rename.marked_range = Some(range.start..range.start + new_text.len());
-            }
-            rename.selected_range = new_selected_range_utf16
-                .as_ref()
-                .map(|range_utf16| rename.range_from_utf16(range_utf16))
-                .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-                .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
-            rename.selection_reversed = false;
-            rename.scroll_cursor_into_view();
+            rename.replace_and_mark_text_in_range_utf16(
+                range_utf16,
+                &new_text,
+                new_selected_range_utf16,
+            );
             cx.notify();
         }
     }
@@ -1158,18 +877,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         let rename = self.active_rename.as_ref()?;
-        let line = rename.last_layout.as_ref()?;
-        let range = rename.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + line.x_for_index(range.start) - rename.scroll_offset,
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + line.x_for_index(range.end) - rename.scroll_offset,
-                bounds.bottom(),
-            ),
-        ))
+        rename.bounds_for_range(range_utf16, bounds)
     }
 
     fn character_index_for_point(
@@ -1183,10 +891,7 @@ impl EntityInputHandler for ExplorerView {
         }
 
         let rename = self.active_rename.as_ref()?;
-        let line_point = rename.last_bounds?.localize(&point)?;
-        let line = rename.last_layout.as_ref()?;
-        let utf8_index = line.index_for_x(point.x - line_point.x)?;
-        Some(rename.offset_to_utf16(rename.clamp_to_boundary(utf8_index)))
+        rename.character_index_for_point(point)
     }
 }
 
@@ -1384,47 +1089,7 @@ impl Element for RenameTextElement {
 }
 
 fn replace_rename_text(rename: &mut RenameState, range: Option<Range<usize>>, new_text: &str) {
-    let range = range
-        .or(rename.marked_range.clone())
-        .unwrap_or_else(|| rename.selected_range.clone());
-    rename.content.replace_range(range.clone(), new_text);
-    let cursor = range.start + new_text.len();
-    rename.selected_range = cursor..cursor;
-    rename.selection_reversed = false;
-    rename.marked_range = None;
-    rename.scroll_cursor_into_view();
-}
-
-fn scroll_offset_for_cursor(
-    current_offset: Pixels,
-    cursor_x: Pixels,
-    content_width: Pixels,
-    viewport_width: Pixels,
-) -> Pixels {
-    let margin = px(4.0);
-    if content_width <= viewport_width {
-        return px(0.0);
-    }
-
-    let max_offset = (content_width - viewport_width + margin).max(px(0.0));
-    let left_edge = current_offset + margin;
-    let right_edge = current_offset + viewport_width - margin;
-
-    if cursor_x < left_edge {
-        (cursor_x - margin).max(px(0.0))
-    } else if cursor_x > right_edge {
-        (cursor_x - viewport_width + margin).clamp(px(0.0), max_offset)
-    } else {
-        current_offset.clamp(px(0.0), max_offset)
-    }
-}
-
-fn rename_text_x_for_mouse_x(
-    mouse_x: Pixels,
-    bounds_left: Pixels,
-    scroll_offset: Pixels,
-) -> Pixels {
-    mouse_x - bounds_left + scroll_offset
+    rename.replace_text(range, new_text);
 }
 
 fn hidden_rename_suffix(entry: &FileEntry, show_file_name_extensions: bool) -> Option<String> {
@@ -1782,7 +1447,8 @@ mod tests {
 
         let rename = view.active_rename.as_mut().unwrap();
         rename.move_to("alpha ".len());
-        rename.select_to(rename.content.len());
+        let offset = rename.content.len();
+        rename.select_to(offset);
         assert_eq!(
             rename.selected_range,
             "alpha ".len().."alpha beta.txt".len()
@@ -1800,16 +1466,19 @@ mod tests {
         rename.content = "alpha beta.txt".to_owned();
 
         rename.move_to(0);
-        rename.move_to(rename.next_word_boundary(rename.cursor_offset()));
+        let offset = rename.next_word_boundary(rename.cursor_offset());
+        rename.move_to(offset);
         assert_eq!(rename.selected_range, "alpha ".len().."alpha ".len());
 
-        rename.move_to(rename.next_word_boundary(rename.cursor_offset()));
+        let offset = rename.next_word_boundary(rename.cursor_offset());
+        rename.move_to(offset);
         assert_eq!(
             rename.selected_range,
             "alpha beta.".len().."alpha beta.".len()
         );
 
-        rename.move_to(rename.previous_word_boundary(rename.cursor_offset()));
+        let offset = rename.previous_word_boundary(rename.cursor_offset());
+        rename.move_to(offset);
         assert_eq!(rename.selected_range, "alpha ".len().."alpha ".len());
     }
 
@@ -1823,11 +1492,13 @@ mod tests {
         rename.content = "alpha beta.txt".to_owned();
 
         rename.move_to(0);
-        rename.select_to(rename.next_word_boundary(rename.cursor_offset()));
+        let offset = rename.next_word_boundary(rename.cursor_offset());
+        rename.select_to(offset);
         assert_eq!(rename.selected_range, 0.."alpha ".len());
 
         rename.move_to("alpha beta.".len());
-        rename.select_to(rename.previous_word_boundary(rename.cursor_offset()));
+        let offset = rename.previous_word_boundary(rename.cursor_offset());
+        rename.select_to(offset);
         assert_eq!(rename.selected_range, "alpha ".len().."alpha beta.".len());
     }
 
@@ -1885,10 +1556,7 @@ mod tests {
 
     #[test]
     fn mouse_text_x_includes_scroll_offset() {
-        assert_eq!(
-            rename_text_x_for_mouse_x(px(60.0), px(20.0), px(80.0)),
-            px(120.0)
-        );
+        assert_eq!(text_x_for_mouse_x(px(60.0), px(20.0), px(80.0)), px(120.0));
     }
 
     #[test]
