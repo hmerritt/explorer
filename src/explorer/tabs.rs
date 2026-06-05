@@ -1,10 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths,
-    FileDropEvent, FocusHandle, Focusable, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Task, Window, div,
-    font, prelude::*, px, rgb,
+    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, FileDropEvent,
+    FocusHandle, Focusable, IntoElement, Modifiers, MouseButton, MouseDownEvent, ParentElement,
+    Render, ScrollHandle, SharedString, Styled, Window, div, font, prelude::*, px, rgb,
 };
 
 use crate::explorer::{
@@ -31,7 +30,6 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
-const TAB_FILE_DRAG_HOVER_DELAY: Duration = Duration::from_millis(0);
 const CLOSE_GLYPH: &str = "\u{E711}";
 const NEW_TAB_GLYPH: &str = "\u{E710}";
 
@@ -57,22 +55,12 @@ struct TabDragPreview {
     scale_factor: f32,
 }
 
-struct PendingTabFileDragHover {
-    tab_id: TabId,
-    request_id: u64,
-    bounds: Bounds<Pixels>,
-    latest_position: Point<Pixels>,
-    _task: Option<Task<()>>,
-}
-
 pub struct ExplorerTabs {
     tabs: Vec<ExplorerTab>,
     active_tab: TabId,
     next_tab_id: u64,
     background_operation_tabs: Vec<Entity<ExplorerView>>,
     dragging_tab: Option<TabId>,
-    pending_file_drag_hover: Option<PendingTabFileDragHover>,
-    next_file_drag_hover_request_id: u64,
     tab_scroll_handle: ScrollHandle,
 }
 
@@ -89,8 +77,6 @@ impl ExplorerTabs {
             next_tab_id: 2,
             background_operation_tabs: Vec::new(),
             dragging_tab: None,
-            pending_file_drag_hover: None,
-            next_file_drag_hover_request_id: 0,
             tab_scroll_handle: ScrollHandle::new(),
         }
     }
@@ -149,86 +135,16 @@ impl ExplorerTabs {
         self.focus_active_tab(window, cx);
     }
 
-    fn schedule_file_drag_hover_tab_activation(
+    fn activate_tab_for_file_drag_hover(
         &mut self,
         id: TabId,
-        bounds: Bounds<Pixels>,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !tab_can_schedule_file_drag_hover(self.active_tab, id, &self.tabs) {
-            self.cancel_file_drag_hover_tab_activation();
-            return;
-        }
-
-        if let Some(pending) = self.pending_file_drag_hover.as_mut()
-            && pending.tab_id == id
-        {
-            pending.bounds = bounds;
-            pending.latest_position = position;
-            return;
-        }
-
-        let request_id = self.next_file_drag_hover_request_id;
-
-        let task = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(TAB_FILE_DRAG_HOVER_DELAY)
-                .await;
-
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.complete_file_drag_hover_tab_activation(id, request_id, window, cx) {
-                        cx.notify();
-                    }
-                });
-            });
-        });
-
-        store_pending_file_drag_hover(
-            &mut self.pending_file_drag_hover,
-            &mut self.next_file_drag_hover_request_id,
-            id,
-            bounds,
-            position,
-            Some(task),
-        );
-    }
-
-    fn update_file_drag_hover_position(&mut self, position: Point<Pixels>) -> bool {
-        let Some(pending) = self.pending_file_drag_hover.as_mut() else {
-            return false;
-        };
-
-        if pending.latest_position == position {
-            return false;
-        }
-
-        pending.latest_position = position;
-        false
-    }
-
-    fn cancel_file_drag_hover_tab_activation(&mut self) -> bool {
-        clear_pending_file_drag_hover(&mut self.pending_file_drag_hover)
-    }
-
-    fn complete_file_drag_hover_tab_activation(
-        &mut self,
-        id: TabId,
-        request_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !pending_file_drag_hover_can_activate(
-            self.pending_file_drag_hover.as_ref(),
-            id,
-            request_id,
-        ) {
+        if !tab_can_activate_for_file_drag_hover(self.active_tab, id, &self.tabs) {
             return false;
         }
 
-        self.pending_file_drag_hover = None;
         let was_active = self.active_tab;
         self.activate_tab(id, window, cx);
         self.active_tab != was_active
@@ -257,7 +173,6 @@ impl ExplorerTabs {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_file_drag_hover_tab_activation();
         if let Some(view) = self.tab_view(id) {
             let _ = view.update(cx, |view, cx| {
                 view.clear_drop_indicator();
@@ -279,7 +194,6 @@ impl ExplorerTabs {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_file_drag_hover_tab_activation();
         if let Some(view) = self.tab_view(id) {
             let _ = view.update(cx, |view, cx| {
                 view.clear_drop_indicator();
@@ -581,13 +495,9 @@ impl ExplorerTabs {
                     }
 
                     let _ = entity.update(cx, |this, cx| {
-                        this.schedule_file_drag_hover_tab_activation(
-                            tab_id,
-                            event.bounds,
-                            event.event.position,
-                            window,
-                            cx,
-                        );
+                        if this.activate_tab_for_file_drag_hover(tab_id, window, cx) {
+                            cx.notify();
+                        }
                     });
                 }
             })
@@ -599,13 +509,9 @@ impl ExplorerTabs {
                     }
 
                     let _ = entity.update(cx, |this, cx| {
-                        this.schedule_file_drag_hover_tab_activation(
-                            tab_id,
-                            event.bounds,
-                            event.event.position,
-                            window,
-                            cx,
-                        );
+                        if this.activate_tab_for_file_drag_hover(tab_id, window, cx) {
+                            cx.notify();
+                        }
                     });
                 }
             })
@@ -679,7 +585,6 @@ impl Render for ExplorerTabs {
         self.cleanup_completed_background_operations(cx);
         let active_view = self.active_tab().map(|tab| tab.view.clone());
         let drop_exit_view = active_view.clone();
-        let drop_exit_tabs = cx.entity();
         let active_drop_indicator = active_view
             .as_ref()
             .and_then(|view| view.read(cx).active_drop_indicator());
@@ -700,32 +605,6 @@ impl Render for ExplorerTabs {
                             }
                         });
                     }
-
-                    let _ = drop_exit_tabs.update(cx, |this, cx| {
-                        if this.cancel_file_drag_hover_tab_activation() {
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .on_drag_move::<DraggedEntries>({
-                let entity = cx.entity();
-                move |event: &DragMoveEvent<DraggedEntries>, _, cx| {
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.update_file_drag_hover_position(event.event.position) {
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .on_drag_move::<ExternalPaths>({
-                let entity = cx.entity();
-                move |event: &DragMoveEvent<ExternalPaths>, _, cx| {
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.update_file_drag_hover_position(event.event.position) {
-                            cx.notify();
-                        }
-                    });
                 }
             })
             .size_full()
@@ -942,7 +821,7 @@ fn can_drag_tab(tab_count: usize) -> bool {
     tab_count > 1
 }
 
-fn tab_can_schedule_file_drag_hover(
+fn tab_can_activate_for_file_drag_hover(
     active_tab: TabId,
     target_tab: TabId,
     tabs: &[ExplorerTab],
@@ -951,36 +830,12 @@ fn tab_can_schedule_file_drag_hover(
 }
 
 #[cfg(test)]
-fn tab_can_schedule_file_drag_hover_from_ids(
+fn activate_tab_id_for_file_drag_hover(
     active_tab: TabId,
     target_tab: TabId,
     tabs: &[TabId],
-) -> bool {
-    target_tab != active_tab && tabs.contains(&target_tab)
-}
-
-fn store_pending_file_drag_hover(
-    pending: &mut Option<PendingTabFileDragHover>,
-    next_request_id: &mut u64,
-    tab_id: TabId,
-    bounds: Bounds<Pixels>,
-    latest_position: Point<Pixels>,
-    task: Option<Task<()>>,
-) -> u64 {
-    let request_id = *next_request_id;
-    *next_request_id = next_request_id.wrapping_add(1);
-    *pending = Some(PendingTabFileDragHover {
-        tab_id,
-        request_id,
-        bounds,
-        latest_position,
-        _task: task,
-    });
-    request_id
-}
-
-fn clear_pending_file_drag_hover(pending: &mut Option<PendingTabFileDragHover>) -> bool {
-    pending.take().is_some()
+) -> Option<TabId> {
+    (target_tab != active_tab && tabs.contains(&target_tab)).then_some(target_tab)
 }
 
 fn start_dragging_tab(dragging_tab: &mut Option<TabId>, id: TabId) {
@@ -1006,18 +861,6 @@ fn tab_reorder_hit_test(
         && cursor_x <= right
         && cursor_y >= top - TAB_REORDER_VERTICAL_TOLERANCE
         && cursor_y <= bottom + TAB_REORDER_VERTICAL_TOLERANCE
-}
-
-fn pending_file_drag_hover_can_activate(
-    pending: Option<&PendingTabFileDragHover>,
-    id: TabId,
-    request_id: u64,
-) -> bool {
-    pending.is_some_and(|pending| {
-        pending.tab_id == id
-            && pending.request_id == request_id
-            && pending.bounds.contains(&pending.latest_position)
-    })
 }
 
 fn active_id_after_close_from_removed(tabs: &[ExplorerTab], removed_index: usize) -> Option<TabId> {
@@ -1095,7 +938,6 @@ fn reorder_tab_ids(
 mod tests {
     use super::*;
     use crate::explorer::view::tab_label_for_path;
-    use gpui::{bounds, point, size};
 
     #[test]
     fn tab_label_uses_last_path_component() {
@@ -1179,111 +1021,55 @@ mod tests {
     }
 
     #[test]
-    fn pending_file_drag_hover_replaces_prior_tab() {
-        let mut pending = None;
-        let mut next_request_id = 7;
-        let first_bounds = test_tab_bounds(0.0);
-        let second_bounds = test_tab_bounds(240.0);
-
-        let first_request_id = store_pending_file_drag_hover(
-            &mut pending,
-            &mut next_request_id,
-            TabId(2),
-            first_bounds,
-            point(px(20.0), px(18.0)),
-            None,
-        );
-        let second_request_id = store_pending_file_drag_hover(
-            &mut pending,
-            &mut next_request_id,
-            TabId(3),
-            second_bounds,
-            point(px(260.0), px(18.0)),
-            None,
-        );
-
-        let pending = pending.as_ref().expect("pending drag hover");
-        assert_eq!(first_request_id, 7);
-        assert_eq!(second_request_id, 8);
-        assert_eq!(next_request_id, 9);
-        assert_eq!(pending.tab_id, TabId(3));
-        assert_eq!(pending.request_id, second_request_id);
-        assert_eq!(pending.bounds, second_bounds);
-        assert_eq!(pending.latest_position, point(px(260.0), px(18.0)));
-    }
-
-    #[test]
-    fn pending_file_drag_hover_ignores_active_or_missing_tab() {
+    fn file_drag_hover_ignores_active_or_missing_tab() {
         let tabs = [TabId(1), TabId(2), TabId(3)];
 
-        assert!(!tab_can_schedule_file_drag_hover_from_ids(
-            TabId(2),
-            TabId(2),
-            &tabs
-        ));
-        assert!(!tab_can_schedule_file_drag_hover_from_ids(
-            TabId(2),
-            TabId(4),
-            &tabs
-        ));
-        assert!(tab_can_schedule_file_drag_hover_from_ids(
-            TabId(2),
-            TabId(3),
-            &tabs
-        ));
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(2), TabId(2), &tabs),
+            None
+        );
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(2), TabId(4), &tabs),
+            None
+        );
     }
 
     #[test]
-    fn pending_file_drag_hover_activation_validates_request_and_bounds() {
-        let bounds = test_tab_bounds(0.0);
-        let pending = PendingTabFileDragHover {
-            tab_id: TabId(2),
-            request_id: 42,
-            bounds,
-            latest_position: point(px(80.0), px(18.0)),
-            _task: None,
-        };
+    fn file_drag_hover_activates_inactive_existing_tab() {
+        let tabs = [TabId(1), TabId(2), TabId(3)];
 
-        assert!(pending_file_drag_hover_can_activate(
-            Some(&pending),
-            TabId(2),
-            42
-        ));
-        assert!(!pending_file_drag_hover_can_activate(
-            Some(&pending),
-            TabId(3),
-            42
-        ));
-        assert!(!pending_file_drag_hover_can_activate(
-            Some(&pending),
-            TabId(2),
-            43
-        ));
-
-        let outside_pending = PendingTabFileDragHover {
-            latest_position: point(px(260.0), px(18.0)),
-            ..pending
-        };
-        assert!(!pending_file_drag_hover_can_activate(
-            Some(&outside_pending),
-            TabId(2),
-            42
-        ));
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(2), TabId(3), &tabs),
+            Some(TabId(3))
+        );
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(3), TabId(1), &tabs),
+            Some(TabId(1))
+        );
     }
 
     #[test]
-    fn pending_file_drag_hover_clears() {
-        let mut pending = Some(PendingTabFileDragHover {
-            tab_id: TabId(2),
-            request_id: 42,
-            bounds: test_tab_bounds(0.0),
-            latest_position: point(px(80.0), px(18.0)),
-            _task: None,
-        });
+    fn file_drag_hover_activation_requires_multiple_tabs() {
+        let tabs = [TabId(1)];
 
-        assert!(clear_pending_file_drag_hover(&mut pending));
-        assert!(pending.is_none());
-        assert!(!clear_pending_file_drag_hover(&mut pending));
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(1), TabId(1), &tabs),
+            None
+        );
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(1), TabId(2), &tabs),
+            None
+        );
+    }
+
+    #[test]
+    fn file_drag_hover_activation_uses_direct_tab_id() {
+        let tabs = [TabId(5), TabId(9), TabId(2)];
+
+        assert_eq!(
+            activate_tab_id_for_file_drag_hover(TabId(5), TabId(2), &tabs),
+            Some(TabId(2))
+        );
     }
 
     #[test]
@@ -1389,12 +1175,5 @@ mod tests {
         assert!(!reorder_tab_ids(&mut ids, TabId(1), TabId(1), true));
         assert!(!reorder_tab_ids(&mut ids, TabId(3), TabId(1), true));
         assert_eq!(ids, vec![TabId(1), TabId(2)]);
-    }
-
-    fn test_tab_bounds(left: f32) -> Bounds<Pixels> {
-        bounds(
-            point(px(left), px(0.0)),
-            size(px(TAB_WIDTH), px(TAB_BAR_HEIGHT)),
-        )
     }
 }
