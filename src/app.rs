@@ -27,8 +27,12 @@ use crate::explorer::{
     RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft,
     RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome,
     RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight,
-    RenameSelected, RenameWordLeft, RenameWordRight, SelectAll, SelectNextTab, SelectPreviousTab,
-    SelectTabByIndex, TrashSelected, default_start_path,
+    RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace, SearchBackspaceWord,
+    SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete, SearchEdit, SearchEnd,
+    SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll, SearchSelectEnd,
+    SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
+    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
+    SelectPreviousTab, SelectTabByIndex, TrashSelected, default_start_path,
 };
 
 const APP_ID: &str = "com.hmerritt.explorer";
@@ -457,6 +461,7 @@ pub fn run() {
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
             KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),
             KeyBinding::new("ctrl-l", AddressEdit, Some("Explorer")),
+            KeyBinding::new("ctrl-f", SearchEdit, Some("Explorer")),
             KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
             KeyBinding::new("ctrl-shift-f", CreateNewFile, Some("Explorer")),
             KeyBinding::new("ctrl-t", NewTab, None),
@@ -562,6 +567,43 @@ pub fn run() {
             KeyBinding::new("up", AddressSuggestionUp, Some("ExplorerAddressInput")),
             KeyBinding::new("down", AddressSuggestionDown, Some("ExplorerAddressInput")),
             KeyBinding::new("tab", AddressAcceptSuggestion, Some("ExplorerAddressInput")),
+            KeyBinding::new("enter", SearchCommit, Some("ExplorerSearchInput")),
+            KeyBinding::new("escape", SearchCancel, Some("ExplorerSearchInput")),
+            KeyBinding::new("backspace", SearchBackspace, Some("ExplorerSearchInput")),
+            KeyBinding::new(
+                "ctrl-backspace",
+                SearchBackspaceWord,
+                Some("ExplorerSearchInput"),
+            ),
+            KeyBinding::new("delete", SearchDelete, Some("ExplorerSearchInput")),
+            KeyBinding::new("left", SearchLeft, Some("ExplorerSearchInput")),
+            KeyBinding::new("right", SearchRight, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-left", SearchWordLeft, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-right", SearchWordRight, Some("ExplorerSearchInput")),
+            KeyBinding::new("shift-left", SearchSelectLeft, Some("ExplorerSearchInput")),
+            KeyBinding::new(
+                "shift-right",
+                SearchSelectRight,
+                Some("ExplorerSearchInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                SearchSelectWordLeft,
+                Some("ExplorerSearchInput"),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                SearchSelectWordRight,
+                Some("ExplorerSearchInput"),
+            ),
+            KeyBinding::new("home", SearchHome, Some("ExplorerSearchInput")),
+            KeyBinding::new("end", SearchEnd, Some("ExplorerSearchInput")),
+            KeyBinding::new("shift-home", SearchSelectHome, Some("ExplorerSearchInput")),
+            KeyBinding::new("shift-end", SearchSelectEnd, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-a", SearchSelectAll, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-c", SearchCopy, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-x", SearchCut, Some("ExplorerSearchInput")),
+            KeyBinding::new("ctrl-v", SearchPaste, Some("ExplorerSearchInput")),
         ]);
 
         open_explorer_window(cx);

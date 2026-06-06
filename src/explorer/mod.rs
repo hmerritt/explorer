@@ -17,6 +17,7 @@ mod navigation;
 mod rename;
 mod render;
 mod scrollbar;
+mod search;
 mod selection;
 mod sidebar;
 mod sorting;
@@ -39,8 +40,12 @@ pub use actions::{
     RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
     RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
     RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
+    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
+    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
+    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
+    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
+    SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]

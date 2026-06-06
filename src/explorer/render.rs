@@ -29,6 +29,7 @@ use crate::explorer::{
         OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
         SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
         SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
         SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
         SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
         STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
@@ -51,6 +52,7 @@ use crate::explorer::{
     navigation::{EntryAction, HistoryMode},
     rename::rename_text_element,
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
+    search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{
         MacosSystemLocationKind, SidebarItem, SidebarItemKind, UserDirectoryKind, sidebar_sections,
@@ -155,6 +157,103 @@ impl ExplorerView {
             } else {
                 directory_bar(breadcrumb, cx)
             })
+            .child(self.render_search_bar(cx))
+    }
+
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+        let editing = self.search_is_editing();
+        let text = if self.search_query().is_empty() {
+            self.search_placeholder()
+        } else {
+            self.search_query().to_owned()
+        };
+
+        div()
+            .id("search-bar")
+            .key_context("ExplorerSearchInput")
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(DIRECTORY_BAR_HEIGHT))
+            .w(px(SEARCH_BAR_MAX_WIDTH))
+            .min_w(px(SEARCH_BAR_MIN_WIDTH))
+            .overflow_hidden()
+            .rounded(px(DIRECTORY_BAR_RADIUS))
+            .border_b_2()
+            .border_color(rgb(if editing { 0x0078d7 } else { 0xf8f8f8 }))
+            .bg(rgb(0xffffff))
+            .pl(px(12.0))
+            .pr(px(10.0))
+            .gap(px(8.0))
+            .cursor(CursorStyle::IBeam)
+            .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
+            .line_height(px(20.0))
+            .text_color(rgb(if self.search_query().is_empty() && !editing {
+                0x767676
+            } else {
+                0x1f1f1f
+            }))
+            .when_some(self.active_search_focus_handle().as_ref(), |this, focus| {
+                this.track_focus(focus)
+            })
+            .when(!editing, |this| {
+                this.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.start_search_edit(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+            })
+            .when(editing, |this| {
+                this.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.on_search_mouse_down(event);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    this.on_search_mouse_move(event);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                        this.on_search_mouse_up(event);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                        this.on_search_mouse_up(event);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .when(editing, |this| this.child(search_text_element(entity)))
+                    .when(!editing, |this| {
+                        this.truncate().child(SharedString::from(text))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font(nav_icon_font())
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x5f5f5f))
+                    .child("\u{E721}"),
+            )
+            .into_any_element()
     }
 
     fn render_utility_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -1247,7 +1346,7 @@ impl ExplorerView {
             .child(self.render_scrollbar(cx))
     }
 
-    fn render_empty_folder(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_empty_folder(&self, message: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
         let current_directory = DropDestination::CurrentDirectory;
 
@@ -1307,7 +1406,7 @@ impl ExplorerView {
                     cx.notify();
                 }
             }))
-            .child(render_empty_folder_message())
+            .child(render_empty_folder_message(message))
             .into_any_element()
     }
 
@@ -1518,6 +1617,28 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_address_suggestion_up))
             .on_action(cx.listener(Self::handle_address_suggestion_down))
             .on_action(cx.listener(Self::handle_address_accept_suggestion))
+            .on_action(cx.listener(Self::handle_search_edit))
+            .on_action(cx.listener(Self::handle_search_commit))
+            .on_action(cx.listener(Self::handle_search_cancel))
+            .on_action(cx.listener(Self::handle_search_backspace))
+            .on_action(cx.listener(Self::handle_search_backspace_word))
+            .on_action(cx.listener(Self::handle_search_delete))
+            .on_action(cx.listener(Self::handle_search_left))
+            .on_action(cx.listener(Self::handle_search_right))
+            .on_action(cx.listener(Self::handle_search_select_left))
+            .on_action(cx.listener(Self::handle_search_select_right))
+            .on_action(cx.listener(Self::handle_search_word_left))
+            .on_action(cx.listener(Self::handle_search_word_right))
+            .on_action(cx.listener(Self::handle_search_select_word_left))
+            .on_action(cx.listener(Self::handle_search_select_word_right))
+            .on_action(cx.listener(Self::handle_search_home))
+            .on_action(cx.listener(Self::handle_search_end))
+            .on_action(cx.listener(Self::handle_search_select_home))
+            .on_action(cx.listener(Self::handle_search_select_end))
+            .on_action(cx.listener(Self::handle_search_select_all))
+            .on_action(cx.listener(Self::handle_search_copy))
+            .on_action(cx.listener(Self::handle_search_cut))
+            .on_action(cx.listener(Self::handle_search_paste))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -1584,9 +1705,11 @@ impl Render for ExplorerView {
                                             .text_color(rgb(0x6f1d1d))
                                             .child(self.read_error.clone().unwrap_or_default()),
                                     ),
-                                    ExplorerContentBranch::Empty => {
-                                        div().child(self.render_empty_folder(cx))
-                                    }
+                                    ExplorerContentBranch::Empty => div()
+                                        .child(self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx)),
+                                    ExplorerContentBranch::NoSearchMatches => div().child(
+                                        self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
+                                    ),
                                     ExplorerContentBranch::List => {
                                         div().child(self.render_list(cx))
                                     }
@@ -1757,14 +1880,14 @@ impl Focusable for ExplorerView {
     }
 }
 
-fn render_empty_folder_message() -> Div {
+fn render_empty_folder_message(message: &'static str) -> Div {
     div()
         .w_full()
         .mt(px(EMPTY_FOLDER_TOP_MARGIN))
         .text_center()
         .text_size(px(EMPTY_FOLDER_TEXT_SIZE))
         .text_color(rgb(0x9a9a9a))
-        .child(EMPTY_FOLDER_MESSAGE)
+        .child(message)
 }
 
 fn render_open_error(error: &str) -> Div {
@@ -2150,7 +2273,7 @@ fn editable_directory_bar(
         .flex_1()
         .overflow_hidden()
         .rounded(px(DIRECTORY_BAR_RADIUS))
-        .border_1()
+        .border_b_2()
         .border_color(rgb(0x0078d7))
         .bg(rgb(0xffffff))
         .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))

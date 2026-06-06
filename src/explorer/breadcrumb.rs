@@ -5,7 +5,7 @@ use gpui::{TextRun, Window, font, px, rgb};
 use crate::explorer::constants::{
     DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HORIZONTAL_PADDING,
     DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE,
-    NAV_BUTTON_SIZE, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP,
+    NAV_BUTTON_SIZE, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, SEARCH_BAR_RESERVED_WIDTH,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,7 +125,8 @@ pub(super) fn breadcrumb_labels(segments: &[BreadcrumbSegment]) -> Vec<String> {
 pub(super) fn directory_bar_available_width(window_width: f32) -> f32 {
     let navbar_content_width =
         window_width - (NAVBAR_HORIZONTAL_PADDING * 2.0) - (NAV_BUTTON_SIZE * 4.0);
-    let directory_bar_width = navbar_content_width - (NAVBAR_ITEM_GAP * 4.0);
+    let directory_bar_width =
+        navbar_content_width - (NAVBAR_ITEM_GAP * 4.0) - SEARCH_BAR_RESERVED_WIDTH;
     (directory_bar_width - (DIRECTORY_BAR_HORIZONTAL_PADDING * 2.0)).max(0.0)
 }
 

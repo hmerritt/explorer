@@ -31,6 +31,7 @@ pub(super) fn test_view_with_entries(names: &[&str]) -> ExplorerView {
         .iter()
         .map(|name| FileEntry::test(name, false, Some(1), None))
         .collect();
+    view.all_entries = view.entries.clone();
     view.read_error = None;
     view.clear_selection();
     view

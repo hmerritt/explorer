@@ -638,6 +638,8 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.finish_search_edit();
+        self.cancel_address_bar_edit();
         self.rename_focus_out = None;
         self.active_rename = Some(RenameState::new(
             &entry,
@@ -792,6 +794,9 @@ impl EntityInputHandler for ExplorerView {
         if self.active_address_bar.is_some() {
             return self.address_text_for_range(range_utf16, actual_range);
         }
+        if self.search_is_editing() {
+            return self.search_text_for_range(range_utf16, actual_range);
+        }
 
         let rename = self.active_rename.as_ref()?;
         let range = rename.range_from_utf16(&range_utf16);
@@ -808,6 +813,9 @@ impl EntityInputHandler for ExplorerView {
         if self.active_address_bar.is_some() {
             return self.selected_address_text_range();
         }
+        if self.search_is_editing() {
+            return Some(self.selected_search_text_range());
+        }
 
         let rename = self.active_rename.as_ref()?;
         Some(rename.selected_text_range_utf16())
@@ -817,6 +825,9 @@ impl EntityInputHandler for ExplorerView {
         if self.active_address_bar.is_some() {
             return self.marked_address_text_range();
         }
+        if self.search_is_editing() {
+            return self.search.marked_text_range_utf16();
+        }
 
         let rename = self.active_rename.as_ref()?;
         rename.marked_text_range_utf16()
@@ -825,6 +836,10 @@ impl EntityInputHandler for ExplorerView {
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         if self.active_address_bar.is_some() {
             self.unmark_address_text();
+            return;
+        }
+        if self.search_is_editing() {
+            self.search.unmark_text();
             return;
         }
 
@@ -845,6 +860,11 @@ impl EntityInputHandler for ExplorerView {
             cx.notify();
             return;
         }
+        if self.search_is_editing() {
+            self.replace_search_text_in_range(range_utf16, text);
+            cx.notify();
+            return;
+        }
 
         if let Some(rename) = self.active_rename.as_mut() {
             rename.replace_text_in_range_utf16(range_utf16, &text.replace(['\r', '\n'], " "));
@@ -862,6 +882,15 @@ impl EntityInputHandler for ExplorerView {
     ) {
         if self.active_address_bar.is_some() {
             self.replace_and_mark_address_text_in_range(
+                range_utf16,
+                new_text,
+                new_selected_range_utf16,
+            );
+            cx.notify();
+            return;
+        }
+        if self.search_is_editing() {
+            self.replace_and_mark_search_text_in_range(
                 range_utf16,
                 new_text,
                 new_selected_range_utf16,
@@ -891,6 +920,9 @@ impl EntityInputHandler for ExplorerView {
         if self.active_address_bar.is_some() {
             return self.address_bounds_for_range(range_utf16, bounds);
         }
+        if self.search_is_editing() {
+            return self.search.bounds_for_range(range_utf16, bounds);
+        }
 
         let rename = self.active_rename.as_ref()?;
         rename.bounds_for_range(range_utf16, bounds)
@@ -904,6 +936,9 @@ impl EntityInputHandler for ExplorerView {
     ) -> Option<usize> {
         if self.active_address_bar.is_some() {
             return self.address_character_index_for_point(point);
+        }
+        if self.search_is_editing() {
+            return self.search.character_index_for_point(point);
         }
 
         let rename = self.active_rename.as_ref()?;

@@ -526,6 +526,7 @@ impl ExplorerView {
     ) -> bool {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
+        self.finish_search_edit();
 
         if !self.commit_active_rename_before_interaction(window, cx) {
             return false;

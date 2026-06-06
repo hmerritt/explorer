@@ -18,6 +18,7 @@ use crate::explorer::{
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
     scrollbar::ScrollbarDrag,
+    search::SearchState,
     selection::SelectionState,
     watcher::DirectoryWatcher,
 };
@@ -25,6 +26,7 @@ use crate::explorer::{
 pub struct ExplorerView {
     pub(super) path: PathBuf,
     pub(super) entries: Vec<FileEntry>,
+    pub(super) all_entries: Vec<FileEntry>,
     pub(super) selection: SelectionState,
     pub(super) read_error: Option<String>,
     pub(super) open_error: Option<String>,
@@ -47,6 +49,7 @@ pub struct ExplorerView {
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
     pub(super) active_address_bar: Option<AddressBarState>,
+    pub(super) search: SearchState,
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
     pub(super) show_hidden_files: bool,
@@ -85,6 +88,7 @@ pub(super) struct PendingTrash {
 pub(super) enum ExplorerContentBranch {
     Error,
     Empty,
+    NoSearchMatches,
     List,
 }
 
@@ -114,6 +118,7 @@ impl ExplorerView {
         let mut view = Self {
             path: initial_path,
             entries: Vec::new(),
+            all_entries: Vec::new(),
             selection: SelectionState::default(),
             read_error: None,
             open_error: None,
@@ -136,6 +141,7 @@ impl ExplorerView {
             active_rename: None,
             rename_focus_out: None,
             active_address_bar: None,
+            search: SearchState::default(),
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
             show_hidden_files: true,
@@ -153,11 +159,12 @@ impl ExplorerView {
 
         match load_entries(&self.path, self.show_hidden_files) {
             Ok(entries) => {
-                self.entries = entries;
+                self.all_entries = entries;
                 self.read_error = None;
-                self.restore_selection_from_paths(&selected_paths);
+                self.apply_search_filter_preserving_selection(&selected_paths);
             }
             Err(error) => {
+                self.all_entries.clear();
                 self.entries.clear();
                 self.clear_selection();
                 self.read_error = Some(error.to_string());
@@ -192,6 +199,7 @@ impl ExplorerView {
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
+        self.finish_search_edit();
         self.cancel_mouse_selection_drag();
         self.clear_drop_indicator();
         self.pending_permanent_delete = None;
@@ -225,7 +233,7 @@ pub(super) fn tab_label_for_path(path: &Path) -> String {
 
 impl ExplorerView {
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
-        self.entries.is_empty() && self.read_error.is_none()
+        self.all_entries.is_empty() && self.read_error.is_none()
     }
 
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {
@@ -233,6 +241,8 @@ impl ExplorerView {
             ExplorerContentBranch::Error
         } else if self.should_show_empty_folder_message() {
             ExplorerContentBranch::Empty
+        } else if self.entries.is_empty() && self.search_is_active() {
+            ExplorerContentBranch::NoSearchMatches
         } else {
             ExplorerContentBranch::List
         }
@@ -277,7 +287,8 @@ mod tests {
     #[test]
     fn non_empty_directory_suppresses_empty_folder_message() {
         let mut view = ExplorerView::new(PathBuf::from("non-empty"));
-        view.entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        view.all_entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        view.entries = view.all_entries.clone();
         view.read_error = None;
 
         assert!(!view.should_show_empty_folder_message());
@@ -294,7 +305,14 @@ mod tests {
         view.read_error = None;
         assert_eq!(view.content_branch(), ExplorerContentBranch::Empty);
 
-        view.entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        view.all_entries = vec![FileEntry::test("file.txt", false, Some(1), None)];
+        view.entries = view.all_entries.clone();
         assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+
+        view.set_search_query("missing".to_owned());
+        assert_eq!(
+            view.content_branch(),
+            ExplorerContentBranch::NoSearchMatches
+        );
     }
 }

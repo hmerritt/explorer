@@ -58,6 +58,7 @@ impl ExplorerView {
         }
 
         self.path = path;
+        self.clear_search();
         self.clear_selection();
         self.read_error = None;
         self.open_error = None;

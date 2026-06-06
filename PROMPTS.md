@@ -78,8 +78,8 @@ Best for sync/update scenarios, not ordinary Explorer copy.
 
 Major remaining Windows Explorer parity areas:
 
-1. **Search**
-   Search box, current folder search, optional recursive folder search, indexed search behavior, filters, or search result view.
+1. **Recursive Search**
+   Recursive folder search, filters (file type), or search result view.
 
 2. **View modes and folder presentation**
    The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
