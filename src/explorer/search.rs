@@ -641,12 +641,12 @@ impl ExplorerView {
         let root = self.path.clone();
         let query = self.search.content.clone();
         let show_hidden_files = self.show_hidden_files;
-        let cached_paths = self
+        let cached_search = self
             .search
             .recursive_cache
             .as_ref()
             .filter(|cache| cache.root == root && cache.show_hidden_files == show_hidden_files)
-            .map(|cache| cache.paths.clone());
+            .cloned();
         let cancel = Arc::new(AtomicBool::new(false));
         self.search.recursive_cancel = Some(cancel.clone());
 
@@ -668,7 +668,7 @@ impl ExplorerView {
                             root,
                             query,
                             show_hidden_files,
-                            cached_paths,
+                            cached_search,
                             cancel,
                         )
                     }
@@ -702,6 +702,7 @@ impl ExplorerView {
             root: output.root,
             show_hidden_files: output.show_hidden_files,
             paths: output.scanned_paths,
+            index: output.index,
         });
         self.entries = output.entries;
         self.restore_selection_from_paths(&selected_paths);
@@ -1023,6 +1024,7 @@ mod tests {
             query: "stale".to_owned(),
             show_hidden_files: view.show_hidden_files,
             scanned_paths: vec![PathBuf::from("stale.txt")],
+            index: None,
             entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
         });
 

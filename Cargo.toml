@@ -21,9 +21,10 @@ globset = "0.4.18"
 jwalk = "0.8.1"
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 notify = "8.2.0"
-seekstorm = { version = "3.2.1", default-features = false }
+regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+tantivy = { version = "0.26.1", default-features = false }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "time"] }
 trash = "5.2.6"
 

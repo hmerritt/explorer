@@ -1,42 +1,48 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use jwalk::WalkDir;
-use seekstorm::{
-    INDEX_RUNTIME,
-    commit::Commit,
-    index::{
-        AccessType, Clustering, Document, DocumentCompression, FieldType, FrequentwordType,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, SchemaField, StemmerType,
-        StopwordType, TokenizerType, create_index,
-    },
-    search::{QueryRewriting, QueryType, ResultType, Search, SearchMode},
+use tantivy::{
+    Index, IndexReader, Order,
+    collector::TopDocs,
+    doc,
+    query::RegexQuery,
+    schema::{FAST, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions},
 };
-use serde_json::Value;
 
-use crate::explorer::entry::FileEntry;
+use crate::explorer::{entry::FileEntry, filesystem::should_hide_entry};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+const NAME_FIELD: &str = "name";
+const PATH_ID_FIELD: &str = "path_id";
+const INDEX_WRITER_MEMORY_BUDGET: usize = 15_000_000;
+
+#[derive(Clone)]
+pub(super) struct RecursiveSearchIndex {
+    reader: IndexReader,
+    name_field: Field,
+}
+
+#[derive(Clone)]
 pub(super) struct RecursiveSearchCache {
     pub(super) root: PathBuf,
     pub(super) show_hidden_files: bool,
     pub(super) paths: Vec<PathBuf>,
+    pub(super) index: Option<RecursiveSearchIndex>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub(super) struct RecursiveSearchOutput {
     pub(super) generation: u64,
     pub(super) root: PathBuf,
     pub(super) query: String,
     pub(super) show_hidden_files: bool,
     pub(super) scanned_paths: Vec<PathBuf>,
+    pub(super) index: Option<RecursiveSearchIndex>,
     pub(super) entries: Vec<FileEntry>,
 }
 
@@ -45,18 +51,28 @@ pub(super) fn recursive_search_entries(
     root: PathBuf,
     query: String,
     show_hidden_files: bool,
-    cached_paths: Option<Vec<PathBuf>>,
+    cached_search: Option<RecursiveSearchCache>,
     cancel: Arc<AtomicBool>,
 ) -> RecursiveSearchOutput {
-    let scanned_paths = match cached_paths {
-        Some(paths) => paths,
-        None => scan_recursive_paths(&root, show_hidden_files, cancel.clone()),
+    let (scanned_paths, index) = match cached_search {
+        Some(cache) => (cache.paths, cache.index),
+        None => {
+            let paths = scan_recursive_paths(&root, show_hidden_files, cancel.clone());
+            let index = if cancel.load(Ordering::Relaxed) {
+                None
+            } else {
+                build_search_index(&paths, &cancel)
+            };
+            (paths, index)
+        }
     };
 
     let result_paths = if cancel.load(Ordering::Relaxed) {
         Vec::new()
     } else {
-        seekstorm_ranked_paths(&scanned_paths, &query, &cancel)
+        index
+            .as_ref()
+            .and_then(|index| tantivy_ranked_paths(index, &scanned_paths, &query, &cancel))
             .unwrap_or_else(|| fallback_ranked_paths(&scanned_paths, &query))
     };
 
@@ -71,6 +87,7 @@ pub(super) fn recursive_search_entries(
         query,
         show_hidden_files,
         scanned_paths,
+        index,
         entries,
     }
 }
@@ -87,7 +104,7 @@ pub(super) fn scan_recursive_paths(
     let process_cancel = cancel.clone();
     let walker = WalkDir::new(root)
         .sort(false)
-        .skip_hidden(!show_hidden_files)
+        .skip_hidden(false)
         .follow_links(false)
         .min_depth(1)
         .process_read_dir(move |_, _, _, children| {
@@ -95,6 +112,13 @@ pub(super) fn scan_recursive_paths(
                 children.clear();
                 return;
             }
+
+            children.retain(|child| match child {
+                Ok(entry) => {
+                    !should_hide_entry(entry.file_name(), &entry.path(), show_hidden_files)
+                }
+                Err(_) => true,
+            });
         });
 
     let mut paths = Vec::new();
@@ -111,21 +135,57 @@ pub(super) fn scan_recursive_paths(
     paths
 }
 
-#[cfg(target_os = "windows")]
-fn is_filesystem_directory_link(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+fn search_schema() -> (Schema, Field, Field) {
+    let mut schema = Schema::builder();
+    let name_options = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("raw")
+            .set_index_option(IndexRecordOption::Basic)
+            .set_fieldnorms(false),
+    );
+    let name_field = schema.add_text_field(NAME_FIELD, name_options);
+    let path_id_field = schema.add_u64_field(PATH_ID_FIELD, FAST);
+    (schema.build(), name_field, path_id_field)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn is_filesystem_directory_link(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+fn build_search_index(paths: &[PathBuf], cancel: &AtomicBool) -> Option<RecursiveSearchIndex> {
+    if paths.is_empty() || cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (schema, name_field, path_id_field) = search_schema();
+    let index = Index::create_in_ram(schema);
+    let mut writer = index
+        .writer_with_num_threads(1, INDEX_WRITER_MEMORY_BUDGET)
+        .ok()?;
+
+    for (path_id, path) in paths.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        let name = path.file_name()?.to_string_lossy().to_lowercase();
+        writer
+            .add_document(doc!(
+                name_field => name,
+                path_id_field => path_id as u64,
+            ))
+            .ok()?;
+    }
+
+    writer.commit().ok()?;
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    Some(RecursiveSearchIndex {
+        reader: index.reader().ok()?,
+        name_field,
+    })
 }
 
-fn seekstorm_ranked_paths(
+fn tantivy_ranked_paths(
+    index: &RecursiveSearchIndex,
     paths: &[PathBuf],
     query: &str,
     cancel: &AtomicBool,
@@ -134,92 +194,26 @@ fn seekstorm_ranked_paths(
         return Some(Vec::new());
     }
 
-    let index_path = temp_index_path();
-    let schema = vec![SchemaField::new(
-        "name".to_owned(),
-        false,
-        true,
-        false,
-        FieldType::Text,
-        false,
-        true,
-        1.0,
-        false,
-        false,
-    )];
-    let meta = IndexMetaObject {
-        id: 0,
-        name: "explorer-recursive-search".to_owned(),
-        lexical_similarity: LexicalSimilarity::Bm25fProximity,
-        tokenizer: TokenizerType::UnicodeAlphanumericFolded,
-        stemmer: StemmerType::None,
-        stop_words: StopwordType::None,
-        frequent_words: FrequentwordType::None,
-        ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::None,
-        access_type: AccessType::Ram,
-        spelling_correction: None,
-        query_completion: None,
-        clustering: Clustering::None,
-        inference: Default::default(),
-    };
-
-    let ranked_paths = INDEX_RUNTIME.block_on(async {
-        let index = create_index(&index_path, meta, &schema, &Vec::new(), 11, true, Some(1))
-            .await
-            .ok()?;
-
-        let documents = paths
-            .iter()
-            .filter_map(|path| {
-                let name = path.file_name()?.to_string_lossy().into_owned();
-                let mut document = Document::new();
-                document.insert("name".to_owned(), Value::String(name));
-                Some(document)
-            })
-            .collect::<Vec<_>>();
-
-        if cancel.load(Ordering::Relaxed) {
-            return Some(Vec::new());
-        }
-
-        index.index_documents(documents).await;
-        index.commit().await;
-
-        if cancel.load(Ordering::Relaxed) {
-            return Some(Vec::new());
-        }
-
-        let result = index
-            .search(
-                query.to_owned(),
-                None,
-                QueryType::Union,
-                SearchMode::Lexical,
-                false,
-                0,
-                paths.len(),
-                ResultType::Topk,
-                true,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                QueryRewriting::SearchOnly,
-            )
-            .await;
-
-        Some(
-            result
-                .results
-                .into_iter()
-                .filter_map(|result| paths.get(result.doc_id).cloned())
-                .collect(),
+    let pattern = format!(".*{}.*", regex::escape(&query.to_lowercase()));
+    let regex_query = RegexQuery::from_pattern(&pattern, index.name_field).ok()?;
+    let searcher = index.reader.searcher();
+    let results = searcher
+        .search(
+            &regex_query,
+            &TopDocs::with_limit(paths.len()).order_by_fast_field::<u64>(PATH_ID_FIELD, Order::Asc),
         )
-    });
+        .ok()?;
 
-    let _ = fs::remove_dir_all(index_path);
-    ranked_paths
+    if cancel.load(Ordering::Relaxed) {
+        return Some(Vec::new());
+    }
+
+    Some(
+        results
+            .into_iter()
+            .filter_map(|(path_id, _)| paths.get(path_id? as usize).cloned())
+            .collect(),
+    )
 }
 
 fn fallback_ranked_paths(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
@@ -235,17 +229,11 @@ fn fallback_ranked_paths(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn temp_index_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir().join(format!("explorer-seekstorm-{}-{nanos}", std::process::id()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
+    use std::fs;
 
     fn path_names(paths: &[PathBuf]) -> Vec<String> {
         let mut names = paths
@@ -259,6 +247,36 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    #[test]
+    fn tantivy_schema_keeps_basename_minimal_and_path_id_fast_only() {
+        let (schema, name_field, path_id_field) = search_schema();
+        let name_entry = schema.get_field_entry(name_field);
+        let path_id_entry = schema.get_field_entry(path_id_field);
+
+        assert!(name_entry.is_indexed());
+        assert!(!name_entry.is_stored());
+        assert!(!name_entry.is_fast());
+        assert!(!name_entry.has_fieldnorms());
+        assert_eq!(
+            name_entry.field_type().index_record_option(),
+            Some(IndexRecordOption::Basic)
+        );
+        let tantivy::schema::FieldType::Str(name_options) = name_entry.field_type() else {
+            panic!("name field should be text");
+        };
+        assert_eq!(
+            name_options
+                .get_indexing_options()
+                .expect("name indexing options")
+                .tokenizer(),
+            "raw"
+        );
+
+        assert!(!path_id_entry.is_indexed());
+        assert!(!path_id_entry.is_stored());
+        assert!(path_id_entry.is_fast());
     }
 
     #[test]
@@ -345,20 +363,85 @@ mod tests {
     }
 
     #[test]
-    fn seekstorm_matches_basename_only() {
+    fn tantivy_matches_basename_only_case_insensitively() {
         let paths = vec![
             PathBuf::from("reports").join("image.png"),
-            PathBuf::from("other").join("report.txt"),
+            PathBuf::from("other").join("Annual Report.txt"),
         ];
         let cancel = AtomicBool::new(false);
+        let index = build_search_index(&paths, &cancel).expect("tantivy index");
 
         let ranked_paths =
-            seekstorm_ranked_paths(&paths, "report", &cancel).expect("seekstorm search");
+            tantivy_ranked_paths(&index, &paths, "REPORT", &cancel).expect("tantivy search");
 
         assert_eq!(
             ranked_paths,
-            vec![PathBuf::from("other").join("report.txt")]
+            vec![PathBuf::from("other").join("Annual Report.txt")]
         );
+    }
+
+    #[test]
+    fn tantivy_treats_regex_characters_as_literal_substring_text() {
+        let paths = vec![
+            PathBuf::from("file[1].txt"),
+            PathBuf::from("file1.txt"),
+            PathBuf::from("notes.txt"),
+        ];
+        let cancel = AtomicBool::new(false);
+        let index = build_search_index(&paths, &cancel).expect("tantivy index");
+
+        assert_eq!(
+            tantivy_ranked_paths(&index, &paths, "[1]", &cancel).expect("tantivy search"),
+            vec![PathBuf::from("file[1].txt")]
+        );
+    }
+
+    #[test]
+    fn tantivy_preserves_scan_order_for_duplicate_basenames() {
+        let paths = vec![
+            PathBuf::from("z").join("report.txt"),
+            PathBuf::from("a").join("report.txt"),
+            PathBuf::from("middle").join("other.txt"),
+        ];
+        let cancel = AtomicBool::new(false);
+        let index = build_search_index(&paths, &cancel).expect("tantivy index");
+
+        assert_eq!(
+            tantivy_ranked_paths(&index, &paths, "report", &cancel).expect("tantivy search"),
+            paths[..2]
+        );
+    }
+
+    #[test]
+    fn recursive_search_reuses_cached_tantivy_index() {
+        let temp = TempDir::new();
+        let report = temp.path().join("report.txt");
+        let notes = temp.path().join("notes.txt");
+        fs::write(&report, b"report").expect("create report");
+        fs::write(&notes, b"notes").expect("create notes");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let index =
+            build_search_index(std::slice::from_ref(&report), &cancel).expect("tantivy index");
+        let cache = RecursiveSearchCache {
+            root: temp.path().to_path_buf(),
+            show_hidden_files: true,
+            // Deliberately differ from the indexed path to prove the cached index is queried.
+            paths: vec![notes.clone()],
+            index: Some(index),
+        };
+
+        let output = recursive_search_entries(
+            1,
+            temp.path().to_path_buf(),
+            "report".to_owned(),
+            true,
+            Some(cache),
+            cancel,
+        );
+
+        assert!(output.index.is_some());
+        assert_eq!(output.entries.len(), 1);
+        assert_eq!(output.entries[0].path, notes);
     }
 
     #[test]
@@ -368,13 +451,19 @@ mod tests {
         let missing = temp.path().join("report-missing.txt");
         fs::write(&existing, b"existing").expect("create existing match");
         let cancel = Arc::new(AtomicBool::new(false));
+        let cached_search = RecursiveSearchCache {
+            root: temp.path().to_path_buf(),
+            show_hidden_files: true,
+            paths: vec![existing.clone(), missing],
+            index: None,
+        };
 
         let output = recursive_search_entries(
             1,
             temp.path().to_path_buf(),
             "report".to_owned(),
             true,
-            Some(vec![existing.clone(), missing]),
+            Some(cached_search),
             cancel,
         );
 
