@@ -8,6 +8,21 @@ use std::{
     time::Duration,
 };
 
+#[cfg(debug_assertions)]
+use std::time::Instant;
+
+#[cfg(debug_assertions)]
+macro_rules! recursive_search_timing {
+    ($generation:expr, $elapsed:expr, $($message:tt)*) => {
+        eprintln!(
+            "[recursive-search:{}] {:<10.3?} {}",
+            $generation,
+            $elapsed,
+            format_args!($($message)*)
+        );
+    };
+}
+
 use globset::{GlobBuilder, GlobMatcher};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
@@ -641,23 +656,50 @@ impl ExplorerView {
         let root = self.path.clone();
         let query = self.search.content.clone();
         let show_hidden_files = self.show_hidden_files;
+        #[cfg(debug_assertions)]
+        let cache_clone_started = Instant::now();
         let cached_search = self
             .search
             .recursive_cache
             .as_ref()
             .filter(|cache| cache.root == root && cache.show_hidden_files == show_hidden_files)
             .cloned();
+        #[cfg(debug_assertions)]
+        recursive_search_timing!(
+            generation,
+            cache_clone_started.elapsed(),
+            "schedule.cache_clone cache_hit={} paths={} index={}",
+            cached_search.is_some(),
+            cached_search.as_ref().map_or(0, |cache| cache.paths.len()),
+            cached_search
+                .as_ref()
+                .is_some_and(|cache| cache.index.is_some())
+        );
         let cancel = Arc::new(AtomicBool::new(false));
         self.search.recursive_cancel = Some(cancel.clone());
 
+        #[cfg(debug_assertions)]
+        let schedule_started = Instant::now();
         let task = cx.spawn(async move |this, cx| {
+            #[cfg(debug_assertions)]
+            let debounce_started = Instant::now();
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
+            #[cfg(debug_assertions)]
+            recursive_search_timing!(generation, debounce_started.elapsed(), "schedule.debounce");
             if cancel.load(Ordering::Relaxed) {
+                #[cfg(debug_assertions)]
+                recursive_search_timing!(
+                    generation,
+                    schedule_started.elapsed(),
+                    "schedule.cancelled_before_work cancelled=true"
+                );
                 return;
             }
 
+            #[cfg(debug_assertions)]
+            let background_started = Instant::now();
             let output = cx
                 .background_executor()
                 .spawn({
@@ -674,22 +716,47 @@ impl ExplorerView {
                     }
                 })
                 .await;
+            #[cfg(debug_assertions)]
+            recursive_search_timing!(
+                generation,
+                background_started.elapsed(),
+                "schedule.background"
+            );
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.apply_recursive_search_output(output);
                 cx.notify();
             });
+            #[cfg(debug_assertions)]
+            recursive_search_timing!(generation, schedule_started.elapsed(), "schedule.total");
         });
         self.search.recursive_task = Some(task);
     }
 
     fn apply_recursive_search_output(&mut self, output: RecursiveSearchOutput) {
+        #[cfg(debug_assertions)]
+        let apply_started = Instant::now();
+        #[cfg(debug_assertions)]
+        let generation = output.generation;
+        #[cfg(debug_assertions)]
+        let output_path_count = output.scanned_paths.len();
+        #[cfg(debug_assertions)]
+        let output_entry_count = output.entries.len();
+        #[cfg(debug_assertions)]
+        let output_has_index = output.index.is_some();
+
         if !self.search.recursive_enabled
             || self.search.recursive_generation != output.generation
             || self.path != output.root
             || self.search.content != output.query
             || self.show_hidden_files != output.show_hidden_files
         {
+            #[cfg(debug_assertions)]
+            recursive_search_timing!(
+                generation,
+                apply_started.elapsed(),
+                "ui.apply accepted=false paths={output_path_count} index={output_has_index} entries={output_entry_count}"
+            );
             return;
         }
 
@@ -707,11 +774,22 @@ impl ExplorerView {
         self.entries = output.entries;
         self.restore_selection_from_paths(&selected_paths);
         self.scroll_to_top();
+        #[cfg(debug_assertions)]
+        recursive_search_timing!(
+            generation,
+            apply_started.elapsed(),
+            "ui.apply accepted=true paths={output_path_count} index={output_has_index} entries={output_entry_count}"
+        );
     }
 
     fn cancel_recursive_search(&mut self) {
         if let Some(cancel) = self.search.recursive_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[recursive-search:{}] {:<10} schedule.cancel_requested cancelled=true",
+                self.search.recursive_generation, "-"
+            );
         }
         self.search.recursive_task = None;
         self.search.recursive_status = RecursiveSearchStatus::Idle;
