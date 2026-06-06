@@ -81,6 +81,26 @@ impl ExplorerTabs {
         }
     }
 
+    #[cfg(test)]
+    fn new_for_test(
+        initial_path: PathBuf,
+        focus_handle: FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let first_id = TabId(1);
+        let view =
+            cx.new(|_| ExplorerView::new_with_focus_handle_for_test(initial_path, focus_handle));
+
+        Self {
+            tabs: vec![ExplorerTab { id: first_id, view }],
+            active_tab: first_id,
+            next_tab_id: 2,
+            background_operation_tabs: Vec::new(),
+            dragging_tab: None,
+            tab_scroll_handle: ScrollHandle::new(),
+        }
+    }
+
     fn active_tab_index(&self) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.id == self.active_tab)
     }
@@ -585,6 +605,7 @@ impl Render for ExplorerTabs {
         self.cleanup_completed_background_operations(cx);
         let active_view = self.active_tab().map(|tab| tab.view.clone());
         let drop_exit_view = active_view.clone();
+        let input_mouse_down_view = active_view.clone();
         let active_drop_indicator = active_view
             .as_ref()
             .and_then(|view| view.read(cx).active_drop_indicator());
@@ -596,6 +617,15 @@ impl Render for ExplorerTabs {
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
             .on_action(cx.listener(Self::handle_select_tab_by_index))
+            .capture_any_mouse_down(move |event, window, cx| {
+                if event.button == MouseButton::Left
+                    && input_mouse_down_view
+                        .as_ref()
+                        .is_some_and(|view| view.read(cx).has_active_text_input())
+                {
+                    window.prevent_default();
+                }
+            })
             .on_file_drop(move |event, _, cx| {
                 if let FileDropEvent::Exited = event {
                     if let Some(active_view) = &drop_exit_view {
@@ -937,7 +967,259 @@ fn reorder_tab_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explorer::view::tab_label_for_path;
+    use crate::explorer::{
+        actions::RenameCommit,
+        test_support::{TempDir, selected_names},
+        view::tab_label_for_path,
+    };
+    use gpui::{AppContext, Modifiers, TestAppContext};
+    use std::fs;
+
+    fn test_tabs_with_two_files<'a>(
+        cx: &'a mut TestAppContext,
+    ) -> (
+        TempDir,
+        Entity<ExplorerTabs>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"a").expect("write first file");
+        fs::write(temp.path().join("b.txt"), b"b").expect("write second file");
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new_for_test(path, focus_handle, cx)
+        });
+        (temp, tabs, cx)
+    }
+
+    fn active_test_view(
+        tabs: &Entity<ExplorerTabs>,
+        cx: &gpui::VisualTestContext,
+    ) -> Entity<ExplorerView> {
+        cx.read_entity(tabs, |tabs, _| tabs.active_tab().unwrap().view.clone())
+    }
+
+    fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect("element bounds");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    fn click_second_entry(cx: &mut gpui::VisualTestContext) {
+        click_selector(cx, "explorer-entry-1");
+    }
+
+    #[gpui::test]
+    fn visual_test_click_selects_entry(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        click_second_entry(cx);
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn search_click_away_selects_entry_with_same_click(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_search_edit(window, cx));
+                view.set_search_query(".txt".to_owned());
+                cx.notify();
+            });
+        });
+
+        let bounds = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.search_is_editing());
+            assert_eq!(view.search_query(), ".txt");
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn address_click_away_selects_entry_with_same_click(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                cx.notify();
+            });
+        });
+
+        click_second_entry(cx);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.address_bar_is_editing());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn rename_click_away_selects_entry_with_same_click(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                view.active_rename.as_mut().unwrap().content = "c.txt".to_owned();
+                cx.notify();
+            });
+        });
+
+        click_second_entry(cx);
+
+        assert!(temp.path().join("c.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.has_active_text_input());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn conflicting_rename_click_away_cancels_and_selects_entry_with_same_click(
+        cx: &mut TestAppContext,
+    ) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                view.active_rename.as_mut().unwrap().content = "b.txt".to_owned();
+                cx.notify();
+            });
+        });
+
+        click_second_entry(cx);
+
+        assert!(temp.path().join("a.txt").exists());
+        assert!(temp.path().join("b.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.has_active_text_input());
+            assert!(view.open_error.is_none());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn invalid_rename_click_away_cancels_and_selects_entry_with_same_click(
+        cx: &mut TestAppContext,
+    ) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                let rename = view.active_rename.as_mut().unwrap();
+                rename.content.clear();
+                rename.selected_range = 0..0;
+                cx.notify();
+            });
+        });
+
+        click_second_entry(cx);
+
+        assert!(temp.path().join("a.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.has_active_text_input());
+            assert!(view.open_error.is_none());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_inside_search_keeps_it_active(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_search_edit(window, cx));
+                cx.notify();
+            });
+        });
+
+        click_selector(cx, "search-bar");
+
+        cx.read_entity(&view, |view, _| assert!(view.search_is_editing()));
+    }
+
+    #[gpui::test]
+    fn clicking_inside_address_keeps_it_active(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                cx.notify();
+            });
+        });
+
+        click_selector(cx, "directory-bar-input");
+
+        cx.read_entity(&view, |view, _| assert!(view.address_bar_is_editing()));
+    }
+
+    #[gpui::test]
+    fn clicking_inside_rename_keeps_it_active(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                cx.notify();
+            });
+        });
+
+        click_selector(cx, "rename-input");
+
+        cx.read_entity(&view, |view, _| assert!(view.active_rename.is_some()));
+    }
+
+    #[gpui::test]
+    fn invalid_rename_submitted_with_enter_stays_active_and_reports_error(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                let rename = view.active_rename.as_mut().unwrap();
+                rename.content.clear();
+                rename.selected_range = 0..0;
+                cx.notify();
+            });
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_rename_commit(&RenameCommit, window, cx);
+            });
+        });
+
+        assert!(temp.path().join("a.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.active_rename.is_some());
+            assert_eq!(
+                view.open_error.as_deref(),
+                Some("The file name cannot be empty.")
+            );
+        });
+    }
 
     #[test]
     fn tab_label_uses_last_path_component() {

@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Render, ScrollWheelEvent,
-    SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb, transparent_black,
-    uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb,
+    transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -50,7 +50,7 @@ use crate::explorer::{
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
-    rename::rename_text_element,
+    rename::{ActiveTextInput, rename_text_element},
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
     search::search_text_element,
     selection::SelectionModifiers,
@@ -171,6 +171,7 @@ impl ExplorerView {
 
         div()
             .id("search-bar")
+            .debug_selector(|| "search-bar".to_owned())
             .key_context("ExplorerSearchInput")
             .flex()
             .flex_row()
@@ -228,10 +229,18 @@ impl ExplorerView {
                 )
                 .on_mouse_up_out(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                        this.on_search_mouse_up(event);
-                        cx.stop_propagation();
-                        cx.notify();
+                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                        if this.active_text_input_is_selecting() {
+                            this.on_search_mouse_up(event);
+                            cx.stop_propagation();
+                            cx.notify();
+                        } else if this.finish_active_input_for_pointer_interaction(
+                            ActiveTextInput::Search,
+                            window,
+                            cx,
+                        ) {
+                            cx.notify();
+                        }
                     }),
                 )
             })
@@ -616,6 +625,29 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn address_suggestions_contain_position(
+        &self,
+        position: Point<Pixels>,
+        window: &Window,
+    ) -> bool {
+        let Some(address) = self.active_address_bar.as_ref() else {
+            return false;
+        };
+        if address.suggestions.is_empty() {
+            return false;
+        }
+
+        let left = NAVBAR_HORIZONTAL_PADDING + (NAV_BUTTON_SIZE * 4.0) + (NAVBAR_ITEM_GAP * 4.0);
+        let right = f32::from(window.bounds().size.width) - NAVBAR_HORIZONTAL_PADDING;
+        let top = ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT;
+        let bottom = top
+            + address.suggestions_viewport_height()
+            + (ADDRESS_SUGGESTIONS_VERTICAL_PADDING * 2.0);
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        x >= left && x <= right && y >= top && y <= bottom
+    }
+
     fn render_address_suggestions_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
 
@@ -919,6 +951,7 @@ impl ExplorerView {
 
         let mut row = div()
             .id(("explorer-entry", ix))
+            .debug_selector(move || format!("explorer-entry-{ix}"))
             .relative()
             .flex()
             .flex_row()
@@ -2265,6 +2298,7 @@ fn editable_directory_bar(
 
     div()
         .id("directory-bar-input")
+        .debug_selector(|| "directory-bar-input".to_owned())
         .key_context("ExplorerAddressInput")
         .flex()
         .flex_row()
@@ -2307,10 +2341,20 @@ fn editable_directory_bar(
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                this.on_address_mouse_up(event);
-                cx.stop_propagation();
-                cx.notify();
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                if this.active_text_input_is_selecting() {
+                    this.on_address_mouse_up(event);
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if this.address_suggestions_contain_position(event.position, window) {
+                    return;
+                } else if this.finish_active_input_for_pointer_interaction(
+                    ActiveTextInput::Address,
+                    window,
+                    cx,
+                ) {
+                    cx.notify();
+                }
             }),
         )
         .child(address_text_element(entity))
@@ -2573,6 +2617,7 @@ fn rename_name_cell(
 ) -> Div {
     let entity = cx.entity();
     let input = div()
+        .debug_selector(|| "rename-input".to_owned())
         .key_context("ExplorerRenameInput")
         .flex_1()
         .min_w(px(0.0))
@@ -2612,10 +2657,18 @@ fn rename_name_cell(
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                this.on_rename_mouse_up(event);
-                cx.stop_propagation();
-                cx.notify();
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                if this.active_text_input_is_selecting() {
+                    this.on_rename_mouse_up(event);
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if this.finish_active_input_for_pointer_interaction(
+                    ActiveTextInput::Rename,
+                    window,
+                    cx,
+                ) {
+                    cx.notify();
+                }
             }),
         )
         .child(rename_text_element(entity));

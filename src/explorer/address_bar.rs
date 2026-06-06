@@ -539,9 +539,8 @@ impl ExplorerView {
             folder_suggestions_for_input(&address.content, &self.path, self.show_hidden_files);
 
         focus_handle.focus(window);
-        let subscription = cx.on_focus_out(&focus_handle, window, |this, _, window, cx| {
+        let subscription = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
             this.cancel_address_bar_edit();
-            this.focus_explorer(window);
             cx.notify();
         });
         address.focus_out = Some(subscription);

@@ -114,6 +114,14 @@ impl ExplorerView {
         view
     }
 
+    #[cfg(test)]
+    pub(super) fn new_with_focus_handle_for_test(
+        initial_path: PathBuf,
+        focus_handle: FocusHandle,
+    ) -> Self {
+        Self::new_inner(initial_path, Some(focus_handle))
+    }
+
     fn new_inner(initial_path: PathBuf, focus_handle: Option<FocusHandle>) -> Self {
         let mut view = Self {
             path: initial_path,

@@ -7,7 +7,7 @@
 ~Windows~ Explorer for macOS, Linux, (and for some reason Windows) built with [GPUI](https://www.gpui.rs/).
 
 - [Features](#features-)
-- [Development](#development-)
+- [~Anti-Features~](#anti-features-that-will-not-be-implemented)
 - [Download](#download-)
 
 ## Features ⚡
@@ -18,13 +18,13 @@
 - [x] GPU acceleration (via [GPUI](https://www.gpui.rs/))
 - [ ] Archive support (compress/decompress)
 
-## Anti Features I will NOT implement
+## 'Anti-Features' that will NOT be implemented
 
-- [x] 3D Objects
-- [x] File grouping
-- [x] List, Titles, and Content file view modes
-- [x] Search that takes as long as a 'quick stop' at IKEA
-- [x] Context menus that take longer to open than a DMV line on a Monday
+- [x] 3D Objects _that gets used as much as a welcome mat at a house that never has visitors_
+- [x] File grouping _that randomly appears when you didn't set it_
+- [x] List, Titles, and Content file view modes _that are as pointless as a screen door on a submarine_
+- [x] Search _that takes as long as a cross-country flight_
+- [x] Context menus _that take longer to open than my wife does when deciding where to eat_
 
 ## Download 💾
 

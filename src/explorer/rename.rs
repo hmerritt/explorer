@@ -48,6 +48,13 @@ pub(super) struct PendingClickRename {
     pub(super) task: Task<()>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActiveTextInput {
+    Rename,
+    Address,
+    Search,
+}
+
 impl RenameState {
     fn new(
         entry: &FileEntry,
@@ -428,6 +435,55 @@ impl ExplorerView {
             .and_then(|rename| rename.focus_handle.clone())
     }
 
+    fn active_text_input(&self) -> Option<ActiveTextInput> {
+        if self.active_rename.is_some() {
+            Some(ActiveTextInput::Rename)
+        } else if self.active_address_bar.is_some() {
+            Some(ActiveTextInput::Address)
+        } else if self.search_is_editing() {
+            Some(ActiveTextInput::Search)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn has_active_text_input(&self) -> bool {
+        self.active_text_input().is_some()
+    }
+
+    pub(super) fn active_text_input_is_selecting(&self) -> bool {
+        self.active_rename
+            .as_ref()
+            .is_some_and(|rename| rename.is_selecting)
+            || self
+                .active_address_bar
+                .as_ref()
+                .is_some_and(|address| address.is_selecting)
+            || self.search_is_editing() && self.search.is_selecting
+    }
+
+    pub(super) fn finish_active_input_for_pointer_interaction(
+        &mut self,
+        input: ActiveTextInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active_text_input() != Some(input) || self.active_text_input_is_selecting() {
+            return false;
+        }
+
+        if input == ActiveTextInput::Rename {
+            self.finish_active_rename_on_focus_out(cx);
+        } else if input == ActiveTextInput::Address {
+            self.cancel_address_bar_edit();
+        } else {
+            self.finish_search_edit();
+        }
+
+        self.focus_explorer(window);
+        true
+    }
+
     pub(super) fn can_start_selected_rename(&self) -> bool {
         self.selection.selected_indices.len() == 1
     }
@@ -538,9 +594,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<crate::explorer::navigation::EntryAction> {
         if self.active_rename.is_some() && !self.rename_is_active_for_path(&entry.path) {
-            if !self.commit_active_rename(window, cx) {
-                return None;
-            }
+            self.finish_active_rename_on_focus_out(cx);
         }
 
         let ix = self.entry_index_by_path(&entry.path);
@@ -556,13 +610,14 @@ impl ExplorerView {
 
     pub(super) fn commit_active_rename_before_interaction(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         self.cancel_pending_click_rename();
 
         if self.active_rename.is_some() {
-            self.commit_active_rename(window, cx)
+            self.finish_active_rename_on_focus_out(cx);
+            true
         } else {
             true
         }
@@ -650,8 +705,8 @@ impl ExplorerView {
 
         if let Some(focus_handle) = focus_handle {
             focus_handle.focus(window);
-            let subscription = cx.on_focus_out(&focus_handle, window, |this, _, window, cx| {
-                this.commit_active_rename(window, cx);
+            let subscription = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+                this.finish_active_rename_on_focus_out(cx);
                 cx.notify();
             });
             self.rename_focus_out = Some(subscription);
@@ -677,6 +732,25 @@ impl ExplorerView {
         if !committed {
             self.refocus_rename_input(window);
             cx.notify();
+        }
+        committed
+    }
+
+    fn finish_active_rename_on_focus_out(&mut self, cx: &mut Context<Self>) {
+        let will_change_filesystem = self
+            .active_rename
+            .as_ref()
+            .is_some_and(|rename| rename.target_file_name() != rename.original_name);
+        let committed = self.apply_active_rename_commit_or_cancel();
+        if committed && will_change_filesystem {
+            self.emit_filesystem_changed(cx);
+        }
+    }
+
+    fn apply_active_rename_commit_or_cancel(&mut self) -> bool {
+        let committed = self.apply_active_rename_commit();
+        if !committed {
+            self.cancel_active_rename();
         }
         committed
     }
@@ -1640,5 +1714,79 @@ mod tests {
                 .as_ref()
                 .is_some_and(|error| error.contains("Could not rename"))
         );
+    }
+
+    #[test]
+    fn invalid_rename_submitted_explicitly_keeps_edit_active() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"data").expect("write file");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&temp.path().join("a.txt"));
+        assert!(view.start_test_rename_for_index(0));
+        view.active_rename.as_mut().unwrap().content.clear();
+
+        assert!(!view.apply_active_rename_commit());
+
+        assert!(temp.path().join("a.txt").exists());
+        assert!(view.active_rename.is_some());
+        assert_eq!(
+            view.open_error.as_deref(),
+            Some("The file name cannot be empty.")
+        );
+    }
+
+    #[test]
+    fn valid_rename_click_away_commits_and_allows_clicked_selection() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"data").expect("write source");
+        fs::write(temp.path().join("c.txt"), b"data").expect("write target selection");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&temp.path().join("a.txt"));
+        assert!(view.start_test_rename_for_index(0));
+        view.active_rename.as_mut().unwrap().content = "b.txt".to_owned();
+        let clicked_entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.path == temp.path().join("c.txt"))
+            .unwrap()
+            .clone();
+
+        assert!(view.apply_active_rename_commit_or_cancel());
+        view.handle_entry_click(&clicked_entry, 1, SelectionModifiers::default());
+
+        assert!(temp.path().join("b.txt").exists());
+        assert!(!temp.path().join("a.txt").exists());
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+        assert!(view.active_rename.is_none());
+    }
+
+    #[test]
+    fn failed_rename_click_away_cancels_and_allows_clicked_selection() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"data").expect("write source");
+        fs::write(temp.path().join("b.txt"), b"data").expect("write duplicate");
+        fs::write(temp.path().join("c.txt"), b"data").expect("write target selection");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&temp.path().join("a.txt"));
+        assert!(view.start_test_rename_for_index(0));
+        view.active_rename.as_mut().unwrap().content = "b.txt".to_owned();
+        let clicked_entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.path == temp.path().join("c.txt"))
+            .unwrap()
+            .clone();
+
+        assert!(!view.apply_active_rename_commit_or_cancel());
+        view.handle_entry_click(&clicked_entry, 1, SelectionModifiers::default());
+
+        assert!(temp.path().join("a.txt").exists());
+        assert!(temp.path().join("b.txt").exists());
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
+        assert!(view.active_rename.is_none());
+        assert!(view.open_error.is_none());
     }
 }
