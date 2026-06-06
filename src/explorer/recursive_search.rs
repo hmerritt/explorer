@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -26,12 +27,12 @@ use jwalk::WalkDir;
 
 use crate::explorer::{entry::FileEntry, filesystem::should_hide_entry};
 
-const CANCELLATION_CHECK_INTERVAL: usize = 1024;
+const CANCELLATION_CHECK_INTERVAL: usize = 5120;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RecursiveSearchPath {
     path: PathBuf,
-    normalized_name: String,
+    file_name: String,
 }
 
 #[derive(Clone)]
@@ -87,7 +88,7 @@ pub(super) fn recursive_search_entries(
     let result_paths = if cancel.load(Ordering::Relaxed) {
         Vec::new()
     } else {
-        filter_recursive_paths(&scanned_paths, &query, &cancel)
+        filter_recursive_paths(&scanned_paths, &query, &cancel, show_hidden_files)
     };
     #[cfg(debug_assertions)]
     recursive_search_timing!(
@@ -145,35 +146,25 @@ pub(super) fn scan_recursive_paths(
     let process_cancel = cancel.clone();
     let walker = WalkDir::new(root)
         .sort(false)
-        .skip_hidden(false)
+        .skip_hidden(!show_hidden_files)
         .follow_links(false)
         .min_depth(1)
-        .process_read_dir(move |_, _, _, children| {
-            if process_cancel.load(Ordering::Relaxed) {
+        .process_read_dir(move |_, path, _, children| {
+            let should_hide_this_dir = !show_hidden_files
+                && should_hide_entry(path.file_name().unwrap(), path, show_hidden_files);
+
+            if process_cancel.load(Ordering::Relaxed) || should_hide_this_dir {
                 children.clear();
                 return;
             }
-
-            children.retain(|child| match child {
-                Ok(entry) => {
-                    !should_hide_entry(entry.file_name(), &entry.path(), show_hidden_files)
-                }
-                Err(_) => true,
-            });
         });
 
     let mut paths = Vec::new();
     for entry_result in walker {
         if let Ok(entry) = entry_result {
             let path = entry.path();
-            let normalized_name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            paths.push(RecursiveSearchPath {
-                path,
-                normalized_name,
-            });
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            paths.push(RecursiveSearchPath { path, file_name });
         }
     }
 
@@ -188,6 +179,7 @@ fn filter_recursive_paths(
     paths: &[RecursiveSearchPath],
     query: &str,
     cancel: &AtomicBool,
+    show_hidden_files: bool,
 ) -> Vec<PathBuf> {
     if paths.is_empty() || query.trim().is_empty() {
         return Vec::new();
@@ -199,7 +191,16 @@ fn filter_recursive_paths(
         if index % CANCELLATION_CHECK_INTERVAL == 0 && cancel.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        if path.normalized_name.contains(&query) {
+        let normalized_name = path.file_name.to_lowercase();
+        if normalized_name.contains(&query)
+            && !should_hide_entry(OsStr::new(&path.file_name), &path.path, show_hidden_files)
+        {
+            eprintln!(
+                "should_hide_entry [{}]: {}: {}",
+                show_hidden_files,
+                path.file_name,
+                path.path.display(),
+            );
             matches.push(path.path.clone());
         }
     }
