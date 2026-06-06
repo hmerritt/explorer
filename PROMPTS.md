@@ -1,6 +1,6 @@
 ## New
 
-Recursive file search is currently extreamly slow. Identify which parts are taking the longest per search.
+Recursive file search results streaming
 
 ## Specific / for-later
 

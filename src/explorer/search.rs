@@ -668,12 +668,9 @@ impl ExplorerView {
         recursive_search_timing!(
             generation,
             cache_clone_started.elapsed(),
-            "schedule.cache_clone cache_hit={} paths={} index={}",
+            "schedule.cache_clone cache_hit={} paths={}",
             cached_search.is_some(),
-            cached_search.as_ref().map_or(0, |cache| cache.paths.len()),
-            cached_search
-                .as_ref()
-                .is_some_and(|cache| cache.index.is_some())
+            cached_search.as_ref().map_or(0, |cache| cache.paths.len())
         );
         let cancel = Arc::new(AtomicBool::new(false));
         self.search.recursive_cancel = Some(cancel.clone());
@@ -698,8 +695,6 @@ impl ExplorerView {
                 return;
             }
 
-            #[cfg(debug_assertions)]
-            let background_started = Instant::now();
             let output = cx
                 .background_executor()
                 .spawn({
@@ -716,47 +711,22 @@ impl ExplorerView {
                     }
                 })
                 .await;
-            #[cfg(debug_assertions)]
-            recursive_search_timing!(
-                generation,
-                background_started.elapsed(),
-                "schedule.background"
-            );
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.apply_recursive_search_output(output);
                 cx.notify();
             });
-            #[cfg(debug_assertions)]
-            recursive_search_timing!(generation, schedule_started.elapsed(), "schedule.total");
         });
         self.search.recursive_task = Some(task);
     }
 
     fn apply_recursive_search_output(&mut self, output: RecursiveSearchOutput) {
-        #[cfg(debug_assertions)]
-        let apply_started = Instant::now();
-        #[cfg(debug_assertions)]
-        let generation = output.generation;
-        #[cfg(debug_assertions)]
-        let output_path_count = output.scanned_paths.len();
-        #[cfg(debug_assertions)]
-        let output_entry_count = output.entries.len();
-        #[cfg(debug_assertions)]
-        let output_has_index = output.index.is_some();
-
         if !self.search.recursive_enabled
             || self.search.recursive_generation != output.generation
             || self.path != output.root
             || self.search.content != output.query
             || self.show_hidden_files != output.show_hidden_files
         {
-            #[cfg(debug_assertions)]
-            recursive_search_timing!(
-                generation,
-                apply_started.elapsed(),
-                "ui.apply accepted=false paths={output_path_count} index={output_has_index} entries={output_entry_count}"
-            );
             return;
         }
 
@@ -769,17 +739,10 @@ impl ExplorerView {
             root: output.root,
             show_hidden_files: output.show_hidden_files,
             paths: output.scanned_paths,
-            index: output.index,
         });
         self.entries = output.entries;
         self.restore_selection_from_paths(&selected_paths);
         self.scroll_to_top();
-        #[cfg(debug_assertions)]
-        recursive_search_timing!(
-            generation,
-            apply_started.elapsed(),
-            "ui.apply accepted=true paths={output_path_count} index={output_has_index} entries={output_entry_count}"
-        );
     }
 
     fn cancel_recursive_search(&mut self) {
@@ -1101,8 +1064,7 @@ mod tests {
             root: view.path.clone(),
             query: "stale".to_owned(),
             show_hidden_files: view.show_hidden_files,
-            scanned_paths: vec![PathBuf::from("stale.txt")],
-            index: None,
+            scanned_paths: Arc::from([]),
             entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
         });
 
