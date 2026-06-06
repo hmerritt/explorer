@@ -1,5 +1,7 @@
 ## New
 
+Recursive file search is currently extreamly slow. Identify which parts are taking the longest per search.
+
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.

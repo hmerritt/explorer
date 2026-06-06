@@ -292,7 +292,9 @@ fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
 }
 
 fn is_hidden_directory_entry(entry: &fs::DirEntry) -> bool {
-    entry.file_name().to_string_lossy().starts_with('.') || has_macos_hidden_flag(&entry.path())
+    entry.file_name().to_string_lossy().starts_with('.')
+        || has_macos_hidden_flag(&entry.path())
+        || has_windows_hidden_attribute(&entry.path())
 }
 
 #[cfg(target_os = "macos")]
@@ -306,6 +308,20 @@ fn has_macos_hidden_flag(path: &Path) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn has_macos_hidden_flag(_: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn has_windows_hidden_attribute(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_windows_hidden_attribute(_: &Path) -> bool {
     false
 }
 
@@ -1199,6 +1215,26 @@ fn path_display_name(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
+    #[cfg(target_os = "windows")]
+    use windows::{
+        Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            SetFileAttributesW,
+        },
+        core::PCWSTR,
+    };
+
+    #[cfg(target_os = "windows")]
+    fn set_windows_file_attributes(path: &Path, attributes: FILE_FLAGS_AND_ATTRIBUTES) {
+        use std::os::windows::ffi::OsStrExt;
+
+        let mut wide_path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide_path.push(0);
+        unsafe {
+            SetFileAttributesW(PCWSTR(wide_path.as_ptr()), attributes)
+                .expect("set windows file attributes");
+        }
+    }
 
     #[test]
     fn default_start_path_prefers_existing_downloads_directory() {
@@ -1315,6 +1351,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["visible.txt"]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn load_entries_omits_windows_hidden_attribute_entries_when_show_hidden_files_is_false() {
+        let temp = TempDir::new();
+        let hidden = temp.path().join("hidden.txt");
+        fs::write(&hidden, b"hidden").expect("create hidden file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+        set_windows_file_attributes(&hidden, FILE_ATTRIBUTE_HIDDEN);
+
+        let hidden_off = load_entries(temp.path(), false).expect("load entries");
+        let hidden_on = load_entries(temp.path(), true).expect("load entries");
+
+        assert_eq!(
+            hidden_off
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible.txt"]
+        );
+        assert_eq!(
+            hidden_on
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hidden.txt", "visible.txt"]
+        );
+
+        set_windows_file_attributes(&hidden, FILE_ATTRIBUTE_NORMAL);
     }
 
     #[test]

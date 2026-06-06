@@ -299,6 +299,38 @@ mod tests {
     }
 
     #[test]
+    fn recursive_scan_does_not_recurse_into_hidden_directories_when_hidden_files_are_off() {
+        let temp = TempDir::new();
+        let hidden = temp.path().join(".hidden-dir");
+        fs::create_dir(&hidden).expect("create hidden directory");
+        fs::write(hidden.join("nested.txt"), b"nested").expect("create nested file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
+
+        let cancel = AtomicBool::new(false);
+        let paths = scan_recursive_paths(temp.path(), false, &cancel);
+
+        assert_eq!(path_names(&paths), vec!["visible.txt"]);
+    }
+
+    #[test]
+    fn recursive_scan_includes_hidden_directories_when_hidden_files_are_on() {
+        let temp = TempDir::new();
+        let hidden = temp.path().join(".hidden-dir");
+        fs::create_dir(&hidden).expect("create hidden directory");
+        fs::write(hidden.join("nested.txt"), b"nested").expect("create nested file");
+        fs::write(hidden.join(".DS_Store"), b"metadata").expect("create nested metadata");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
+
+        let cancel = AtomicBool::new(false);
+        let paths = scan_recursive_paths(temp.path(), true, &cancel);
+
+        assert_eq!(
+            path_names(&paths),
+            vec![".hidden-dir", "nested.txt", "visible.txt"]
+        );
+    }
+
+    #[test]
     fn fallback_matches_basename_only() {
         let paths = vec![
             PathBuf::from("reports").join("image.png"),
