@@ -44,6 +44,7 @@ impl ExplorerView {
         if path == self.path {
             self.reload();
             if let Some(cx) = cx.as_deref_mut() {
+                self.refresh_search_after_external_change(cx);
                 self.restart_directory_watcher(cx);
             }
             return;

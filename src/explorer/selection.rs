@@ -5,7 +5,8 @@ use std::{
 
 use gpui::{Modifiers, ScrollStrategy};
 
-use crate::explorer::{constants::ROW_HEIGHT, entry::FileEntry, view::ExplorerView};
+use crate::explorer::entry::FileEntry;
+use crate::explorer::view::ExplorerView;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SelectionState {
@@ -212,8 +213,9 @@ impl ExplorerView {
     }
 
     pub(super) fn scroll_index_into_view(&self, ix: usize) {
-        let row_top = ix as f32 * ROW_HEIGHT;
-        let row_bottom = row_top + ROW_HEIGHT;
+        let row_height = self.entry_row_height();
+        let row_top = ix as f32 * row_height;
+        let row_bottom = row_top + row_height;
 
         if let Some(metrics) = self.scrollbar_metrics() {
             let viewport_bottom = metrics.scroll_top + metrics.viewport_height;

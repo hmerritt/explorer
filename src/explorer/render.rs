@@ -26,16 +26,17 @@ use crate::explorer::{
         HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE,
         NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT,
         NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING,
-        OPEN_ERROR_VERTICAL_PADDING, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
-        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
-        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
-        SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
-        SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT,
-        SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
-        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
-        UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
-        UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
-        UTILITY_MENU_WIDTH, effective_name_column_width,
+        OPEN_ERROR_VERTICAL_PADDING, RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT,
+        SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
+        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
+        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG, SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH,
+        SEARCH_NO_MATCHES_MESSAGE, SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING,
+        SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
+        STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
+        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT,
+        UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT,
+        UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
+        effective_name_column_width,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -98,8 +99,19 @@ const UTILITY_NEW_ICON_BLUE: u32 = 0x0078d4;
 const UTILITY_NEW_ICON_BLACK: u32 = 0x555555;
 const UTILITY_VIEW_ICON_LINE_COLOR: u32 = 0x555555;
 const UTILITY_VIEW_ICON_LINE_TOPS: [f32; 4] = [3.5, 6.5, 9.5, 12.5];
+const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
+const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
+const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
 
 impl ExplorerView {
+    pub(super) fn entry_row_height(&self) -> f32 {
+        if self.recursive_search_results_active() {
+            RECURSIVE_SEARCH_ROW_HEIGHT
+        } else {
+            ROW_HEIGHT
+        }
+    }
+
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let breadcrumb = visible_breadcrumb_for_path(
             &self.path,
@@ -149,6 +161,7 @@ impl ExplorerView {
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.reload();
+                    this.refresh_search_after_external_change(cx);
                     cx.notify();
                 }),
             ))
@@ -254,6 +267,16 @@ impl ExplorerView {
                         this.truncate().child(SharedString::from(text))
                     }),
             )
+            .child(search_bar_icon_button(
+                "recursive-search-toggle",
+                RECURSIVE_SEARCH_ICON,
+                self.recursive_search_is_enabled(),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_recursive_search(cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
             .child(
                 div()
                     .flex_shrink_0()
@@ -429,7 +452,9 @@ impl ExplorerView {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
                             this.show_hidden_files = !this.show_hidden_files;
+                            this.invalidate_recursive_search_cache();
                             this.reload();
+                            this.refresh_search_after_external_change(cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -956,7 +981,7 @@ impl ExplorerView {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(ROW_HEIGHT))
+            .h(px(self.entry_row_height()))
             .w_full()
             .bg(if is_selected {
                 rgb(0xcce8ff)
@@ -1193,6 +1218,7 @@ impl ExplorerView {
                 app_icon,
                 scale_factor,
                 self.show_file_name_extensions,
+                self.recursive_search_results_active(),
                 window,
             )
             .id(("explorer-entry-name", ix))
@@ -1571,6 +1597,40 @@ impl ExplorerView {
     }
 }
 
+fn search_bar_icon_button(
+    id: &'static str,
+    icon: &'static str,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .w(px(22.0))
+        .h(px(22.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .when(active, |this| this.bg(rgb(0xe5f3ff)))
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(on_click)
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(px(13.0))
+                .text_color(rgb(if active { 0x0078d7 } else { 0x5f5f5f }))
+                .child(icon),
+        )
+        .into_any_element()
+}
+
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale_factor = window.scale_factor();
@@ -1740,6 +1800,9 @@ impl Render for ExplorerView {
                                     ),
                                     ExplorerContentBranch::Empty => div()
                                         .child(self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx)),
+                                    ExplorerContentBranch::SearchWorking => div().child(
+                                        self.render_empty_folder(SEARCH_WORKING_MESSAGE, cx),
+                                    ),
                                     ExplorerContentBranch::NoSearchMatches => div().child(
                                         self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
                                     ),
@@ -2577,17 +2640,21 @@ fn name_cell(
     app_icon: Option<Arc<Image>>,
     scale_factor: f32,
     show_file_name_extensions: bool,
+    show_full_path: bool,
     window: &Window,
 ) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
-    let text_width = available_filename_text_width(list_viewport_width, scale_factor);
+    let text_width = if show_full_path {
+        recursive_result_text_width(list_viewport_width, scale_factor)
+    } else {
+        available_filename_text_width(list_viewport_width, scale_factor)
+    };
     let filename = truncated_text(
         entry.display_name_with_extensions(show_file_name_extensions),
         text_width,
         0x000000,
         window,
     );
-
     div()
         .flex()
         .items_center()
@@ -2597,15 +2664,48 @@ fn name_cell(
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING))
         .child(entry_icon(entry, app_icon, scale_factor))
-        .child(
+        .child(if show_full_path {
+            let full_path = truncated_text_with_size(
+                &entry.path.display().to_string(),
+                text_width,
+                RECURSIVE_SEARCH_PATH_TEXT_SIZE,
+                RECURSIVE_SEARCH_PATH_TEXT_COLOR,
+                window,
+            );
+
+            div()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .flex_1()
+                .min_w(px(0.0))
+                .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+                .text_size(px(NAME_TEXT_SIZE))
+                .child(
+                    div()
+                        .w(px(text_width))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(filename),
+                )
+                .child(
+                    div()
+                        .w(px(text_width))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(RECURSIVE_SEARCH_PATH_TEXT_SIZE))
+                        .text_color(rgb(RECURSIVE_SEARCH_PATH_TEXT_COLOR))
+                        .child(full_path),
+                )
+        } else {
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
                 .truncate()
                 .text_size(px(NAME_TEXT_SIZE))
-                .child(filename),
-        )
+                .child(filename)
+        })
 }
 
 fn rename_name_cell(
@@ -2715,9 +2815,23 @@ fn available_filename_text_width(viewport_width: f32, scale_factor: f32) -> f32 
     filename_text_width(effective_name_column_width(viewport_width), scale_factor)
 }
 
+fn recursive_result_text_width(viewport_width: f32, scale_factor: f32) -> f32 {
+    available_filename_text_width(viewport_width, scale_factor)
+}
+
 fn truncated_text(
     text: &str,
     available_width: f32,
+    text_color: u32,
+    window: &Window,
+) -> SharedString {
+    truncated_text_with_size(text, available_width, NAME_TEXT_SIZE, text_color, window)
+}
+
+fn truncated_text_with_size(
+    text: &str,
+    available_width: f32,
+    text_size: f32,
     text_color: u32,
     window: &Window,
 ) -> SharedString {
@@ -2733,7 +2847,7 @@ fn truncated_text(
 
     window
         .text_system()
-        .line_wrapper(name_font, px(NAME_TEXT_SIZE))
+        .line_wrapper(name_font, px(text_size))
         .truncate_line(
             SharedString::from(text.to_owned()),
             px(available_width),
@@ -2888,7 +3002,7 @@ mod tests {
         UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
         available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
         filename_text_width, folder_status_summary, is_normal_entry_click,
-        selection_modifiers_for_click, text_cell_width,
+        recursive_result_text_width, selection_modifiers_for_click, text_cell_width,
     };
 
     #[test]
@@ -2965,6 +3079,19 @@ mod tests {
                 - FILE_ICON_SLOT_WIDTH_PHYSICAL
                 - NAME_ICON_TEXT_GAP_PHYSICAL
         );
+    }
+
+    #[test]
+    fn recursive_result_text_width_matches_name_text_width() {
+        for viewport_width in [100.0, 900.0] {
+            let recursive_width = recursive_result_text_width(viewport_width, 1.0);
+
+            assert_eq!(
+                recursive_width,
+                available_filename_text_width(viewport_width, 1.0)
+            );
+            assert!(recursive_width > 0.0);
+        }
     }
 
     #[test]

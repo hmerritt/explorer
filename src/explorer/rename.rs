@@ -935,7 +935,7 @@ impl EntityInputHandler for ExplorerView {
             return;
         }
         if self.search_is_editing() {
-            self.replace_search_text_in_range(range_utf16, text);
+            self.replace_search_text_in_range(range_utf16, text, cx);
             cx.notify();
             return;
         }
@@ -968,6 +968,7 @@ impl EntityInputHandler for ExplorerView {
                 range_utf16,
                 new_text,
                 new_selected_range_utf16,
+                cx,
             );
             cx.notify();
             return;

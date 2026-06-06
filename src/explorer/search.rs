@@ -1,11 +1,19 @@
-use std::ops::{Deref, DerefMut, Range};
+use std::{
+    ops::{Deref, DerefMut, Range},
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use globset::{GlobBuilder, GlobMatcher};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, GlobalElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, ShapedLine, Style, Subscription, TextRun, UTF16Selection,
-    Window, fill, point, px, relative, rgb, size,
+    MouseUpEvent, PaintQuad, Pixels, ShapedLine, Style, Subscription, Task, TextRun,
+    UTF16Selection, Window, fill, point, px, relative, rgb, size,
 };
 
 use crate::explorer::{
@@ -16,6 +24,7 @@ use crate::explorer::{
         SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight,
     },
     entry::FileEntry,
+    recursive_search::{RecursiveSearchCache, RecursiveSearchOutput, recursive_search_entries},
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
         scroll_offset_for_cursor,
@@ -27,6 +36,20 @@ pub(super) struct SearchState {
     text: EditableTextState,
     pub(super) focus_handle: Option<FocusHandle>,
     pub(super) focus_out: Option<Subscription>,
+    pub(super) recursive_enabled: bool,
+    pub(super) recursive_generation: u64,
+    pub(super) recursive_status: RecursiveSearchStatus,
+    pub(super) recursive_results_active: bool,
+    pub(super) recursive_cache: Option<RecursiveSearchCache>,
+    pub(super) recursive_cancel: Option<Arc<AtomicBool>>,
+    pub(super) recursive_task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum RecursiveSearchStatus {
+    #[default]
+    Idle,
+    Searching,
 }
 
 impl Default for SearchState {
@@ -35,6 +58,13 @@ impl Default for SearchState {
             text: EditableTextState::with_selection(String::new(), 0..0),
             focus_handle: None,
             focus_out: None,
+            recursive_enabled: false,
+            recursive_generation: 0,
+            recursive_status: RecursiveSearchStatus::Idle,
+            recursive_results_active: false,
+            recursive_cache: None,
+            recursive_cancel: None,
+            recursive_task: None,
         }
     }
 }
@@ -106,6 +136,18 @@ impl ExplorerView {
         !self.search.content.is_empty()
     }
 
+    pub(super) fn recursive_search_is_enabled(&self) -> bool {
+        self.search.recursive_enabled
+    }
+
+    pub(super) fn recursive_search_is_working(&self) -> bool {
+        self.search.recursive_status == RecursiveSearchStatus::Searching
+    }
+
+    pub(super) fn recursive_search_results_active(&self) -> bool {
+        self.search.recursive_results_active
+    }
+
     pub(super) fn search_is_editing(&self) -> bool {
         self.search.focus_handle.is_some()
     }
@@ -131,6 +173,7 @@ impl ExplorerView {
         self.search.selected_range = end..end;
         self.search.selection_reversed = false;
         self.search.marked_range = None;
+        self.cancel_recursive_search();
         self.apply_search_filter_preserving_selection(&selected_paths);
         self.scroll_to_top();
     }
@@ -143,8 +186,27 @@ impl ExplorerView {
         &mut self,
         selected_paths: &[std::path::PathBuf],
     ) {
+        self.search.recursive_results_active = false;
         self.entries = filtered_entries(&self.all_entries, &self.search.content);
         self.restore_selection_from_paths(selected_paths);
+    }
+
+    pub(super) fn invalidate_recursive_search_cache(&mut self) {
+        self.search.recursive_cache = None;
+        self.cancel_recursive_search();
+    }
+
+    pub(super) fn toggle_recursive_search(&mut self, cx: &mut Context<Self>) {
+        let selected_paths = self.selected_paths();
+        self.search.recursive_enabled = !self.search.recursive_enabled;
+        self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
+        self.search.recursive_cache = None;
+        self.refresh_search_filter_with_selection(&selected_paths, cx);
+    }
+
+    pub(super) fn refresh_search_after_external_change(&mut self, cx: &mut Context<Self>) {
+        let selected_paths = self.selected_paths();
+        self.refresh_search_filter_with_selection(&selected_paths, cx);
     }
 
     pub(super) fn start_search_edit(
@@ -232,7 +294,7 @@ impl ExplorerView {
             let offset = self.search.previous_boundary(self.search.cursor_offset());
             self.search.select_to(offset);
         }
-        self.replace_search_text(None, "");
+        self.replace_search_text(None, "", cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -244,7 +306,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.search.delete_previous_word_or_selection();
-        self.refresh_search_filter();
+        self.refresh_search_filter(cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -259,7 +321,7 @@ impl ExplorerView {
             let offset = self.search.next_boundary(self.search.cursor_offset());
             self.search.select_to(offset);
         }
-        self.replace_search_text(None, "");
+        self.replace_search_text(None, "", cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -450,7 +512,7 @@ impl ExplorerView {
     ) {
         if let Some(text) = self.search.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.replace_search_text(None, "");
+            self.replace_search_text(None, "", cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -463,7 +525,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_search_text(None, &text.replace(['\r', '\n'], " "));
+            self.replace_search_text(None, &text.replace(['\r', '\n'], " "), cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -516,10 +578,11 @@ impl ExplorerView {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
+        cx: &mut Context<Self>,
     ) {
         self.search
             .replace_text_in_range_utf16(range_utf16, &text.replace(['\r', '\n'], " "));
-        self.refresh_search_filter();
+        self.refresh_search_filter(cx);
     }
 
     pub(super) fn replace_and_mark_search_text_in_range(
@@ -527,24 +590,131 @@ impl ExplorerView {
         range_utf16: Option<Range<usize>>,
         text: &str,
         selected_range_utf16: Option<Range<usize>>,
+        cx: &mut Context<Self>,
     ) {
         self.search.replace_and_mark_text_in_range_utf16(
             range_utf16,
             &text.replace(['\r', '\n'], " "),
             selected_range_utf16,
         );
-        self.refresh_search_filter();
+        self.refresh_search_filter(cx);
     }
 
-    fn replace_search_text(&mut self, range: Option<Range<usize>>, text: &str) {
+    fn replace_search_text(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.search.replace_text(range, text);
-        self.refresh_search_filter();
+        self.refresh_search_filter(cx);
     }
 
-    fn refresh_search_filter(&mut self) {
+    fn refresh_search_filter(&mut self, cx: &mut Context<Self>) {
         let selected_paths = self.selected_paths();
-        self.apply_search_filter_preserving_selection(&selected_paths);
+        self.refresh_search_filter_with_selection(&selected_paths, cx);
         self.scroll_to_top();
+    }
+
+    fn refresh_search_filter_with_selection(
+        &mut self,
+        selected_paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        if self.search.recursive_enabled && self.search_is_active() {
+            self.schedule_recursive_search(cx);
+        } else {
+            self.cancel_recursive_search();
+            self.apply_search_filter_preserving_selection(selected_paths);
+        }
+    }
+
+    fn schedule_recursive_search(&mut self, cx: &mut Context<Self>) {
+        self.cancel_recursive_search();
+        self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
+        self.search.recursive_status = RecursiveSearchStatus::Searching;
+        self.search.recursive_results_active = true;
+        self.entries.clear();
+        self.clear_selection();
+
+        let generation = self.search.recursive_generation;
+        let root = self.path.clone();
+        let query = self.search.content.clone();
+        let show_hidden_files = self.show_hidden_files;
+        let cached_paths = self
+            .search
+            .recursive_cache
+            .as_ref()
+            .filter(|cache| cache.root == root && cache.show_hidden_files == show_hidden_files)
+            .map(|cache| cache.paths.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search.recursive_cancel = Some(cancel.clone());
+
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let output = cx
+                .background_executor()
+                .spawn({
+                    let cancel = cancel.clone();
+                    async move {
+                        recursive_search_entries(
+                            generation,
+                            root,
+                            query,
+                            show_hidden_files,
+                            cached_paths,
+                            cancel,
+                        )
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.apply_recursive_search_output(output);
+                cx.notify();
+            });
+        });
+        self.search.recursive_task = Some(task);
+    }
+
+    fn apply_recursive_search_output(&mut self, output: RecursiveSearchOutput) {
+        if !self.search.recursive_enabled
+            || self.search.recursive_generation != output.generation
+            || self.path != output.root
+            || self.search.content != output.query
+            || self.show_hidden_files != output.show_hidden_files
+        {
+            return;
+        }
+
+        let selected_paths = self.selected_paths();
+        self.search.recursive_status = RecursiveSearchStatus::Idle;
+        self.search.recursive_cancel = None;
+        self.search.recursive_task = None;
+        self.search.recursive_results_active = true;
+        self.search.recursive_cache = Some(RecursiveSearchCache {
+            root: output.root,
+            show_hidden_files: output.show_hidden_files,
+            paths: output.scanned_paths,
+        });
+        self.entries = output.entries;
+        self.restore_selection_from_paths(&selected_paths);
+        self.scroll_to_top();
+    }
+
+    fn cancel_recursive_search(&mut self) {
+        if let Some(cancel) = self.search.recursive_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.search.recursive_task = None;
+        self.search.recursive_status = RecursiveSearchStatus::Idle;
+        self.search.recursive_results_active = false;
     }
 }
 
@@ -826,5 +996,41 @@ mod tests {
         view.navigate_to_directory(child, HistoryMode::Record);
         assert_eq!(view.search_query(), "");
         assert_eq!(names(&view.entries), vec!["b.png"]);
+    }
+
+    #[test]
+    fn empty_recursive_query_shows_current_folder_entries() {
+        let mut view = test_view_with_entries(&["a.txt", "b.png"]);
+        view.search.recursive_enabled = true;
+
+        view.set_search_query(String::new());
+
+        assert_eq!(names(&view.entries), vec!["a.txt", "b.png"]);
+        assert!(!view.recursive_search_results_active());
+    }
+
+    #[test]
+    fn stale_recursive_search_output_is_ignored() {
+        let mut view = test_view_with_entries(&["current.txt"]);
+        view.search.recursive_enabled = true;
+        view.search.recursive_generation = 2;
+        view.search.recursive_status = RecursiveSearchStatus::Searching;
+        view.search.content = "stale".to_owned();
+
+        view.apply_recursive_search_output(RecursiveSearchOutput {
+            generation: 1,
+            root: view.path.clone(),
+            query: "stale".to_owned(),
+            show_hidden_files: view.show_hidden_files,
+            scanned_paths: vec![PathBuf::from("stale.txt")],
+            entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
+        });
+
+        assert_eq!(names(&view.entries), vec!["current.txt"]);
+        assert_eq!(
+            view.search.recursive_status,
+            RecursiveSearchStatus::Searching
+        );
+        assert!(view.search.recursive_cache.is_none());
     }
 }

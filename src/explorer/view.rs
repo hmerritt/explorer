@@ -88,6 +88,7 @@ pub(super) struct PendingTrash {
 pub(super) enum ExplorerContentBranch {
     Error,
     Empty,
+    SearchWorking,
     NoSearchMatches,
     List,
 }
@@ -247,6 +248,8 @@ impl ExplorerView {
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {
         if self.read_error.is_some() {
             ExplorerContentBranch::Error
+        } else if self.recursive_search_is_working() {
+            ExplorerContentBranch::SearchWorking
         } else if self.should_show_empty_folder_message() {
             ExplorerContentBranch::Empty
         } else if self.entries.is_empty() && self.search_is_active() {

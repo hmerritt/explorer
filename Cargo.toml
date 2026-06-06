@@ -20,8 +20,10 @@ gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "w
 globset = "0.4.18"
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 notify = "8.2.0"
+seekstorm = { version = "3.2.1", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "time"] }
 trash = "5.2.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]

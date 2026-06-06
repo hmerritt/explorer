@@ -248,6 +248,7 @@ impl ExplorerView {
 
     pub(super) fn handle_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
         self.reload();
+        self.refresh_search_after_external_change(cx);
         cx.notify();
     }
 

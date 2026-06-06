@@ -5,7 +5,7 @@ use gpui::{
 
 use crate::explorer::{
     constants::{
-        ROW_HEIGHT, SCROLLBAR_ARROW_COLOR, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_ARROW_HOVER_BG,
+        SCROLLBAR_ARROW_COLOR, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_ARROW_HOVER_BG,
         SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_MIN_THUMB_HEIGHT, SCROLLBAR_THUMB_ACTIVE_BG,
         SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
         SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
@@ -131,9 +131,9 @@ impl ExplorerView {
 
     pub(super) fn handle_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
         if local_y < SCROLLBAR_ARROW_HEIGHT {
-            self.set_scroll_offset(metrics.scroll_by(-ROW_HEIGHT));
+            self.set_scroll_offset(metrics.scroll_by(-self.entry_row_height()));
         } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
-            self.set_scroll_offset(metrics.scroll_by(ROW_HEIGHT));
+            self.set_scroll_offset(metrics.scroll_by(self.entry_row_height()));
         } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
             self.scrollbar_drag = Some(ScrollbarDrag {
                 pointer_offset_from_thumb_top: local_y - metrics.thumb_top,

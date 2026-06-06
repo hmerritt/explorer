@@ -14,6 +14,7 @@ mod formatting;
 mod icons;
 mod mouse_selection;
 mod navigation;
+mod recursive_search;
 mod rename;
 mod render;
 mod scrollbar;

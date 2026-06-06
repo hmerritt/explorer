@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use gpui::{Bounds, Pixels, Point, px, size};
 
 use crate::explorer::{
-    constants::{ROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, effective_name_column_width},
+    constants::{SCROLLBAR_GUTTER_WIDTH, effective_name_column_width},
     selection::SelectionModifiers,
     view::ExplorerView,
 };
@@ -66,13 +66,14 @@ impl ExplorerView {
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
-        pointer_drag_intent_at(
+        pointer_drag_intent_at_with_row_height(
             f32::from(local_position.x),
             f32::from(local_position.y),
             scroll_top,
             f32::from(viewport_size.width),
             self.entries.len(),
             &self.selection.selected_indices,
+            self.entry_row_height(),
         )
     }
 
@@ -176,7 +177,11 @@ impl ExplorerView {
         let viewport_width = f32::from(viewport_size.width);
         let selection_box =
             content_selection_box_for_drag(drag).clipped_horizontally(viewport_width);
-        let box_indices = row_indices_intersecting_content_box(selection_box, self.entries.len());
+        let box_indices = row_indices_intersecting_content_box_with_row_height(
+            selection_box,
+            self.entries.len(),
+            self.entry_row_height(),
+        );
 
         let selected_indices = if drag.modifiers.toggle {
             toggle_indices(drag.initial_selection.clone(), &box_indices)
@@ -192,9 +197,9 @@ impl ExplorerView {
         };
 
         let scroll_top = if local_y < DRAG_AUTOSCROLL_MARGIN {
-            metrics.scroll_by(-ROW_HEIGHT)
+            metrics.scroll_by(-self.entry_row_height())
         } else if local_y > viewport_height - DRAG_AUTOSCROLL_MARGIN {
-            metrics.scroll_by(ROW_HEIGHT)
+            metrics.scroll_by(self.entry_row_height())
         } else {
             return metrics.scroll_top;
         };
@@ -240,23 +245,36 @@ pub(super) fn visible_selection_box_for_drag(
     content_selection_box_for_drag(drag).translated_y(-scroll_top)
 }
 
+#[cfg(test)]
 pub(super) fn row_indices_intersecting_content_box(
     selection_box: SelectionBox,
     entry_count: usize,
+) -> BTreeSet<usize> {
+    row_indices_intersecting_content_box_with_row_height(
+        selection_box,
+        entry_count,
+        crate::explorer::constants::ROW_HEIGHT,
+    )
+}
+
+pub(super) fn row_indices_intersecting_content_box_with_row_height(
+    selection_box: SelectionBox,
+    entry_count: usize,
+    row_height: f32,
 ) -> BTreeSet<usize> {
     if selection_box.is_empty() || entry_count == 0 {
         return BTreeSet::new();
     }
 
-    let first = (selection_box.top / ROW_HEIGHT).floor().max(0.0) as usize;
-    let last = ((selection_box.bottom() / ROW_HEIGHT).ceil() as usize)
+    let first = (selection_box.top / row_height).floor().max(0.0) as usize;
+    let last = ((selection_box.bottom() / row_height).ceil() as usize)
         .saturating_sub(1)
         .min(entry_count - 1);
 
     (first..=last)
         .filter(|ix| {
-            let row_top = *ix as f32 * ROW_HEIGHT;
-            let row_bottom = row_top + ROW_HEIGHT;
+            let row_top = *ix as f32 * row_height;
+            let row_bottom = row_top + row_height;
             row_top < selection_box.bottom() && row_bottom > selection_box.top
         })
         .collect()
@@ -271,6 +289,7 @@ pub(super) fn row_indices_intersecting_box(
     row_indices_intersecting_content_box(selection_box.translated_y(scroll_top), entry_count)
 }
 
+#[cfg(test)]
 pub(super) fn pointer_drag_intent_at(
     local_x: f32,
     local_y: f32,
@@ -279,11 +298,31 @@ pub(super) fn pointer_drag_intent_at(
     entry_count: usize,
     selected_indices: &BTreeSet<usize>,
 ) -> Option<PointerDragIntent> {
+    pointer_drag_intent_at_with_row_height(
+        local_x,
+        local_y,
+        scroll_top,
+        viewport_width,
+        entry_count,
+        selected_indices,
+        crate::explorer::constants::ROW_HEIGHT,
+    )
+}
+
+pub(super) fn pointer_drag_intent_at_with_row_height(
+    local_x: f32,
+    local_y: f32,
+    scroll_top: f32,
+    viewport_width: f32,
+    entry_count: usize,
+    selected_indices: &BTreeSet<usize>,
+    row_height: f32,
+) -> Option<PointerDragIntent> {
     if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
         return None;
     }
 
-    let Some(ix) = row_index_at_content_y(local_y + scroll_top, entry_count) else {
+    let Some(ix) = row_index_at_content_y(local_y + scroll_top, entry_count, row_height) else {
         return Some(PointerDragIntent::RubberBand);
     };
 
@@ -322,12 +361,12 @@ fn drag_distance(start: Point<Pixels>, current: Point<Pixels>) -> f32 {
     dx.abs().max(dy.abs())
 }
 
-fn row_index_at_content_y(content_y: f32, entry_count: usize) -> Option<usize> {
+fn row_index_at_content_y(content_y: f32, entry_count: usize, row_height: f32) -> Option<usize> {
     if content_y < 0.0 || entry_count == 0 {
         return None;
     }
 
-    let ix = (content_y / ROW_HEIGHT).floor() as usize;
+    let ix = (content_y / row_height).floor() as usize;
     (ix < entry_count).then_some(ix)
 }
 
@@ -341,6 +380,7 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::constants::ROW_HEIGHT;
     use crate::explorer::test_support::{selected_names, test_view_with_entries};
 
     #[test]
