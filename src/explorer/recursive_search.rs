@@ -195,12 +195,6 @@ fn filter_recursive_paths(
         if normalized_name.contains(&query)
             && !should_hide_entry(OsStr::new(&path.file_name), &path.path, show_hidden_files)
         {
-            eprintln!(
-                "should_hide_entry [{}]: {}: {}",
-                show_hidden_files,
-                path.file_name,
-                path.path.display(),
-            );
             matches.push(path.path.clone());
         }
     }
@@ -222,10 +216,7 @@ mod tests {
         paths
             .into_iter()
             .map(|path| RecursiveSearchPath {
-                normalized_name: path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_lowercase())
-                    .unwrap_or_default(),
+                file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
                 path,
             })
             .collect::<Vec<_>>()
@@ -302,7 +293,7 @@ mod tests {
 
         assert_eq!(
             path_names(&paths),
-            vec![".hidden-dir", "nested.txt", "visible.txt"]
+            vec![".DS_Store", ".hidden-dir", "nested.txt", "visible.txt"]
         );
     }
 
@@ -326,7 +317,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "report", &cancel),
+            filter_recursive_paths(&paths, "report", &cancel, true),
             vec![PathBuf::from("other").join("report.txt")]
         );
     }
@@ -340,7 +331,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "REPORT", &cancel),
+            filter_recursive_paths(&paths, "REPORT", &cancel, true),
             vec![PathBuf::from("other").join("Annual Report.txt")]
         );
     }
@@ -355,7 +346,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "[1]", &cancel),
+            filter_recursive_paths(&paths, "[1]", &cancel, true),
             vec![PathBuf::from("file[1].txt")]
         );
     }
@@ -373,7 +364,10 @@ mod tests {
         ]);
         let cancel = AtomicBool::new(false);
 
-        assert_eq!(filter_recursive_paths(&paths, "report", &cancel), expected);
+        assert_eq!(
+            filter_recursive_paths(&paths, "report", &cancel, true),
+            expected
+        );
     }
 
     #[test]
@@ -381,7 +375,7 @@ mod tests {
         let paths = recursive_paths(vec![PathBuf::from("report.txt")]);
         let cancel = AtomicBool::new(true);
 
-        assert!(filter_recursive_paths(&paths, "report", &cancel).is_empty());
+        assert!(filter_recursive_paths(&paths, "report", &cancel, true).is_empty());
     }
 
     #[test]
