@@ -283,18 +283,21 @@ fn should_skip_directory_entry(entry: &fs::DirEntry, options: EntryLoadOptions) 
 }
 
 pub(super) fn should_hide_directory_entry(entry: &fs::DirEntry, show_hidden_files: bool) -> bool {
-    is_always_hidden_metadata_entry_name(&entry.file_name())
-        || !show_hidden_files && is_hidden_directory_entry(entry)
+    should_hide_entry(&entry.file_name(), &entry.path(), show_hidden_files)
+}
+
+pub(super) fn should_hide_entry(name: &OsStr, path: &Path, show_hidden_files: bool) -> bool {
+    is_always_hidden_metadata_entry_name(name) || !show_hidden_files && is_hidden_entry(name, path)
 }
 
 fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
     name == OsStr::new(".localized") || name == OsStr::new(".DS_Store")
 }
 
-fn is_hidden_directory_entry(entry: &fs::DirEntry) -> bool {
-    entry.file_name().to_string_lossy().starts_with('.')
-        || has_macos_hidden_flag(&entry.path())
-        || has_windows_hidden_attribute(&entry.path())
+fn is_hidden_entry(name: &OsStr, path: &Path) -> bool {
+    name.to_string_lossy().starts_with('.')
+        || has_macos_hidden_flag(path)
+        || has_windows_hidden_attribute(path)
 }
 
 #[cfg(target_os = "macos")]

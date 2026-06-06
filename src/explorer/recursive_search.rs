@@ -8,6 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use jwalk::WalkDir;
 use seekstorm::{
     INDEX_RUNTIME,
     commit::Commit,
@@ -20,7 +21,7 @@ use seekstorm::{
 };
 use serde_json::Value;
 
-use crate::explorer::{entry::FileEntry, filesystem::should_hide_directory_entry};
+use crate::explorer::entry::FileEntry;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RecursiveSearchCache {
@@ -49,7 +50,7 @@ pub(super) fn recursive_search_entries(
 ) -> RecursiveSearchOutput {
     let scanned_paths = match cached_paths {
         Some(paths) => paths,
-        None => scan_recursive_paths(&root, show_hidden_files, &cancel),
+        None => scan_recursive_paths(&root, show_hidden_files, cancel.clone()),
     };
 
     let result_paths = if cancel.load(Ordering::Relaxed) {
@@ -77,50 +78,37 @@ pub(super) fn recursive_search_entries(
 pub(super) fn scan_recursive_paths(
     root: &Path,
     show_hidden_files: bool,
-    cancel: &AtomicBool,
+    cancel: Arc<AtomicBool>,
 ) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    collect_recursive_paths(root, show_hidden_files, cancel, &mut paths);
-    paths
-}
-
-fn collect_recursive_paths(
-    directory: &Path,
-    show_hidden_files: bool,
-    cancel: &AtomicBool,
-    paths: &mut Vec<PathBuf>,
-) {
     if cancel.load(Ordering::Relaxed) {
-        return;
+        return Vec::new();
     }
 
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
+    let process_cancel = cancel.clone();
+    let walker = WalkDir::new(root)
+        .sort(false)
+        .skip_hidden(!show_hidden_files)
+        .follow_links(false)
+        .min_depth(1)
+        .process_read_dir(move |_, _, _, children| {
+            if process_cancel.load(Ordering::Relaxed) {
+                children.clear();
+                return;
+            }
+        });
 
-    for entry in entries {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-
-        if should_hide_directory_entry(&entry, show_hidden_files) {
-            continue;
-        }
-
-        let path = entry.path();
-        let should_recurse = entry
-            .file_type()
-            .is_ok_and(|file_type| file_type.is_dir() && !file_type.is_symlink())
-            && !is_filesystem_directory_link(&path);
-
-        paths.push(path.clone());
-
-        if should_recurse {
-            collect_recursive_paths(&path, show_hidden_files, cancel, paths);
+    let mut paths = Vec::new();
+    for entry_result in walker {
+        if let Ok(entry) = entry_result {
+            paths.push(entry.path());
         }
     }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+
+    paths
 }
 
 #[cfg(target_os = "windows")]
@@ -260,7 +248,7 @@ mod tests {
     use crate::explorer::test_support::TempDir;
 
     fn path_names(paths: &[PathBuf]) -> Vec<String> {
-        paths
+        let mut names = paths
             .iter()
             .map(|path| {
                 path.file_name()
@@ -268,7 +256,9 @@ mod tests {
                     .to_string_lossy()
                     .into_owned()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     #[test]
@@ -279,8 +269,8 @@ mod tests {
         fs::write(temp.path().join("root.txt"), b"root").expect("create root file");
         fs::write(child.join("nested.txt"), b"nested").expect("create nested file");
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), true, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(path_names(&paths), vec!["child", "nested.txt", "root.txt"]);
     }
@@ -292,8 +282,8 @@ mod tests {
         fs::write(temp.path().join(".DS_Store"), b"metadata").expect("create metadata");
         fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), false, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), false, cancel);
 
         assert_eq!(path_names(&paths), vec!["visible.txt"]);
     }
@@ -306,8 +296,8 @@ mod tests {
         fs::write(hidden.join("nested.txt"), b"nested").expect("create nested file");
         fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), false, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), false, cancel);
 
         assert_eq!(path_names(&paths), vec!["visible.txt"]);
     }
@@ -321,13 +311,24 @@ mod tests {
         fs::write(hidden.join(".DS_Store"), b"metadata").expect("create nested metadata");
         fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), true, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(
             path_names(&paths),
             vec![".hidden-dir", "nested.txt", "visible.txt"]
         );
+    }
+
+    #[test]
+    fn recursive_scan_honors_existing_cancellation() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible");
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let paths = scan_recursive_paths(temp.path(), true, cancel);
+
+        assert!(paths.is_empty());
     }
 
     #[test]
@@ -393,10 +394,10 @@ mod tests {
         fs::write(real.join("nested.txt"), b"nested").expect("create nested file");
         symlink(&real, &link).expect("create symlink");
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), true, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), true, cancel);
 
-        assert_eq!(path_names(&paths), vec!["link", "real", "nested.txt"]);
+        assert_eq!(path_names(&paths), vec!["link", "nested.txt", "real"]);
     }
 
     #[cfg(windows)]
@@ -416,9 +417,9 @@ mod tests {
             Err(error) => panic!("create symlink: {error}"),
         }
 
-        let cancel = AtomicBool::new(false);
-        let paths = scan_recursive_paths(temp.path(), true, &cancel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paths = scan_recursive_paths(temp.path(), true, cancel);
 
-        assert_eq!(path_names(&paths), vec!["link", "real", "nested.txt"]);
+        assert_eq!(path_names(&paths), vec!["link", "nested.txt", "real"]);
     }
 }
