@@ -3208,7 +3208,8 @@ fn folder_status_summary(
 
 fn count_label(count: usize, singular: &str, plural: &str) -> String {
     let name = if count == 1 { singular } else { plural };
-    format!("{count} {name}")
+    let count_friendly = count.separate_with_commas();
+    format!("{count_friendly} {name}")
 }
 
 #[cfg(test)]

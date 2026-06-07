@@ -2,7 +2,6 @@
 
 ## Specific / for-later
 
-- Recursive search loader UI / live feedback (scanning <live count of files scanned>, searching)
 - Alt-double-click opens a "Details" window, for both files/folders.
 - Left side-bar drag re-sizable
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?

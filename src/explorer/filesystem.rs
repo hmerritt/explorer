@@ -11,6 +11,7 @@ use std::{
 };
 
 use filetime::FileTime;
+use thousands::Separable;
 
 use crate::explorer::{entry::FileEntry, sorting::sort_entries};
 
@@ -514,10 +515,11 @@ impl FileConflictBatch {
 
     pub(super) fn item_count_label(&self) -> String {
         let count = self.job.roots.len();
+        let count_friendly = count.separate_with_commas();
         if count == 1 {
             "1 item".to_owned()
         } else {
-            format!("{count} items")
+            format!("{count_friendly} items")
         }
     }
 
