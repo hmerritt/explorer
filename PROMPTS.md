@@ -28,7 +28,6 @@
 
 - Context menu
 - File icons
-- File search, plus recursive search
 - Large icons grid view (alternate to the current Details view)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
 - ssh drive support
@@ -74,9 +73,6 @@ Best for sync/update scenarios, not ordinary Explorer copy.
 
 Major remaining Windows Explorer parity areas:
 
-1. **Recursive Search**
-   Recursive folder search, filters (file type), or search result view.
-
 2. **View modes and folder presentation**
    The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
 
@@ -93,7 +89,7 @@ Major remaining Windows Explorer parity areas:
    Current copy/move/delete is strong, but Explorer has much more: undo/redo for file operations, “keep both” conflict handling, per-file conflict choices, richer copy collision naming, pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, shortcut creation via Alt-drag, and more exact same-volume/network behavior.
 
 7. **Keyboard and mouse completeness**
-   Implemented keys cover common navigation and rename, but Explorer has a large set left: type-to-select, incremental search, Ctrl+L/F4 address focus, Ctrl+F search, Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window, Alt+D, Ctrl+Shift+number view modes, and detailed click timing/focus edge cases.
+   Implemented keys cover common navigation and rename, but Explorer has a large set left: Ctrl+L/F4 address focus, Ctrl+F search, Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window, Alt+D, Ctrl+Shift+number view modes, and detailed click timing/focus edge cases.
 
 8. **Shell integration and platform associations**
    Opening files uses the default app, but there is no full file association management, “Open with” picker, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.

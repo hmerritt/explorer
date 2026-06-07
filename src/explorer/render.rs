@@ -1646,6 +1646,7 @@ impl Render for ExplorerView {
         div()
             .key_context("Explorer")
             .track_focus(&focus_handle)
+            .on_key_down(cx.listener(Self::handle_type_to_search))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
             .on_action(cx.listener(Self::handle_extend_up))

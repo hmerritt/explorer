@@ -985,7 +985,7 @@ fn reorder_tab_ids(
 mod tests {
     use super::*;
     use crate::explorer::{
-        actions::RenameCommit,
+        actions::{RenameCommit, SearchCommit},
         test_support::{TempDir, selected_names},
         view::tab_label_for_path,
     };
@@ -1080,6 +1080,86 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn unmodified_typing_starts_search_and_enters_text_once(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.simulate_input("b");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert_eq!(view.search_query(), "b");
+            assert_eq!(view.entries.len(), 1);
+            assert_eq!(view.entries[0].name, "b.txt");
+        });
+
+        cx.simulate_input("a");
+
+        cx.read_entity(&view, |view, _| assert_eq!(view.search_query(), "ba"));
+    }
+
+    #[gpui::test]
+    fn type_to_search_replaces_an_inactive_query(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.simulate_input("a");
+        cx.dispatch_action(SearchCommit);
+        cx.simulate_input("b");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert_eq!(view.search_query(), "b");
+        });
+    }
+
+    #[gpui::test]
+    fn modified_and_non_printable_keys_do_not_start_search(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.simulate_keystrokes("shift-z ctrl-z alt-z win-z fn-z left");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.search_is_editing());
+            assert_eq!(view.search_query(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn active_address_and_rename_inputs_are_not_hijacked_by_typing(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                cx.notify();
+            });
+        });
+        cx.simulate_input("z");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.address_bar_is_editing());
+            assert_eq!(view.search_query(), "");
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.cancel_address_bar_edit();
+                view.focus_explorer(window);
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                cx.notify();
+            });
+        });
+        cx.simulate_input("z");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.has_active_text_input());
+            assert_eq!(view.search_query(), "");
         });
     }
 

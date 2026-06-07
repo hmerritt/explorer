@@ -26,9 +26,9 @@ macro_rules! recursive_search_timing {
 use globset::{GlobBuilder, GlobMatcher};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
-    FocusHandle, GlobalElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, ShapedLine, Style, Subscription, Task, TextRun,
-    UTF16Selection, Window, fill, point, px, relative, rgb, size,
+    FocusHandle, GlobalElementId, IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ShapedLine, Style, Subscription, Task,
+    TextRun, UTF16Selection, Window, fill, point, px, relative, rgb, size,
 };
 
 use crate::explorer::{
@@ -143,6 +143,29 @@ pub(super) fn filtered_entries(entries: &[FileEntry], query: &str) -> Vec<FileEn
 }
 
 impl ExplorerView {
+    pub(super) fn handle_type_to_search(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_active_text_input() || event.keystroke.modifiers != Modifiers::none() {
+            return;
+        }
+
+        let Some(text) = event.keystroke.key_char.as_deref().filter(|text| {
+            !text.is_empty() && text.chars().all(|character| !character.is_control())
+        }) else {
+            return;
+        };
+
+        if self.start_search_edit(window, cx) {
+            self.replace_search_text(None, text, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
     pub(super) fn search_query(&self) -> &str {
         &self.search.content
     }
