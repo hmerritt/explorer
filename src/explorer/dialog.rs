@@ -649,16 +649,11 @@ impl ExplorerDialog {
             .as_ref()
             .map(|progress| progress.kind.progress_title())
             .unwrap_or("Working");
-        let current_item = progress
-            .as_ref()
-            .and_then(|progress| progress.current_item.as_deref())
-            .map(path_display_name)
-            .unwrap_or_else(|| "Preparing...".to_owned());
+        let current_item = file_operation_current_item_label(progress.as_ref());
         let item_label = progress
             .as_ref()
             .map(file_operation_item_label)
             .unwrap_or_else(|| "Preparing".to_owned());
-        let percent = progress.as_ref().and_then(FileOperationProgress::percent);
         let cancellable = progress
             .as_ref()
             .is_none_or(|progress| progress.cancellable);
@@ -679,7 +674,7 @@ impl ExplorerDialog {
                     .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
                     .child(SharedString::from(current_item)),
             )
-            .child(render_file_operation_progress_bar(percent))
+            .child(render_file_operation_progress_bar(progress.as_ref()))
             .child(
                 div()
                     .mt(px(PROGRESS_DIALOG_STATUS_TOP_MARGIN))
@@ -1043,7 +1038,13 @@ fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
         .into_any_element()
 }
 
-fn render_file_operation_progress_bar(percent: Option<f32>) -> AnyElement {
+fn render_file_operation_progress_bar(progress: Option<&FileOperationProgress>) -> AnyElement {
+    let percent = progress.and_then(|progress| {
+        (progress.phase != FileOperationPhase::Extracting)
+            .then(|| progress.percent())
+            .flatten()
+    });
+
     let Some(percent) = percent else {
         return div()
             .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
@@ -1072,6 +1073,21 @@ fn render_file_operation_progress_bar(percent: Option<f32>) -> AnyElement {
                 .bg(rgb(SHELL_DIALOG_LINK_BLUE)),
         )
         .into_any_element()
+}
+
+fn file_operation_current_item_label(progress: Option<&FileOperationProgress>) -> String {
+    let Some(progress) = progress else {
+        return "Preparing...".to_owned();
+    };
+    let Some(current_item) = progress.current_item.as_deref() else {
+        return "Preparing...".to_owned();
+    };
+
+    if progress.phase == FileOperationPhase::Extracting {
+        current_item.display().to_string()
+    } else {
+        path_display_name(current_item)
+    }
 }
 
 fn file_operation_item_label(progress: &FileOperationProgress) -> String {

@@ -451,11 +451,10 @@ impl ExplorerView {
                 }),
             ))
             .when(can_extract, |this| {
-                this.child(utility_separator()).child(utility_text_button(
+                this.child(utility_separator()).child(utility_action_button(
                     "utility-extract",
                     Some(utility_text_icon(UTILITY_ICON_EXTRACT).into_any_element()),
                     "Extract",
-                    false,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
@@ -2274,6 +2273,26 @@ fn utility_text_button(
     is_open: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    utility_text_button_base(id, left_icon, label, is_open, true, on_click)
+}
+
+fn utility_action_button(
+    id: &'static str,
+    left_icon: Option<AnyElement>,
+    label: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    utility_text_button_base(id, left_icon, label, false, false, on_click)
+}
+
+fn utility_text_button_base(
+    id: &'static str,
+    left_icon: Option<AnyElement>,
+    label: &'static str,
+    is_open: bool,
+    show_chevron: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
         .id(id)
         .flex()
@@ -2300,14 +2319,16 @@ fn utility_text_button(
                 .text_color(rgb(0x1f1f1f))
                 .child(label),
         )
-        .child(
-            div()
-                .font(nav_icon_font())
-                .text_size(px(7.0))
-                .mt(px(2.0))
-                .text_color(rgb(0x505050))
-                .child(UTILITY_ICON_CHEVRON_DOWN),
-        )
+        .when(show_chevron, |this| {
+            this.child(
+                div()
+                    .font(nav_icon_font())
+                    .text_size(px(7.0))
+                    .mt(px(2.0))
+                    .text_color(rgb(0x505050))
+                    .child(UTILITY_ICON_CHEVRON_DOWN),
+            )
+        })
         .into_any_element()
 }
 

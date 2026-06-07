@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
@@ -682,6 +682,13 @@ struct FileOperationRoot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ArchiveExtractEntry {
+    display_path: PathBuf,
+    destination: PathBuf,
+    conflict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum FileOperationStep {
     CreateDirectory(PathBuf),
     CopyFile {
@@ -697,7 +704,7 @@ enum FileOperationStep {
     ExtractArchive {
         archive: PathBuf,
         destination: PathBuf,
-        conflicts: Vec<PathBuf>,
+        entries: Vec<ArchiveExtractEntry>,
     },
     RemoveEmptyDirectory(PathBuf),
 }
@@ -928,7 +935,8 @@ fn prepare_extract_archive_operation(
             ));
         }
 
-        let top_level_entries = archive_top_level_entries(archive)?;
+        let listing = archive_listing(archive)?;
+        let top_level_entries = top_level_entries_from_listing(&listing.entries);
         if top_level_entries.is_empty() {
             return Err(format!(
                 "{} does not contain any files.",
@@ -938,28 +946,25 @@ fn prepare_extract_archive_operation(
 
         let extract_to = archive_extract_destination(archive, destination, &top_level_entries)?;
         let output_roots = archive_output_roots(&extract_to, &top_level_entries);
-        let planned_outputs = archive_planned_output_paths(archive, &extract_to)?;
-        let mut conflicts = Vec::new();
+        let mut entries = planned_extract_entries_from_listing(&listing.entries, &extract_to);
 
-        for output in &planned_outputs {
-            if !reserved_destinations.insert(output.clone()) {
+        for entry in &mut entries {
+            if !reserved_destinations.insert(entry.destination.clone()) {
                 return Err(format!(
                     "Multiple selected archives contain {}.",
-                    path_display_name(output)
+                    path_display_name(&entry.destination)
                 ));
             }
-            if output.exists() {
-                conflicts.push(output.clone());
-            }
+            entry.conflict = entry.destination.exists();
         }
 
         steps.push(FileOperationStep::ExtractArchive {
             archive: archive.clone(),
             destination: extract_to,
-            conflicts,
+            entries: entries.clone(),
         });
 
-        stats.total_files = stats.total_files.saturating_add(1);
+        stats.total_files = stats.total_files.saturating_add(entries.len().max(1));
         stats.total_bytes = stats.total_bytes.saturating_add(
             fs::metadata(archive)
                 .map(|metadata| metadata.len())
@@ -1001,13 +1006,13 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 destination: destination.clone(),
             }),
             FileOperationStep::ExtractArchive {
-                archive,
-                conflicts: archive_conflicts,
-                ..
+                archive, entries, ..
             } => {
-                file_conflicts.extend(archive_conflicts.iter().map(|destination| FileConflict {
-                    source: archive.clone(),
-                    destination: destination.clone(),
+                file_conflicts.extend(entries.iter().filter_map(|entry| {
+                    entry.conflict.then(|| FileConflict {
+                        source: archive.clone(),
+                        destination: entry.destination.clone(),
+                    })
                 }));
             }
             _ => {}
@@ -1119,22 +1124,14 @@ pub(super) fn execute_file_operation_with_progress(
             FileOperationStep::ExtractArchive {
                 archive,
                 destination,
-                conflicts,
+                entries,
             } => {
-                if conflict_choice == ConflictChoice::Skip
-                    && archive_is_single_file_compression(archive)
-                    && !conflicts.is_empty()
-                {
-                    continue;
-                }
-
                 progress.phase = FileOperationPhase::Extracting;
-                progress.current_item = Some(archive.clone());
                 on_progress(progress.clone());
-                extract_archive_with_progress_filter(
+                extract_archive_with_entry_progress(
                     archive,
                     destination,
-                    conflicts,
+                    entries,
                     conflict_choice,
                     &mut progress,
                     &mut on_progress,
@@ -1180,19 +1177,90 @@ pub(super) fn execute_file_operation_with_progress(
     Ok(summary)
 }
 
-fn extract_archive_with_progress_filter(
+fn extract_archive_with_entry_progress(
     archive: &Path,
     destination: &Path,
-    conflicts: &[PathBuf],
+    entries: &[ArchiveExtractEntry],
     conflict_choice: ConflictChoice,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
-    let conflict_paths = conflicts.iter().cloned().collect::<HashSet<_>>();
+    if archive_is_ar(archive) {
+        extract_ar_archive_with_entry_progress(
+            archive,
+            destination,
+            entries,
+            conflict_choice,
+            progress,
+            on_progress,
+        )?;
+    } else if archive_supports_filtered_extract(archive)
+        || archive_is_single_file_compression(archive)
+    {
+        for entry in entries {
+            progress.current_item = Some(entry.display_path.clone());
+            on_progress(progress.clone());
+
+            if entry.conflict && conflict_choice == ConflictChoice::Skip {
+                progress.completed_files = progress.completed_files.saturating_add(1);
+                on_progress(progress.clone());
+                continue;
+            }
+
+            extract_archive_entry_with_filter(archive, destination, &entry.destination)?;
+            progress.completed_files = progress.completed_files.saturating_add(1);
+            on_progress(progress.clone());
+        }
+    } else {
+        if let Some(entry) = entries.first() {
+            progress.current_item = Some(entry.display_path.clone());
+            on_progress(progress.clone());
+        }
+
+        let conflict_paths = entries
+            .iter()
+            .filter(|entry| entry.conflict)
+            .map(|entry| entry.destination.clone())
+            .collect::<HashSet<_>>();
+        let opts = decompress::ExtractOptsBuilder::default()
+            .filter(move |path| {
+                conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path)
+            })
+            .build()
+            .map_err(|error| {
+                FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
+            })?;
+
+        decompress::decompress(archive, destination, &opts).map_err(|error| {
+            FileOperationError::Failed(format_path_error(
+                "extract",
+                archive,
+                io::Error::other(error.to_string()),
+            ))
+        })?;
+
+        progress.completed_files = progress
+            .completed_files
+            .saturating_add(entries.len().max(1));
+        on_progress(progress.clone());
+    }
+
+    progress.copied_bytes = progress.copied_bytes.saturating_add(
+        fs::metadata(archive)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+    );
+    Ok(())
+}
+
+fn extract_archive_entry_with_filter(
+    archive: &Path,
+    destination: &Path,
+    output_path: &Path,
+) -> Result<(), FileOperationError> {
+    let output_path = output_path.to_path_buf();
     let opts = decompress::ExtractOptsBuilder::default()
-        .filter(move |path| {
-            conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path)
-        })
+        .filter(move |path| path == output_path)
         .build()
         .map_err(|error| {
             FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
@@ -1202,40 +1270,63 @@ fn extract_archive_with_progress_filter(
         FileOperationError::Failed(format_path_error(
             "extract",
             archive,
-            std::io::Error::other(error.to_string()),
+            io::Error::other(error.to_string()),
         ))
     })?;
 
-    progress.copied_bytes = progress.copied_bytes.saturating_add(
-        fs::metadata(archive)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0),
-    );
-    progress.completed_files = progress.completed_files.saturating_add(1);
-    on_progress(progress.clone());
     Ok(())
 }
 
-fn archive_top_level_entries(archive: &Path) -> Result<Vec<PathBuf>, String> {
-    let opts = default_extract_opts()?;
-    let listing = decompress::list(archive, &opts)
-        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))?;
+fn extract_ar_archive_with_entry_progress(
+    archive: &Path,
+    _destination: &Path,
+    entries: &[ArchiveExtractEntry],
+    conflict_choice: ConflictChoice,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let file = File::open(archive).map_err(|error| operation_error("read", archive, error))?;
+    let mut reader = ar::Archive::new(file);
 
-    Ok(top_level_entries_from_listing(&listing.entries))
+    while let Some(entry) = reader.next_entry() {
+        let mut archive_entry =
+            entry.map_err(|error| operation_error("extract", archive, error))?;
+        let entry_name = String::from_utf8_lossy(archive_entry.header().identifier());
+        let display_path = sanitized_archive_entry_path(Path::new(entry_name.as_ref()));
+        let Some(planned_entry) = entries
+            .iter()
+            .find(|entry| entry.display_path == display_path)
+        else {
+            continue;
+        };
+
+        progress.current_item = Some(planned_entry.display_path.clone());
+        on_progress(progress.clone());
+
+        if planned_entry.conflict && conflict_choice == ConflictChoice::Skip {
+            progress.completed_files = progress.completed_files.saturating_add(1);
+            on_progress(progress.clone());
+            continue;
+        }
+
+        if let Some(parent) = planned_entry.destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| operation_error("create", parent, error))?;
+        }
+        let mut output = File::create(&planned_entry.destination)
+            .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
+        io::copy(&mut archive_entry, &mut output)
+            .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
+        progress.completed_files = progress.completed_files.saturating_add(1);
+        on_progress(progress.clone());
+    }
+
+    Ok(())
 }
 
-fn archive_planned_output_paths(
-    archive: &Path,
-    destination: &Path,
-) -> Result<Vec<PathBuf>, String> {
+fn archive_listing(archive: &Path) -> Result<decompress::Listing, String> {
     let opts = default_extract_opts()?;
-    let listing = decompress::list(archive, &opts)
-        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))?;
-
-    Ok(planned_output_paths_from_listing(
-        &listing.entries,
-        destination,
-    ))
+    decompress::list(archive, &opts)
+        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))
 }
 
 fn default_extract_opts() -> Result<decompress::ExtractOpts, String> {
@@ -1259,8 +1350,19 @@ fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
     top_level_entries
 }
 
+#[cfg(test)]
 fn planned_output_paths_from_listing(entries: &[String], destination: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    planned_extract_entries_from_listing(entries, destination)
+        .into_iter()
+        .map(|entry| entry.destination)
+        .collect()
+}
+
+fn planned_extract_entries_from_listing(
+    entries: &[String],
+    destination: &Path,
+) -> Vec<ArchiveExtractEntry> {
+    let mut planned_entries = Vec::new();
     let mut seen = HashSet::new();
     for entry in entries {
         let relative = sanitized_archive_entry_path(Path::new(entry));
@@ -1269,10 +1371,14 @@ fn planned_output_paths_from_listing(entries: &[String], destination: &Path) -> 
         }
         let output = destination.join(relative);
         if seen.insert(output.clone()) {
-            paths.push(output);
+            planned_entries.push(ArchiveExtractEntry {
+                display_path: sanitized_archive_entry_path(Path::new(entry)),
+                destination: output,
+                conflict: false,
+            });
         }
     }
-    paths
+    planned_entries
 }
 
 fn archive_extract_destination(
@@ -1348,6 +1454,30 @@ fn archive_is_single_file_compression(path: &Path) -> bool {
                         .iter()
                         .any(|compound| lower.ends_with(&format!(".{compound}")))
             })
+        })
+        .unwrap_or(false)
+}
+
+fn archive_supports_filtered_extract(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            [
+                "zip", "tar", "tar.gz", "tgz", "tar.bz2", "tbz", "tar.xz", "txz", "tar.zst", "tzst",
+            ]
+            .iter()
+            .any(|extension| lower.ends_with(&format!(".{extension}")))
+        })
+        .unwrap_or(false)
+}
+
+fn archive_is_ar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".ar") && name.len() > ".ar".len()
         })
         .unwrap_or(false)
 }

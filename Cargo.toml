@@ -17,6 +17,7 @@ identifier = "com.hmerritt.explorer"
 icon = ["assets/explorer.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+ar = "0.9.0"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
 decompress = "0.6.0"
 filetime = "0.2.29"

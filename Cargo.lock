@@ -1847,6 +1847,7 @@ dependencies = [
 name = "explorer"
 version = "0.9.0"
 dependencies = [
+ "ar",
  "chrono",
  "cocoa 0.26.0",
  "criterion",
