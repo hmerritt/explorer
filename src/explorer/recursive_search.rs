@@ -41,12 +41,20 @@ pub(super) struct RecursiveSearchProgress {
     scanned_paths: AtomicUsize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RecursiveSearchProgressSnapshot {
+    Scanning(usize),
+    Searching(Option<usize>),
+}
+
 impl RecursiveSearchProgress {
-    pub(super) fn scanning_count(&self) -> Option<usize> {
-        self.scanning
-            .load(Ordering::Relaxed)
-            .then(|| self.scanned_paths.load(Ordering::Relaxed))
-            .filter(|count| *count > 0)
+    pub(super) fn snapshot(&self) -> RecursiveSearchProgressSnapshot {
+        let scanned_paths = self.scanned_paths.load(Ordering::Relaxed);
+        if self.scanning.load(Ordering::Relaxed) {
+            RecursiveSearchProgressSnapshot::Scanning(scanned_paths)
+        } else {
+            RecursiveSearchProgressSnapshot::Searching((scanned_paths > 0).then_some(scanned_paths))
+        }
     }
 }
 
@@ -95,7 +103,12 @@ pub(super) fn recursive_search_entries(
     let cache_hit = cached_search.is_some();
 
     let scanned_paths = match cached_search {
-        Some(cache) => cache.paths,
+        Some(cache) => {
+            progress
+                .scanned_paths
+                .store(cache.paths.len(), Ordering::Relaxed);
+            cache.paths
+        }
         None => {
             #[cfg(debug_assertions)]
             let scan_started = Instant::now();
@@ -529,18 +542,30 @@ mod tests {
     }
 
     #[test]
-    fn recursive_search_progress_only_exposes_positive_counts_while_scanning() {
+    fn recursive_search_progress_exposes_phase_and_retains_count() {
         let progress = RecursiveSearchProgress::default();
-        assert_eq!(progress.scanning_count(), None);
+        assert_eq!(
+            progress.snapshot(),
+            RecursiveSearchProgressSnapshot::Searching(None)
+        );
 
         progress.scanning.store(true, Ordering::Relaxed);
-        assert_eq!(progress.scanning_count(), None);
+        assert_eq!(
+            progress.snapshot(),
+            RecursiveSearchProgressSnapshot::Scanning(0)
+        );
 
         progress.scanned_paths.store(42, Ordering::Relaxed);
-        assert_eq!(progress.scanning_count(), Some(42));
+        assert_eq!(
+            progress.snapshot(),
+            RecursiveSearchProgressSnapshot::Scanning(42)
+        );
 
         progress.scanning.store(false, Ordering::Relaxed);
-        assert_eq!(progress.scanning_count(), None);
+        assert_eq!(
+            progress.snapshot(),
+            RecursiveSearchProgressSnapshot::Searching(Some(42))
+        );
     }
 
     #[test]
@@ -687,6 +712,7 @@ mod tests {
         fs::write(&notes, b"notes").expect("create notes");
         let cancel = Arc::new(AtomicBool::new(false));
         let paths = recursive_paths(vec![report.clone(), notes]);
+        let progress = Arc::new(RecursiveSearchProgress::default());
         let cache = RecursiveSearchCache {
             root: temp.path().to_path_buf(),
             show_hidden_files: true,
@@ -700,12 +726,16 @@ mod tests {
             true,
             Some(cache),
             cancel,
-            Arc::new(RecursiveSearchProgress::default()),
+            progress.clone(),
         );
 
         assert!(Arc::ptr_eq(&output.scanned_paths, &paths));
         assert_eq!(output.entries.len(), 1);
         assert_eq!(output.entries[0].path, report);
+        assert_eq!(
+            progress.snapshot(),
+            RecursiveSearchProgressSnapshot::Searching(Some(2))
+        );
     }
 
     #[test]

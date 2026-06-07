@@ -51,6 +51,7 @@ use crate::explorer::{
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
+    recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
     search::search_text_element,
@@ -1996,7 +1997,7 @@ impl Render for ExplorerView {
                                         div().child(self.render_empty_folder_with_detail(
                                             None,
                                             Some(search_working_detail(
-                                                self.recursive_search_scanned_count(),
+                                                self.recursive_search_progress(),
                                             )),
                                             cx,
                                         ))
@@ -2212,11 +2213,16 @@ fn render_empty_folder_message(message: Option<&'static str>, detail: Option<Str
         })
 }
 
-fn search_working_detail(scanned_count: Option<usize>) -> String {
-    scanned_count.map_or_else(
-        || SEARCH_WORKING_MESSAGE.to_owned(),
-        |count| format!("Searching {}...", count.separate_with_commas()),
-    )
+fn search_working_detail(progress: RecursiveSearchProgressSnapshot) -> String {
+    match progress {
+        RecursiveSearchProgressSnapshot::Scanning(count) => {
+            format!("Scanning {}...", count.separate_with_commas())
+        }
+        RecursiveSearchProgressSnapshot::Searching(Some(count)) => {
+            format!("Searching {}...", count.separate_with_commas())
+        }
+        RecursiveSearchProgressSnapshot::Searching(None) => SEARCH_WORKING_MESSAGE.to_owned(),
+    }
 }
 
 fn render_open_error(error: &str) -> Div {
@@ -3230,8 +3236,8 @@ mod tests {
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP_PHYSICAL, UTILITY_NEW_ICON_BLACK, UTILITY_NEW_ICON_BLUE,
-        UTILITY_NEW_ICON_CIRCLE_SIZE, UTILITY_NEW_ICON_PLUS_CENTER_OFFSET,
+        NAME_ICON_TEXT_GAP_PHYSICAL, RecursiveSearchProgressSnapshot, UTILITY_NEW_ICON_BLACK,
+        UTILITY_NEW_ICON_BLUE, UTILITY_NEW_ICON_CIRCLE_SIZE, UTILITY_NEW_ICON_PLUS_CENTER_OFFSET,
         UTILITY_NEW_ICON_PLUS_SIZE, UTILITY_NEW_ICON_PLUS_THICKNESS, UTILITY_TEXT_BUTTON_ICON_SIZE,
         UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
         available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
@@ -3327,8 +3333,18 @@ mod tests {
 
     #[test]
     fn recursive_search_working_detail_formats_live_count() {
-        assert_eq!(search_working_detail(None), "Searching...");
-        assert_eq!(search_working_detail(Some(1_234)), "Searching 1,234...");
+        assert_eq!(
+            search_working_detail(RecursiveSearchProgressSnapshot::Searching(None)),
+            "Searching..."
+        );
+        assert_eq!(
+            search_working_detail(RecursiveSearchProgressSnapshot::Scanning(1_234)),
+            "Scanning 1,234..."
+        );
+        assert_eq!(
+            search_working_detail(RecursiveSearchProgressSnapshot::Searching(Some(1_234))),
+            "Searching 1,234..."
+        );
     }
 
     #[test]

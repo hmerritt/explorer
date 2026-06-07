@@ -41,7 +41,7 @@ use crate::explorer::{
     entry::FileEntry,
     recursive_search::{
         RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
-        recursive_search_entries,
+        RecursiveSearchProgressSnapshot, recursive_search_entries,
     },
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
@@ -57,7 +57,7 @@ pub(super) struct SearchState {
     pub(super) recursive_enabled: bool,
     pub(super) recursive_generation: u64,
     pub(super) recursive_status: RecursiveSearchStatus,
-    pub(super) recursive_scanned_count: Option<usize>,
+    pub(super) recursive_progress: RecursiveSearchProgressSnapshot,
     pub(super) recursive_results_active: bool,
     pub(super) recursive_cache: Option<RecursiveSearchCache>,
     pub(super) recursive_cancel: Option<Arc<AtomicBool>>,
@@ -80,7 +80,7 @@ impl Default for SearchState {
             recursive_enabled: false,
             recursive_generation: 0,
             recursive_status: RecursiveSearchStatus::Idle,
-            recursive_scanned_count: None,
+            recursive_progress: RecursiveSearchProgressSnapshot::Searching(None),
             recursive_results_active: false,
             recursive_cache: None,
             recursive_cancel: None,
@@ -191,8 +191,8 @@ impl ExplorerView {
         self.search.recursive_results_active
     }
 
-    pub(super) fn recursive_search_scanned_count(&self) -> Option<usize> {
-        self.search.recursive_scanned_count
+    pub(super) fn recursive_search_progress(&self) -> RecursiveSearchProgressSnapshot {
+        self.search.recursive_progress
     }
 
     pub(super) fn search_is_editing(&self) -> bool {
@@ -680,7 +680,7 @@ impl ExplorerView {
         self.cancel_recursive_search();
         self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
         self.search.recursive_status = RecursiveSearchStatus::Searching;
-        self.search.recursive_scanned_count = None;
+        self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(None);
         self.search.recursive_results_active = true;
         self.entries.clear();
         self.clear_selection();
@@ -697,6 +697,12 @@ impl ExplorerView {
             .as_ref()
             .filter(|cache| cache.root == root && cache.show_hidden_files == show_hidden_files)
             .cloned();
+        self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(
+            cached_search
+                .as_ref()
+                .map(|cache| cache.paths.len())
+                .filter(|count| *count > 0),
+        );
         #[cfg(debug_assertions)]
         recursive_search_timing!(
             generation,
@@ -755,9 +761,9 @@ impl ExplorerView {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
-                let scanned_count = progress.scanning_count();
+                let progress = progress.snapshot();
                 let _ = this.update(cx, |explorer, cx| {
-                    if explorer.update_recursive_search_progress(generation, scanned_count) {
+                    if explorer.update_recursive_search_progress(generation, progress) {
                         cx.notify();
                     }
                 });
@@ -785,7 +791,7 @@ impl ExplorerView {
 
         let selected_paths = self.selected_paths();
         self.search.recursive_status = RecursiveSearchStatus::Idle;
-        self.search.recursive_scanned_count = None;
+        self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(None);
         self.search.recursive_cancel = None;
         self.search.recursive_task = None;
         self.search.recursive_results_active = true;
@@ -810,23 +816,23 @@ impl ExplorerView {
         }
         self.search.recursive_task = None;
         self.search.recursive_status = RecursiveSearchStatus::Idle;
-        self.search.recursive_scanned_count = None;
+        self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(None);
         self.search.recursive_results_active = false;
     }
 
     fn update_recursive_search_progress(
         &mut self,
         generation: u64,
-        scanned_count: Option<usize>,
+        progress: RecursiveSearchProgressSnapshot,
     ) -> bool {
         if self.search.recursive_generation != generation
             || self.search.recursive_status != RecursiveSearchStatus::Searching
-            || self.search.recursive_scanned_count == scanned_count
+            || self.search.recursive_progress == progress
         {
             return false;
         }
 
-        self.search.recursive_scanned_count = scanned_count;
+        self.search.recursive_progress = progress;
         true
     }
 }
@@ -1153,8 +1159,14 @@ mod tests {
         view.search.recursive_generation = 2;
         view.search.recursive_status = RecursiveSearchStatus::Searching;
 
-        assert!(!view.update_recursive_search_progress(1, Some(42)));
-        assert_eq!(view.search.recursive_scanned_count, None);
+        assert!(
+            !view
+                .update_recursive_search_progress(1, RecursiveSearchProgressSnapshot::Scanning(42))
+        );
+        assert_eq!(
+            view.search.recursive_progress,
+            RecursiveSearchProgressSnapshot::Searching(None)
+        );
     }
 
     #[test]
@@ -1163,10 +1175,18 @@ mod tests {
         view.search.recursive_generation = 2;
         view.search.recursive_status = RecursiveSearchStatus::Searching;
 
-        assert!(view.update_recursive_search_progress(2, Some(42)));
-        assert_eq!(view.search.recursive_scanned_count, Some(42));
+        assert!(
+            view.update_recursive_search_progress(2, RecursiveSearchProgressSnapshot::Scanning(42))
+        );
+        assert_eq!(
+            view.search.recursive_progress,
+            RecursiveSearchProgressSnapshot::Scanning(42)
+        );
 
         view.cancel_recursive_search();
-        assert_eq!(view.search.recursive_scanned_count, None);
+        assert_eq!(
+            view.search.recursive_progress,
+            RecursiveSearchProgressSnapshot::Searching(None)
+        );
     }
 }
