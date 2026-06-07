@@ -50,6 +50,8 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
+const MIN_RECURSIVE_SEARCH_QUERY_CHARS: usize = 2;
+
 pub(super) struct SearchState {
     text: EditableTextState,
     pub(super) focus_handle: Option<FocusHandle>,
@@ -147,6 +149,10 @@ pub(super) fn filtered_entries(entries: &[FileEntry], query: &str) -> Vec<FileEn
         .collect()
 }
 
+fn recursive_search_query_is_ready(query: &str) -> bool {
+    query.chars().count() >= MIN_RECURSIVE_SEARCH_QUERY_CHARS
+}
+
 impl ExplorerView {
     pub(super) fn handle_type_to_search(
         &mut self,
@@ -236,6 +242,17 @@ impl ExplorerView {
         self.search.recursive_results_active = false;
         self.entries = filtered_entries(&self.all_entries, &self.search.content);
         self.restore_selection_from_paths(selected_paths);
+    }
+
+    fn restore_normal_entries_preserving_selection(&mut self, selected_paths: &[PathBuf]) {
+        self.search.recursive_results_active = false;
+        self.entries = self.all_entries.clone();
+        self.restore_selection_from_paths(selected_paths);
+    }
+
+    fn reset_recursive_search_below_minimum(&mut self, selected_paths: &[PathBuf]) {
+        self.cancel_recursive_search();
+        self.restore_normal_entries_preserving_selection(selected_paths);
     }
 
     pub(super) fn invalidate_recursive_search_cache(&mut self) {
@@ -668,7 +685,11 @@ impl ExplorerView {
         selected_paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
-        if self.search.recursive_enabled && self.search_is_active() {
+        if self.search.recursive_enabled {
+            if !recursive_search_query_is_ready(&self.search.content) {
+                self.reset_recursive_search_below_minimum(selected_paths);
+                return;
+            };
             self.schedule_recursive_search(cx);
         } else {
             self.cancel_recursive_search();
@@ -1125,6 +1146,32 @@ mod tests {
         view.set_search_query(String::new());
 
         assert_eq!(names(&view.entries), vec!["a.txt", "b.png"]);
+        assert!(!view.recursive_search_results_active());
+    }
+
+    #[test]
+    fn recursive_search_query_requires_at_least_two_characters() {
+        assert!(!recursive_search_query_is_ready(""));
+        assert!(!recursive_search_query_is_ready("a"));
+        assert!(recursive_search_query_is_ready("ab"));
+        assert!(!recursive_search_query_is_ready("文"));
+        assert!(recursive_search_query_is_ready("文件"));
+    }
+
+    #[test]
+    fn recursive_query_below_minimum_restores_normal_entries() {
+        let mut view = test_view_with_entries(&["a.txt", "b.png"]);
+        view.search.recursive_enabled = true;
+        view.search.recursive_results_active = true;
+        view.search.recursive_status = RecursiveSearchStatus::Searching;
+        view.search.content = "a".to_owned();
+        view.entries = vec![FileEntry::test("stale-recursive.txt", false, Some(1), None)];
+
+        view.reset_recursive_search_below_minimum(&[]);
+
+        assert_eq!(view.search_query(), "a");
+        assert_eq!(names(&view.entries), vec!["a.txt", "b.png"]);
+        assert_eq!(view.search.recursive_status, RecursiveSearchStatus::Idle);
         assert!(!view.recursive_search_results_active());
     }
 
