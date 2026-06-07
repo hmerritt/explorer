@@ -6,10 +6,9 @@ use crate::explorer::constants::EXPLORER_COPY_GREEN;
 
 const LINEAR_PROGRESS_HEIGHT: f32 = 4.0;
 const LINEAR_PROGRESS_TRACK_GREEN: u32 = 0xe1f3e4;
-const PRIMARY_BAR_WIDTH: f32 = 0.42;
-const SECONDARY_BAR_WIDTH: f32 = 0.28;
-const PRIMARY_ANIMATION_MS: u64 = 1_450;
-const SECONDARY_ANIMATION_MS: u64 = 1_900;
+
+// MUI's standard indeterminate animation cycle is 2.1 seconds.
+const PROGRESS_ANIMATION_MS: u64 = 1_500;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LinearProgressStyle {
@@ -28,6 +27,12 @@ impl LinearProgressStyle {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BarType {
+    Primary,
+    Secondary,
+}
+
 pub(crate) fn linear_indeterminate(id: &'static str, style: LinearProgressStyle) -> AnyElement {
     div()
         .id(id)
@@ -40,18 +45,12 @@ pub(crate) fn linear_indeterminate(id: &'static str, style: LinearProgressStyle)
         .child(animated_linear_progress_bar(
             (id, 0),
             style.color,
-            PRIMARY_BAR_WIDTH,
-            PRIMARY_ANIMATION_MS,
-            -PRIMARY_BAR_WIDTH,
-            1.0,
+            BarType::Primary,
         ))
         .child(animated_linear_progress_bar(
             (id, 1),
             style.color,
-            SECONDARY_BAR_WIDTH,
-            SECONDARY_ANIMATION_MS,
-            -SECONDARY_BAR_WIDTH * 2.0,
-            1.0,
+            BarType::Secondary,
         ))
         .into_any_element()
 }
@@ -59,26 +58,82 @@ pub(crate) fn linear_indeterminate(id: &'static str, style: LinearProgressStyle)
 fn animated_linear_progress_bar(
     id: (&'static str, usize),
     color: u32,
-    width_fraction: f32,
-    duration_ms: u64,
-    start_fraction: f32,
-    end_fraction: f32,
+    bar_type: BarType,
 ) -> AnyElement {
     div()
         .absolute()
         .top(px(0.0))
         .bottom(px(0.0))
-        .w(relative(width_fraction))
         .bg(rgb(color))
         .with_animation(
             id,
-            Animation::new(Duration::from_millis(duration_ms)).repeat(),
+            Animation::new(Duration::from_millis(PROGRESS_ANIMATION_MS)).repeat(),
             move |bar, delta| {
-                let left = start_fraction + (end_fraction - start_fraction) * delta;
-                bar.left(relative(left))
+                let (left, right) = match bar_type {
+                    BarType::Primary => {
+                        // The primary bar animates for the first 60% of the cycle.
+                        if delta <= 0.6 {
+                            let t = delta / 0.6;
+                            // MUI cubic-bezier(0.65, 0.815, 0.735, 0.395)
+                            let progress = solve_cubic_bezier(0.65, 0.815, 0.735, 0.395, t);
+                            let l = -0.35 + (1.0 - (-0.35)) * progress;
+                            let r = 1.0 + (-0.9 - 1.0) * progress;
+                            (l, r)
+                        } else {
+                            (1.0, -0.9)
+                        }
+                    }
+                    BarType::Secondary => {
+                        // The secondary bar has a CSS animation-delay of 1.15s.
+                        // On a 2.1s cycle, this constitutes a phase shift of ~0.4524.
+                        let phase_shifted_delta = (delta + 0.4524) % 1.0;
+                        if phase_shifted_delta <= 0.6 {
+                            let t = phase_shifted_delta / 0.6;
+                            // MUI cubic-bezier(0.165, 0.84, 0.44, 1.0)
+                            let progress = solve_cubic_bezier(0.165, 0.84, 0.44, 1.0, t);
+                            let l = -2.00 + (1.07 - (-2.00)) * progress;
+                            let r = 1.00 + (-0.08 - 1.00) * progress;
+                            (l, r)
+                        } else {
+                            (1.07, -0.08)
+                        }
+                    }
+                };
+
+                // GPUI utilizes relative dimensions for absolute positioning.
+                // The logical width is the remainder of the space after subtracting the left and right offsets.
+                let width = 1.0 - left - right;
+                bar.left(relative(left)).w(relative(width))
             },
         )
         .into_any_element()
+}
+
+/// Computes the corresponding Y value for a cubic-Bézier curve given an X progression.
+fn solve_cubic_bezier(p1x: f32, p1y: f32, p2x: f32, p2y: f32, x: f32) -> f32 {
+    let mut t = x;
+
+    // Newton-Raphson approximation to converge on the 't' parameter.
+    for _ in 0..8 {
+        let x_est = evaluate_bezier(p1x, p2x, t);
+        let dx = evaluate_bezier_derivative(p1x, p2x, t);
+        if dx.abs() < 1e-6 {
+            break;
+        }
+        t -= (x_est - x) / dx;
+    }
+
+    evaluate_bezier(p1y, p2y, t.clamp(0.0, 1.0))
+}
+
+fn evaluate_bezier(p1: f32, p2: f32, t: f32) -> f32 {
+    let mt = 1.0 - t;
+    3.0 * mt * mt * t * p1 + 3.0 * mt * t * t * p2 + t * t * t
+}
+
+fn evaluate_bezier_derivative(p1: f32, p2: f32, t: f32) -> f32 {
+    let mt = 1.0 - t;
+    3.0 * mt * mt * p1 + 6.0 * mt * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
 }
 
 #[cfg(test)]
