@@ -63,6 +63,7 @@ pub(super) struct RecursiveSearchPath {
     parent_path: Arc<Path>,
     file_name: OsString,
     normalized_name: String,
+    depth: usize,
 }
 
 impl RecursiveSearchPath {
@@ -235,10 +236,12 @@ fn scan_recursive_paths_with_progress(
         }
 
         if let Ok(entry) = entry_result {
+            let depth = entry.depth();
             paths.push(RecursiveSearchPath {
                 parent_path: entry.parent_path,
                 file_name: entry.file_name,
                 normalized_name: entry.client_state,
+                depth,
             });
             if let Some(progress) = progress {
                 progress.store(paths.len(), Ordering::Relaxed);
@@ -272,6 +275,12 @@ fn filter_recursive_paths(
             matches.push(index);
         }
     }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+
+    matches.sort_unstable_by_key(|&index| (paths[index].depth, index));
 
     if cancel.load(Ordering::Relaxed) {
         Vec::new()
@@ -471,10 +480,12 @@ mod tests {
                 .into_iter()
                 .map(|path| {
                     let file_name = path.file_name().unwrap().to_owned();
+                    let depth = path.components().count();
                     RecursiveSearchPath {
                         parent_path: Arc::from(path.parent().unwrap_or(Path::new(""))),
                         normalized_name: file_name.to_string_lossy().to_lowercase(),
                         file_name,
+                        depth,
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -693,6 +704,51 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(filtered_paths(&paths, "report", &cancel), expected);
+    }
+
+    #[test]
+    fn filter_sorts_shallow_matches_before_deep_matches() {
+        let expected = vec![
+            PathBuf::from("root-report.txt"),
+            PathBuf::from("a").join("report.txt"),
+            PathBuf::from("a").join("b").join("report.txt"),
+        ];
+        let paths = recursive_paths(vec![
+            expected[2].clone(),
+            expected[1].clone(),
+            PathBuf::from("other.txt"),
+            expected[0].clone(),
+        ]);
+        let cancel = AtomicBool::new(false);
+
+        assert_eq!(filtered_paths(&paths, "report", &cancel), expected);
+    }
+
+    #[test]
+    fn materialized_recursive_entries_follow_depth_sorted_match_order() {
+        let temp = TempDir::new();
+        let shallow = temp.path().join("report-root.txt");
+        let middle_dir = temp.path().join("middle");
+        let deep_dir = middle_dir.join("deep");
+        let middle = middle_dir.join("report-middle.txt");
+        let deep = deep_dir.join("report-deep.txt");
+        fs::create_dir_all(&deep_dir).expect("create nested directories");
+        fs::write(&shallow, b"shallow").expect("create shallow report");
+        fs::write(&middle, b"middle").expect("create middle report");
+        fs::write(&deep, b"deep").expect("create deep report");
+        let paths = recursive_paths(vec![deep.clone(), middle.clone(), shallow.clone()]);
+        let indices = filter_recursive_paths(&paths, "report", &AtomicBool::new(false));
+
+        let entries =
+            materialize_recursive_entries(&paths, &indices, true, &AtomicBool::new(false));
+
+        assert_eq!(
+            entries
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            vec![shallow, middle, deep]
+        );
     }
 
     #[test]
