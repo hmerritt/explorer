@@ -52,6 +52,8 @@ pub use dialog::DialogCancel;
 #[allow(unused_imports)]
 pub use entry::FileEntry;
 pub use filesystem::default_start_path;
+#[cfg(feature = "benchmarks")]
+pub use recursive_search::benchmark_support;
 pub use tabs::ExplorerTabs;
 #[allow(unused_imports)]
 pub use view::ExplorerView;

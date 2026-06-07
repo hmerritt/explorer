@@ -290,6 +290,16 @@ pub(super) fn should_hide_entry(name: &OsStr, path: &Path, show_hidden_files: bo
     is_always_hidden_metadata_entry_name(name) || !show_hidden_files && is_hidden_entry(name, path)
 }
 
+pub(super) fn should_hide_entry_with_metadata(
+    name: &OsStr,
+    path: &Path,
+    show_hidden_files: bool,
+    metadata: &fs::Metadata,
+) -> bool {
+    is_always_hidden_metadata_entry_name(name)
+        || !show_hidden_files && is_hidden_entry_with_metadata(name, path, metadata)
+}
+
 fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
     name == OsStr::new(".localized") || name == OsStr::new(".DS_Store")
 }
@@ -300,13 +310,16 @@ fn is_hidden_entry(name: &OsStr, path: &Path) -> bool {
         || has_windows_hidden_attribute(path)
 }
 
+fn is_hidden_entry_with_metadata(name: &OsStr, path: &Path, metadata: &fs::Metadata) -> bool {
+    name.to_string_lossy().starts_with('.')
+        || has_macos_hidden_flag_with_metadata(path, metadata)
+        || has_windows_hidden_attribute_with_metadata(path, metadata)
+}
+
 #[cfg(target_os = "macos")]
 fn has_macos_hidden_flag(path: &Path) -> bool {
-    use std::os::macos::fs::MetadataExt;
-
-    const UF_HIDDEN: u32 = 0x0000_8000;
-
-    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.st_flags() & UF_HIDDEN != 0)
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| has_macos_hidden_flag_with_metadata(path, &metadata))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -314,17 +327,41 @@ fn has_macos_hidden_flag(_: &Path) -> bool {
     false
 }
 
+#[cfg(target_os = "macos")]
+fn has_macos_hidden_flag_with_metadata(_: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::macos::fs::MetadataExt;
+
+    const UF_HIDDEN: u32 = 0x0000_8000;
+
+    metadata.st_flags() & UF_HIDDEN != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn has_macos_hidden_flag_with_metadata(_: &Path, _: &fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(target_os = "windows")]
 fn has_windows_hidden_attribute(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
-
     fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0)
+        .is_ok_and(|metadata| has_windows_hidden_attribute_with_metadata(path, &metadata))
 }
 
 #[cfg(not(target_os = "windows"))]
 fn has_windows_hidden_attribute(_: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn has_windows_hidden_attribute_with_metadata(_: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN.0 != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_windows_hidden_attribute_with_metadata(_: &Path, _: &fs::Metadata) -> bool {
     false
 }
 

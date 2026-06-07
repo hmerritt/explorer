@@ -1,15 +1,17 @@
-use std::ffi::OsStr;
 use std::{
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
-use thousands::Separable;
 
 #[cfg(debug_assertions)]
 use std::time::Instant;
+#[cfg(debug_assertions)]
+use thousands::Separable;
 
 #[cfg(debug_assertions)]
 macro_rules! recursive_search_timing {
@@ -23,23 +25,34 @@ macro_rules! recursive_search_timing {
     };
 }
 
-use jwalk::WalkDir;
+use jwalk::{WalkDirGeneric, rayon::prelude::*};
 
-use crate::explorer::{entry::FileEntry, filesystem::should_hide_entry};
+use crate::explorer::{
+    entry::FileEntry,
+    filesystem::{should_hide_entry, should_hide_entry_with_metadata},
+};
 
 const CANCELLATION_CHECK_INTERVAL: usize = 5120;
+const PARALLEL_MATERIALIZATION_THRESHOLD: usize = 128;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RecursiveSearchPath {
-    path: PathBuf,
-    file_name: String,
+    parent_path: Arc<Path>,
+    file_name: OsString,
+    normalized_name: String,
+}
+
+impl RecursiveSearchPath {
+    fn path(&self) -> PathBuf {
+        self.parent_path.join(&self.file_name)
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct RecursiveSearchCache {
     pub(super) root: PathBuf,
     pub(super) show_hidden_files: bool,
-    pub(super) paths: Arc<[RecursiveSearchPath]>,
+    pub(super) paths: Arc<Vec<RecursiveSearchPath>>,
 }
 
 #[derive(Clone)]
@@ -48,7 +61,7 @@ pub(super) struct RecursiveSearchOutput {
     pub(super) root: PathBuf,
     pub(super) query: String,
     pub(super) show_hidden_files: bool,
-    pub(super) scanned_paths: Arc<[RecursiveSearchPath]>,
+    pub(super) scanned_paths: Arc<Vec<RecursiveSearchPath>>,
     pub(super) entries: Vec<FileEntry>,
 }
 
@@ -88,7 +101,7 @@ pub(super) fn recursive_search_entries(
     let result_paths = if cancel.load(Ordering::Relaxed) {
         Vec::new()
     } else {
-        filter_recursive_paths(&scanned_paths, &query, &cancel, show_hidden_files)
+        filter_recursive_paths(&scanned_paths, &query, &cancel)
     };
     #[cfg(debug_assertions)]
     recursive_search_timing!(
@@ -103,10 +116,8 @@ pub(super) fn recursive_search_entries(
     let result_path_count = result_paths.len();
     #[cfg(debug_assertions)]
     let materialize_started = Instant::now();
-    let entries = result_paths
-        .into_iter()
-        .filter_map(FileEntry::from_path)
-        .collect::<Vec<_>>();
+    let entries =
+        materialize_recursive_entries(&scanned_paths, &result_paths, show_hidden_files, &cancel);
     #[cfg(debug_assertions)]
     recursive_search_timing!(
         generation,
@@ -138,49 +149,65 @@ pub(super) fn scan_recursive_paths(
     root: &Path,
     show_hidden_files: bool,
     cancel: Arc<AtomicBool>,
-) -> Arc<[RecursiveSearchPath]> {
+) -> Arc<Vec<RecursiveSearchPath>> {
     if cancel.load(Ordering::Relaxed) {
-        return Arc::from([]);
+        return Arc::new(Vec::new());
     }
 
     let process_cancel = cancel.clone();
-    let walker = WalkDir::new(root)
+    let walker = WalkDirGeneric::<((), String)>::new(root)
         .sort(false)
         .skip_hidden(!show_hidden_files)
         .follow_links(false)
         .min_depth(1)
-        .process_read_dir(move |_, path, _, children| {
-            let should_hide_this_dir = !show_hidden_files
-                && should_hide_entry(path.file_name().unwrap(), path, show_hidden_files);
-
-            if process_cancel.load(Ordering::Relaxed) || should_hide_this_dir {
+        .process_read_dir(move |_, _, _, children| {
+            if process_cancel.load(Ordering::Relaxed) {
                 children.clear();
                 return;
+            }
+
+            for child in children.iter_mut() {
+                let Ok(entry) = child else {
+                    continue;
+                };
+                entry.client_state = entry.file_name().to_string_lossy().to_lowercase();
+
+                if entry.file_type().is_dir() {
+                    let path = entry.path();
+                    if should_hide_entry(entry.file_name(), &path, show_hidden_files) {
+                        entry.read_children_path = None;
+                    }
+                }
             }
         });
 
     let mut paths = Vec::new();
-    for entry_result in walker {
+    for (index, entry_result) in walker.into_iter().enumerate() {
+        if index % CANCELLATION_CHECK_INTERVAL == 0 && cancel.load(Ordering::Relaxed) {
+            break;
+        }
+
         if let Ok(entry) = entry_result {
-            let path = entry.path();
-            let file_name = entry.file_name().to_string_lossy().into_owned();
-            paths.push(RecursiveSearchPath { path, file_name });
+            paths.push(RecursiveSearchPath {
+                parent_path: entry.parent_path,
+                file_name: entry.file_name,
+                normalized_name: entry.client_state,
+            });
         }
     }
 
     if cancel.load(Ordering::Relaxed) {
-        return Arc::from([]);
+        return Arc::new(Vec::new());
     }
 
-    paths.into()
+    Arc::new(paths)
 }
 
 fn filter_recursive_paths(
     paths: &[RecursiveSearchPath],
     query: &str,
     cancel: &AtomicBool,
-    show_hidden_files: bool,
-) -> Vec<PathBuf> {
+) -> Vec<usize> {
     if paths.is_empty() || query.trim().is_empty() {
         return Vec::new();
     }
@@ -191,11 +218,8 @@ fn filter_recursive_paths(
         if index % CANCELLATION_CHECK_INTERVAL == 0 && cancel.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        let normalized_name = path.file_name.to_lowercase();
-        if normalized_name.contains(&query)
-            && !should_hide_entry(OsStr::new(&path.file_name), &path.path, show_hidden_files)
-        {
-            matches.push(path.path.clone());
+        if path.normalized_name.contains(&query) {
+            matches.push(index);
         }
     }
 
@@ -206,28 +230,210 @@ fn filter_recursive_paths(
     }
 }
 
+fn materialize_recursive_entries(
+    paths: &[RecursiveSearchPath],
+    result_indices: &[usize],
+    show_hidden_files: bool,
+    cancel: &AtomicBool,
+) -> Vec<FileEntry> {
+    if result_indices.is_empty() || cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+
+    let materialized = if result_indices.len() < PARALLEL_MATERIALIZATION_THRESHOLD {
+        result_indices
+            .iter()
+            .filter_map(|&index| {
+                materialize_recursive_entry(&paths[index], show_hidden_files, cancel)
+            })
+            .collect()
+    } else {
+        result_indices
+            .par_iter()
+            .map(|&index| materialize_recursive_entry(&paths[index], show_hidden_files, cancel))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+
+    if cancel.load(Ordering::Relaxed) {
+        Vec::new()
+    } else {
+        materialized
+    }
+}
+
+fn materialize_recursive_entry(
+    recursive_path: &RecursiveSearchPath,
+    show_hidden_files: bool,
+    cancel: &AtomicBool,
+) -> Option<FileEntry> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let path = recursive_path.path();
+    let link_metadata = fs::symlink_metadata(&path).ok()?;
+    if should_hide_entry_with_metadata(
+        &recursive_path.file_name,
+        &path,
+        show_hidden_files,
+        &link_metadata,
+    ) || cancel.load(Ordering::Relaxed)
+    {
+        return None;
+    }
+
+    FileEntry::from_path_with_link_metadata(path, link_metadata)
+}
+
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod benchmark_support {
+    use super::*;
+
+    pub struct ScannedPaths {
+        root: PathBuf,
+        show_hidden_files: bool,
+        paths: Arc<Vec<RecursiveSearchPath>>,
+    }
+
+    pub struct FilteredPaths(Vec<usize>);
+
+    pub struct MaterializedEntries(Vec<FileEntry>);
+
+    pub struct SearchResult(RecursiveSearchOutput);
+
+    impl ScannedPaths {
+        pub fn len(&self) -> usize {
+            self.paths.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.paths.is_empty()
+        }
+    }
+
+    impl FilteredPaths {
+        pub fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    impl MaterializedEntries {
+        pub fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    impl SearchResult {
+        pub fn entry_count(&self) -> usize {
+            self.0.entries.len()
+        }
+
+        pub fn scanned_path_count(&self) -> usize {
+            self.0.scanned_paths.len()
+        }
+    }
+
+    pub fn scan(root: &Path, show_hidden_files: bool) -> ScannedPaths {
+        ScannedPaths {
+            root: root.to_path_buf(),
+            show_hidden_files,
+            paths: scan_recursive_paths(root, show_hidden_files, Arc::new(AtomicBool::new(false))),
+        }
+    }
+
+    pub fn filter(paths: &ScannedPaths, query: &str) -> FilteredPaths {
+        FilteredPaths(filter_recursive_paths(
+            &paths.paths,
+            query,
+            &AtomicBool::new(false),
+        ))
+    }
+
+    pub fn materialize(paths: &ScannedPaths, filtered: &FilteredPaths) -> MaterializedEntries {
+        MaterializedEntries(materialize_recursive_entries(
+            &paths.paths,
+            &filtered.0,
+            paths.show_hidden_files,
+            &AtomicBool::new(false),
+        ))
+    }
+
+    pub fn cancelled_materialize(paths: &ScannedPaths, filtered: &FilteredPaths) -> usize {
+        materialize_recursive_entries(
+            &paths.paths,
+            &filtered.0,
+            paths.show_hidden_files,
+            &AtomicBool::new(true),
+        )
+        .len()
+    }
+
+    pub fn cached_search(paths: &ScannedPaths, query: &str) -> SearchResult {
+        SearchResult(recursive_search_entries(
+            0,
+            paths.root.clone(),
+            query.to_owned(),
+            paths.show_hidden_files,
+            Some(RecursiveSearchCache {
+                root: paths.root.clone(),
+                show_hidden_files: paths.show_hidden_files,
+                paths: paths.paths.clone(),
+            }),
+            Arc::new(AtomicBool::new(false)),
+        ))
+    }
+
+    pub fn uncached_search(root: &Path, query: &str, show_hidden_files: bool) -> SearchResult {
+        SearchResult(recursive_search_entries(
+            0,
+            root.to_path_buf(),
+            query.to_owned(),
+            show_hidden_files,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
     use std::fs;
 
-    fn recursive_paths(paths: Vec<PathBuf>) -> Arc<[RecursiveSearchPath]> {
-        paths
-            .into_iter()
-            .map(|path| RecursiveSearchPath {
-                file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
-                path,
-            })
-            .collect::<Vec<_>>()
-            .into()
+    fn recursive_paths(paths: Vec<PathBuf>) -> Arc<Vec<RecursiveSearchPath>> {
+        Arc::new(
+            paths
+                .into_iter()
+                .map(|path| {
+                    let file_name = path.file_name().unwrap().to_owned();
+                    RecursiveSearchPath {
+                        parent_path: Arc::from(path.parent().unwrap_or(Path::new(""))),
+                        normalized_name: file_name.to_string_lossy().to_lowercase(),
+                        file_name,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn path_names(paths: &[RecursiveSearchPath]) -> Vec<String> {
         let mut names = paths
             .iter()
             .map(|path| {
-                path.path
+                path.path()
                     .file_name()
                     .expect("file name")
                     .to_string_lossy()
@@ -236,6 +442,17 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    fn filtered_paths(
+        paths: &[RecursiveSearchPath],
+        query: &str,
+        cancel: &AtomicBool,
+    ) -> Vec<PathBuf> {
+        filter_recursive_paths(paths, query, cancel)
+            .into_iter()
+            .map(|index| paths[index].path())
+            .collect()
     }
 
     #[test]
@@ -250,6 +467,18 @@ mod tests {
         let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(path_names(&paths), vec!["child", "nested.txt", "root.txt"]);
+    }
+
+    #[test]
+    fn recursive_scan_reconstructs_exact_paths() {
+        let temp = TempDir::new();
+        let nested = temp.path().join("child").join("Mixed Case.txt");
+        fs::create_dir(nested.parent().unwrap()).expect("create child");
+        fs::write(&nested, b"nested").expect("create nested file");
+
+        let paths = scan_recursive_paths(temp.path(), true, Arc::new(AtomicBool::new(false)));
+
+        assert!(paths.iter().any(|path| path.path() == nested));
     }
 
     #[test]
@@ -317,7 +546,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "report", &cancel, true),
+            filtered_paths(&paths, "report", &cancel),
             vec![PathBuf::from("other").join("report.txt")]
         );
     }
@@ -331,7 +560,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "REPORT", &cancel, true),
+            filtered_paths(&paths, "REPORT", &cancel),
             vec![PathBuf::from("other").join("Annual Report.txt")]
         );
     }
@@ -346,7 +575,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         assert_eq!(
-            filter_recursive_paths(&paths, "[1]", &cancel, true),
+            filtered_paths(&paths, "[1]", &cancel),
             vec![PathBuf::from("file[1].txt")]
         );
     }
@@ -364,10 +593,7 @@ mod tests {
         ]);
         let cancel = AtomicBool::new(false);
 
-        assert_eq!(
-            filter_recursive_paths(&paths, "report", &cancel, true),
-            expected
-        );
+        assert_eq!(filtered_paths(&paths, "report", &cancel), expected);
     }
 
     #[test]
@@ -375,7 +601,7 @@ mod tests {
         let paths = recursive_paths(vec![PathBuf::from("report.txt")]);
         let cancel = AtomicBool::new(true);
 
-        assert!(filter_recursive_paths(&paths, "report", &cancel, true).is_empty());
+        assert!(filter_recursive_paths(&paths, "report", &cancel).is_empty());
     }
 
     #[test]
@@ -433,6 +659,64 @@ mod tests {
         assert_eq!(output.entries[0].path, existing);
     }
 
+    #[test]
+    fn materialization_hides_hidden_matches_when_hidden_files_are_off() {
+        let temp = TempDir::new();
+        let hidden = temp.path().join(".hidden-report.txt");
+        let visible = temp.path().join("visible-report.txt");
+        fs::write(&hidden, b"hidden").expect("create hidden report");
+        fs::write(&visible, b"visible").expect("create visible report");
+        let paths = recursive_paths(vec![hidden, visible.clone()]);
+        let indices = filter_recursive_paths(&paths, "report", &AtomicBool::new(false));
+
+        let entries =
+            materialize_recursive_entries(&paths, &indices, false, &AtomicBool::new(false));
+
+        assert_eq!(
+            entries
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            vec![visible]
+        );
+    }
+
+    #[test]
+    fn parallel_materialization_preserves_match_order() {
+        let temp = TempDir::new();
+        let expected = (0..PARALLEL_MATERIALIZATION_THRESHOLD + 8)
+            .rev()
+            .map(|index| temp.path().join(format!("report-{index:03}.txt")))
+            .collect::<Vec<_>>();
+        for path in &expected {
+            fs::write(path, b"report").expect("create report");
+        }
+        let paths = recursive_paths(expected.clone());
+        let indices = filter_recursive_paths(&paths, "report", &AtomicBool::new(false));
+
+        let entries =
+            materialize_recursive_entries(&paths, &indices, true, &AtomicBool::new(false));
+
+        assert_eq!(
+            entries
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn materialization_discards_results_after_cancellation() {
+        let temp = TempDir::new();
+        let report = temp.path().join("report.txt");
+        fs::write(&report, b"report").expect("create report");
+        let paths = recursive_paths(vec![report]);
+        let cancel = AtomicBool::new(true);
+
+        assert!(materialize_recursive_entries(&paths, &[0], true, &cancel).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn recursive_scan_does_not_recurse_into_symlinked_directories() {
@@ -449,6 +733,12 @@ mod tests {
         let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(path_names(&paths), vec!["link", "nested.txt", "real"]);
+        let link_indices = filter_recursive_paths(&paths, "link", &AtomicBool::new(false));
+        let entries =
+            materialize_recursive_entries(&paths, &link_indices, true, &AtomicBool::new(false));
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_directory_like());
+        assert_eq!(entries[0].path, link);
     }
 
     #[cfg(windows)]
@@ -472,5 +762,11 @@ mod tests {
         let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(path_names(&paths), vec!["link", "nested.txt", "real"]);
+        let link_indices = filter_recursive_paths(&paths, "link", &AtomicBool::new(false));
+        let entries =
+            materialize_recursive_entries(&paths, &link_indices, true, &AtomicBool::new(false));
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_directory_like());
+        assert_eq!(entries[0].path, link);
     }
 }

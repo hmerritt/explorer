@@ -1064,7 +1064,7 @@ mod tests {
             root: view.path.clone(),
             query: "stale".to_owned(),
             show_hidden_files: view.show_hidden_files,
-            scanned_paths: Arc::from([]),
+            scanned_paths: Arc::new(Vec::new()),
             entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
         });
 
