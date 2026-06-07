@@ -190,8 +190,7 @@ impl ExplorerView {
     }
 
     pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) {
-        self.directory_watcher =
-            DirectoryWatcher::start(self.path.clone(), self.search.recursive_enabled, cx);
+        self.directory_watcher = DirectoryWatcher::start(self.path.clone(), cx);
     }
 
     pub(super) fn tab_label(&self) -> String {

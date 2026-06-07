@@ -14,7 +14,7 @@ mod formatting;
 mod icons;
 mod mouse_selection;
 mod navigation;
-pub(crate) mod recursive_search;
+mod recursive_search;
 mod rename;
 mod render;
 mod scrollbar;

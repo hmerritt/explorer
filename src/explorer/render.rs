@@ -452,6 +452,7 @@ impl ExplorerView {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
                             this.show_hidden_files = !this.show_hidden_files;
+                            this.invalidate_recursive_search_cache();
                             this.reload();
                             this.refresh_search_after_external_change(cx);
                         }

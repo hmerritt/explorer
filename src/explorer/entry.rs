@@ -30,21 +30,9 @@ pub(super) enum DirectoryLinkKind {
 impl FileEntry {
     pub(super) fn from_path(path: PathBuf) -> Option<Self> {
         let link_metadata = fs::symlink_metadata(&path).ok()?;
-        Self::from_path_with_link_metadata(path, link_metadata)
-    }
-
-    pub(super) fn from_path_with_link_metadata(
-        path: PathBuf,
-        link_metadata: Metadata,
-    ) -> Option<Self> {
-        let target_metadata = if is_filesystem_directory_link(&link_metadata) {
-            Some(fs::metadata(&path).ok()?)
-        } else {
-            None
-        };
-        let metadata = target_metadata.as_ref().unwrap_or(&link_metadata);
+        let metadata = fs::metadata(&path).ok()?;
         let name = path.file_name()?.to_string_lossy().into_owned();
-        let kind = entry_kind(&path, &link_metadata, metadata);
+        let kind = entry_kind(&path, &link_metadata, &metadata);
 
         Some(Self {
             path,
