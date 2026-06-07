@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use gpui::{Context, Window, actions};
 
 use crate::explorer::{
@@ -22,6 +24,7 @@ actions!(
         GoUp,
         CancelDrag,
         OpenSelected,
+        OpenSettings,
         EnterSelected,
         Refresh,
         SelectAll,
@@ -234,6 +237,20 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         let _ = self.activate_focused_entry_with_watcher(false, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_open_settings(
+        &mut self,
+        _: &OpenSettings,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = cx
+            .global::<crate::settings::SettingsState>()
+            .settings_path()
+            .map(Path::to_path_buf);
+        self.open_settings_file(path.as_deref());
         cx.notify();
     }
 

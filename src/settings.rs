@@ -89,6 +89,10 @@ impl SettingsState {
             .unwrap_or_else(crate::explorer::default_start_path)
     }
 
+    pub(crate) fn settings_path(&self) -> Option<&Path> {
+        (!self.path.as_os_str().is_empty()).then_some(self.path.as_path())
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(value: ExplorerSettings) -> Self {
         Self {
@@ -477,6 +481,25 @@ mod tests {
         assert!(settings.show_file_name_extensions);
         assert_eq!(settings.startup_location, StartupLocation::Downloads);
         assert_eq!(settings.sidebar_items.len(), 4);
+    }
+
+    #[test]
+    fn settings_state_exposes_configured_settings_path() {
+        let path = PathBuf::from("configured").join(SETTINGS_FILE_NAME);
+        let state = SettingsState {
+            value: ExplorerSettings::default(),
+            path: path.clone(),
+            _watcher: None,
+        };
+
+        assert_eq!(state.settings_path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn settings_state_hides_unavailable_settings_path() {
+        let state = SettingsState::for_test(ExplorerSettings::default());
+
+        assert_eq!(state.settings_path(), None);
     }
 
     #[test]

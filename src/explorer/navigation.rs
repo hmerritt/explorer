@@ -261,6 +261,24 @@ impl ExplorerView {
         self.handle_open_file_result(path, result);
     }
 
+    pub(super) fn open_settings_file(&mut self, path: Option<&Path>) {
+        self.open_settings_file_with(path, open_path_with_default_app);
+    }
+
+    fn open_settings_file_with(
+        &mut self,
+        path: Option<&Path>,
+        open: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) {
+        let Some(path) = path else {
+            self.open_error =
+                Some("Could not open settings.json: settings file path is unavailable".to_owned());
+            return;
+        };
+
+        self.handle_open_file_result(path, open(path));
+    }
+
     pub(super) fn handle_open_file_result(&mut self, path: &Path, result: std::io::Result<()>) {
         match result {
             Ok(()) => self.open_error = None,
@@ -512,6 +530,42 @@ mod tests {
         view.handle_open_file_result(&file, Ok(()));
 
         assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn settings_file_open_result_sets_and_clears_open_error() {
+        let temp = TempDir::new();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let settings = temp.path().join("settings.json");
+
+        view.open_settings_file_with(Some(&settings), |_| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        });
+        assert_eq!(
+            view.open_error.as_deref(),
+            Some("Could not open settings.json: missing")
+        );
+
+        view.open_settings_file_with(Some(&settings), |_| Ok(()));
+        assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn unavailable_settings_path_sets_open_error_without_opening() {
+        let temp = TempDir::new();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let mut opened = false;
+
+        view.open_settings_file_with(None, |_| {
+            opened = true;
+            Ok(())
+        });
+
+        assert!(!opened);
+        assert_eq!(
+            view.open_error.as_deref(),
+            Some("Could not open settings.json: settings file path is unavailable")
+        );
     }
 
     #[test]
