@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::explorer::{
+    constants::EXPLORER_COPY_GREEN,
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
@@ -35,7 +36,6 @@ const SHELL_DIALOG_COMMAND_HOVER_BG: u32 = 0xe5f3ff;
 const SHELL_DIALOG_BUTTON_BG: u32 = 0xf3f3f3;
 const SHELL_DIALOG_BUTTON_BORDER: u32 = 0x8a8a8a;
 const SHELL_DIALOG_BUTTON_HOVER_BORDER: u32 = 0x0078d7;
-const SHELL_DIALOG_ICON_GREEN: u32 = 0x36a646;
 const SHELL_DIALOG_LINE_HEIGHT_SCALE: f32 = 1.618;
 const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
 const DELETE_DIALOG_WIDTH: f32 = 460.0;
@@ -612,7 +612,7 @@ impl ExplorerDialog {
                         dialog_command_row(
                             "file-conflict-replace",
                             "✓",
-                            SHELL_DIALOG_ICON_GREEN,
+                            EXPLORER_COPY_GREEN,
                             text.replace_label,
                             true,
                         )

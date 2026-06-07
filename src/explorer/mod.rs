@@ -3,7 +3,7 @@ mod address_bar;
 mod app_icons;
 mod breadcrumb;
 mod clipboard;
-mod constants;
+pub(crate) mod constants;
 mod dialog;
 mod drag_drop;
 mod entry;

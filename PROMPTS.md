@@ -1,5 +1,15 @@
 ## New
 
+Plan to implement: Context menus
+
+There is no full right-click model yet:
+
+- Open with
+- Properties
+- Copy as path
+- Send to
+- Share
+
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.

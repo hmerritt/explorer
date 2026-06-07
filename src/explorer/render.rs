@@ -61,6 +61,7 @@ use crate::explorer::{
     },
     view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
+use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::{ExplorerSettings, SettingsState};
 use thousands::Separable;
 
@@ -2017,6 +2018,12 @@ impl Render for ExplorerView {
                             .when_some(self.open_error.clone(), |this, error| {
                                 this.child(render_open_error(&error))
                             })
+                            .when(self.recursive_search_is_working(), |this| {
+                                this.child(linear_indeterminate(
+                                    "recursive-search-linear-progress",
+                                    LinearProgressStyle::explorer_copy_green(),
+                                ))
+                            })
                             .child(self.render_status_bar()),
                     ),
             )
@@ -3227,8 +3234,8 @@ mod tests {
         constants::{
             COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
             EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-            FILE_ICON_SLOT_WIDTH_PHYSICAL, MB_BYTES, NAV_BUTTON_ACTIVE_OPACITY,
-            SCROLLBAR_GUTTER_WIDTH,
+            EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH_PHYSICAL, MB_BYTES,
+            NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
         },
         entry::FileEntry,
         selection::SelectionModifiers,
@@ -3323,6 +3330,11 @@ mod tests {
         assert_eq!(UTILITY_NEW_ICON_BLACK, 0x555555);
         assert_eq!(UTILITY_VIEW_ICON_LINE_COLOR, 0x555555);
         assert_eq!(UTILITY_VIEW_ICON_LINE_TOPS, [3.5, 6.5, 9.5, 12.5]);
+    }
+
+    #[test]
+    fn explorer_copy_green_matches_dialog_copy_green() {
+        assert_eq!(EXPLORER_COPY_GREEN, 0x36a646);
     }
 
     #[test]
