@@ -216,10 +216,12 @@ impl ExplorerView {
         self.search.recursive_enabled = !self.search.recursive_enabled;
         self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
         self.search.recursive_cache = None;
+        self.restart_directory_watcher(cx);
         self.refresh_search_filter_with_selection(&selected_paths, cx);
     }
 
     pub(super) fn refresh_search_after_external_change(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_recursive_search_cache();
         let selected_paths = self.selected_paths();
         self.refresh_search_filter_with_selection(&selected_paths, cx);
     }
@@ -670,7 +672,7 @@ impl ExplorerView {
             cache_clone_started.elapsed(),
             "schedule.cache_clone cache_hit={} paths={}",
             cached_search.is_some(),
-            cached_search.as_ref().map_or(0, |cache| cache.paths.len())
+            cached_search.as_ref().map_or(0, |cache| cache.index.len())
         );
         let cancel = Arc::new(AtomicBool::new(false));
         self.search.recursive_cancel = Some(cancel.clone());
@@ -738,7 +740,7 @@ impl ExplorerView {
         self.search.recursive_cache = Some(RecursiveSearchCache {
             root: output.root,
             show_hidden_files: output.show_hidden_files,
-            paths: output.scanned_paths,
+            index: output.scanned_index,
         });
         self.entries = output.entries;
         self.restore_selection_from_paths(&selected_paths);
@@ -1064,7 +1066,11 @@ mod tests {
             root: view.path.clone(),
             query: "stale".to_owned(),
             show_hidden_files: view.show_hidden_files,
-            scanned_paths: Arc::from([]),
+            scanned_index: Arc::new(
+                crate::explorer::recursive_search::RecursiveSearchIndex::new(
+                    crate::ngram::NgramIndexBuilder::new().finish(),
+                ),
+            ),
             entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
         });
 
@@ -1073,6 +1079,24 @@ mod tests {
             view.search.recursive_status,
             RecursiveSearchStatus::Searching
         );
+        assert!(view.search.recursive_cache.is_none());
+    }
+
+    #[test]
+    fn invalidating_recursive_search_cache_drops_materialized_index() {
+        let mut view = test_view_with_entries(&["current.txt"]);
+        view.search.recursive_cache = Some(RecursiveSearchCache {
+            root: view.path.clone(),
+            show_hidden_files: view.show_hidden_files,
+            index: Arc::new(
+                crate::explorer::recursive_search::RecursiveSearchIndex::new(
+                    crate::ngram::NgramIndexBuilder::new().finish(),
+                ),
+            ),
+        });
+
+        view.invalidate_recursive_search_cache();
+
         assert!(view.search.recursive_cache.is_none());
     }
 }

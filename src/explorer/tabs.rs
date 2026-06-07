@@ -324,6 +324,7 @@ impl ExplorerTabs {
         for tab in &self.tabs {
             let _ = tab.view.update(cx, |view, cx| {
                 view.reload();
+                view.refresh_search_after_external_change(cx);
                 cx.notify();
             });
         }
