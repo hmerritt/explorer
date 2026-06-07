@@ -18,6 +18,7 @@ icon = ["assets/explorer.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+decompress = "0.6.0"
 filetime = "0.2.29"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
 globset = "0.4.18"

@@ -19,9 +19,9 @@ use crate::explorer::{
     },
     filesystem::{
         ConflictChoice, FileOperationError, FileOperationJob, FileOperationSummary,
-        PreparedFileOperation, execute_file_operation_with_progress,
-        prepare_copy_paths_to_directory_for_paste, prepare_move_paths_to_directory,
-        remove_paths_permanently, trash_paths,
+        PreparedFileOperation, archive_path_is_supported, execute_file_operation_with_progress,
+        prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
+        prepare_move_paths_to_directory, remove_paths_permanently, trash_paths,
     },
     view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
@@ -142,6 +142,17 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn extract_selected_archives(&mut self, cx: &mut Context<Self>) {
+        let Some(paths) = self.selected_archive_paths() else {
+            return;
+        };
+
+        self.handle_prepared_file_command_result_and_open_dialog(
+            prepare_extract_archives_to_directory(&paths, &self.path),
+            cx,
+        );
+    }
+
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -249,6 +260,19 @@ impl ExplorerView {
     ) -> Option<FileClipboard> {
         let paths = self.selected_paths();
         (!paths.is_empty()).then(|| FileClipboard::new(operation, paths))
+    }
+
+    pub(super) fn selected_archive_paths(&self) -> Option<Vec<PathBuf>> {
+        let paths = self.selected_paths();
+        if paths.is_empty()
+            || paths
+                .iter()
+                .any(|path| !path.is_file() || !archive_path_is_supported(path))
+        {
+            return None;
+        }
+
+        Some(paths)
     }
 
     pub(super) fn mark_cut_paths(&mut self, paths: &[PathBuf]) {
@@ -687,6 +711,51 @@ mod tests {
             clipboard.paths,
             vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]
         );
+    }
+
+    #[test]
+    fn selected_archive_paths_requires_all_selected_items_to_be_archive_files() {
+        let temp = TempDir::new();
+        let archive = temp.path().join("archive.zip");
+        let other_archive = temp.path().join("other.tar.gz");
+        let text = temp.path().join("file.txt");
+        fs::write(&archive, b"not a real zip").expect("create archive path");
+        fs::write(&other_archive, b"not a real tarball").expect("create archive path");
+        fs::write(&text, b"text").expect("create text");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&archive);
+
+        assert_eq!(view.selected_archive_paths(), Some(vec![archive.clone()]));
+
+        view.apply_click_selection(
+            view.entries
+                .iter()
+                .position(|entry| entry.path == other_archive)
+                .expect("other archive index"),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        assert_eq!(
+            view.selected_archive_paths(),
+            Some(vec![archive.clone(), other_archive])
+        );
+
+        view.apply_click_selection(
+            view.entries
+                .iter()
+                .position(|entry| entry.path == text)
+                .expect("text index"),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        assert_eq!(view.selected_archive_paths(), None);
     }
 
     #[test]

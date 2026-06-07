@@ -129,6 +129,7 @@ const UTILITY_ICON_PASTE: &str = "\u{E77F}";
 const UTILITY_ICON_RENAME: &str = "\u{E8AC}";
 const UTILITY_ICON_DELETE: &str = "\u{E74D}";
 const UTILITY_ICON_FILE: &str = "\u{E8A5}";
+const UTILITY_ICON_EXTRACT: &str = "\u{E8B6}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
@@ -333,6 +334,7 @@ impl ExplorerView {
     fn render_utility_bar(&self, cx: &mut Context<Self>) -> Div {
         let has_selection = !self.selection.selected_indices.is_empty();
         let can_rename = self.can_start_selected_rename();
+        let can_extract = self.selected_archive_paths().is_some();
         let clipboard = cx.read_from_clipboard();
         let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
 
@@ -448,6 +450,22 @@ impl ExplorerView {
                     cx.notify();
                 }),
             ))
+            .when(can_extract, |this| {
+                this.child(utility_separator()).child(utility_text_button(
+                    "utility-extract",
+                    Some(utility_text_icon(UTILITY_ICON_EXTRACT).into_any_element()),
+                    "Extract",
+                    false,
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.extract_selected_archives(cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+            })
     }
 
     fn render_utility_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2359,6 +2377,21 @@ fn utility_view_icon_line(top: f32) -> Div {
         .w(px(14.0))
         .h(px(1.0))
         .bg(rgb(UTILITY_VIEW_ICON_LINE_COLOR))
+}
+
+fn utility_text_icon(icon: &'static str) -> Div {
+    div()
+        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .font(nav_icon_font())
+        .text_size(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .line_height(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+        .text_color(rgb(UTILITY_NEW_ICON_BLACK))
+        .child(icon)
 }
 
 fn utility_icon_button(

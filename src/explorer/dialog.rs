@@ -21,6 +21,7 @@ use crate::explorer::{
     formatting::format_size,
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
+use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 
 actions!(dialog, [DialogCancel]);
 
@@ -658,6 +659,9 @@ impl ExplorerDialog {
             .map(file_operation_item_label)
             .unwrap_or_else(|| "Preparing".to_owned());
         let percent = progress.as_ref().and_then(FileOperationProgress::percent);
+        let cancellable = progress
+            .as_ref()
+            .is_none_or(|progress| progress.cancellable);
 
         div()
             .id("file-operation-progress")
@@ -683,20 +687,20 @@ impl ExplorerDialog {
                     .text_color(rgb(0x595959))
                     .child(SharedString::from(item_label)),
             )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
-                    .child(
-                        dialog_button("file-operation-cancel", "Cancel").on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
+            .when(cancellable, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
+                        .child(dialog_button("file-operation-cancel", "Cancel").on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.cancel(window, cx);
                                 cx.stop_propagation();
-                            },
+                            }),
                         )),
-                    ),
-            )
+                )
+            })
             .into_any_element()
     }
 }
@@ -1040,7 +1044,18 @@ fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
 }
 
 fn render_file_operation_progress_bar(percent: Option<f32>) -> AnyElement {
-    let fill_width = percent.unwrap_or(0.0) * PROGRESS_DIALOG_BAR_WIDTH;
+    let Some(percent) = percent else {
+        return div()
+            .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
+            .w(px(PROGRESS_DIALOG_BAR_WIDTH))
+            .child(linear_indeterminate(
+                "file-operation-indeterminate-progress",
+                LinearProgressStyle::explorer_copy_green(),
+            ))
+            .into_any_element();
+    };
+
+    let fill_width = percent * PROGRESS_DIALOG_BAR_WIDTH;
 
     div()
         .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
@@ -1063,6 +1078,7 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
     let action = match progress.phase {
         FileOperationPhase::Preparing => "Preparing",
         FileOperationPhase::Copying => "Copying",
+        FileOperationPhase::Extracting => "Extracting",
         FileOperationPhase::Moving => "Moving",
         FileOperationPhase::Removing => "Removing",
         FileOperationPhase::Finished => "Finished",

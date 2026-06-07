@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -16,6 +16,10 @@ use thousands::Separable;
 use crate::explorer::{entry::FileEntry, sorting::sort_entries};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
+const COMPOUND_ARCHIVE_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "tar.xz", "tar.zst"];
+const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
+    "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar",
+];
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_start_path() -> PathBuf {
@@ -444,6 +448,19 @@ pub(super) fn prepare_copy_paths_to_directory_for_paste(
     .map(prepared_or_conflicts)
 }
 
+pub(super) fn archive_path_is_supported(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(archive_name_has_supported_extension)
+}
+
+pub(super) fn prepare_extract_archives_to_directory(
+    archives: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
+    prepare_extract_archive_operation(archives, destination).map(prepared_or_conflicts)
+}
+
 #[cfg(test)]
 pub(super) fn resolve_file_conflicts(
     conflicts: FileConflictBatch,
@@ -573,6 +590,7 @@ pub(super) enum ConflictChoice {
 pub(super) enum FileOperationKind {
     Move,
     Copy,
+    Extract,
 }
 
 impl FileOperationKind {
@@ -580,6 +598,7 @@ impl FileOperationKind {
         match self {
             FileOperationKind::Move => "Moving",
             FileOperationKind::Copy => "Copying",
+            FileOperationKind::Extract => "Extracting",
         }
     }
 }
@@ -588,6 +607,7 @@ impl FileOperationKind {
 pub(super) enum FileOperationPhase {
     Preparing,
     Copying,
+    Extracting,
     Moving,
     Removing,
     Finished,
@@ -649,7 +669,7 @@ impl FileOperationJob {
             total_files: self.stats.total_files,
             completed_files: 0,
             current_item: None,
-            cancellable: true,
+            cancellable: self.kind != FileOperationKind::Extract,
         }
     }
 }
@@ -673,6 +693,11 @@ enum FileOperationStep {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
+    },
+    ExtractArchive {
+        archive: PathBuf,
+        destination: PathBuf,
+        conflicts: Vec<PathBuf>,
     },
     RemoveEmptyDirectory(PathBuf),
 }
@@ -747,6 +772,7 @@ fn prepare_file_operation(
                 let operation = match kind {
                     FileOperationKind::Move => "move",
                     FileOperationKind::Copy => "copy",
+                    FileOperationKind::Extract => "extract",
                 };
                 return Err(format!(
                     "Cannot {operation} {} into itself.",
@@ -860,16 +886,107 @@ fn plan_path_operation(
                 destination: destination.to_path_buf(),
                 conflict,
             }),
+            FileOperationKind::Extract => {}
         }
     }
 
     Ok(())
 }
 
+fn prepare_extract_archive_operation(
+    archives: &[PathBuf],
+    destination: &Path,
+) -> Result<FileOperationJob, String> {
+    if archives.is_empty() {
+        return Err("No archive files were selected.".to_owned());
+    }
+
+    if !destination.is_dir() {
+        return Err(format!(
+            "{} is not a folder.",
+            path_display_name(destination)
+        ));
+    }
+
+    let mut steps = Vec::new();
+    let mut roots = Vec::new();
+    let mut reserved_destinations = HashSet::new();
+    let mut stats = FileOperationStats {
+        total_bytes: 0,
+        total_files: 0,
+    };
+
+    for archive in archives {
+        if !archive.exists() {
+            return Err(format!("Could not find {}.", path_display_name(archive)));
+        }
+
+        if !archive.is_file() || !archive_path_is_supported(archive) {
+            return Err(format!(
+                "{} is not a supported archive.",
+                path_display_name(archive)
+            ));
+        }
+
+        let top_level_entries = archive_top_level_entries(archive)?;
+        if top_level_entries.is_empty() {
+            return Err(format!(
+                "{} does not contain any files.",
+                path_display_name(archive)
+            ));
+        }
+
+        let extract_to = archive_extract_destination(archive, destination, &top_level_entries)?;
+        let output_roots = archive_output_roots(&extract_to, &top_level_entries);
+        let planned_outputs = archive_planned_output_paths(archive, &extract_to)?;
+        let mut conflicts = Vec::new();
+
+        for output in &planned_outputs {
+            if !reserved_destinations.insert(output.clone()) {
+                return Err(format!(
+                    "Multiple selected archives contain {}.",
+                    path_display_name(output)
+                ));
+            }
+            if output.exists() {
+                conflicts.push(output.clone());
+            }
+        }
+
+        steps.push(FileOperationStep::ExtractArchive {
+            archive: archive.clone(),
+            destination: extract_to,
+            conflicts,
+        });
+
+        stats.total_files = stats.total_files.saturating_add(1);
+        stats.total_bytes = stats.total_bytes.saturating_add(
+            fs::metadata(archive)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        );
+
+        for output in output_roots {
+            roots.push(FileOperationRoot {
+                source: archive.clone(),
+                destination: output,
+                source_is_dir: false,
+            });
+        }
+    }
+
+    Ok(FileOperationJob {
+        kind: FileOperationKind::Extract,
+        stats,
+        steps,
+        roots,
+    })
+}
+
 fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
-    job.steps
-        .iter()
-        .filter_map(|step| match step {
+    let mut file_conflicts = Vec::new();
+    for step in &job.steps {
+        match step {
             FileOperationStep::CopyFile {
                 source,
                 destination,
@@ -879,13 +996,24 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source,
                 destination,
                 conflict: true,
-            } => Some(FileConflict {
+            } => file_conflicts.push(FileConflict {
                 source: source.clone(),
                 destination: destination.clone(),
             }),
-            _ => None,
-        })
-        .collect()
+            FileOperationStep::ExtractArchive {
+                archive,
+                conflicts: archive_conflicts,
+                ..
+            } => {
+                file_conflicts.extend(archive_conflicts.iter().map(|destination| FileConflict {
+                    source: archive.clone(),
+                    destination: destination.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+    file_conflicts
 }
 
 #[cfg(test)]
@@ -988,6 +1116,31 @@ pub(super) fn execute_file_operation_with_progress(
                 }
                 operated_destinations.insert(destination.clone());
             }
+            FileOperationStep::ExtractArchive {
+                archive,
+                destination,
+                conflicts,
+            } => {
+                if conflict_choice == ConflictChoice::Skip
+                    && archive_is_single_file_compression(archive)
+                    && !conflicts.is_empty()
+                {
+                    continue;
+                }
+
+                progress.phase = FileOperationPhase::Extracting;
+                progress.current_item = Some(archive.clone());
+                on_progress(progress.clone());
+                extract_archive_with_progress_filter(
+                    archive,
+                    destination,
+                    conflicts,
+                    conflict_choice,
+                    &mut progress,
+                    &mut on_progress,
+                )?;
+                operated_destinations.insert(destination.clone());
+            }
             FileOperationStep::RemoveEmptyDirectory(path) => {
                 progress.phase = FileOperationPhase::Removing;
                 progress.current_item = Some(path.clone());
@@ -1000,7 +1153,11 @@ pub(super) fn execute_file_operation_with_progress(
 
     let mut summary = FileOperationSummary::default();
     for root in &job.roots {
-        if root.source_is_dir {
+        if job.kind == FileOperationKind::Extract {
+            if root.destination.exists() {
+                summary.destination_paths.push(root.destination.clone());
+            }
+        } else if root.source_is_dir {
             if root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
@@ -1021,6 +1178,198 @@ pub(super) fn execute_file_operation_with_progress(
     on_progress(progress);
 
     Ok(summary)
+}
+
+fn extract_archive_with_progress_filter(
+    archive: &Path,
+    destination: &Path,
+    conflicts: &[PathBuf],
+    conflict_choice: ConflictChoice,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let conflict_paths = conflicts.iter().cloned().collect::<HashSet<_>>();
+    let opts = decompress::ExtractOptsBuilder::default()
+        .filter(move |path| {
+            conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path)
+        })
+        .build()
+        .map_err(|error| {
+            FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
+        })?;
+
+    decompress::decompress(archive, destination, &opts).map_err(|error| {
+        FileOperationError::Failed(format_path_error(
+            "extract",
+            archive,
+            std::io::Error::other(error.to_string()),
+        ))
+    })?;
+
+    progress.copied_bytes = progress.copied_bytes.saturating_add(
+        fs::metadata(archive)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+    );
+    progress.completed_files = progress.completed_files.saturating_add(1);
+    on_progress(progress.clone());
+    Ok(())
+}
+
+fn archive_top_level_entries(archive: &Path) -> Result<Vec<PathBuf>, String> {
+    let opts = default_extract_opts()?;
+    let listing = decompress::list(archive, &opts)
+        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))?;
+
+    Ok(top_level_entries_from_listing(&listing.entries))
+}
+
+fn archive_planned_output_paths(
+    archive: &Path,
+    destination: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let opts = default_extract_opts()?;
+    let listing = decompress::list(archive, &opts)
+        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))?;
+
+    Ok(planned_output_paths_from_listing(
+        &listing.entries,
+        destination,
+    ))
+}
+
+fn default_extract_opts() -> Result<decompress::ExtractOpts, String> {
+    decompress::ExtractOptsBuilder::default()
+        .build()
+        .map_err(|error| format!("Could not prepare extraction: {error}"))
+}
+
+fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
+    let mut top_level_entries = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let Some(top_level) = top_level_archive_component(Path::new(entry)) else {
+            continue;
+        };
+        if seen.insert(top_level.clone()) {
+            top_level_entries.push(top_level);
+        }
+    }
+
+    top_level_entries
+}
+
+fn planned_output_paths_from_listing(entries: &[String], destination: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let relative = sanitized_archive_entry_path(Path::new(entry));
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let output = destination.join(relative);
+        if seen.insert(output.clone()) {
+            paths.push(output);
+        }
+    }
+    paths
+}
+
+fn archive_extract_destination(
+    archive: &Path,
+    destination: &Path,
+    top_level_entries: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if top_level_entries.len() == 1 {
+        return Ok(destination.to_path_buf());
+    }
+
+    let name = archive_extract_root_name(archive)?;
+    Ok(destination.join(name))
+}
+
+fn archive_output_roots(destination: &Path, top_level_entries: &[PathBuf]) -> Vec<PathBuf> {
+    if top_level_entries.len() > 1 {
+        return vec![destination.to_path_buf()];
+    }
+
+    top_level_entries
+        .iter()
+        .map(|entry| destination.join(entry))
+        .collect()
+}
+
+fn archive_extract_root_name(archive: &Path) -> Result<OsString, String> {
+    let file_name = archive
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("{} cannot be extracted.", path_display_name(archive)))?;
+    let lower = file_name.to_ascii_lowercase();
+
+    for extension in COMPOUND_ARCHIVE_EXTENSIONS {
+        let suffix = format!(".{extension}");
+        if lower.ends_with(&suffix) && file_name.len() > suffix.len() {
+            return Ok(OsString::from(&file_name[..file_name.len() - suffix.len()]));
+        }
+    }
+
+    for extension in SIMPLE_ARCHIVE_EXTENSIONS {
+        let suffix = format!(".{extension}");
+        if lower.ends_with(&suffix) && file_name.len() > suffix.len() {
+            return Ok(OsString::from(&file_name[..file_name.len() - suffix.len()]));
+        }
+    }
+
+    archive
+        .file_stem()
+        .map(OsStr::to_os_string)
+        .ok_or_else(|| format!("{} cannot be extracted.", path_display_name(archive)))
+}
+
+fn archive_name_has_supported_extension(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    COMPOUND_ARCHIVE_EXTENSIONS
+        .iter()
+        .chain(SIMPLE_ARCHIVE_EXTENSIONS.iter())
+        .any(|extension| {
+            let suffix = format!(".{extension}");
+            lower.ends_with(&suffix) && file_name.len() > suffix.len()
+        })
+}
+
+fn archive_is_single_file_compression(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            ["gz", "bz", "bz2", "xz", "zst"].iter().any(|extension| {
+                lower.ends_with(&format!(".{extension}"))
+                    && !COMPOUND_ARCHIVE_EXTENSIONS
+                        .iter()
+                        .any(|compound| lower.ends_with(&format!(".{compound}")))
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn top_level_archive_component(path: &Path) -> Option<PathBuf> {
+    sanitized_archive_entry_path(path)
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Normal(name) => Some(PathBuf::from(name)),
+            _ => None,
+        })
+}
+
+fn sanitized_archive_entry_path(path: &Path) -> PathBuf {
+    let mut sanitized = PathBuf::new();
+    for component in path.components() {
+        if let Component::Normal(name) = component {
+            sanitized.push(name);
+        }
+    }
+    sanitized
 }
 
 fn move_source_file_with_progress(
@@ -1276,6 +1625,105 @@ mod tests {
             SetFileAttributesW(PCWSTR(wide_path.as_ptr()), attributes)
                 .expect("set windows file attributes");
         }
+    }
+
+    #[test]
+    fn archive_extract_root_name_strips_simple_and_compound_extensions() {
+        assert_eq!(
+            archive_extract_root_name(Path::new("package.zip")).unwrap(),
+            OsString::from("package")
+        );
+        assert_eq!(
+            archive_extract_root_name(Path::new("package.tar.gz")).unwrap(),
+            OsString::from("package")
+        );
+        assert_eq!(
+            archive_extract_root_name(Path::new("package.tar.zst")).unwrap(),
+            OsString::from("package")
+        );
+        assert_eq!(
+            archive_extract_root_name(Path::new("package.rar")).unwrap(),
+            OsString::from("package")
+        );
+    }
+
+    #[test]
+    fn top_level_entries_from_listing_counts_unique_roots() {
+        let entries = vec![
+            "file.txt".to_owned(),
+            "folder/a.txt".to_owned(),
+            "folder/nested/b.txt".to_owned(),
+            "../ignored.txt".to_owned(),
+            "/rooted.txt".to_owned(),
+        ];
+
+        assert_eq!(
+            top_level_entries_from_listing(&entries),
+            vec![
+                PathBuf::from("file.txt"),
+                PathBuf::from("folder"),
+                PathBuf::from("ignored.txt"),
+                PathBuf::from("rooted.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn archive_destination_uses_current_directory_for_single_root() {
+        let destination = Path::new("downloads");
+        let top_level_entries = vec![PathBuf::from("folder")];
+
+        assert_eq!(
+            archive_extract_destination(
+                Path::new("downloads/archive.zip"),
+                destination,
+                &top_level_entries,
+            )
+            .unwrap(),
+            PathBuf::from("downloads")
+        );
+        assert_eq!(
+            archive_output_roots(destination, &top_level_entries),
+            vec![PathBuf::from("downloads/folder")]
+        );
+    }
+
+    #[test]
+    fn archive_destination_uses_archive_named_folder_for_multiple_roots() {
+        let destination = Path::new("downloads");
+        let top_level_entries = vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")];
+
+        let extract_to = archive_extract_destination(
+            Path::new("downloads/archive.tar.gz"),
+            destination,
+            &top_level_entries,
+        )
+        .unwrap();
+
+        assert_eq!(extract_to, PathBuf::from("downloads/archive"));
+        assert_eq!(
+            archive_output_roots(&extract_to, &top_level_entries),
+            vec![PathBuf::from("downloads/archive")]
+        );
+    }
+
+    #[test]
+    fn planned_output_paths_sanitize_and_dedupe_listing_entries() {
+        let entries = vec![
+            "folder/a.txt".to_owned(),
+            "folder/a.txt".to_owned(),
+            "./folder/b.txt".to_owned(),
+            "../outside.txt".to_owned(),
+        ];
+
+        assert_eq!(
+            planned_output_paths_from_listing(&entries, Path::new("dest")),
+            vec![
+                PathBuf::from("dest/folder/a.txt"),
+                PathBuf::from("dest/folder/b.txt"),
+                PathBuf::from("dest/outside.txt"),
+            ]
+        );
     }
 
     #[test]
