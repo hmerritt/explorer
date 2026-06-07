@@ -61,6 +61,7 @@ use crate::explorer::{
     view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
 use crate::settings::{ExplorerSettings, SettingsState};
+use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
@@ -1586,6 +1587,15 @@ impl ExplorerView {
     }
 
     fn render_empty_folder(&self, message: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        self.render_empty_folder_with_detail(Some(message), None, cx)
+    }
+
+    fn render_empty_folder_with_detail(
+        &self,
+        message: Option<&'static str>,
+        detail: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entity = cx.entity();
         let current_directory = DropDestination::CurrentDirectory;
 
@@ -1645,7 +1655,7 @@ impl ExplorerView {
                     cx.notify();
                 }
             }))
-            .child(render_empty_folder_message(message))
+            .child(render_empty_folder_message(message, detail))
             .into_any_element()
     }
 
@@ -1982,9 +1992,15 @@ impl Render for ExplorerView {
                                     ),
                                     ExplorerContentBranch::Empty => div()
                                         .child(self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx)),
-                                    ExplorerContentBranch::SearchWorking => div().child(
-                                        self.render_empty_folder(SEARCH_WORKING_MESSAGE, cx),
-                                    ),
+                                    ExplorerContentBranch::SearchWorking => {
+                                        div().child(self.render_empty_folder_with_detail(
+                                            None,
+                                            Some(search_working_detail(
+                                                self.recursive_search_scanned_count(),
+                                            )),
+                                            cx,
+                                        ))
+                                    }
                                     ExplorerContentBranch::NoSearchMatches => div().child(
                                         self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
                                     ),
@@ -2181,14 +2197,26 @@ impl Focusable for ExplorerView {
     }
 }
 
-fn render_empty_folder_message(message: &'static str) -> Div {
+fn render_empty_folder_message(message: Option<&'static str>, detail: Option<String>) -> Div {
     div()
+        .flex()
+        .flex_col()
         .w_full()
         .mt(px(EMPTY_FOLDER_TOP_MARGIN))
         .text_center()
         .text_size(px(EMPTY_FOLDER_TEXT_SIZE))
         .text_color(rgb(0x9a9a9a))
-        .child(message)
+        .when_some(message, |this, message| this.child(message))
+        .when_some(detail, |this, detail| {
+            this.child(div().child(SharedString::from(detail)))
+        })
+}
+
+fn search_working_detail(scanned_count: Option<usize>) -> String {
+    scanned_count.map_or_else(
+        || SEARCH_WORKING_MESSAGE.to_owned(),
+        |count| format!("Searching {}...", count.separate_with_commas()),
+    )
 }
 
 fn render_open_error(error: &str) -> Div {
@@ -3208,8 +3236,8 @@ mod tests {
         UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
         available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
         filename_text_width, folder_status_summary, is_normal_entry_click,
-        recursive_result_text_width, selection_modifiers_for_click, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, text_cell_width,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, text_cell_width,
     };
 
     #[test]
@@ -3295,6 +3323,12 @@ mod tests {
         assert_eq!(EMPTY_FOLDER_TEXT_SIZE, 12.0);
         assert_eq!(EMPTY_FOLDER_TOP_MARGIN, 20.0);
         assert_eq!(EMPTY_FOLDER_MESSAGE, "This folder is empty.");
+    }
+
+    #[test]
+    fn recursive_search_working_detail_formats_live_count() {
+        assert_eq!(search_working_detail(None), "Searching...");
+        assert_eq!(search_working_detail(Some(1_234)), "Searching 1,234...");
     }
 
     #[test]

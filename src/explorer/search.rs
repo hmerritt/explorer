@@ -39,7 +39,10 @@ use crate::explorer::{
         SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight,
     },
     entry::FileEntry,
-    recursive_search::{RecursiveSearchCache, RecursiveSearchOutput, recursive_search_entries},
+    recursive_search::{
+        RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
+        recursive_search_entries,
+    },
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
         scroll_offset_for_cursor,
@@ -54,6 +57,7 @@ pub(super) struct SearchState {
     pub(super) recursive_enabled: bool,
     pub(super) recursive_generation: u64,
     pub(super) recursive_status: RecursiveSearchStatus,
+    pub(super) recursive_scanned_count: Option<usize>,
     pub(super) recursive_results_active: bool,
     pub(super) recursive_cache: Option<RecursiveSearchCache>,
     pub(super) recursive_cancel: Option<Arc<AtomicBool>>,
@@ -76,6 +80,7 @@ impl Default for SearchState {
             recursive_enabled: false,
             recursive_generation: 0,
             recursive_status: RecursiveSearchStatus::Idle,
+            recursive_scanned_count: None,
             recursive_results_active: false,
             recursive_cache: None,
             recursive_cancel: None,
@@ -184,6 +189,10 @@ impl ExplorerView {
 
     pub(super) fn recursive_search_results_active(&self) -> bool {
         self.search.recursive_results_active
+    }
+
+    pub(super) fn recursive_search_scanned_count(&self) -> Option<usize> {
+        self.search.recursive_scanned_count
     }
 
     pub(super) fn search_is_editing(&self) -> bool {
@@ -671,6 +680,7 @@ impl ExplorerView {
         self.cancel_recursive_search();
         self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
         self.search.recursive_status = RecursiveSearchStatus::Searching;
+        self.search.recursive_scanned_count = None;
         self.search.recursive_results_active = true;
         self.entries.clear();
         self.clear_selection();
@@ -696,6 +706,7 @@ impl ExplorerView {
             cached_search.as_ref().map_or(0, |cache| cache.paths.len())
         );
         let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(RecursiveSearchProgress::default());
         self.search.recursive_cancel = Some(cancel.clone());
 
         #[cfg(debug_assertions)]
@@ -718,22 +729,41 @@ impl ExplorerView {
                 return;
             }
 
-            let output = cx
-                .background_executor()
-                .spawn({
+            let finished = Arc::new(AtomicBool::new(false));
+            let output_task = cx.background_executor().spawn({
+                let finished = finished.clone();
+                let progress = progress.clone();
+                {
                     let cancel = cancel.clone();
                     async move {
-                        recursive_search_entries(
+                        let output = recursive_search_entries(
                             generation,
                             root,
                             query,
                             show_hidden_files,
                             cached_search,
                             cancel,
-                        )
+                            progress,
+                        );
+                        finished.store(true, Ordering::Relaxed);
+                        output
                     }
-                })
-                .await;
+                }
+            });
+
+            while !finished.load(Ordering::Relaxed) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let scanned_count = progress.scanning_count();
+                let _ = this.update(cx, |explorer, cx| {
+                    if explorer.update_recursive_search_progress(generation, scanned_count) {
+                        cx.notify();
+                    }
+                });
+            }
+
+            let output = output_task.await;
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.apply_recursive_search_output(output);
@@ -755,6 +785,7 @@ impl ExplorerView {
 
         let selected_paths = self.selected_paths();
         self.search.recursive_status = RecursiveSearchStatus::Idle;
+        self.search.recursive_scanned_count = None;
         self.search.recursive_cancel = None;
         self.search.recursive_task = None;
         self.search.recursive_results_active = true;
@@ -779,7 +810,24 @@ impl ExplorerView {
         }
         self.search.recursive_task = None;
         self.search.recursive_status = RecursiveSearchStatus::Idle;
+        self.search.recursive_scanned_count = None;
         self.search.recursive_results_active = false;
+    }
+
+    fn update_recursive_search_progress(
+        &mut self,
+        generation: u64,
+        scanned_count: Option<usize>,
+    ) -> bool {
+        if self.search.recursive_generation != generation
+            || self.search.recursive_status != RecursiveSearchStatus::Searching
+            || self.search.recursive_scanned_count == scanned_count
+        {
+            return false;
+        }
+
+        self.search.recursive_scanned_count = scanned_count;
+        true
     }
 }
 
@@ -1097,5 +1145,28 @@ mod tests {
             RecursiveSearchStatus::Searching
         );
         assert!(view.search.recursive_cache.is_none());
+    }
+
+    #[test]
+    fn stale_recursive_search_progress_is_ignored() {
+        let mut view = test_view_with_entries(&["current.txt"]);
+        view.search.recursive_generation = 2;
+        view.search.recursive_status = RecursiveSearchStatus::Searching;
+
+        assert!(!view.update_recursive_search_progress(1, Some(42)));
+        assert_eq!(view.search.recursive_scanned_count, None);
+    }
+
+    #[test]
+    fn recursive_search_progress_updates_and_clears_on_cancel() {
+        let mut view = test_view_with_entries(&["current.txt"]);
+        view.search.recursive_generation = 2;
+        view.search.recursive_status = RecursiveSearchStatus::Searching;
+
+        assert!(view.update_recursive_search_progress(2, Some(42)));
+        assert_eq!(view.search.recursive_scanned_count, Some(42));
+
+        view.cancel_recursive_search();
+        assert_eq!(view.search.recursive_scanned_count, None);
     }
 }

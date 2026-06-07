@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -34,6 +34,21 @@ use crate::explorer::{
 
 const CANCELLATION_CHECK_INTERVAL: usize = 5120;
 const PARALLEL_MATERIALIZATION_THRESHOLD: usize = 128;
+
+#[derive(Default)]
+pub(super) struct RecursiveSearchProgress {
+    scanning: AtomicBool,
+    scanned_paths: AtomicUsize,
+}
+
+impl RecursiveSearchProgress {
+    pub(super) fn scanning_count(&self) -> Option<usize> {
+        self.scanning
+            .load(Ordering::Relaxed)
+            .then(|| self.scanned_paths.load(Ordering::Relaxed))
+            .filter(|count| *count > 0)
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RecursiveSearchPath {
@@ -72,6 +87,7 @@ pub(super) fn recursive_search_entries(
     show_hidden_files: bool,
     cached_search: Option<RecursiveSearchCache>,
     cancel: Arc<AtomicBool>,
+    progress: Arc<RecursiveSearchProgress>,
 ) -> RecursiveSearchOutput {
     #[cfg(debug_assertions)]
     let total_started = Instant::now();
@@ -83,7 +99,15 @@ pub(super) fn recursive_search_entries(
         None => {
             #[cfg(debug_assertions)]
             let scan_started = Instant::now();
-            let paths = scan_recursive_paths(&root, show_hidden_files, cancel.clone());
+            progress.scanned_paths.store(0, Ordering::Relaxed);
+            progress.scanning.store(true, Ordering::Relaxed);
+            let paths = scan_recursive_paths_with_progress(
+                &root,
+                show_hidden_files,
+                cancel.clone(),
+                Some(&progress.scanned_paths),
+            );
+            progress.scanning.store(false, Ordering::Relaxed);
             #[cfg(debug_assertions)]
             recursive_search_timing!(
                 generation,
@@ -145,10 +169,20 @@ pub(super) fn recursive_search_entries(
     }
 }
 
+#[cfg(any(test, feature = "benchmarks"))]
 pub(super) fn scan_recursive_paths(
     root: &Path,
     show_hidden_files: bool,
     cancel: Arc<AtomicBool>,
+) -> Arc<Vec<RecursiveSearchPath>> {
+    scan_recursive_paths_with_progress(root, show_hidden_files, cancel, None)
+}
+
+fn scan_recursive_paths_with_progress(
+    root: &Path,
+    show_hidden_files: bool,
+    cancel: Arc<AtomicBool>,
+    progress: Option<&AtomicUsize>,
 ) -> Arc<Vec<RecursiveSearchPath>> {
     if cancel.load(Ordering::Relaxed) {
         return Arc::new(Vec::new());
@@ -193,6 +227,9 @@ pub(super) fn scan_recursive_paths(
                 file_name: entry.file_name,
                 normalized_name: entry.client_state,
             });
+            if let Some(progress) = progress {
+                progress.store(paths.len(), Ordering::Relaxed);
+            }
         }
     }
 
@@ -392,6 +429,7 @@ pub mod benchmark_support {
                 paths: paths.paths.clone(),
             }),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(RecursiveSearchProgress::default()),
         ))
     }
 
@@ -403,6 +441,7 @@ pub mod benchmark_support {
             show_hidden_files,
             None,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(RecursiveSearchProgress::default()),
         ))
     }
 }
@@ -467,6 +506,41 @@ mod tests {
         let paths = scan_recursive_paths(temp.path(), true, cancel);
 
         assert_eq!(path_names(&paths), vec!["child", "nested.txt", "root.txt"]);
+    }
+
+    #[test]
+    fn recursive_scan_publishes_discovered_item_count() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+        fs::write(temp.path().join("root.txt"), b"root").expect("create root file");
+        fs::write(child.join("nested.txt"), b"nested").expect("create nested file");
+        let progress = AtomicUsize::new(0);
+
+        let paths = scan_recursive_paths_with_progress(
+            temp.path(),
+            true,
+            Arc::new(AtomicBool::new(false)),
+            Some(&progress),
+        );
+
+        assert_eq!(progress.load(Ordering::Relaxed), paths.len());
+        assert_eq!(progress.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn recursive_search_progress_only_exposes_positive_counts_while_scanning() {
+        let progress = RecursiveSearchProgress::default();
+        assert_eq!(progress.scanning_count(), None);
+
+        progress.scanning.store(true, Ordering::Relaxed);
+        assert_eq!(progress.scanning_count(), None);
+
+        progress.scanned_paths.store(42, Ordering::Relaxed);
+        assert_eq!(progress.scanning_count(), Some(42));
+
+        progress.scanning.store(false, Ordering::Relaxed);
+        assert_eq!(progress.scanning_count(), None);
     }
 
     #[test]
@@ -626,6 +700,7 @@ mod tests {
             true,
             Some(cache),
             cancel,
+            Arc::new(RecursiveSearchProgress::default()),
         );
 
         assert!(Arc::ptr_eq(&output.scanned_paths, &paths));
@@ -653,6 +728,7 @@ mod tests {
             true,
             Some(cached_search),
             cancel,
+            Arc::new(RecursiveSearchProgress::default()),
         );
 
         assert_eq!(output.entries.len(), 1);
