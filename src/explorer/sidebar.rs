@@ -8,6 +8,7 @@ pub(super) struct SidebarItem {
     pub(super) label: String,
     pub(super) path: PathBuf,
     pub(super) kind: SidebarItemKind,
+    pub(super) configured_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +82,7 @@ fn user_directory_items_from_paths(
             label,
             path,
             kind: SidebarItemKind::UserDirectory(kind),
+            configured_index: None,
         })
     })
     .collect()
@@ -89,7 +91,8 @@ fn user_directory_items_from_paths(
 fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<SidebarItem> {
     configured_items
         .iter()
-        .filter_map(|location| {
+        .enumerate()
+        .filter_map(|(configured_index, location)| {
             let path = location.resolve()?;
             if !path.is_dir() {
                 return None;
@@ -120,7 +123,12 @@ fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<Sidebar
                     SidebarItemKind::CustomDirectory,
                 ),
             };
-            Some(SidebarItem { label, path, kind })
+            Some(SidebarItem {
+                label,
+                path,
+                kind,
+                configured_index: Some(configured_index),
+            })
         })
         .collect()
 }
@@ -155,6 +163,7 @@ fn macos_system_location_items_from_paths(
             label,
             path,
             kind: SidebarItemKind::MacosSystemLocation(kind),
+            configured_index: None,
         })
     })
     .collect()
@@ -187,6 +196,7 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
             label: sidebar_drive_label(&path),
             path,
             kind: SidebarItemKind::Drive,
+            configured_index: None,
         })
         .collect()
 }
@@ -234,21 +244,25 @@ mod tests {
                     label: "home".to_owned(),
                     path: home,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Home),
+                    configured_index: None,
                 },
                 SidebarItem {
                     label: "Desktop".to_owned(),
                     path: desktop,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop),
+                    configured_index: None,
                 },
                 SidebarItem {
                     label: "Documents".to_owned(),
                     path: documents,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Documents),
+                    configured_index: None,
                 },
                 SidebarItem {
                     label: "Downloads".to_owned(),
                     path: downloads,
                     kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
+                    configured_index: None,
                 },
             ]
         );
@@ -304,11 +318,13 @@ mod tests {
                     label: "Pinned".to_owned(),
                     path: second,
                     kind: SidebarItemKind::CustomDirectory,
+                    configured_index: Some(0),
                 },
                 SidebarItem {
                     label: "first".to_owned(),
                     path: first,
                     kind: SidebarItemKind::CustomDirectory,
+                    configured_index: Some(2),
                 },
             ]
         );
@@ -334,11 +350,13 @@ mod tests {
                     kind: SidebarItemKind::MacosSystemLocation(
                         MacosSystemLocationKind::Applications
                     ),
+                    configured_index: None,
                 },
                 SidebarItem {
                     label: "Bin".to_owned(),
                     path: bin,
                     kind: SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin),
+                    configured_index: None,
                 },
             ]
         );

@@ -173,15 +173,103 @@ pub(crate) fn set_show_file_name_extensions(value: bool, cx: &mut impl BorrowApp
     update_settings(cx, |settings| settings.show_file_name_extensions = value);
 }
 
-fn update_settings(cx: &mut impl BorrowAppContext, update: impl FnOnce(&mut ExplorerSettings)) {
+pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> bool {
+    path.is_dir()
+        && !settings
+            .sidebar_items
+            .iter()
+            .filter_map(SidebarLocation::resolve)
+            .any(|configured_path| configured_path == path)
+}
+
+pub(crate) fn pin_sidebar_path(
+    path: PathBuf,
+    insertion_index: usize,
+    cx: &mut impl BorrowAppContext,
+) -> bool {
+    update_settings(cx, |settings| {
+        pin_sidebar_path_in_settings(path, insertion_index, settings)
+    })
+}
+
+pub(crate) fn reorder_sidebar_item(
+    source_index: usize,
+    target_index: usize,
+    before: bool,
+    cx: &mut impl BorrowAppContext,
+) -> Option<usize> {
+    update_settings(cx, |settings| {
+        reorder_sidebar_item_in_settings(source_index, target_index, before, settings)
+    })
+}
+
+fn update_settings<R>(
+    cx: &mut impl BorrowAppContext,
+    update: impl FnOnce(&mut ExplorerSettings) -> R,
+) -> R {
     cx.update_global::<SettingsState, _>(|state, _| {
-        update(&mut state.value);
+        let result = update(&mut state.value);
         if !state.path.as_os_str().is_empty()
             && let Err(error) = save_settings_to_path(&state.path, &state.value)
         {
             eprintln!("Unable to save Explorer settings: {error}");
         }
-    });
+        result
+    })
+}
+
+fn sidebar_reorder_index(
+    len: usize,
+    source_index: usize,
+    mut target_index: usize,
+    before: bool,
+) -> Option<usize> {
+    if source_index >= len || target_index >= len || source_index == target_index {
+        return None;
+    }
+    if source_index < target_index {
+        target_index -= 1;
+    }
+
+    let new_index = if before {
+        target_index
+    } else {
+        target_index + 1
+    };
+    (new_index != source_index).then_some(new_index)
+}
+
+fn pin_sidebar_path_in_settings(
+    path: PathBuf,
+    insertion_index: usize,
+    settings: &mut ExplorerSettings,
+) -> bool {
+    if !can_pin_sidebar_path(&path, settings) {
+        return false;
+    }
+    let insertion_index = insertion_index.min(settings.sidebar_items.len());
+    settings.sidebar_items.insert(
+        insertion_index,
+        SidebarLocation::Custom { path, label: None },
+    );
+    true
+}
+
+fn reorder_sidebar_item_in_settings(
+    source_index: usize,
+    target_index: usize,
+    before: bool,
+    settings: &mut ExplorerSettings,
+) -> Option<usize> {
+    let new_index = sidebar_reorder_index(
+        settings.sidebar_items.len(),
+        source_index,
+        target_index,
+        before,
+    )?;
+    let item = settings.sidebar_items.remove(source_index);
+    settings.sidebar_items.insert(new_index, item);
+    Some(new_index)
 }
 
 fn settings_watcher(
@@ -502,6 +590,97 @@ mod tests {
         });
         assert_ne!(state.startup_path(), missing);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pinning_inserts_at_requested_positions_and_rejects_duplicates() {
+        let dir = unique_temp_dir("pin-sidebar");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        let third = dir.join("third");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(&third).unwrap();
+
+        let mut settings = ExplorerSettings {
+            sidebar_items: Vec::new(),
+            ..ExplorerSettings::default()
+        };
+        assert!(pin_sidebar_path_in_settings(
+            first.clone(),
+            0,
+            &mut settings
+        ));
+        assert!(!pin_sidebar_path_in_settings(
+            first.clone(),
+            0,
+            &mut settings
+        ));
+        assert!(!pin_sidebar_path_in_settings(
+            dir.join("missing"),
+            0,
+            &mut settings
+        ));
+        assert!(pin_sidebar_path_in_settings(
+            second.clone(),
+            0,
+            &mut settings
+        ));
+        assert!(pin_sidebar_path_in_settings(
+            third.clone(),
+            1,
+            &mut settings
+        ));
+        assert_eq!(
+            settings
+                .sidebar_items
+                .iter()
+                .filter_map(SidebarLocation::resolve)
+                .collect::<Vec<_>>(),
+            vec![second, third, first]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidebar_reorder_indices_move_before_and_after_targets() {
+        assert_eq!(sidebar_reorder_index(4, 3, 1, true), Some(1));
+        assert_eq!(sidebar_reorder_index(4, 0, 2, false), Some(2));
+        assert_eq!(sidebar_reorder_index(4, 1, 1, true), None);
+        assert_eq!(sidebar_reorder_index(4, 0, 1, true), None);
+        assert_eq!(sidebar_reorder_index(4, 4, 1, true), None);
+    }
+
+    #[test]
+    fn sidebar_reorder_preserves_invisible_configured_items() {
+        let missing = unique_temp_dir("missing-sidebar");
+        let mut settings = ExplorerSettings {
+            sidebar_items: vec![
+                SidebarLocation::Home,
+                SidebarLocation::Custom {
+                    path: missing.clone(),
+                    label: None,
+                },
+                SidebarLocation::Downloads,
+            ],
+            ..ExplorerSettings::default()
+        };
+
+        assert_eq!(
+            reorder_sidebar_item_in_settings(2, 0, true, &mut settings),
+            Some(0)
+        );
+        assert_eq!(
+            settings.sidebar_items,
+            vec![
+                SidebarLocation::Downloads,
+                SidebarLocation::Home,
+                SidebarLocation::Custom {
+                    path: missing,
+                    label: None,
+                },
+            ]
+        );
     }
 
     #[test]

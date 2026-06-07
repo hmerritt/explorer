@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
+use std::{any::Any, collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
@@ -60,6 +60,7 @@ use crate::explorer::{
     },
     view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
+use crate::settings::{ExplorerSettings, SettingsState};
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
@@ -73,6 +74,44 @@ const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
+const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 6.0;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SidebarItemDrag {
+    configured_index: usize,
+    label: SharedString,
+}
+
+struct SidebarItemDragPreview {
+    label: SharedString,
+    scale_factor: f32,
+}
+
+impl Render for SidebarItemDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .w(px(SIDEBAR_WIDTH - 16.0))
+            .px(px(SIDEBAR_HORIZONTAL_PADDING))
+            .rounded(px(4.0))
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0x8a8a8a))
+            .shadow_md()
+            .child(folder_icon(self.scale_factor))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .ml(device_px(SIDEBAR_ICON_TEXT_GAP_PHYSICAL, self.scale_factor))
+                    .truncate()
+                    .text_size(px(SIDEBAR_TEXT_SIZE))
+                    .child(self.label.clone()),
+            )
+    }
+}
 const UTILITY_SEPARATOR_OUTER_WIDTH: f32 = 17.0;
 const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
 const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
@@ -762,17 +801,40 @@ impl ExplorerView {
 
     fn render_sidebar(&self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
         let configured_items = cx
-            .try_global::<crate::settings::SettingsState>()
+            .try_global::<SettingsState>()
             .map(|state| state.value.sidebar_items.clone())
-            .unwrap_or_else(|| crate::settings::ExplorerSettings::default().sidebar_items);
+            .unwrap_or_else(|| ExplorerSettings::default().sidebar_items);
         let sections = sidebar_sections(&configured_items);
         let mut children = Vec::new();
+        let has_user_directories = !sections.user_directories.is_empty();
 
-        for (index, item) in sections.user_directories.into_iter().enumerate() {
+        for (index, item) in sections.user_directories.iter().cloned().enumerate() {
+            children.push(self.render_sidebar_insertion_zone(
+                item.configured_index.unwrap_or(configured_items.len()),
+                index,
+                SIDEBAR_INSERTION_ZONE_HEIGHT,
+                cx,
+            ));
             children.push(self.render_sidebar_row(index, item, scale_factor, cx));
         }
+        let final_insertion_index = sections
+            .user_directories
+            .last()
+            .and_then(|item| item.configured_index)
+            .map(|index| index + 1)
+            .unwrap_or(configured_items.len());
+        children.push(self.render_sidebar_insertion_zone(
+            final_insertion_index,
+            sections.user_directories.len(),
+            if has_user_directories {
+                SIDEBAR_INSERTION_ZONE_HEIGHT
+            } else {
+                SIDEBAR_ROW_HEIGHT
+            },
+            cx,
+        ));
 
-        if !children.is_empty() && !sections.macos_system_locations.is_empty() {
+        if has_user_directories && !sections.macos_system_locations.is_empty() {
             children.push(sidebar_separator().into_any_element());
         }
 
@@ -804,6 +866,46 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn render_sidebar_insertion_zone(
+        &self,
+        insertion_index: usize,
+        id: usize,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(("explorer-sidebar-insertion", id))
+            .h(px(height))
+            .mx(px(8.0))
+            .flex_shrink_0()
+            .can_drop(move |dragged_value, _, cx| {
+                let Some(path) = sidebar_pin_path_from_value(dragged_value) else {
+                    return false;
+                };
+                cx.try_global::<SettingsState>()
+                    .is_some_and(|state| crate::settings::can_pin_sidebar_path(&path, &state.value))
+            })
+            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0x0078d7)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0x0078d7)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _, cx| {
+                this.clear_drop_indicator();
+                if let Some(path) = sidebar_pin_path_from_value(dragged) {
+                    crate::settings::pin_sidebar_path(path, insertion_index, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                this.clear_drop_indicator();
+                if let Some(path) = sidebar_pin_path_from_value(paths) {
+                    crate::settings::pin_sidebar_path(path, insertion_index, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     fn render_sidebar_row(
         &self,
         id: usize,
@@ -815,6 +917,8 @@ impl ExplorerView {
         let label = item.label.clone();
         let path = item.path.clone();
         let icon_item = item.clone();
+        let configured_index = item.configured_index;
+        let is_dragging = sidebar_item_is_dragging(configured_index, self.dragging_sidebar_item);
         let is_user_directory = matches!(
             item.kind,
             SidebarItemKind::UserDirectory(_) | SidebarItemKind::CustomDirectory
@@ -839,6 +943,7 @@ impl ExplorerView {
             .px(px(SIDEBAR_HORIZONTAL_PADDING))
             .rounded(px(4.0))
             .cursor_default()
+            .when(is_dragging, |this| this.opacity(0.4))
             .bg(if is_current {
                 rgb(0xcce8ff)
             } else {
@@ -864,6 +969,74 @@ impl ExplorerView {
                     .text_color(rgb(0x1f1f1f))
                     .child(SharedString::from(label)),
             );
+
+        if let Some(configured_index) = configured_index {
+            let drag_label = SharedString::from(item.label.clone());
+            row = row
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if this.dragging_sidebar_item.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if this.dragging_sidebar_item.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_drag(
+                    SidebarItemDrag {
+                        configured_index,
+                        label: drag_label,
+                    },
+                    {
+                        let entity = entity.clone();
+                        move |drag, _, window, cx| {
+                            let scale_factor = window.scale_factor();
+                            let _ = entity.update(cx, |this, cx| {
+                                this.dragging_sidebar_item = Some(drag.configured_index);
+                                cx.notify();
+                            });
+                            cx.new(|_| SidebarItemDragPreview {
+                                label: drag.label.clone(),
+                                scale_factor,
+                            })
+                        }
+                    },
+                )
+                .on_drag_move::<SidebarItemDrag>({
+                    let entity = entity.clone();
+                    move |event: &DragMoveEvent<SidebarItemDrag>, _, cx| {
+                        if !event.bounds.contains(&event.event.position) {
+                            return;
+                        }
+                        let top = f32::from(event.bounds.origin.y);
+                        let height = f32::from(event.bounds.size.height);
+                        let cursor_y = f32::from(event.event.position.y);
+                        let before = cursor_y < top + (height / 2.0);
+                        let fallback_source = event.drag(cx).configured_index;
+
+                        let _ = entity.update(cx, |this, cx| {
+                            let source_index =
+                                this.dragging_sidebar_item.unwrap_or(fallback_source);
+                            if let Some(new_index) = crate::settings::reorder_sidebar_item(
+                                source_index,
+                                configured_index,
+                                before,
+                                cx,
+                            ) {
+                                this.dragging_sidebar_item = Some(new_index);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+        }
 
         if is_user_directory {
             row = row
@@ -1952,6 +2125,28 @@ fn sidebar_separator() -> Div {
         .flex_shrink_0()
 }
 
+fn sidebar_pin_path_from_value(dragged_value: &dyn Any) -> Option<PathBuf> {
+    let paths = if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+        &dragged.paths
+    } else if let Some(paths) = dragged_value.downcast_ref::<ExternalPaths>() {
+        paths.paths()
+    } else {
+        return None;
+    };
+
+    let [path] = paths else {
+        return None;
+    };
+    path.is_dir().then(|| path.clone())
+}
+
+fn sidebar_item_is_dragging(
+    configured_index: Option<usize>,
+    dragging_index: Option<usize>,
+) -> bool {
+    configured_index.is_some() && configured_index == dragging_index
+}
+
 fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
     match item.kind {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop) => {
@@ -2984,11 +3179,11 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use std::{collections::BTreeSet, path::PathBuf};
+    use std::{collections::BTreeSet, fs, path::PathBuf};
 
     use gpui::{
-        ClickEvent, ClipboardItem, KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent,
-        MouseDownEvent, MouseUpEvent,
+        ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers, MouseButton,
+        MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
     use crate::explorer::{
@@ -3001,6 +3196,7 @@ mod tests {
         },
         entry::FileEntry,
         selection::SelectionModifiers,
+        test_support::TempDir,
     };
 
     use super::{
@@ -3011,7 +3207,8 @@ mod tests {
         UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
         available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
         filename_text_width, folder_status_summary, is_normal_entry_click,
-        recursive_result_text_width, selection_modifiers_for_click, text_cell_width,
+        recursive_result_text_width, selection_modifiers_for_click, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, text_cell_width,
     };
 
     #[test]
@@ -3038,6 +3235,44 @@ mod tests {
         assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
         assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
         assert!(!clipboard_has_file_clipboard(None));
+    }
+
+    #[test]
+    fn sidebar_pin_drop_accepts_exactly_one_directory() {
+        let temp = TempDir::new();
+        let directory = temp.path().join("directory");
+        let file = temp.path().join("file.txt");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&file, "file").unwrap();
+
+        assert_eq!(
+            sidebar_pin_path_from_value(&ExternalPaths::new(vec![directory.clone()])),
+            Some(directory.clone())
+        );
+        assert_eq!(
+            sidebar_pin_path_from_value(&ExternalPaths::new(vec![file])),
+            None
+        );
+        assert_eq!(
+            sidebar_pin_path_from_value(&ExternalPaths::new(vec![
+                directory.clone(),
+                directory.clone(),
+            ])),
+            None
+        );
+        assert_eq!(
+            sidebar_pin_path_from_value(&ExternalPaths::new(Vec::new())),
+            None
+        );
+    }
+
+    #[test]
+    fn only_configured_sidebar_item_matching_active_drag_is_dimmed() {
+        assert!(sidebar_item_is_dragging(Some(2), Some(2)));
+        assert!(!sidebar_item_is_dragging(Some(2), Some(1)));
+        assert!(!sidebar_item_is_dragging(Some(2), None));
+        assert!(!sidebar_item_is_dragging(None, None));
+        assert!(!sidebar_item_is_dragging(None, Some(2)));
     }
 
     #[test]

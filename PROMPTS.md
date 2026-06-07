@@ -1,5 +1,7 @@
 ## New
 
+Ctrl+Shift+S should open the explorer settings file.
+
 ## Specific / for-later
 
 - Recursive search loader UI / live feedback (scanning <live count of files scanned>, searching)
