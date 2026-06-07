@@ -22,6 +22,7 @@ use crate::explorer::{
     selection::SelectionState,
     watcher::DirectoryWatcher,
 };
+use crate::settings::ExplorerSettings;
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -110,7 +111,8 @@ impl ExplorerView {
         focus_handle: FocusHandle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut view = Self::new_inner(initial_path, Some(focus_handle));
+        let settings = cx.global::<crate::settings::SettingsState>().value.clone();
+        let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
         view.restart_directory_watcher(cx);
         view
     }
@@ -123,7 +125,16 @@ impl ExplorerView {
         Self::new_inner(initial_path, Some(focus_handle))
     }
 
+    #[cfg(test)]
     fn new_inner(initial_path: PathBuf, focus_handle: Option<FocusHandle>) -> Self {
+        Self::new_inner_with_settings(initial_path, focus_handle, &ExplorerSettings::default())
+    }
+
+    fn new_inner_with_settings(
+        initial_path: PathBuf,
+        focus_handle: Option<FocusHandle>,
+        settings: &ExplorerSettings,
+    ) -> Self {
         let mut view = Self {
             path: initial_path,
             entries: Vec::new(),
@@ -153,13 +164,26 @@ impl ExplorerView {
             search: SearchState::default(),
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
-            show_hidden_files: true,
-            show_file_name_extensions: true,
+            show_hidden_files: settings.show_hidden_files,
+            show_file_name_extensions: settings.show_file_name_extensions,
             open_utility_menu: None,
             directory_watcher: None,
         };
         view.reload();
         view
+    }
+
+    pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
+        let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
+        self.show_hidden_files = settings.show_hidden_files;
+        self.show_file_name_extensions = settings.show_file_name_extensions;
+
+        if hidden_changed {
+            self.invalidate_recursive_search_cache();
+            self.reload();
+            self.refresh_search_after_external_change(cx);
+        }
+        cx.notify();
     }
 
     pub fn reload(&mut self) {
@@ -277,10 +301,10 @@ mod tests {
     }
 
     #[test]
-    fn view_options_default_to_showing_hidden_files_and_extensions() {
+    fn view_options_use_settings_defaults() {
         let view = ExplorerView::new(PathBuf::from("defaults"));
 
-        assert!(view.show_hidden_files);
+        assert!(!view.show_hidden_files);
         assert!(view.show_file_name_extensions);
         assert_eq!(view.open_utility_menu, None);
         assert!(view.directory_watcher.is_none());

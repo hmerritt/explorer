@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::explorer::filesystem::{
-    drive_display_label, local_drive_roots, user_desktop_dir, user_documents_dir,
-    user_downloads_dir, user_home_dir,
-};
+use crate::explorer::filesystem::{drive_display_label, local_drive_roots, user_home_dir};
+use crate::settings::SidebarLocation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -15,6 +13,7 @@ pub(super) struct SidebarItem {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarItemKind {
     UserDirectory(UserDirectoryKind),
+    CustomDirectory,
     MacosSystemLocation(MacosSystemLocationKind),
     Drive,
 }
@@ -33,15 +32,10 @@ pub(super) enum MacosSystemLocationKind {
     Bin,
 }
 
-pub(super) fn sidebar_sections() -> SidebarSections {
+pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarSections {
     let home_dir = user_home_dir();
     SidebarSections {
-        user_directories: user_directory_items_from_paths(
-            home_dir.clone(),
-            user_desktop_dir(home_dir.as_deref()),
-            user_documents_dir(home_dir.as_deref()),
-            user_downloads_dir(home_dir.as_deref()),
-        ),
+        user_directories: configured_sidebar_items(configured_items),
         macos_system_locations: macos_system_location_items(home_dir.as_deref()),
         drives: drive_items_from_roots(local_drive_roots()),
     }
@@ -54,6 +48,7 @@ pub(super) struct SidebarSections {
     pub(super) drives: Vec<SidebarItem>,
 }
 
+#[cfg(test)]
 fn user_directory_items_from_paths(
     home: Option<PathBuf>,
     desktop: Option<PathBuf>,
@@ -89,6 +84,45 @@ fn user_directory_items_from_paths(
         })
     })
     .collect()
+}
+
+fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<SidebarItem> {
+    configured_items
+        .iter()
+        .filter_map(|location| {
+            let path = location.resolve()?;
+            if !path.is_dir() {
+                return None;
+            }
+            let (label, kind) = match location {
+                SidebarLocation::Home => (
+                    home_sidebar_label(&path),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Home),
+                ),
+                SidebarLocation::Desktop => (
+                    "Desktop".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop),
+                ),
+                SidebarLocation::Documents => (
+                    "Documents".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Documents),
+                ),
+                SidebarLocation::Downloads => (
+                    "Downloads".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
+                ),
+                SidebarLocation::Custom { label, .. } => (
+                    label
+                        .as_deref()
+                        .filter(|label| !label.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| home_sidebar_label(&path)),
+                    SidebarItemKind::CustomDirectory,
+                ),
+            };
+            Some(SidebarItem { label, path, kind })
+        })
+        .collect()
 }
 
 fn home_sidebar_label(path: &Path) -> String {
@@ -172,6 +206,7 @@ fn sidebar_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
+    use crate::settings::SidebarLocation;
     use std::fs;
 
     #[test]
@@ -237,6 +272,46 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Downloads");
+    }
+
+    #[test]
+    fn configured_custom_items_preserve_order_labels_and_omit_missing_paths() {
+        let temp = TempDir::new();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).expect("create first");
+        fs::create_dir_all(&second).expect("create second");
+
+        let items = configured_sidebar_items(&[
+            SidebarLocation::Custom {
+                path: second.clone(),
+                label: Some("Pinned".to_owned()),
+            },
+            SidebarLocation::Custom {
+                path: temp.path().join("missing"),
+                label: None,
+            },
+            SidebarLocation::Custom {
+                path: first.clone(),
+                label: None,
+            },
+        ]);
+
+        assert_eq!(
+            items,
+            vec![
+                SidebarItem {
+                    label: "Pinned".to_owned(),
+                    path: second,
+                    kind: SidebarItemKind::CustomDirectory,
+                },
+                SidebarItem {
+                    label: "first".to_owned(),
+                    path: first,
+                    kind: SidebarItemKind::CustomDirectory,
+                },
+            ]
+        );
     }
 
     #[test]

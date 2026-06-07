@@ -51,7 +51,9 @@ pub use actions::{
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]
 pub use entry::FileEntry;
-pub use filesystem::default_start_path;
+pub(crate) use filesystem::{
+    default_start_path, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
+};
 #[cfg(feature = "benchmarks")]
 pub use recursive_search::benchmark_support;
 pub use tabs::ExplorerTabs;

@@ -9,12 +9,12 @@ use gpui::{
 use crate::explorer::{
     CloseTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
-    default_start_path,
     drag_drop::{DraggedEntries, DropDestination},
     icons::folder_icon,
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
 };
+use crate::settings::SettingsState;
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_WIDTH: f32 = 225.0;
@@ -70,6 +70,7 @@ impl ExplorerTabs {
         let view = cx
             .new(|cx| ExplorerView::new_watched_with_focus_handle(initial_path, focus_handle, cx));
         observe_tab_view(&view, cx);
+        observe_settings(cx);
 
         Self {
             tabs: vec![ExplorerTab { id: first_id, view }],
@@ -117,7 +118,8 @@ impl ExplorerTabs {
     }
 
     fn add_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_foreground_tab(default_start_path(), window, cx);
+        let path = cx.global::<SettingsState>().startup_path();
+        self.add_foreground_tab(path, window, cx);
     }
 
     fn add_foreground_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,6 +329,16 @@ impl ExplorerTabs {
                 cx.notify();
             });
         }
+    }
+
+    fn apply_settings_to_all_tabs(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<SettingsState>().value.clone();
+        for tab in &self.tabs {
+            let _ = tab
+                .view
+                .update(cx, |view, cx| view.apply_settings(&settings, cx));
+        }
+        cx.notify();
     }
 
     fn cleanup_completed_background_operations(&mut self, cx: &mut Context<Self>) {
@@ -751,6 +763,11 @@ fn observe_tab_view(view: &Entity<ExplorerView>, cx: &mut Context<ExplorerTabs>)
     .detach();
 }
 
+fn observe_settings(cx: &mut Context<ExplorerTabs>) {
+    cx.observe_global::<SettingsState>(|this, cx| this.apply_settings_to_all_tabs(cx))
+        .detach();
+}
+
 fn close_tab_button(tab_id: TabId, cx: &mut Context<ExplorerTabs>) -> AnyElement {
     div()
         .id(("explorer-tab-close", tab_id.0))
@@ -972,6 +989,7 @@ mod tests {
         test_support::{TempDir, selected_names},
         view::tab_label_for_path,
     };
+    use crate::settings::{ExplorerSettings, SettingsState};
     use gpui::{AppContext, Modifiers, TestAppContext};
     use std::fs;
 
@@ -1008,6 +1026,49 @@ mod tests {
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
         click_selector(cx, "explorer-entry-1");
+    }
+
+    #[gpui::test]
+    fn settings_changes_apply_to_existing_and_future_tabs(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new(path, focus_handle, cx)
+        });
+
+        tabs.update(cx, |tabs, cx| {
+            tabs.add_background_tab(temp.path().to_path_buf(), cx);
+        });
+        cx.update_global::<SettingsState, _>(|state, _| {
+            state.value.show_hidden_files = true;
+            state.value.show_file_name_extensions = false;
+        });
+        cx.run_until_parked();
+
+        let existing_views = cx.read_entity(&tabs, |tabs, _| {
+            tabs.tabs
+                .iter()
+                .map(|tab| tab.view.clone())
+                .collect::<Vec<_>>()
+        });
+        for view in existing_views {
+            cx.read_entity(&view, |view, _| {
+                assert!(view.show_hidden_files);
+                assert!(!view.show_file_name_extensions);
+            });
+        }
+
+        tabs.update(cx, |tabs, cx| {
+            tabs.add_background_tab(temp.path().to_path_buf(), cx);
+        });
+        let future_view = cx.read_entity(&tabs, |tabs, _| tabs.tabs.last().unwrap().view.clone());
+        cx.read_entity(&future_view, |view, _| {
+            assert!(view.show_hidden_files);
+            assert!(!view.show_file_name_extensions);
+        });
     }
 
     #[gpui::test]

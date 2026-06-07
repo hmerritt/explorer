@@ -451,10 +451,7 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            this.show_hidden_files = !this.show_hidden_files;
-                            this.invalidate_recursive_search_cache();
-                            this.reload();
-                            this.refresh_search_after_external_change(cx);
+                            crate::settings::set_show_hidden_files(!this.show_hidden_files, cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -467,7 +464,10 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            this.show_file_name_extensions = !this.show_file_name_extensions;
+                            crate::settings::set_show_file_name_extensions(
+                                !this.show_file_name_extensions,
+                                cx,
+                            );
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -761,7 +761,11 @@ impl ExplorerView {
     }
 
     fn render_sidebar(&self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
-        let sections = sidebar_sections();
+        let configured_items = cx
+            .try_global::<crate::settings::SettingsState>()
+            .map(|state| state.value.sidebar_items.clone())
+            .unwrap_or_else(|| crate::settings::ExplorerSettings::default().sidebar_items);
+        let sections = sidebar_sections(&configured_items);
         let mut children = Vec::new();
 
         for (index, item) in sections.user_directories.into_iter().enumerate() {
@@ -811,7 +815,10 @@ impl ExplorerView {
         let label = item.label.clone();
         let path = item.path.clone();
         let icon_item = item.clone();
-        let is_user_directory = matches!(item.kind, SidebarItemKind::UserDirectory(_));
+        let is_user_directory = matches!(
+            item.kind,
+            SidebarItemKind::UserDirectory(_) | SidebarItemKind::CustomDirectory
+        );
         let is_bin = matches!(
             item.kind,
             SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin)
@@ -1958,6 +1965,7 @@ fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
             folder_icon(scale_factor).into_any_element()
         }
+        SidebarItemKind::CustomDirectory => folder_icon(scale_factor).into_any_element(),
         SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Applications) => {
             applications_sidebar_icon(scale_factor)
         }

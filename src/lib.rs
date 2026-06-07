@@ -2,6 +2,11 @@
 mod app;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod explorer;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod settings;
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub use settings::{ExplorerSettings, SidebarLocation, StartupLocation};
 
 #[cfg(all(
     feature = "benchmarks",

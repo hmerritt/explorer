@@ -2,11 +2,11 @@
 use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
-    env,
-    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
 };
+#[cfg(any(target_os = "linux", test))]
+use std::{env, ffi::OsString};
 
 use gpui::{
     App, Application, Bounds, Context, KeyBinding, SharedString, TitlebarOptions, Window,
@@ -32,12 +32,11 @@ use crate::explorer::{
     SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll, SearchSelectEnd,
     SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
     SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TrashSelected, default_start_path,
+    SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
+use crate::settings::{APP_ID, SettingsState, config_dir};
 
-const APP_ID: &str = "com.hmerritt.explorer";
 const APP_TITLE: &str = "Explorer";
-const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
 const DEFAULT_WINDOW_WIDTH: f32 = 1024.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
@@ -47,13 +46,6 @@ const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/Segoe Fluent Icons.t
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/Segoe MDL2 Assets.ttf");
 #[cfg(any(target_os = "linux", test))]
 const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConfigPlatform {
-    MacOS,
-    Linux,
-    Windows,
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -162,24 +154,6 @@ fn register_embedded_fonts(cx: &mut App) {
             Cow::Borrowed(SEGOE_MDL2_ASSETS),
         ])
         .expect("failed to register embedded icon fonts");
-}
-
-fn current_config_platform() -> ConfigPlatform {
-    if cfg!(target_os = "macos") {
-        ConfigPlatform::MacOS
-    } else if cfg!(target_os = "windows") {
-        ConfigPlatform::Windows
-    } else {
-        ConfigPlatform::Linux
-    }
-}
-
-fn env_path(name: &str) -> Option<PathBuf> {
-    non_empty_path(env::var_os(name)?)
-}
-
-fn non_empty_path(value: OsString) -> Option<PathBuf> {
-    (!value.as_os_str().is_empty()).then(|| PathBuf::from(value))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -307,32 +281,7 @@ fn configure_linux_display_backend() {
 }
 
 fn window_state_path() -> Option<PathBuf> {
-    window_state_path_for(current_config_platform(), env_path)
-}
-
-fn window_state_path_for(
-    platform: ConfigPlatform,
-    mut env_path: impl FnMut(&str) -> Option<PathBuf>,
-) -> Option<PathBuf> {
-    match platform {
-        ConfigPlatform::MacOS => env_path("HOME").map(|home| {
-            home.join("Library")
-                .join("Application Support")
-                .join(APP_ID)
-        }),
-        ConfigPlatform::Linux => env_path("XDG_CONFIG_HOME")
-            .map(|config_home| config_home.join(LINUX_CONFIG_DIR_NAME))
-            .or_else(|| {
-                env_path("HOME").map(|home| home.join(".config").join(LINUX_CONFIG_DIR_NAME))
-            }),
-        ConfigPlatform::Windows => env_path("APPDATA")
-            .map(|appdata| appdata.join(APP_ID))
-            .or_else(|| {
-                env_path("USERPROFILE")
-                    .map(|profile| profile.join("AppData").join("Roaming").join(APP_ID))
-            }),
-    }
-    .map(|dir| dir.join(WINDOW_STATE_FILE_NAME))
+    config_dir().map(|dir| dir.join(WINDOW_STATE_FILE_NAME))
 }
 
 fn default_window_bounds(cx: &App) -> WindowBounds {
@@ -397,7 +346,11 @@ fn open_explorer_window(cx: &mut App) {
             let explorer = cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                ExplorerTabs::new(default_start_path(), focus_handle, cx)
+                ExplorerTabs::new(
+                    cx.global::<SettingsState>().startup_path(),
+                    focus_handle,
+                    cx,
+                )
             });
 
             cx.new(|cx| {
@@ -434,6 +387,7 @@ pub fn run() {
 
     app.run(|cx: &mut App| {
         register_embedded_fonts(cx);
+        crate::settings::initialize(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),
             KeyBinding::new("down", MoveDown, None),
@@ -614,6 +568,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{ConfigPlatform, config_dir_for};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -701,7 +656,7 @@ mod tests {
             ),
             Some(
                 PathBuf::from("xdg")
-                    .join(LINUX_CONFIG_DIR_NAME)
+                    .join("explorer")
                     .join(WINDOW_STATE_FILE_NAME)
             )
         );
@@ -710,7 +665,7 @@ mod tests {
             Some(
                 PathBuf::from("home")
                     .join(".config")
-                    .join(LINUX_CONFIG_DIR_NAME)
+                    .join("explorer")
                     .join(WINDOW_STATE_FILE_NAME)
             )
         );
@@ -954,11 +909,12 @@ mod tests {
     }
 
     fn test_window_state_path(platform: ConfigPlatform, vars: &[(&str, &str)]) -> Option<PathBuf> {
-        window_state_path_for(platform, |name| {
+        config_dir_for(platform, |name| {
             vars.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| PathBuf::from(value))
         })
+        .map(|dir| dir.join(WINDOW_STATE_FILE_NAME))
     }
 
     fn linux_display_env(vars: &[(&str, &str)]) -> LinuxDisplayEnv {

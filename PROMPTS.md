@@ -1,9 +1,8 @@
 ## New
 
-Recursive file search results streaming
-
 ## Specific / for-later
 
+- Recursive search loader UI / live feedback (scanning <live count of files scanned>, searching)
 - Alt-double-click opens a "Details" window, for both files/folders.
 - Left side-bar drag re-sizable
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
@@ -20,11 +19,6 @@ Recursive file search results streaming
 
 ## Ideas
 
-- Settings file
-    - Sidebar items
-    - Hidden files
-    - File extensions
-    - <any and all options you can think of>
 - Split-screen (Zed style)
 - Shell-extension system
 - 7zip built-in

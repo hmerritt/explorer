@@ -36,7 +36,7 @@ fn preferred_start_path(
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub(super) fn user_home_dir() -> Option<PathBuf> {
+pub(crate) fn user_home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
@@ -58,38 +58,38 @@ fn known_folder_path(folder_id: &windows::core::GUID) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn user_desktop_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_desktop_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::FOLDERID_Desktop;
 
     known_folder_path(&FOLDERID_Desktop)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn user_desktop_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_desktop_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Desktop"))
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn user_documents_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_documents_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::FOLDERID_Documents;
 
     known_folder_path(&FOLDERID_Documents)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn user_documents_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_documents_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Documents"))
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_downloads_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
     use windows::Win32::UI::Shell::FOLDERID_Downloads;
 
     known_folder_path(&FOLDERID_Downloads)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Downloads"))
 }
 
