@@ -1781,7 +1781,7 @@ impl Image {
             ImageFormat::Bmp => frames_for_image(&self.bytes, image::ImageFormat::Bmp)?,
             ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Svg => {
-                let pixmap = svg_renderer.render_pixmap(&self.bytes, SvgSize::ScaleFactor(1.0))?;
+                let pixmap = svg_renderer.render_pixmap(&self.bytes, SvgSize::ScaleFactor(crate::SMOOTH_SVG_SCALE_FACTOR))?;
 
                 let mut buffer =
                     image::ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
@@ -1796,7 +1796,12 @@ impl Image {
             }
         };
 
-        Ok(Arc::new(RenderImage::new(frames)))
+        let mut render_image = RenderImage::new(frames);
+        if self.format == ImageFormat::Svg {
+            render_image.scale_factor = crate::SMOOTH_SVG_SCALE_FACTOR;
+        }
+
+        Ok(Arc::new(render_image))
     }
 
     /// Get the format of the clipboard image
