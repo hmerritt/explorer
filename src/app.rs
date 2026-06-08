@@ -42,8 +42,8 @@ const DEFAULT_WINDOW_WIDTH: f32 = 1024.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const MIN_WINDOW_WIDTH: f32 = 400.0;
 const MIN_WINDOW_HEIGHT: f32 = 120.0;
-const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/Segoe Fluent Icons.ttf");
-const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/Segoe MDL2 Assets.ttf");
+const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/fonts/Segoe Fluent Icons.ttf");
+const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/fonts/Segoe MDL2 Assets.ttf");
 #[cfg(any(target_os = "linux", test))]
 const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
 
