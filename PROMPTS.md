@@ -1,37 +1,5 @@
 ## New
 
-New feature in the utilities bar:
-
-"Extract" zips / archives files with a single click.
-
-https://crates.io/crates/sevenz-rust2
-
----
-
-Only show this button when a supported archive file is selected - render after "View", with a separator
-
----
-
-Extract logic:
-
-- IF there are multiple folders/files inside the archive, extract into a directory (of the same name as the archive, minus the extension)
-- IF there is a single file/folder within the archive, extract as-is without crating an addition directory
-
----
-
-Show a progress dialog (same UI as the copy dialog) while extracting
-
----
-
-Use the following library:
-https://crates.io/crates/decompress
-
----
-
----
-
----
-
 Plan to implement: Context menus
 
 There is no full right-click model yet:

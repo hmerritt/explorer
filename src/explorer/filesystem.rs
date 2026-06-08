@@ -18,7 +18,7 @@ use crate::explorer::{entry::FileEntry, sorting::sort_entries};
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const COMPOUND_ARCHIVE_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "tar.xz", "tar.zst"];
 const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
-    "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar",
+    "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar", "7z",
 ];
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1198,6 +1198,16 @@ fn extract_archive_with_entry_progress(
             progress,
             on_progress,
         )?;
+    } else if archive_is_7z(archive) {
+        extract_7z_archive_with_entry_progress(
+            archive,
+            destination,
+            entries,
+            conflict_choice,
+            cancel,
+            progress,
+            on_progress,
+        )?;
     } else if archive_is_ar(archive) {
         extract_ar_archive_with_entry_progress(
             archive,
@@ -1313,6 +1323,67 @@ fn extract_archive_with_entry_progress(
             .copied_bytes
             .saturating_add(archive_entry_byte_total(entries));
         on_progress(progress.clone());
+    }
+
+    Ok(())
+}
+
+fn extract_7z_archive_with_entry_progress(
+    archive: &Path,
+    _destination: &Path,
+    entries: &[ArchiveExtractEntry],
+    conflict_choice: ConflictChoice,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let file = File::open(archive).map_err(|error| operation_error("open", archive, error))?;
+    let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
+        .map_err(|error| operation_error("extract", archive, io::Error::other(error.to_string())))?;
+
+    reader.for_each_entries(|entry, reader| {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
+        let display_path = sanitized_archive_entry_path(Path::new(entry.name()));
+        let Some(planned_entry) = entries.iter().find(|e| e.display_path == display_path) else {
+            return Ok(true);
+        };
+
+        progress.current_item = Some(planned_entry.display_path.clone());
+        on_progress(progress.clone());
+
+        if planned_entry.conflict && conflict_choice == ConflictChoice::Skip {
+            progress.completed_files = progress.completed_files.saturating_add(1);
+            on_progress(progress.clone());
+            return Ok(true);
+        }
+
+        if let Some(parent) = planned_entry.destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                sevenz_rust2::Error::Io(error, "Could not create directory".into())
+            })?;
+        }
+
+        if !entry.is_directory() {
+            let mut output = File::create(&planned_entry.destination).map_err(|error| {
+                sevenz_rust2::Error::Io(error, "Could not create file".into())
+            })?;
+            io::copy(reader, &mut output).map_err(|error| {
+                sevenz_rust2::Error::Io(error, "Could not extract file".into())
+            })?;
+            progress.copied_bytes = progress.copied_bytes.saturating_add(planned_entry.byte_weight);
+        }
+
+        progress.completed_files = progress.completed_files.saturating_add(1);
+        on_progress(progress.clone());
+
+        Ok(true)
+    }).map_err(|error| operation_error("extract", archive, io::Error::other(error.to_string())))?;
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FileOperationError::Cancelled);
     }
 
     Ok(())
@@ -1475,9 +1546,34 @@ fn extract_rar_archive_to_temp(
 }
 
 fn archive_listing(archive: &Path) -> Result<decompress::Listing, String> {
-    let opts = default_extract_opts()?;
-    decompress::list(archive, &opts)
-        .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))
+    if archive_is_7z(archive) {
+        let file = File::open(archive).map_err(|error| format!("Could not open {}: {error}", path_display_name(archive)))?;
+        let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
+            .map_err(|error| format!("Could not read 7z archive {}: {error}", path_display_name(archive)))?;
+        let mut entries = Vec::new();
+        reader.for_each_entries(|entry, _| {
+            entries.push(entry.name().to_owned());
+            Ok(true)
+        }).map_err(|error| format!("Could not list 7z archive {}: {error}", path_display_name(archive)))?;
+        Ok(decompress::Listing {
+            id: "7z",
+            entries,
+        })
+    } else {
+        let opts = default_extract_opts()?;
+        decompress::list(archive, &opts)
+            .map_err(|error| format!("Could not list {}: {error}", path_display_name(archive)))
+    }
+}
+
+fn archive_is_7z(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".7z") && name.len() > ".7z".len()
+        })
+        .unwrap_or(false)
 }
 
 fn default_extract_opts() -> Result<decompress::ExtractOpts, String> {
