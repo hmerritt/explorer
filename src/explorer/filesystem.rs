@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{self, Read, Write},
@@ -1134,6 +1134,7 @@ pub(super) fn execute_file_operation_with_progress(
                     destination,
                     entries,
                     conflict_choice,
+                    &cancel,
                     &mut progress,
                     &mut on_progress,
                 )?;
@@ -1183,6 +1184,7 @@ fn extract_archive_with_entry_progress(
     destination: &Path,
     entries: &[ArchiveExtractEntry],
     conflict_choice: ConflictChoice,
+    cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
@@ -1192,6 +1194,7 @@ fn extract_archive_with_entry_progress(
             destination,
             entries,
             conflict_choice,
+            cancel,
             progress,
             on_progress,
         )?;
@@ -1201,27 +1204,76 @@ fn extract_archive_with_entry_progress(
             destination,
             entries,
             conflict_choice,
+            cancel,
             progress,
             on_progress,
         )?;
     } else if archive_supports_filtered_extract(archive)
         || archive_is_single_file_compression(archive)
     {
-        for entry in entries {
+        let entry_weights: HashMap<PathBuf, u64> = entries
+            .iter()
+            .map(|entry| (entry.destination.clone(), entry.byte_weight))
+            .collect();
+        let conflict_destinations: HashSet<PathBuf> = entries
+            .iter()
+            .filter(|entry| entry.conflict)
+            .map(|entry| entry.destination.clone())
+            .collect();
+
+        let cancel_filter = cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        if let Some(entry) = entries.first() {
             progress.current_item = Some(entry.display_path.clone());
             on_progress(progress.clone());
+        }
 
-            if entry.conflict && conflict_choice == ConflictChoice::Skip {
-                progress.completed_files = progress.completed_files.saturating_add(1);
-                on_progress(progress.clone());
-                continue;
-            }
+        let archive_buf = archive.to_path_buf();
+        let destination_buf = destination.to_path_buf();
 
-            extract_archive_entry_with_filter(archive, destination, &entry.destination)?;
-            progress.copied_bytes = progress.copied_bytes.saturating_add(entry.byte_weight);
+        let handle = std::thread::spawn(move || {
+            let opts = decompress::ExtractOptsBuilder::default()
+                .filter(move |path| {
+                    if cancel_filter.load(Ordering::Relaxed) {
+                        return false;
+                    }
+
+                    let is_conflict = conflict_destinations.contains(path);
+                    let is_allowed = !is_conflict || conflict_choice == ConflictChoice::Replace;
+                    if is_allowed {
+                        if let Some(weight) = entry_weights.get(path) {
+                            let _ = tx.send((path.to_path_buf(), *weight));
+                        }
+                    }
+                    is_allowed
+                })
+                .build()
+                .map_err(|error| {
+                    FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
+                })?;
+
+            decompress::decompress(&archive_buf, &destination_buf, &opts).map_err(|error| {
+                FileOperationError::Failed(format_path_error(
+                    "extract",
+                    &archive_buf,
+                    io::Error::other(error.to_string()),
+                ))
+            })?;
+            
+            Ok::<(), FileOperationError>(())
+        });
+
+        while let Ok((path, weight)) = rx.recv() {
+            progress.current_item = Some(path);
+            progress.copied_bytes = progress.copied_bytes.saturating_add(weight);
             progress.completed_files = progress.completed_files.saturating_add(1);
             on_progress(progress.clone());
         }
+
+        handle
+            .join()
+            .map_err(|_| FileOperationError::Failed("Extraction thread panicked".to_owned()))??;
     } else {
         if let Some(entry) = entries.first() {
             progress.current_item = Some(entry.display_path.clone());
@@ -1233,8 +1285,12 @@ fn extract_archive_with_entry_progress(
             .filter(|entry| entry.conflict)
             .map(|entry| entry.destination.clone())
             .collect::<HashSet<_>>();
+        let cancel_filter = cancel.clone();
         let opts = decompress::ExtractOptsBuilder::default()
             .filter(move |path| {
+                if cancel_filter.load(Ordering::Relaxed) {
+                    return false;
+                }
                 conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path)
             })
             .build()
@@ -1262,35 +1318,12 @@ fn extract_archive_with_entry_progress(
     Ok(())
 }
 
-fn extract_archive_entry_with_filter(
-    archive: &Path,
-    destination: &Path,
-    output_path: &Path,
-) -> Result<(), FileOperationError> {
-    let output_path = output_path.to_path_buf();
-    let opts = decompress::ExtractOptsBuilder::default()
-        .filter(move |path| path == output_path)
-        .build()
-        .map_err(|error| {
-            FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
-        })?;
-
-    decompress::decompress(archive, destination, &opts).map_err(|error| {
-        FileOperationError::Failed(format_path_error(
-            "extract",
-            archive,
-            io::Error::other(error.to_string()),
-        ))
-    })?;
-
-    Ok(())
-}
-
 fn extract_ar_archive_with_entry_progress(
     archive: &Path,
     _destination: &Path,
     entries: &[ArchiveExtractEntry],
     conflict_choice: ConflictChoice,
+    cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
@@ -1298,6 +1331,9 @@ fn extract_ar_archive_with_entry_progress(
     let mut reader = ar::Archive::new(file);
 
     while let Some(entry) = reader.next_entry() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FileOperationError::Cancelled);
+        }
         let mut archive_entry =
             entry.map_err(|error| operation_error("extract", archive, error))?;
         let entry_name = String::from_utf8_lossy(archive_entry.header().identifier());
@@ -1340,6 +1376,7 @@ fn extract_rar_archive_with_entry_progress(
     destination: &Path,
     entries: &[ArchiveExtractEntry],
     conflict_choice: ConflictChoice,
+    cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
@@ -1353,6 +1390,7 @@ fn extract_rar_archive_with_entry_progress(
         &temp_directory,
         entries,
         conflict_choice,
+        cancel,
         progress,
         on_progress,
     );
@@ -1370,6 +1408,7 @@ fn extract_rar_archive_to_temp(
     temp_directory: &Path,
     entries: &[ArchiveExtractEntry],
     conflict_choice: ConflictChoice,
+    cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
@@ -1386,6 +1425,9 @@ fn extract_rar_archive_to_temp(
     let mut index = 0;
 
     while let Some(result) = archive_reader.next() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FileOperationError::Cancelled);
+        }
         if let Some(entry) = entries.get(index) {
             progress.current_item = Some(entry.display_path.clone());
             on_progress(progress.clone());
