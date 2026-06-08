@@ -39,15 +39,15 @@ jobs:
               if: github.event_name == 'pull_request'
               run: cargo test --locked --all-targets
 
-            # - name: Generate coverage
-            #   if: github.event_name == 'push'
-            #   run: cargo llvm-cov --locked --all-targets --workspace --lcov --output-path lcov.info
+            - name: Generate coverage
+              if: github.event_name == 'push'
+              run: cargo llvm-cov --locked --all-targets --workspace --lcov --output-path lcov.info
 
-            # - name: Upload coverage to Coveralls
-            #   if: github.event_name == 'push'
-            #   uses: coverallsapp/github-action@v2
-            #   with:
-            #       file: lcov.info
-            #       format: lcov
-            #       repo-token: ${{ secrets.COVERALLS_REPO_TOKEN }}
-            #       github-token: ${{ secrets.GITHUB_TOKEN }}
+            - name: Upload coverage to Coveralls
+              if: github.event_name == 'push'
+              uses: coverallsapp/github-action@v2
+              with:
+                  file: lcov.info
+                  format: lcov
+                  repo-token: ${{ secrets.COVERALLS_REPO_TOKEN }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
