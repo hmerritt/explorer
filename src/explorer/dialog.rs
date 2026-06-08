@@ -21,7 +21,6 @@ use crate::explorer::{
     formatting::format_size,
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
-use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 
 actions!(dialog, [DialogCancel]);
 
@@ -31,6 +30,7 @@ const SHELL_DIALOG_BOTTOM_PADDING: f32 = 14.0;
 const SHELL_DIALOG_VERTICAL_SLACK: f32 = 6.0;
 const SHELL_DIALOG_TEXT_COLOR: u32 = 0x000000;
 const SHELL_DIALOG_LINK_BLUE: u32 = 0x0067c0;
+const SHELL_PROGRESS_GREEN: u32 = EXPLORER_COPY_GREEN;
 const SHELL_DIALOG_COMMAND_BLUE: u32 = 0x001f60;
 const SHELL_DIALOG_COMMAND_SELECTED_BG: u32 = 0xcfe8ff;
 const SHELL_DIALOG_COMMAND_HOVER_BG: u32 = 0xe5f3ff;
@@ -1039,23 +1039,9 @@ fn render_operation_header(text: &FileConflictDialogText) -> AnyElement {
 }
 
 fn render_file_operation_progress_bar(progress: Option<&FileOperationProgress>) -> AnyElement {
-    let percent = progress.and_then(|progress| {
-        (progress.phase != FileOperationPhase::Extracting)
-            .then(|| progress.percent())
-            .flatten()
-    });
-
-    let Some(percent) = percent else {
-        return div()
-            .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
-            .w(px(PROGRESS_DIALOG_BAR_WIDTH))
-            .child(linear_indeterminate(
-                "file-operation-indeterminate-progress",
-                LinearProgressStyle::explorer_copy_green(),
-            ))
-            .into_any_element();
-    };
-
+    let percent = progress
+        .and_then(FileOperationProgress::percent)
+        .unwrap_or(0.0);
     let fill_width = percent * PROGRESS_DIALOG_BAR_WIDTH;
 
     div()
@@ -1070,7 +1056,7 @@ fn render_file_operation_progress_bar(progress: Option<&FileOperationProgress>) 
             div()
                 .h_full()
                 .w(px(fill_width))
-                .bg(rgb(SHELL_DIALOG_LINK_BLUE)),
+                .bg(rgb(SHELL_PROGRESS_GREEN)),
         )
         .into_any_element()
 }
@@ -1561,6 +1547,11 @@ mod tests {
 
         assert!(progress_dialog_height() >= minimum_height);
         assert_approx_eq(progress_dialog_height(), 188.0);
+    }
+
+    #[test]
+    fn shell_progress_green_uses_copy_progress_green() {
+        assert_eq!(SHELL_PROGRESS_GREEN, EXPLORER_COPY_GREEN);
     }
 
     #[test]

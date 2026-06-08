@@ -1867,6 +1867,7 @@ dependencies = [
  "thousands",
  "tokio",
  "trash",
+ "unrar",
  "windows 0.61.3",
  "windows-sys 0.59.0",
 ]

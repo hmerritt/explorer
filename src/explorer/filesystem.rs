@@ -686,6 +686,7 @@ struct ArchiveExtractEntry {
     display_path: PathBuf,
     destination: PathBuf,
     conflict: bool,
+    byte_weight: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -946,7 +947,11 @@ fn prepare_extract_archive_operation(
 
         let extract_to = archive_extract_destination(archive, destination, &top_level_entries)?;
         let output_roots = archive_output_roots(&extract_to, &top_level_entries);
+        let archive_size = fs::metadata(archive)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         let mut entries = planned_extract_entries_from_listing(&listing.entries, &extract_to);
+        assign_archive_entry_byte_weights(&mut entries, archive_size);
 
         for entry in &mut entries {
             if !reserved_destinations.insert(entry.destination.clone()) {
@@ -965,11 +970,7 @@ fn prepare_extract_archive_operation(
         });
 
         stats.total_files = stats.total_files.saturating_add(entries.len().max(1));
-        stats.total_bytes = stats.total_bytes.saturating_add(
-            fs::metadata(archive)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0),
-        );
+        stats.total_bytes = stats.total_bytes.saturating_add(archive_size);
 
         for output in output_roots {
             roots.push(FileOperationRoot {
@@ -1185,7 +1186,16 @@ fn extract_archive_with_entry_progress(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<(), FileOperationError> {
-    if archive_is_ar(archive) {
+    if archive_is_rar(archive) {
+        extract_rar_archive_with_entry_progress(
+            archive,
+            destination,
+            entries,
+            conflict_choice,
+            progress,
+            on_progress,
+        )?;
+    } else if archive_is_ar(archive) {
         extract_ar_archive_with_entry_progress(
             archive,
             destination,
@@ -1208,6 +1218,7 @@ fn extract_archive_with_entry_progress(
             }
 
             extract_archive_entry_with_filter(archive, destination, &entry.destination)?;
+            progress.copied_bytes = progress.copied_bytes.saturating_add(entry.byte_weight);
             progress.completed_files = progress.completed_files.saturating_add(1);
             on_progress(progress.clone());
         }
@@ -1242,14 +1253,12 @@ fn extract_archive_with_entry_progress(
         progress.completed_files = progress
             .completed_files
             .saturating_add(entries.len().max(1));
+        progress.copied_bytes = progress
+            .copied_bytes
+            .saturating_add(archive_entry_byte_total(entries));
         on_progress(progress.clone());
     }
 
-    progress.copied_bytes = progress.copied_bytes.saturating_add(
-        fs::metadata(archive)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0),
-    );
     Ok(())
 }
 
@@ -1316,6 +1325,106 @@ fn extract_ar_archive_with_entry_progress(
             .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
         io::copy(&mut archive_entry, &mut output)
             .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
+        progress.copied_bytes = progress
+            .copied_bytes
+            .saturating_add(planned_entry.byte_weight);
+        progress.completed_files = progress.completed_files.saturating_add(1);
+        on_progress(progress.clone());
+    }
+
+    Ok(())
+}
+
+fn extract_rar_archive_with_entry_progress(
+    archive: &Path,
+    destination: &Path,
+    entries: &[ArchiveExtractEntry],
+    conflict_choice: ConflictChoice,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let temp_directory = temp_extract_directory_for(destination)
+        .map_err(|error| operation_error("create", destination, error))?;
+    fs::create_dir_all(&temp_directory)
+        .map_err(|error| operation_error("create", &temp_directory, error))?;
+
+    let result = extract_rar_archive_to_temp(
+        archive,
+        &temp_directory,
+        entries,
+        conflict_choice,
+        progress,
+        on_progress,
+    );
+
+    let cleanup = fs::remove_dir_all(&temp_directory);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(operation_error("remove", &temp_directory, error)),
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn extract_rar_archive_to_temp(
+    archive: &Path,
+    temp_directory: &Path,
+    entries: &[ArchiveExtractEntry],
+    conflict_choice: ConflictChoice,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let archive_file = archive.to_string_lossy().to_string();
+    let temp_destination = temp_directory.to_string_lossy().to_string();
+    let mut archive_reader = unrar::Archive::new(archive_file)
+        .extract_to(temp_destination)
+        .map_err(|error| {
+            FileOperationError::Failed(format!(
+                "Could not extract {}: {error}",
+                path_display_name(archive)
+            ))
+        })?;
+    let mut index = 0;
+
+    while let Some(result) = archive_reader.next() {
+        if let Some(entry) = entries.get(index) {
+            progress.current_item = Some(entry.display_path.clone());
+            on_progress(progress.clone());
+        }
+
+        let rar_entry = result.map_err(|error| {
+            FileOperationError::Failed(format!(
+                "Could not extract {}: {error}",
+                path_display_name(archive)
+            ))
+        })?;
+        let display_path = sanitized_archive_entry_path(Path::new(&rar_entry.filename));
+        let planned_entry = entries
+            .iter()
+            .find(|entry| entry.display_path == display_path)
+            .or_else(|| entries.get(index));
+        index += 1;
+
+        let Some(planned_entry) = planned_entry else {
+            continue;
+        };
+
+        progress.current_item = Some(planned_entry.display_path.clone());
+        if planned_entry.conflict && conflict_choice == ConflictChoice::Skip {
+            remove_temp_extract_output(&temp_directory.join(&planned_entry.display_path))
+                .map_err(|error| operation_error("remove", &planned_entry.destination, error))?;
+            progress.completed_files = progress.completed_files.saturating_add(1);
+            on_progress(progress.clone());
+            continue;
+        }
+
+        merge_temp_extract_output(
+            &temp_directory.join(&planned_entry.display_path),
+            &planned_entry.destination,
+            rar_entry.is_directory(),
+        )?;
+        progress.copied_bytes = progress
+            .copied_bytes
+            .saturating_add(planned_entry.byte_weight);
         progress.completed_files = progress.completed_files.saturating_add(1);
         on_progress(progress.clone());
     }
@@ -1375,10 +1484,32 @@ fn planned_extract_entries_from_listing(
                 display_path: sanitized_archive_entry_path(Path::new(entry)),
                 destination: output,
                 conflict: false,
+                byte_weight: 0,
             });
         }
     }
     planned_entries
+}
+
+fn assign_archive_entry_byte_weights(entries: &mut [ArchiveExtractEntry], archive_size: u64) {
+    let entry_count = entries.len() as u64;
+    if entry_count == 0 {
+        return;
+    }
+
+    let base_weight = archive_size / entry_count;
+    let mut remainder = archive_size % entry_count;
+    for entry in entries {
+        entry.byte_weight = base_weight + u64::from(remainder > 0);
+        remainder = remainder.saturating_sub(1);
+    }
+}
+
+fn archive_entry_byte_total(entries: &[ArchiveExtractEntry]) -> u64 {
+    entries
+        .iter()
+        .map(|entry| entry.byte_weight)
+        .fold(0_u64, u64::saturating_add)
 }
 
 fn archive_extract_destination(
@@ -1478,6 +1609,16 @@ fn archive_is_ar(path: &Path) -> bool {
         .map(|name| {
             let lower = name.to_ascii_lowercase();
             lower.ends_with(".ar") && name.len() > ".ar".len()
+        })
+        .unwrap_or(false)
+}
+
+fn archive_is_rar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".rar") && name.len() > ".rar".len()
         })
         .unwrap_or(false)
 }
@@ -1611,6 +1752,61 @@ fn temp_destination_for(destination: &Path) -> std::io::Result<PathBuf> {
         if !candidate.exists() {
             return Ok(candidate);
         }
+    }
+}
+
+fn temp_extract_directory_for(destination: &Path) -> std::io::Result<PathBuf> {
+    let parent = if destination.is_dir() {
+        destination
+    } else {
+        destination.parent().unwrap_or_else(|| Path::new("."))
+    };
+    let process_id = std::process::id();
+
+    loop {
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".explorer-extract-{process_id}-{counter}.tmp"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+}
+
+fn merge_temp_extract_output(
+    source: &Path,
+    destination: &Path,
+    is_directory: bool,
+) -> Result<(), FileOperationError> {
+    if is_directory || source.is_dir() {
+        fs::create_dir_all(destination)
+            .map_err(|error| operation_error("create", destination, error))?;
+        remove_temp_extract_output(source)
+            .map_err(|error| operation_error("remove", source, error))?;
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| operation_error("create", parent, error))?;
+    }
+
+    if destination.is_dir() {
+        return Err(FileOperationError::Failed(format!(
+            "{} already exists and is a folder.",
+            path_display_name(destination)
+        )));
+    }
+
+    replace_destination_with_temp(source, destination)
+        .map_err(|error| operation_error("extract", destination, error))
+}
+
+fn remove_temp_extract_output(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else if path.exists() {
+        fs::remove_file(path)
+    } else {
+        Ok(())
     }
 }
 
@@ -1757,6 +1953,19 @@ mod tests {
         }
     }
 
+    fn create_ar_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).expect("create ar archive");
+        let mut builder = ar::Builder::new(file);
+        for (name, data) in entries {
+            let header = ar::Header::new(name.as_bytes().to_vec(), data.len() as u64);
+            let mut reader = *data;
+            builder
+                .append(&header, &mut reader)
+                .expect("append ar entry");
+        }
+        builder.into_inner().expect("finish ar archive");
+    }
+
     #[test]
     fn archive_extract_root_name_strips_simple_and_compound_extensions() {
         assert_eq!(
@@ -1854,6 +2063,77 @@ mod tests {
                 PathBuf::from("dest/outside.txt"),
             ]
         );
+    }
+
+    #[test]
+    fn extract_progress_reports_archive_bytes_per_entry() {
+        let temp = TempDir::new();
+        let archive = temp.path().join("archive.ar");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        create_ar_archive(&archive, &[("a.txt", b"one"), ("b.txt", b"two")]);
+        let archive_size = fs::metadata(&archive).expect("archive metadata").len();
+        let job = ready_job(prepare_extract_archives_to_directory(
+            std::slice::from_ref(&archive),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        let summary = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("extract with progress");
+
+        let extracted_root = destination.join("archive");
+        assert_eq!(fs::read(extracted_root.join("a.txt")).unwrap(), b"one");
+        assert_eq!(fs::read(extracted_root.join("b.txt")).unwrap(), b"two");
+        assert_eq!(summary.destination_paths, vec![extracted_root]);
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Extracting && progress.copied_bytes > 0
+        }));
+        assert_eq!(
+            progress_events.last().map(|progress| progress.copied_bytes),
+            Some(archive_size)
+        );
+    }
+
+    #[test]
+    fn extract_progress_skip_conflict_advances_items_without_skipped_bytes() {
+        let temp = TempDir::new();
+        let archive = temp.path().join("archive.ar");
+        let destination = temp.path().join("destination");
+        let extracted_root = destination.join("archive");
+        fs::create_dir(&destination).expect("create destination");
+        fs::create_dir(&extracted_root).expect("create extracted root");
+        fs::write(extracted_root.join("a.txt"), b"existing").expect("create conflict");
+        create_ar_archive(&archive, &[("a.txt", b"one"), ("b.txt", b"two")]);
+        let conflicts = prepared_conflict_batch(prepare_extract_archives_to_directory(
+            std::slice::from_ref(&archive),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        execute_file_operation_with_progress(
+            conflicts.into_job(),
+            ConflictChoice::Skip,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("extract with skipped conflict");
+
+        assert_eq!(fs::read(extracted_root.join("a.txt")).unwrap(), b"existing");
+        assert_eq!(fs::read(extracted_root.join("b.txt")).unwrap(), b"two");
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Extracting
+                && progress.completed_files == 1
+                && progress.copied_bytes == 0
+        }));
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Extracting && progress.copied_bytes > 0
+        }));
     }
 
     #[test]
@@ -2199,6 +2479,13 @@ mod tests {
                     conflicts.len()
                 )
             }
+        }
+    }
+
+    fn prepared_conflict_batch(result: Result<PreparedFileOperation, String>) -> FileConflictBatch {
+        match result.expect("prepared operation") {
+            PreparedFileOperation::Conflicts(conflicts) => conflicts,
+            PreparedFileOperation::Ready(_) => panic!("expected file conflicts"),
         }
     }
 

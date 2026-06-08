@@ -4,6 +4,8 @@ New feature in the utilities bar:
 
 "Extract" zips / archives files with a single click.
 
+https://crates.io/crates/sevenz-rust2
+
 ---
 
 Only show this button when a supported archive file is selected - render after "View", with a separator
