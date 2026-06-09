@@ -43,7 +43,7 @@ const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
 const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] =
     include_bytes!("../../assets/icons/macos-applications.png");
 const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/bin.png");
-const NEW_ITEM_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/new_item.svg");
+const NEW_ITEM_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/utility/new_item.svg");
 
 static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(
