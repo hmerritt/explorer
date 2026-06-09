@@ -5,8 +5,6 @@ use gpui::{
     img, prelude::*, px, rgb,
 };
 
-use crate::explorer::constants::{FILE_ICON_SLOT_HEIGHT_PHYSICAL, FILE_ICON_SLOT_WIDTH_PHYSICAL};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavIcon {
     Back,
@@ -15,22 +13,19 @@ pub(super) enum NavIcon {
     Refresh,
 }
 
-const FILE_ICON_FALLBACK_GLYPH: &str = "\u{E8A5}";
-const FILE_ICON_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 20.0;
-const FILE_ICON_FALLBACK_ICON_COLOR: u32 = 0x9a9a9a;
 const DOWNLOADS_FOLDER_FALLBACK_GLYPH: &str = "\u{E896}";
 const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
 const DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x10893e;
 const DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
-const DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
+const DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 22.0;
 const DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL: f32 = 4.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL: f32 = 1.0;
+const DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL: f32 = 2.0;
 const DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL: f32 = 14.0;
 const DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL: f32 = 18.0;
 const DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR: u32 = 0x7897b6;
 const DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR: u32 = 0xffffff;
 const DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
-const DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 20.0;
+const DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 22.0;
 const DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL: f32 = 20.0;
 const DESKTOP_FOLDER_FALLBACK_SCREEN_HEIGHT_PHYSICAL: f32 = 15.0;
 const DESKTOP_FOLDER_FALLBACK_SCREEN_COLOR: u32 = 0x2aa9d8;
@@ -40,15 +35,12 @@ const DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL: f32 = 2.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL: f32 = 3.0;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR: u32 = 0xe5ffff;
 const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
-const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] =
-    include_bytes!("../../assets/icons/macos-applications.png");
-const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/bin.png");
 
 // Helper to define SVG icons with consistent naming
 macro_rules! svg_icon {
-    ($name:ident, $file:expr) => {
+    ($name:ident, $sub_dir:expr, $file:expr) => {
         paste::paste! {
-            const [<$name _BYTES>]: &[u8] = include_bytes!(concat!("../../assets/icons/utility/", $file));
+            const [<$name _BYTES>]: &[u8] = include_bytes!(concat!("../../assets/icons/",  $sub_dir, "/", $file));
             pub(super) static $name: LazyLock<Arc<Image>> = LazyLock::new(|| {
                 Arc::new(Image::from_bytes(
                     ImageFormat::Svg,
@@ -59,27 +51,39 @@ macro_rules! svg_icon {
     };
 }
 
-svg_icon!(NEW_ITEM_ICON, "new_item.svg");
-svg_icon!(COPY_ICON, "copy.svg");
-svg_icon!(CUT_ICON, "cut.svg");
-svg_icon!(PASTE_ICON, "paste.svg");
-svg_icon!(RENAME_ICON, "rename.svg");
-svg_icon!(DELETE_ICON, "delete.svg");
-svg_icon!(DETAILS_ICON, "details.svg");
-svg_icon!(EXTRACT_ICON, "extract.svg");
+macro_rules! png_icon {
+    ($name:ident, $sub_dir:expr, $file:expr) => {
+        paste::paste! {
+            const [<$name _BYTES>]: &[u8] = include_bytes!(concat!("../../assets/icons/", $sub_dir, "/", $file));
+            pub(super) static $name: LazyLock<Arc<Image>> = LazyLock::new(|| {
+                Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    [<$name _BYTES>].to_vec(),
+                ))
+            });
+        }
+    };
+}
 
-static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        APPLICATIONS_SIDEBAR_ICON_BYTES.to_vec(),
-    ))
-});
-static BIN_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        BIN_SIDEBAR_ICON_BYTES.to_vec(),
-    ))
-});
+png_icon!(FOLDER_ICON, "common", "folder.png");
+png_icon!(FOLDER_SHORTCUT_ICON, "common", "folder_shortcut.png");
+png_icon!(DOCUMENT_ICON, "common", "document.png");
+
+png_icon!(
+    APPLICATIONS_SIDEBAR_ICON,
+    "sidebar",
+    "macos-applications.png"
+);
+png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
+
+svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
+svg_icon!(COPY_ICON, "utility", "copy.svg");
+svg_icon!(CUT_ICON, "utility", "cut.svg");
+svg_icon!(PASTE_ICON, "utility", "paste.svg");
+svg_icon!(RENAME_ICON, "utility", "rename.svg");
+svg_icon!(DELETE_ICON, "utility", "delete.svg");
+svg_icon!(DETAILS_ICON, "utility", "details.svg");
+svg_icon!(EXTRACT_ICON, "utility", "extract.svg");
 
 impl NavIcon {
     pub(super) fn glyph(self) -> &'static str {
@@ -114,37 +118,10 @@ pub(super) fn nav_icon_font() -> gpui::Font {
 
 pub(super) fn folder_icon(scale_factor: f32) -> Div {
     div()
-        .relative()
         .w(device_px(22.0, scale_factor))
-        .h(device_px(17.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
         .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(device_px(1.0, scale_factor))
-                .top(device_px(0.0, scale_factor))
-                .w(device_px(9.0, scale_factor))
-                .h(device_px(5.0, scale_factor))
-                .bg(rgb(0xf5c242)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(0.0, scale_factor))
-                .top(device_px(4.0, scale_factor))
-                .w(device_px(22.0, scale_factor))
-                .h(device_px(13.0, scale_factor))
-                .bg(rgb(0xffcc4d)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(0.0, scale_factor))
-                .top(device_px(14.0, scale_factor))
-                .w(device_px(22.0, scale_factor))
-                .h(device_px(3.0, scale_factor))
-                .bg(rgb(0xf3b839)),
-        )
+        .child(image_icon(FOLDER_ICON.clone(), 22.0, 22.0, scale_factor))
 }
 
 pub(super) fn desktop_folder_icon(scale_factor: f32) -> AnyElement {
@@ -160,11 +137,11 @@ pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
 }
 
 pub(super) fn applications_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 22.0, 20.0, scale_factor)
+    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 22.0, 22.0, scale_factor)
 }
 
 pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(BIN_SIDEBAR_ICON.clone(), 22.0, 20.0, scale_factor)
+    image_icon(BIN_SIDEBAR_ICON.clone(), 22.0, 22.0, scale_factor)
 }
 
 pub(super) fn image_icon(
@@ -197,7 +174,7 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(1.0, scale_factor))
-                .top(device_px(2.0, scale_factor))
+                .top(device_px(3.0, scale_factor))
                 .w(device_px(
                     DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
                     scale_factor,
@@ -212,7 +189,7 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(1.0, scale_factor))
-                .top(device_px(2.0, scale_factor))
+                .top(device_px(3.0, scale_factor))
                 .w(device_px(
                     DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
                     scale_factor,
@@ -224,7 +201,7 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(1.0, scale_factor))
-                .top(device_px(15.0, scale_factor))
+                .top(device_px(16.0, scale_factor))
                 .w(device_px(
                     DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
                     scale_factor,
@@ -236,7 +213,7 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(4.0, scale_factor))
-                .top(device_px(6.0, scale_factor))
+                .top(device_px(7.0, scale_factor))
                 .w(device_px(
                     DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL,
                     scale_factor,
@@ -251,7 +228,7 @@ fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(4.0, scale_factor))
-                .top(device_px(10.0, scale_factor))
+                .top(device_px(11.0, scale_factor))
                 .w(device_px(
                     DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL,
                     scale_factor,
@@ -324,7 +301,7 @@ fn special_folder_glyph_icon(
         .items_center()
         .justify_center()
         .w(device_px(22.0, scale_factor))
-        .h(device_px(20.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
         .flex_shrink_0()
         .font(nav_icon_font())
         .text_size(device_px(icon_size_physical, scale_factor))
@@ -351,13 +328,13 @@ pub(super) fn drive_icon(scale_factor: f32) -> Div {
     div()
         .relative()
         .w(device_px(22.0, scale_factor))
-        .h(device_px(18.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
         .flex_shrink_0()
         .child(
             div()
                 .absolute()
                 .left(device_px(1.0, scale_factor))
-                .top(device_px(4.0, scale_factor))
+                .top(device_px(6.0, scale_factor))
                 .w(device_px(20.0, scale_factor))
                 .h(device_px(11.0, scale_factor))
                 .bg(rgb(0xe9eef5))
@@ -368,7 +345,7 @@ pub(super) fn drive_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .left(device_px(3.0, scale_factor))
-                .top(device_px(12.0, scale_factor))
+                .top(device_px(14.0, scale_factor))
                 .w(device_px(16.0, scale_factor))
                 .h(device_px(2.0, scale_factor))
                 .bg(rgb(0xc9d3df)),
@@ -377,7 +354,7 @@ pub(super) fn drive_icon(scale_factor: f32) -> Div {
             div()
                 .absolute()
                 .right(device_px(4.0, scale_factor))
-                .top(device_px(11.0, scale_factor))
+                .top(device_px(13.0, scale_factor))
                 .w(device_px(3.0, scale_factor))
                 .h(device_px(3.0, scale_factor))
                 .bg(rgb(0x2aa7ff)),
@@ -386,55 +363,23 @@ pub(super) fn drive_icon(scale_factor: f32) -> Div {
 
 pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
     div()
-        .relative()
-        .w(device_px(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor))
-        .h(device_px(FILE_ICON_SLOT_HEIGHT_PHYSICAL, scale_factor))
+        .w(device_px(22.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
         .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(device_px(0.0, scale_factor))
-                .top(device_px(1.0, scale_factor))
-                .child(folder_icon(scale_factor)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(0.0, scale_factor))
-                .top(device_px(11.0, scale_factor))
-                .w(device_px(11.0, scale_factor))
-                .h(device_px(9.0, scale_factor))
-                .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0xb7b7b7)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(2.0, scale_factor))
-                .top(device_px(14.0, scale_factor))
-                .w(device_px(6.0, scale_factor))
-                .h(device_px(2.0, scale_factor))
-                .bg(rgb(0x1f1f1f)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(5.0, scale_factor))
-                .top(device_px(12.0, scale_factor))
-                .w(device_px(2.0, scale_factor))
-                .h(device_px(6.0, scale_factor))
-                .bg(rgb(0x1f1f1f)),
-        )
+        .child(image_icon(
+            FOLDER_SHORTCUT_ICON.clone(),
+            22.0,
+            22.0,
+            scale_factor,
+        ))
 }
 
 pub(super) fn file_icon(scale_factor: f32) -> Div {
-    special_folder_glyph_icon(
-        FILE_ICON_FALLBACK_GLYPH,
-        FILE_ICON_FALLBACK_ICON_SIZE_PHYSICAL,
-        FILE_ICON_FALLBACK_ICON_COLOR,
-        scale_factor,
-    )
+    div()
+        .w(device_px(22.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
+        .flex_shrink_0()
+        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0, scale_factor))
 }
 
 #[cfg(test)]
@@ -474,9 +419,9 @@ mod tests {
     #[test]
     fn documents_fallback_icon_uses_windows_explorer_documents_geometry() {
         assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL, 22.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 20.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 22.0);
         assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL, 4.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL, 1.0);
+        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL, 2.0);
         assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL, 14.0);
         assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL, 18.0);
         assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR, 0x7897b6);
@@ -486,7 +431,7 @@ mod tests {
     #[test]
     fn desktop_fallback_icon_uses_windows_explorer_desktop_glyph_geometry() {
         assert_eq!(DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL, 22.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 20.0);
+        assert_eq!(DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 22.0);
         assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL, 20.0);
         assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_HEIGHT_PHYSICAL, 15.0);
         assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_COLOR, 0x2aa9d8);
@@ -506,13 +451,13 @@ mod tests {
     #[test]
     fn drive_icon_uses_fixed_explorer_list_slot() {
         assert_eq!(device_px_value(22.0, 1.0), 22.0);
-        assert_eq!(device_px_value(18.0, 1.0), 18.0);
+        assert_eq!(device_px_value(22.0, 1.0), 22.0);
     }
 
     #[test]
     fn special_folder_fallback_icons_use_sidebar_icon_slot() {
         assert_eq!(device_px_value(22.0, 1.0), 22.0);
-        assert_eq!(device_px_value(20.0, 1.0), 20.0);
+        assert_eq!(device_px_value(22.0, 1.0), 22.0);
     }
 
     #[test]
