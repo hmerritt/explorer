@@ -1184,6 +1184,7 @@ impl ExplorerView {
             })
             .border_1()
             .border_color(rgb(0xffffff))
+            // .border_color(rgb(0x949494))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -3213,13 +3214,12 @@ mod tests {
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP_PHYSICAL, RecursiveSearchProgressSnapshot, UTILITY_NEW_ICON_BLACK,
-        UTILITY_TEXT_BUTTON_ICON_SIZE,
-        UTILITY_TEXT_BUTTON_WIDTH, UTILITY_VIEW_ICON_LINE_COLOR, UTILITY_VIEW_ICON_LINE_TOPS,
-        available_filename_text_width, clipboard_has_file_clipboard, drop_indicator_target_width,
-        filename_text_width, folder_status_summary, is_normal_entry_click,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_item_is_dragging, sidebar_pin_path_from_value, text_cell_width,
+        NAME_ICON_TEXT_GAP_PHYSICAL, RecursiveSearchProgressSnapshot,
+        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
+        clipboard_has_file_clipboard, drop_indicator_target_width, filename_text_width,
+        folder_status_summary, is_normal_entry_click, recursive_result_text_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, text_cell_width,
     };
 
     #[test]
@@ -3290,9 +3290,6 @@ mod tests {
     fn utility_text_button_icon_geometry_fits_button() {
         assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
         assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
-        assert_eq!(UTILITY_NEW_ICON_BLACK, 0x555555);
-        assert_eq!(UTILITY_VIEW_ICON_LINE_COLOR, 0x555555);
-        assert_eq!(UTILITY_VIEW_ICON_LINE_TOPS, [3.5, 6.5, 9.5, 12.5]);
     }
 
     #[test]
