@@ -43,7 +43,29 @@ const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
 const APPLICATIONS_SIDEBAR_ICON_BYTES: &[u8] =
     include_bytes!("../../assets/icons/macos-applications.png");
 const BIN_SIDEBAR_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/bin.png");
-const NEW_ITEM_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/utility/new_item.svg");
+
+// Helper to define SVG icons with consistent naming
+macro_rules! svg_icon {
+    ($name:ident, $file:expr) => {
+        paste::paste! {
+            const [<$name _BYTES>]: &[u8] = include_bytes!(concat!("../../assets/icons/utility/", $file));
+            pub(super) static $name: LazyLock<Arc<Image>> = LazyLock::new(|| {
+                Arc::new(Image::from_bytes(
+                    ImageFormat::Svg,
+                    [<$name _BYTES>].to_vec(),
+                ))
+            });
+        }
+    };
+}
+
+svg_icon!(NEW_ITEM_ICON, "new_item.svg");
+svg_icon!(COPY_ICON, "copy.svg");
+svg_icon!(CUT_ICON, "cut.svg");
+svg_icon!(PASTE_ICON, "paste.svg");
+svg_icon!(RENAME_ICON, "rename.svg");
+svg_icon!(DELETE_ICON, "delete.svg");
+svg_icon!(DETAILS_ICON, "details.svg");
 
 static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(
@@ -55,12 +77,6 @@ static BIN_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(
         ImageFormat::Png,
         BIN_SIDEBAR_ICON_BYTES.to_vec(),
-    ))
-});
-pub(super) static NEW_ITEM_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        NEW_ITEM_ICON_BYTES.to_vec(),
     ))
 });
 

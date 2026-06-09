@@ -45,6 +45,7 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
+        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, NEW_ITEM_ICON, PASTE_ICON, RENAME_ICON,
         NavIcon, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon, device_px,
         device_px_value, directory_shortcut_icon, documents_folder_icon, downloads_folder_icon,
         drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
@@ -123,19 +124,12 @@ const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + (UTILITY_ICON_BUTTON_SIZE * 5.0)
     + UTILITY_SEPARATOR_OUTER_WIDTH
     + (UTILITY_BAR_ITEM_GAP * 8.0);
-const UTILITY_ICON_CUT: &str = "\u{E8C6}";
-const UTILITY_ICON_COPY: &str = "\u{E8C8}";
-const UTILITY_ICON_PASTE: &str = "\u{E77F}";
-const UTILITY_ICON_RENAME: &str = "\u{E8AC}";
-const UTILITY_ICON_DELETE: &str = "\u{E74D}";
 const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_EXTRACT: &str = "\u{E8B6}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const UTILITY_NEW_ICON_BLACK: u32 = 0x555555;
-const UTILITY_VIEW_ICON_LINE_COLOR: u32 = 0x555555;
-const UTILITY_VIEW_ICON_LINE_TOPS: [f32; 4] = [3.5, 6.5, 9.5, 12.5];
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -364,7 +358,7 @@ impl ExplorerView {
             .child(utility_separator())
             .child(utility_icon_button(
                 "utility-cut",
-                UTILITY_ICON_CUT,
+                CUT_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.open_utility_menu = None;
@@ -377,7 +371,7 @@ impl ExplorerView {
             ))
             .child(utility_icon_button(
                 "utility-copy",
-                UTILITY_ICON_COPY,
+                COPY_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.open_utility_menu = None;
@@ -390,7 +384,7 @@ impl ExplorerView {
             ))
             .child(utility_icon_button(
                 "utility-paste",
-                UTILITY_ICON_PASTE,
+                PASTE_ICON.clone(),
                 can_paste,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.open_utility_menu = None;
@@ -403,7 +397,7 @@ impl ExplorerView {
             ))
             .child(utility_icon_button(
                 "utility-rename",
-                UTILITY_ICON_RENAME,
+                RENAME_ICON.clone(),
                 can_rename,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.open_utility_menu = None;
@@ -416,7 +410,7 @@ impl ExplorerView {
             ))
             .child(utility_icon_button(
                 "utility-delete",
-                UTILITY_ICON_DELETE,
+                DELETE_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.open_utility_menu = None;
@@ -2327,31 +2321,15 @@ fn utility_text_button_base(
 }
 
 fn utility_new_icon() -> gpui::Img {
-    gpui::img(crate::explorer::icons::NEW_ITEM_ICON.clone())
+    gpui::img(NEW_ITEM_ICON.clone())
         .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
         .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
 }
 
-fn utility_view_icon() -> Div {
-    div()
-        .relative()
+fn utility_view_icon() -> gpui::Img {
+    gpui::img(DETAILS_ICON.clone())
         .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
         .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-        .flex_shrink_0()
-        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[0]))
-        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[1]))
-        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[2]))
-        .child(utility_view_icon_line(UTILITY_VIEW_ICON_LINE_TOPS[3]))
-}
-
-fn utility_view_icon_line(top: f32) -> Div {
-    div()
-        .absolute()
-        .left(px(1.0))
-        .top(px(top))
-        .w(px(14.0))
-        .h(px(1.0))
-        .bg(rgb(UTILITY_VIEW_ICON_LINE_COLOR))
 }
 
 fn utility_text_icon(icon: &'static str) -> Div {
@@ -2371,7 +2349,7 @@ fn utility_text_icon(icon: &'static str) -> Div {
 
 fn utility_icon_button(
     id: &'static str,
-    icon: &'static str,
+    icon: Arc<Image>,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -2390,15 +2368,10 @@ fn utility_icon_button(
                 .on_click(on_click)
         })
         .child(
-            div()
-                .font(nav_icon_font())
-                .text_size(px(14.0))
-                .text_color(if enabled {
-                    rgb(NAV_ICON_ENABLED_COLOR)
-                } else {
-                    rgb(NAV_ICON_DISABLED_COLOR)
-                })
-                .child(icon),
+            gpui::img(icon)
+                .w(px(16.0))
+                .h(px(16.0))
+                .when(!enabled, |this| this.opacity(0.4)),
         )
         .into_any_element()
 }

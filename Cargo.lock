@@ -1959,6 +1959,7 @@ dependencies = [
  "notify",
  "objc",
  "open",
+ "paste",
  "plist",
  "serde",
  "serde_json",
