@@ -66,6 +66,7 @@ svg_icon!(PASTE_ICON, "paste.svg");
 svg_icon!(RENAME_ICON, "rename.svg");
 svg_icon!(DELETE_ICON, "delete.svg");
 svg_icon!(DETAILS_ICON, "details.svg");
+svg_icon!(EXTRACT_ICON, "extract.svg");
 
 static APPLICATIONS_SIDEBAR_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
     Arc::new(Image::from_bytes(

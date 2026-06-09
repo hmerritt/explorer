@@ -45,10 +45,10 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, NEW_ITEM_ICON, PASTE_ICON, RENAME_ICON,
-        NavIcon, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon, device_px,
-        device_px_value, directory_shortcut_icon, documents_folder_icon, downloads_folder_icon,
-        drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
+        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, PASTE_ICON,
+        RENAME_ICON, NavIcon, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon,
+        device_px, device_px_value, directory_shortcut_icon, documents_folder_icon,
+        downloads_folder_icon, drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -125,11 +125,9 @@ const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + UTILITY_SEPARATOR_OUTER_WIDTH
     + (UTILITY_BAR_ITEM_GAP * 8.0);
 const UTILITY_ICON_FILE: &str = "\u{E8A5}";
-const UTILITY_ICON_EXTRACT: &str = "\u{E8B6}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
-const UTILITY_NEW_ICON_BLACK: u32 = 0x555555;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -441,7 +439,12 @@ impl ExplorerView {
             .when(can_extract, |this| {
                 this.child(utility_separator()).child(utility_action_button(
                     "utility-extract",
-                    Some(utility_text_icon(UTILITY_ICON_EXTRACT).into_any_element()),
+                    Some(
+                        gpui::img(EXTRACT_ICON.clone())
+                            .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .into_any_element(),
+                    ),
                     "Extract",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
@@ -2330,21 +2333,6 @@ fn utility_view_icon() -> gpui::Img {
     gpui::img(DETAILS_ICON.clone())
         .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
         .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-}
-
-fn utility_text_icon(icon: &'static str) -> Div {
-    div()
-        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .font(nav_icon_font())
-        .text_size(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-        .line_height(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-        .text_color(rgb(UTILITY_NEW_ICON_BLACK))
-        .child(icon)
 }
 
 fn utility_icon_button(
