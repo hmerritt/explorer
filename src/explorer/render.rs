@@ -45,10 +45,11 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, PASTE_ICON,
-        RENAME_ICON, NavIcon, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon,
+        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, NavIcon,
+        PASTE_ICON, RENAME_ICON, applications_sidebar_icon, bin_sidebar_icon, desktop_folder_icon,
         device_px, device_px_value, directory_shortcut_icon, documents_folder_icon,
-        downloads_folder_icon, drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
+        downloads_folder_icon, drive_icon, file_icon, folder_icon, folder_sidebar_icon, image_icon,
+        music_folder_icon, nav_icon_font, pictures_folder_icon, videos_folder_icon,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -78,7 +79,7 @@ const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
-const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 6.0;
+const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 4.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SidebarItemDrag {
@@ -2183,6 +2184,9 @@ fn sidebar_item_is_dragging(
 
 fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
     match item.kind {
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
+            folder_sidebar_icon(scale_factor).into_any_element()
+        }
         SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop) => {
             desktop_folder_icon(scale_factor)
         }
@@ -2192,9 +2196,13 @@ fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
         SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads) => {
             downloads_folder_icon(scale_factor)
         }
-        SidebarItemKind::UserDirectory(UserDirectoryKind::Home) => {
-            folder_icon(scale_factor).into_any_element()
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Pictures) => {
+            pictures_folder_icon(scale_factor)
         }
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Videos) => {
+            videos_folder_icon(scale_factor)
+        }
+        SidebarItemKind::UserDirectory(UserDirectoryKind::Music) => music_folder_icon(scale_factor),
         SidebarItemKind::CustomDirectory => folder_icon(scale_factor).into_any_element(),
         SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Applications) => {
             applications_sidebar_icon(scale_factor)

@@ -99,6 +99,42 @@ pub(crate) fn user_downloads_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn user_pictures_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Pictures;
+
+    known_folder_path(&FOLDERID_Pictures)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn user_pictures_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Pictures"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn user_videos_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Videos;
+
+    known_folder_path(&FOLDERID_Videos)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn user_videos_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Videos"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn user_music_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_Music;
+
+    known_folder_path(&FOLDERID_Music)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn user_music_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Music"))
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn local_drive_roots() -> Vec<PathBuf> {
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows::core::PCWSTR;
@@ -1270,7 +1306,7 @@ fn extract_archive_with_entry_progress(
                     io::Error::other(error.to_string()),
                 ))
             })?;
-            
+
             Ok::<(), FileOperationError>(())
         });
 
@@ -1339,48 +1375,57 @@ fn extract_7z_archive_with_entry_progress(
 ) -> Result<(), FileOperationError> {
     let file = File::open(archive).map_err(|error| operation_error("open", archive, error))?;
     let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
-        .map_err(|error| operation_error("extract", archive, io::Error::other(error.to_string())))?;
+        .map_err(|error| {
+            operation_error("extract", archive, io::Error::other(error.to_string()))
+        })?;
 
-    reader.for_each_entries(|entry, reader| {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
+    reader
+        .for_each_entries(|entry, reader| {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
 
-        let display_path = sanitized_archive_entry_path(Path::new(entry.name()));
-        let Some(planned_entry) = entries.iter().find(|e| e.display_path == display_path) else {
-            return Ok(true);
-        };
+            let display_path = sanitized_archive_entry_path(Path::new(entry.name()));
+            let Some(planned_entry) = entries.iter().find(|e| e.display_path == display_path)
+            else {
+                return Ok(true);
+            };
 
-        progress.current_item = Some(planned_entry.display_path.clone());
-        on_progress(progress.clone());
+            progress.current_item = Some(planned_entry.display_path.clone());
+            on_progress(progress.clone());
 
-        if planned_entry.conflict && conflict_choice == ConflictChoice::Skip {
+            if planned_entry.conflict && conflict_choice == ConflictChoice::Skip {
+                progress.completed_files = progress.completed_files.saturating_add(1);
+                on_progress(progress.clone());
+                return Ok(true);
+            }
+
+            if let Some(parent) = planned_entry.destination.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    sevenz_rust2::Error::Io(error, "Could not create directory".into())
+                })?;
+            }
+
+            if !entry.is_directory() {
+                let mut output = File::create(&planned_entry.destination).map_err(|error| {
+                    sevenz_rust2::Error::Io(error, "Could not create file".into())
+                })?;
+                io::copy(reader, &mut output).map_err(|error| {
+                    sevenz_rust2::Error::Io(error, "Could not extract file".into())
+                })?;
+                progress.copied_bytes = progress
+                    .copied_bytes
+                    .saturating_add(planned_entry.byte_weight);
+            }
+
             progress.completed_files = progress.completed_files.saturating_add(1);
             on_progress(progress.clone());
-            return Ok(true);
-        }
 
-        if let Some(parent) = planned_entry.destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                sevenz_rust2::Error::Io(error, "Could not create directory".into())
-            })?;
-        }
-
-        if !entry.is_directory() {
-            let mut output = File::create(&planned_entry.destination).map_err(|error| {
-                sevenz_rust2::Error::Io(error, "Could not create file".into())
-            })?;
-            io::copy(reader, &mut output).map_err(|error| {
-                sevenz_rust2::Error::Io(error, "Could not extract file".into())
-            })?;
-            progress.copied_bytes = progress.copied_bytes.saturating_add(planned_entry.byte_weight);
-        }
-
-        progress.completed_files = progress.completed_files.saturating_add(1);
-        on_progress(progress.clone());
-
-        Ok(true)
-    }).map_err(|error| operation_error("extract", archive, io::Error::other(error.to_string())))?;
+            Ok(true)
+        })
+        .map_err(|error| {
+            operation_error("extract", archive, io::Error::other(error.to_string()))
+        })?;
 
     if cancel.load(Ordering::Relaxed) {
         return Err(FileOperationError::Cancelled);
@@ -1547,18 +1592,28 @@ fn extract_rar_archive_to_temp(
 
 fn archive_listing(archive: &Path) -> Result<decompress::Listing, String> {
     if archive_is_7z(archive) {
-        let file = File::open(archive).map_err(|error| format!("Could not open {}: {error}", path_display_name(archive)))?;
+        let file = File::open(archive)
+            .map_err(|error| format!("Could not open {}: {error}", path_display_name(archive)))?;
         let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
-            .map_err(|error| format!("Could not read 7z archive {}: {error}", path_display_name(archive)))?;
+            .map_err(|error| {
+                format!(
+                    "Could not read 7z archive {}: {error}",
+                    path_display_name(archive)
+                )
+            })?;
         let mut entries = Vec::new();
-        reader.for_each_entries(|entry, _| {
-            entries.push(entry.name().to_owned());
-            Ok(true)
-        }).map_err(|error| format!("Could not list 7z archive {}: {error}", path_display_name(archive)))?;
-        Ok(decompress::Listing {
-            id: "7z",
-            entries,
-        })
+        reader
+            .for_each_entries(|entry, _| {
+                entries.push(entry.name().to_owned());
+                Ok(true)
+            })
+            .map_err(|error| {
+                format!(
+                    "Could not list 7z archive {}: {error}",
+                    path_display_name(archive)
+                )
+            })?;
+        Ok(decompress::Listing { id: "7z", entries })
     } else {
         let opts = default_extract_opts()?;
         decompress::list(archive, &opts)

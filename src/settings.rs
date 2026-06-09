@@ -30,6 +30,9 @@ pub enum SidebarLocation {
     Desktop,
     Documents,
     Downloads,
+    Pictures,
+    Videos,
+    Music,
     Custom {
         path: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +47,9 @@ pub enum StartupLocation {
     Desktop,
     Documents,
     Downloads,
+    Pictures,
+    Videos,
+    Music,
     Custom { path: PathBuf },
 }
 
@@ -119,6 +125,18 @@ impl SidebarLocation {
                 let home = crate::explorer::user_home_dir();
                 crate::explorer::user_downloads_dir(home.as_deref())
             }
+            Self::Pictures => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_pictures_dir(home.as_deref())
+            }
+            Self::Videos => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_videos_dir(home.as_deref())
+            }
+            Self::Music => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_music_dir(home.as_deref())
+            }
             Self::Custom { path, .. } => expand_configured_path(path),
         }
     }
@@ -139,6 +157,18 @@ impl StartupLocation {
             Self::Downloads => {
                 let home = crate::explorer::user_home_dir();
                 crate::explorer::user_downloads_dir(home.as_deref())
+            }
+            Self::Pictures => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_pictures_dir(home.as_deref())
+            }
+            Self::Videos => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_videos_dir(home.as_deref())
+            }
+            Self::Music => {
+                let home = crate::explorer::user_home_dir();
+                crate::explorer::user_music_dir(home.as_deref())
             }
             Self::Custom { path } => expand_configured_path(path),
         }

@@ -14,27 +14,8 @@ pub(super) enum NavIcon {
 }
 
 const DOWNLOADS_FOLDER_FALLBACK_GLYPH: &str = "\u{E896}";
-const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 18.0;
+const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 24.0;
 const DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x10893e;
-const DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
-const DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 22.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL: f32 = 4.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL: f32 = 2.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL: f32 = 14.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL: f32 = 18.0;
-const DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR: u32 = 0x7897b6;
-const DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR: u32 = 0xffffff;
-const DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL: f32 = 22.0;
-const DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL: f32 = 22.0;
-const DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL: f32 = 20.0;
-const DESKTOP_FOLDER_FALLBACK_SCREEN_HEIGHT_PHYSICAL: f32 = 15.0;
-const DESKTOP_FOLDER_FALLBACK_SCREEN_COLOR: u32 = 0x2aa9d8;
-const DESKTOP_FOLDER_FALLBACK_SCREEN_HIGHLIGHT_COLOR: u32 = 0x86f2ee;
-const DESKTOP_FOLDER_FALLBACK_SCREEN_BOTTOM_COLOR: u32 = 0x1381a8;
-const DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL: f32 = 2.0;
-const DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL: f32 = 3.0;
-const DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR: u32 = 0xe5ffff;
-const DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR: u32 = 0x70d7d7;
 
 // Helper to define SVG icons with consistent naming
 macro_rules! svg_icon {
@@ -75,6 +56,12 @@ png_icon!(
     "macos-applications.png"
 );
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
+png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
+png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
+png_icon!(DRIVE_SIDEBAR_ICON, "sidebar", "drive.png");
+png_icon!(PICTURES_SIDEBAR_ICON, "sidebar", "pictures.png");
+png_icon!(VIDEOS_SIDEBAR_ICON, "sidebar", "videos.png");
+png_icon!(MUSIC_SIDEBAR_ICON, "sidebar", "music.png");
 
 svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
 svg_icon!(COPY_ICON, "utility", "copy.svg");
@@ -124,24 +111,56 @@ pub(super) fn folder_icon(scale_factor: f32) -> Div {
         .child(image_icon(FOLDER_ICON.clone(), 22.0, 22.0, scale_factor))
 }
 
+pub(super) fn file_icon(scale_factor: f32) -> Div {
+    div()
+        .w(device_px(22.0, scale_factor))
+        .h(device_px(22.0, scale_factor))
+        .flex_shrink_0()
+        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0, scale_factor))
+}
+
+pub(super) fn folder_sidebar_icon(scale_factor: f32) -> Div {
+    div()
+        .w(device_px(24.0, scale_factor))
+        .h(device_px(24.0, scale_factor))
+        .flex_shrink_0()
+        .child(image_icon(FOLDER_ICON.clone(), 24.0, 24.0, scale_factor))
+}
+
 pub(super) fn desktop_folder_icon(scale_factor: f32) -> AnyElement {
-    desktop_folder_fallback_icon(scale_factor).into_any_element()
+    image_icon(DESKTOP_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn documents_folder_icon(scale_factor: f32) -> AnyElement {
-    documents_folder_fallback_icon(scale_factor).into_any_element()
+    image_icon(DOCUMENTS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
     downloads_folder_fallback_icon(scale_factor).into_any_element()
 }
 
+pub(super) fn pictures_folder_icon(scale_factor: f32) -> AnyElement {
+    image_icon(PICTURES_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
+pub(super) fn videos_folder_icon(scale_factor: f32) -> AnyElement {
+    image_icon(VIDEOS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
+pub(super) fn music_folder_icon(scale_factor: f32) -> AnyElement {
+    image_icon(MUSIC_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
 pub(super) fn applications_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 22.0, 22.0, scale_factor)
+    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(BIN_SIDEBAR_ICON.clone(), 22.0, 22.0, scale_factor)
+    image_icon(BIN_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
+pub(super) fn drive_icon(scale_factor: f32) -> AnyElement {
+    image_icon(DRIVE_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn image_icon(
@@ -158,89 +177,6 @@ pub(super) fn image_icon(
         .into_any_element()
 }
 
-fn desktop_folder_fallback_icon(scale_factor: f32) -> Div {
-    div()
-        .relative()
-        .w(device_px(
-            DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL,
-            scale_factor,
-        ))
-        .h(device_px(
-            DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL,
-            scale_factor,
-        ))
-        .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(device_px(1.0, scale_factor))
-                .top(device_px(3.0, scale_factor))
-                .w(device_px(
-                    DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(
-                    DESKTOP_FOLDER_FALLBACK_SCREEN_HEIGHT_PHYSICAL,
-                    scale_factor,
-                ))
-                .bg(rgb(DESKTOP_FOLDER_FALLBACK_SCREEN_COLOR)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(1.0, scale_factor))
-                .top(device_px(3.0, scale_factor))
-                .w(device_px(
-                    DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(2.0, scale_factor))
-                .bg(rgb(DESKTOP_FOLDER_FALLBACK_SCREEN_HIGHLIGHT_COLOR)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(1.0, scale_factor))
-                .top(device_px(16.0, scale_factor))
-                .w(device_px(
-                    DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(2.0, scale_factor))
-                .bg(rgb(DESKTOP_FOLDER_FALLBACK_SCREEN_BOTTOM_COLOR)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(4.0, scale_factor))
-                .top(device_px(7.0, scale_factor))
-                .w(device_px(
-                    DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(
-                    DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL,
-                    scale_factor,
-                ))
-                .bg(rgb(DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(4.0, scale_factor))
-                .top(device_px(11.0, scale_factor))
-                .w(device_px(
-                    DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(
-                    DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL,
-                    scale_factor,
-                ))
-                .bg(rgb(DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR)),
-        )
-}
-
 fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
     special_folder_glyph_icon(
         DOWNLOADS_FOLDER_FALLBACK_GLYPH,
@@ -248,46 +184,6 @@ fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
         DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR,
         scale_factor,
     )
-}
-
-fn documents_folder_fallback_icon(scale_factor: f32) -> Div {
-    div()
-        .relative()
-        .w(device_px(
-            DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL,
-            scale_factor,
-        ))
-        .h(device_px(
-            DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL,
-            scale_factor,
-        ))
-        .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(device_px(
-                    DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL,
-                    scale_factor,
-                ))
-                .top(device_px(
-                    DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL,
-                    scale_factor,
-                ))
-                .w(device_px(
-                    DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL,
-                    scale_factor,
-                ))
-                .h(device_px(
-                    DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL,
-                    scale_factor,
-                ))
-                .bg(rgb(DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR)),
-        )
-        .child(documents_folder_line(7.0, 3.0, 2.0, scale_factor))
-        .child(documents_folder_line(7.0, 6.0, 3.0, scale_factor))
-        .child(documents_folder_line(7.0, 9.0, 8.0, scale_factor))
-        .child(documents_folder_line(7.0, 12.0, 8.0, scale_factor))
-        .child(documents_folder_line(7.0, 15.0, 8.0, scale_factor))
 }
 
 fn special_folder_glyph_icon(
@@ -309,58 +205,6 @@ fn special_folder_glyph_icon(
         .child(glyph)
 }
 
-fn documents_folder_line(
-    left_physical: f32,
-    top_physical: f32,
-    width_physical: f32,
-    scale_factor: f32,
-) -> Div {
-    div()
-        .absolute()
-        .left(device_px(left_physical, scale_factor))
-        .top(device_px(top_physical, scale_factor))
-        .w(device_px(width_physical, scale_factor))
-        .h(device_px(1.0, scale_factor))
-        .bg(rgb(DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR))
-}
-
-pub(super) fn drive_icon(scale_factor: f32) -> Div {
-    div()
-        .relative()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
-        .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(device_px(1.0, scale_factor))
-                .top(device_px(6.0, scale_factor))
-                .w(device_px(20.0, scale_factor))
-                .h(device_px(11.0, scale_factor))
-                .bg(rgb(0xe9eef5))
-                .border_1()
-                .border_color(rgb(0x8a95a3)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(device_px(3.0, scale_factor))
-                .top(device_px(14.0, scale_factor))
-                .w(device_px(16.0, scale_factor))
-                .h(device_px(2.0, scale_factor))
-                .bg(rgb(0xc9d3df)),
-        )
-        .child(
-            div()
-                .absolute()
-                .right(device_px(4.0, scale_factor))
-                .top(device_px(13.0, scale_factor))
-                .w(device_px(3.0, scale_factor))
-                .h(device_px(3.0, scale_factor))
-                .bg(rgb(0x2aa7ff)),
-        )
-}
-
 pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
     div()
         .w(device_px(22.0, scale_factor))
@@ -372,14 +216,6 @@ pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
             22.0,
             scale_factor,
         ))
-}
-
-pub(super) fn file_icon(scale_factor: f32) -> Div {
-    div()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
-        .flex_shrink_0()
-        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0, scale_factor))
 }
 
 #[cfg(test)]
@@ -414,33 +250,6 @@ mod tests {
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_GLYPH, "\u{E896}");
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 18.0);
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR, 0x10893e);
-    }
-
-    #[test]
-    fn documents_fallback_icon_uses_windows_explorer_documents_geometry() {
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL, 22.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 22.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_LEFT_PHYSICAL, 4.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_TOP_PHYSICAL, 2.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_WIDTH_PHYSICAL, 14.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_HEIGHT_PHYSICAL, 18.0);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_PAGE_COLOR, 0x7897b6);
-        assert_eq!(DOCUMENTS_FOLDER_FALLBACK_LINE_COLOR, 0xffffff);
-    }
-
-    #[test]
-    fn desktop_fallback_icon_uses_windows_explorer_desktop_glyph_geometry() {
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SLOT_WIDTH_PHYSICAL, 22.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SLOT_HEIGHT_PHYSICAL, 22.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_WIDTH_PHYSICAL, 20.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_HEIGHT_PHYSICAL, 15.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_COLOR, 0x2aa9d8);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_HIGHLIGHT_COLOR, 0x86f2ee);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_SCREEN_BOTTOM_COLOR, 0x1381a8);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_DETAIL_WIDTH_PHYSICAL, 2.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_DETAIL_HEIGHT_PHYSICAL, 3.0);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_DETAIL_LIGHT_COLOR, 0xe5ffff);
-        assert_eq!(DESKTOP_FOLDER_FALLBACK_DETAIL_MID_COLOR, 0x70d7d7);
     }
 
     #[test]

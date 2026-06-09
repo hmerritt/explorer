@@ -53,6 +53,7 @@ pub use dialog::DialogCancel;
 pub use entry::FileEntry;
 pub(crate) use filesystem::{
     default_start_path, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
+    user_music_dir, user_pictures_dir, user_videos_dir,
 };
 #[cfg(feature = "benchmarks")]
 pub use recursive_search::benchmark_support;

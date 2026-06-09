@@ -25,6 +25,9 @@ pub(super) enum UserDirectoryKind {
     Desktop,
     Documents,
     Downloads,
+    Pictures,
+    Music,
+    Videos,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +116,18 @@ fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<Sidebar
                 SidebarLocation::Downloads => (
                     "Downloads".to_owned(),
                     SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
+                ),
+                SidebarLocation::Music => (
+                    "Music".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Music),
+                ),
+                SidebarLocation::Pictures => (
+                    "Pictures".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Pictures),
+                ),
+                SidebarLocation::Videos => (
+                    "Videos".to_owned(),
+                    SidebarItemKind::UserDirectory(UserDirectoryKind::Videos),
                 ),
                 SidebarLocation::Custom { label, .. } => (
                     label
