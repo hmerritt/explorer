@@ -43,9 +43,9 @@ macro_rules! png_icon {
     };
 }
 
-png_icon!(DOCUMENT_ICON, "common", "document.png");
-png_icon!(FOLDER_ICON, "common", "folder.png");
-png_icon!(FOLDER_SHORTCUT_ICON, "common", "folder_shortcut.png");
+png_icon!(DOCUMENT_ICON, "files", "generic.png");
+png_icon!(FOLDER_ICON, "folders", "folder.png");
+png_icon!(FOLDER_SHORTCUT_ICON, "folders", "shortcut.png");
 
 png_icon!(
     APPLICATIONS_SIDEBAR_ICON,
