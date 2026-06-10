@@ -91,18 +91,13 @@ Major remaining Windows Explorer parity areas:
    Missing file/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 
 5. **Navigation shell surfaces**
-   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion, and richer breadcrumb segment dropdowns.
+   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion.
 
 6. **File operation parity**
    Current copy/move/delete is strong, but Explorer has much more: pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, shortcut creation via Alt-drag, and more exact same-volume/network behavior.
 
 7. **Keyboard and mouse completeness**
-   Implemented keys cover common navigation and rename, but Explorer has a large set left: Ctrl+L/F4 address focus, Ctrl+F search, Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window, Alt+D, Ctrl+Shift+number view modes, and detailed click timing/focus edge cases.
+   Implemented keys cover common navigation and rename, but Explorer has a large set left: Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window.
 
 8. **Shell integration and platform associations**
    Opening files uses the default app, but there is no full file association management, “Open with” picker, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.
-
-9. **Archive support**
-   Explicitly still unchecked in [README.md](C:/Users/hrmer/Documents/my/projects/explorer/README.md:19): compress/decompress zip/archive behavior.
-
-The biggest product gaps are not the basic explorer loop anymore. They are search, view modes/thumbnails, context menus/properties, richer sidebar/navigation concepts, and exact file-operation semantics.

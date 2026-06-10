@@ -415,6 +415,7 @@ pub fn run() {
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
             KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),
             KeyBinding::new("ctrl-l", AddressEdit, Some("Explorer")),
+            KeyBinding::new("f4", AddressEdit, Some("Explorer")),
             KeyBinding::new("ctrl-f", SearchEdit, Some("Explorer")),
             KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
             KeyBinding::new("ctrl-shift-f", CreateNewFile, Some("Explorer")),
