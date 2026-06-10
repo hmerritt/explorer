@@ -282,10 +282,20 @@ fn pin_sidebar_path_in_settings(
         return false;
     }
     let insertion_index = insertion_index.min(settings.sidebar_items.len());
-    settings.sidebar_items.insert(
-        insertion_index,
-        SidebarLocation::Custom { path, label: None },
-    );
+    let location = [
+        SidebarLocation::Home,
+        SidebarLocation::Desktop,
+        SidebarLocation::Documents,
+        SidebarLocation::Downloads,
+        SidebarLocation::Pictures,
+        SidebarLocation::Videos,
+        SidebarLocation::Music,
+    ]
+    .into_iter()
+    .find(|loc| loc.resolve().as_ref() == Some(&path))
+    .unwrap_or(SidebarLocation::Custom { path, label: None });
+
+    settings.sidebar_items.insert(insertion_index, location);
     true
 }
 
@@ -693,6 +703,27 @@ mod tests {
             vec![second, third, first]
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pinning_standard_directory_uses_dedicated_kind() {
+        let downloads = SidebarLocation::Downloads.resolve().unwrap();
+        if !downloads.exists() {
+            fs::create_dir_all(&downloads).unwrap();
+        }
+
+        let mut settings = ExplorerSettings {
+            sidebar_items: Vec::new(),
+            ..ExplorerSettings::default()
+        };
+
+        assert!(pin_sidebar_path_in_settings(
+            downloads.clone(),
+            0,
+            &mut settings
+        ));
+        assert_eq!(settings.sidebar_items.len(), 1);
+        assert_eq!(settings.sidebar_items[0], SidebarLocation::Downloads);
     }
 
     #[test]
