@@ -134,8 +134,24 @@ pub(crate) fn user_music_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Music"))
 }
 
+pub(crate) fn macos_applications_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/Applications"))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn macos_bin_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        home_dir.map(|home| home.join(".Trash"))
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "windows")]
-pub(super) fn local_drive_roots() -> Vec<PathBuf> {
+pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows::core::PCWSTR;
 
@@ -161,7 +177,7 @@ pub(super) fn local_drive_roots() -> Vec<PathBuf> {
     roots
 }
 
-pub(super) fn drive_display_label(path: &Path) -> String {
+pub(crate) fn drive_display_label(path: &Path) -> String {
     let display = path.display().to_string();
 
     #[cfg(target_os = "windows")]
@@ -222,7 +238,7 @@ fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn local_drive_roots() -> Vec<PathBuf> {
+pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
 }
 

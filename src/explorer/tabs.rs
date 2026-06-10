@@ -10,14 +10,11 @@ use crate::explorer::{
     CloseTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
-    icons::{
-        desktop_folder_icon, documents_folder_icon, downloads_folder_icon, folder_icon,
-        folder_sidebar_icon, music_folder_icon, pictures_folder_icon, videos_folder_icon,
-    },
+    icons::folder_icon,
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
 };
-use crate::settings::{SidebarLocation, SettingsState};
+use crate::settings::SettingsState;
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_WIDTH: f32 = 225.0;
@@ -756,26 +753,8 @@ fn tab_icon(path: Option<&Path>, scale_factor: f32) -> AnyElement {
         return folder_icon(scale_factor).into_any_element();
     };
 
-    if SidebarLocation::Desktop.resolve().as_deref() == Some(path) {
-        return desktop_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Documents.resolve().as_deref() == Some(path) {
-        return documents_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Downloads.resolve().as_deref() == Some(path) {
-        return downloads_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Pictures.resolve().as_deref() == Some(path) {
-        return pictures_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Videos.resolve().as_deref() == Some(path) {
-        return videos_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Music.resolve().as_deref() == Some(path) {
-        return music_folder_icon(scale_factor);
-    }
-    if SidebarLocation::Home.resolve().as_deref() == Some(path) {
-        return folder_sidebar_icon(scale_factor).into_any_element();
+    if let Some(kind) = crate::explorer::resolve_directory_kind(path) {
+        return crate::explorer::icons::directory_kind_icon(kind, scale_factor);
     }
 
     folder_icon(scale_factor).into_any_element()

@@ -5,6 +5,7 @@ mod breadcrumb;
 mod clipboard;
 pub(crate) mod constants;
 mod dialog;
+mod directory_kind;
 mod drag_drop;
 mod entry;
 mod file_commands;
@@ -51,8 +52,10 @@ pub use actions::{
 pub use dialog::DialogCancel;
 #[allow(unused_imports)]
 pub use entry::FileEntry;
+pub(crate) use directory_kind::{resolve_directory_kind, DirectoryKind};
 pub(crate) use filesystem::{
-    default_start_path, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
+    default_start_path, drive_display_label, local_drive_roots, macos_applications_dir,
+    macos_bin_dir, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
     user_music_dir, user_pictures_dir, user_videos_dir,
 };
 #[cfg(feature = "benchmarks")]

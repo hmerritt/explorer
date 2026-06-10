@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
+use crate::explorer::directory_kind::DirectoryKind;
 use gpui::{
     AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, Pixels, StyledImage, div, font,
     img, prelude::*, px,
@@ -158,6 +159,20 @@ pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
 
 pub(super) fn drive_icon(scale_factor: f32) -> AnyElement {
     image_icon(DRIVE_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
+pub(super) fn directory_kind_icon(kind: DirectoryKind, scale_factor: f32) -> AnyElement {
+    match kind {
+        DirectoryKind::Home => folder_sidebar_icon(scale_factor).into_any_element(),
+        DirectoryKind::Desktop => desktop_folder_icon(scale_factor),
+        DirectoryKind::Documents => documents_folder_icon(scale_factor),
+        DirectoryKind::Downloads => downloads_folder_icon(scale_factor),
+        DirectoryKind::Pictures => pictures_folder_icon(scale_factor),
+        DirectoryKind::Music => music_folder_icon(scale_factor),
+        DirectoryKind::Videos => videos_folder_icon(scale_factor),
+        DirectoryKind::Applications => applications_sidebar_icon(scale_factor),
+        DirectoryKind::Bin => bin_sidebar_icon(scale_factor),
+    }
 }
 
 pub(super) fn image_icon(

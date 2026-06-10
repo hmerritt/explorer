@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::explorer::filesystem::{drive_display_label, local_drive_roots, user_home_dir};
+use crate::explorer::{
+    drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir, user_home_dir,
+    DirectoryKind,
+};
 use crate::settings::SidebarLocation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,27 +16,9 @@ pub(super) struct SidebarItem {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarItemKind {
-    UserDirectory(UserDirectoryKind),
+    Directory(DirectoryKind),
     CustomDirectory,
-    MacosSystemLocation(MacosSystemLocationKind),
     Drive,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum UserDirectoryKind {
-    Home,
-    Desktop,
-    Documents,
-    Downloads,
-    Pictures,
-    Music,
-    Videos,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MacosSystemLocationKind {
-    Applications,
-    Bin,
 }
 
 pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarSections {
@@ -65,18 +50,18 @@ fn user_directory_items_from_paths(
                 .map(home_sidebar_label)
                 .unwrap_or_else(|| "Home".to_owned()),
             home,
-            UserDirectoryKind::Home,
+            DirectoryKind::Home,
         ),
-        ("Desktop".to_owned(), desktop, UserDirectoryKind::Desktop),
+        ("Desktop".to_owned(), desktop, DirectoryKind::Desktop),
         (
             "Documents".to_owned(),
             documents,
-            UserDirectoryKind::Documents,
+            DirectoryKind::Documents,
         ),
         (
             "Downloads".to_owned(),
             downloads,
-            UserDirectoryKind::Downloads,
+            DirectoryKind::Downloads,
         ),
     ]
     .into_iter()
@@ -84,7 +69,7 @@ fn user_directory_items_from_paths(
         path.filter(|path| path.is_dir()).map(|path| SidebarItem {
             label,
             path,
-            kind: SidebarItemKind::UserDirectory(kind),
+            kind: SidebarItemKind::Directory(kind),
             configured_index: None,
         })
     })
@@ -103,31 +88,31 @@ fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<Sidebar
             let (label, kind) = match location {
                 SidebarLocation::Home => (
                     home_sidebar_label(&path),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Home),
+                    SidebarItemKind::Directory(DirectoryKind::Home),
                 ),
                 SidebarLocation::Desktop => (
                     "Desktop".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop),
+                    SidebarItemKind::Directory(DirectoryKind::Desktop),
                 ),
                 SidebarLocation::Documents => (
                     "Documents".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Documents),
+                    SidebarItemKind::Directory(DirectoryKind::Documents),
                 ),
                 SidebarLocation::Downloads => (
                     "Downloads".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
+                    SidebarItemKind::Directory(DirectoryKind::Downloads),
                 ),
                 SidebarLocation::Music => (
                     "Music".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Music),
+                    SidebarItemKind::Directory(DirectoryKind::Music),
                 ),
                 SidebarLocation::Pictures => (
                     "Pictures".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Pictures),
+                    SidebarItemKind::Directory(DirectoryKind::Pictures),
                 ),
                 SidebarLocation::Videos => (
                     "Videos".to_owned(),
-                    SidebarItemKind::UserDirectory(UserDirectoryKind::Videos),
+                    SidebarItemKind::Directory(DirectoryKind::Videos),
                 ),
                 SidebarLocation::Custom { label, .. } => (
                     label
@@ -168,9 +153,9 @@ fn macos_system_location_items_from_paths(
         (
             "Applications".to_owned(),
             applications,
-            MacosSystemLocationKind::Applications,
+            DirectoryKind::Applications,
         ),
-        ("Bin".to_owned(), bin, MacosSystemLocationKind::Bin),
+        ("Bin".to_owned(), bin, DirectoryKind::Bin),
     ]
     .into_iter()
     .filter_map(|(label, path, kind)| {
@@ -178,7 +163,7 @@ fn macos_system_location_items_from_paths(
             if !path.is_dir() {
                 return false;
             }
-            if kind == MacosSystemLocationKind::Bin {
+            if kind == DirectoryKind::Bin {
                 std::fs::read_dir(path).is_ok()
             } else {
                 true
@@ -187,31 +172,11 @@ fn macos_system_location_items_from_paths(
         .map(|path| SidebarItem {
             label,
             path,
-            kind: SidebarItemKind::MacosSystemLocation(kind),
+            kind: SidebarItemKind::Directory(kind),
             configured_index: None,
         })
     })
     .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn macos_applications_dir() -> Option<PathBuf> {
-    Some(PathBuf::from("/Applications"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_applications_dir() -> Option<PathBuf> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn macos_bin_dir(home: Option<&Path>) -> Option<PathBuf> {
-    home.map(|home| home.join(".Trash"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_bin_dir(_: Option<&Path>) -> Option<PathBuf> {
-    None
 }
 
 fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
@@ -268,25 +233,25 @@ mod tests {
                 SidebarItem {
                     label: "home".to_owned(),
                     path: home,
-                    kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Home),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Home),
                     configured_index: None,
                 },
                 SidebarItem {
                     label: "Desktop".to_owned(),
                     path: desktop,
-                    kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Desktop),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Desktop),
                     configured_index: None,
                 },
                 SidebarItem {
                     label: "Documents".to_owned(),
                     path: documents,
-                    kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Documents),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Documents),
                     configured_index: None,
                 },
                 SidebarItem {
                     label: "Downloads".to_owned(),
                     path: downloads,
-                    kind: SidebarItemKind::UserDirectory(UserDirectoryKind::Downloads),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Downloads),
                     configured_index: None,
                 },
             ]
@@ -372,15 +337,13 @@ mod tests {
                 SidebarItem {
                     label: "Applications".to_owned(),
                     path: applications,
-                    kind: SidebarItemKind::MacosSystemLocation(
-                        MacosSystemLocationKind::Applications
-                    ),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Applications),
                     configured_index: None,
                 },
                 SidebarItem {
                     label: "Bin".to_owned(),
                     path: bin,
-                    kind: SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Bin),
                     configured_index: None,
                 },
             ]
@@ -402,7 +365,7 @@ mod tests {
         assert_eq!(items[0].label, "Bin");
         assert_eq!(
             items[0].kind,
-            SidebarItemKind::MacosSystemLocation(MacosSystemLocationKind::Bin)
+            SidebarItemKind::Directory(DirectoryKind::Bin)
         );
     }
 

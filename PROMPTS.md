@@ -1,13 +1,5 @@
 ## New
 
-Hide Trash from sidebar if application cannot read it's contents
-
----
-
-Special file explorer logic to change ".app" directories into click-able applications. Make this macOS only. On Windows/Linux the foldershould just be a regular folder you can navigate
-
----
-
 Plan to implement: Context menus
 
 There is no full right-click model yet:
