@@ -156,25 +156,30 @@ pub(crate) fn macos_bin_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn windows_local_os_drive_root() -> Option<PathBuf> {
-    use std::path::Path;
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    static CACHE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            use std::path::Path;
+            use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 
-    let mut buffer = vec![0u16; 260]; // MAX_PATH length
-    unsafe {
-        let length = GetSystemDirectoryW(Some(&mut buffer));
-        if length > 0 {
-            buffer.truncate(length as usize);
-            let system_dir = String::from_utf16(&buffer).ok()?;
-            if let Some(root) = Path::new(&system_dir).components().next() {
-                println!("windows_local_os_drive_root: {:?}", root.as_os_str());
-                return Some(PathBuf::from(format!(
-                    "{}\\",
-                    root.as_os_str().to_string_lossy()
-                )));
+            let mut buffer = vec![0u16; 260]; // MAX_PATH length
+            unsafe {
+                let length = GetSystemDirectoryW(Some(&mut buffer));
+                if length > 0 {
+                    buffer.truncate(length as usize);
+                    let system_dir = String::from_utf16(&buffer).ok()?;
+                    if let Some(root) = Path::new(&system_dir).components().next() {
+                        println!("windows_local_os_drive_root: {:?}", root.as_os_str());
+                        return Some(PathBuf::from(format!(
+                            "{}\\",
+                            root.as_os_str().to_string_lossy()
+                        )));
+                    }
+                }
             }
-        }
-    }
-    None
+            None
+        })
+        .clone()
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -22,7 +22,8 @@ use crate::explorer::{
     selection::SelectionState,
     watcher::DirectoryWatcher,
 };
-use crate::settings::ExplorerSettings;
+use crate::settings::{ExplorerSettings, SidebarLocation};
+use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -58,6 +59,8 @@ pub struct ExplorerView {
     pub(super) show_file_name_extensions: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
+    pub(super) sidebar_items: Vec<SidebarLocation>,
+    pub(super) sidebar_sections: SidebarSections,
 }
 
 pub(super) struct FileOperationState {
@@ -170,6 +173,8 @@ impl ExplorerView {
             show_file_name_extensions: settings.show_file_name_extensions,
             open_utility_menu: None,
             directory_watcher: None,
+            sidebar_items: settings.sidebar_items.clone(),
+            sidebar_sections: SidebarSections::default(),
         };
         view.reload();
         view
@@ -180,10 +185,14 @@ impl ExplorerView {
         self.show_hidden_files = settings.show_hidden_files;
         self.show_file_name_extensions = settings.show_file_name_extensions;
 
+        self.sidebar_items = settings.sidebar_items.clone();
+
         if hidden_changed {
             self.invalidate_recursive_search_cache();
             self.reload();
             self.refresh_search_after_external_change(cx);
+        } else {
+            self.sidebar_sections = sidebar_sections(&self.sidebar_items);
         }
         cx.notify();
     }
@@ -191,6 +200,8 @@ impl ExplorerView {
     pub fn reload(&mut self) {
         self.open_error = None;
         let selected_paths = self.selected_paths();
+
+        self.sidebar_sections = sidebar_sections(&self.sidebar_items);
 
         match load_entries(&self.path, self.show_hidden_files) {
             Ok(entries) => {

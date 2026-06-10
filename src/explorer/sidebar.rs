@@ -32,7 +32,7 @@ pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarS
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SidebarSections {
     pub(super) user_directories: Vec<SidebarItem>,
     pub(super) macos_system_locations: Vec<SidebarItem>,

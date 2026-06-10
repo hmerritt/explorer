@@ -58,11 +58,11 @@ use crate::explorer::{
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
     search::search_text_element,
     selection::SelectionModifiers,
-    sidebar::{SidebarItem, SidebarItemKind, sidebar_sections},
+    sidebar::{SidebarItem, SidebarItemKind},
     view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
-use crate::settings::{ExplorerSettings, SettingsState};
+use crate::settings::SettingsState;
 use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -810,17 +810,13 @@ impl ExplorerView {
     }
 
     fn render_sidebar(&self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
-        let configured_items = cx
-            .try_global::<SettingsState>()
-            .map(|state| state.value.sidebar_items.clone())
-            .unwrap_or_else(|| ExplorerSettings::default().sidebar_items);
-        let sections = sidebar_sections(&configured_items);
+        let sections = &self.sidebar_sections;
         let mut children = Vec::new();
         let has_user_directories = !sections.user_directories.is_empty();
 
         for (index, item) in sections.user_directories.iter().cloned().enumerate() {
             children.push(self.render_sidebar_insertion_zone(
-                item.configured_index.unwrap_or(configured_items.len()),
+                item.configured_index.unwrap_or(self.sidebar_items.len()),
                 index,
                 SIDEBAR_INSERTION_ZONE_HEIGHT,
                 cx,
@@ -832,7 +828,7 @@ impl ExplorerView {
             .last()
             .and_then(|item| item.configured_index)
             .map(|index| index + 1)
-            .unwrap_or(configured_items.len());
+            .unwrap_or(self.sidebar_items.len());
         children.push(self.render_sidebar_insertion_zone(
             final_insertion_index,
             sections.user_directories.len(),
@@ -848,7 +844,7 @@ impl ExplorerView {
             children.push(sidebar_separator().into_any_element());
         }
 
-        for (index, item) in sections.macos_system_locations.into_iter().enumerate() {
+        for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
             children.push(self.render_sidebar_row(index + 1_000, item, scale_factor, cx));
         }
 
@@ -856,7 +852,7 @@ impl ExplorerView {
             children.push(sidebar_separator().into_any_element());
         }
 
-        for (index, item) in sections.drives.into_iter().enumerate() {
+        for (index, item) in sections.drives.iter().cloned().enumerate() {
             children.push(self.render_sidebar_row(index + 2_000, item, scale_factor, cx));
         }
 
