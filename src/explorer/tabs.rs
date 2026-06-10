@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, FileDropEvent,
@@ -10,11 +10,14 @@ use crate::explorer::{
     CloseTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
-    icons::folder_icon,
+    icons::{
+        desktop_folder_icon, documents_folder_icon, downloads_folder_icon, folder_icon,
+        folder_sidebar_icon, music_folder_icon, pictures_folder_icon, videos_folder_icon,
+    },
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
 };
-use crate::settings::SettingsState;
+use crate::settings::{SidebarLocation, SettingsState};
 
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_WIDTH: f32 = 225.0;
@@ -46,11 +49,13 @@ struct ExplorerTab {
 struct TabDrag {
     id: TabId,
     label: SharedString,
+    path: PathBuf,
     is_active: bool,
 }
 
 struct TabDragPreview {
     label: SharedString,
+    path: PathBuf,
     is_active: bool,
     scale_factor: f32,
 }
@@ -443,7 +448,9 @@ impl ExplorerTabs {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = tab.id == self.active_tab;
-        let label = SharedString::from(tab.view.read(cx).tab_label());
+        let view = tab.view.read(cx);
+        let label = SharedString::from(view.tab_label());
+        let path = view.path().to_path_buf();
         let tab_id = tab.id;
         let is_dragging = self.dragging_tab == Some(tab_id);
         let entity = cx.entity();
@@ -505,6 +512,7 @@ impl ExplorerTabs {
             )
             .child(tab_inner_contents(
                 label.clone(),
+                Some(&path),
                 scale_factor,
                 can_close.then(|| close_tab_button(tab_id, cx)),
             ))
@@ -562,11 +570,13 @@ impl ExplorerTabs {
 
         if can_drag {
             let drag_label = label.clone();
+            let drag_path = path.clone();
             rendered_tab = rendered_tab
                 .on_drag(
                     TabDrag {
                         id: tab_id,
                         label: drag_label,
+                        path: drag_path,
                         is_active,
                     },
                     move |drag, _, window, cx| {
@@ -577,6 +587,7 @@ impl ExplorerTabs {
                         });
                         cx.new(|_| TabDragPreview {
                             label: drag.label.clone(),
+                            path: drag.path.clone(),
                             is_active: drag.is_active,
                             scale_factor,
                         })
@@ -671,11 +682,21 @@ impl Render for ExplorerTabs {
 
 impl Render for TabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tab_preview_visual(self.label.clone(), self.is_active, self.scale_factor)
+        tab_preview_visual(
+            self.label.clone(),
+            &self.path,
+            self.is_active,
+            self.scale_factor,
+        )
     }
 }
 
-fn tab_preview_visual(label: SharedString, is_active: bool, scale_factor: f32) -> impl IntoElement {
+fn tab_preview_visual(
+    label: SharedString,
+    path: &Path,
+    is_active: bool,
+    scale_factor: f32,
+) -> impl IntoElement {
     div()
         .relative()
         .flex()
@@ -696,6 +717,7 @@ fn tab_preview_visual(label: SharedString, is_active: bool, scale_factor: f32) -
         .shadow_md()
         .child(tab_inner_contents(
             label,
+            Some(path),
             scale_factor,
             Some(close_tab_glyph_visual().into_any_element()),
         ))
@@ -703,6 +725,7 @@ fn tab_preview_visual(label: SharedString, is_active: bool, scale_factor: f32) -
 
 fn tab_inner_contents(
     label: SharedString,
+    path: Option<&Path>,
     scale_factor: f32,
     close_glyph: Option<AnyElement>,
 ) -> AnyElement {
@@ -714,7 +737,7 @@ fn tab_inner_contents(
         .min_w(px(0.0))
         .gap(px(TAB_ICON_GAP))
         .overflow_hidden()
-        .child(folder_icon(scale_factor))
+        .child(tab_icon(path, scale_factor))
         .child(
             div()
                 .flex_1()
@@ -726,6 +749,36 @@ fn tab_inner_contents(
         )
         .when_some(close_glyph, |this, close_glyph| this.child(close_glyph))
         .into_any_element()
+}
+
+fn tab_icon(path: Option<&Path>, scale_factor: f32) -> AnyElement {
+    let Some(path) = path else {
+        return folder_icon(scale_factor).into_any_element();
+    };
+
+    if SidebarLocation::Desktop.resolve().as_deref() == Some(path) {
+        return desktop_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Documents.resolve().as_deref() == Some(path) {
+        return documents_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Downloads.resolve().as_deref() == Some(path) {
+        return downloads_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Pictures.resolve().as_deref() == Some(path) {
+        return pictures_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Videos.resolve().as_deref() == Some(path) {
+        return videos_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Music.resolve().as_deref() == Some(path) {
+        return music_folder_icon(scale_factor);
+    }
+    if SidebarLocation::Home.resolve().as_deref() == Some(path) {
+        return folder_sidebar_icon(scale_factor).into_any_element();
+    }
+
+    folder_icon(scale_factor).into_any_element()
 }
 
 fn close_tab_glyph_visual() -> gpui::Div {
