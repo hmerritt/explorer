@@ -174,7 +174,17 @@ fn macos_system_location_items_from_paths(
     ]
     .into_iter()
     .filter_map(|(label, path, kind)| {
-        path.filter(|path| path.is_dir()).map(|path| SidebarItem {
+        path.filter(|path| {
+            if !path.is_dir() {
+                return false;
+            }
+            if kind == MacosSystemLocationKind::Bin {
+                std::fs::read_dir(path).is_ok()
+            } else {
+                true
+            }
+        })
+        .map(|path| SidebarItem {
             label,
             path,
             kind: SidebarItemKind::MacosSystemLocation(kind),
