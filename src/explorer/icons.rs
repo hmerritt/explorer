@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn downloads_fallback_icon_uses_windows_explorer_download_glyph() {
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_GLYPH, "\u{E896}");
-        assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 18.0);
+        assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 24.0);
         assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR, 0x10893e);
     }
 
