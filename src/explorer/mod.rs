@@ -50,9 +50,9 @@ pub use actions::{
     SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
 pub use dialog::DialogCancel;
+pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]
 pub use entry::FileEntry;
-pub(crate) use directory_kind::{resolve_directory_kind, DirectoryKind};
 pub(crate) use filesystem::{
     default_start_path, drive_display_label, local_drive_roots, macos_applications_dir,
     macos_bin_dir, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,

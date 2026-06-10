@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::explorer::{
+    DirectoryKind,
     address_bar::{
         ADDRESS_SUGGESTION_ROW_HEIGHT, ADDRESS_SUGGESTIONS_VERTICAL_PADDING, address_text_element,
     },
@@ -47,7 +48,8 @@ use crate::explorer::{
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, NavIcon,
         PASTE_ICON, RENAME_ICON, device_px, device_px_value, directory_kind_icon,
-        directory_shortcut_icon, drive_icon, file_icon, folder_icon, image_icon, nav_icon_font,
+        directory_shortcut_icon, drive_icon, drive_windows_icon, file_icon, folder_icon,
+        image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -57,7 +59,6 @@ use crate::explorer::{
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind, sidebar_sections},
-    DirectoryKind,
     view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
@@ -932,10 +933,7 @@ impl ExplorerView {
             item.kind,
             SidebarItemKind::Directory(_) | SidebarItemKind::CustomDirectory
         );
-        let is_bin = matches!(
-            item.kind,
-            SidebarItemKind::Directory(DirectoryKind::Bin)
-        );
+        let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
         let destination = DropDestination::Directory {
             item_path: path.clone(),
             target_path: path.clone(),
@@ -2196,6 +2194,7 @@ fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind, scale_factor),
         SidebarItemKind::CustomDirectory => folder_icon(scale_factor).into_any_element(),
         SidebarItemKind::Drive => drive_icon(scale_factor).into_any_element(),
+        SidebarItemKind::DriveWindows => drive_windows_icon(scale_factor).into_any_element(),
     }
 }
 

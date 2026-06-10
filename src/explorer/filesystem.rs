@@ -117,7 +117,11 @@ pub(crate) fn user_videos_dir(_home_dir: Option<&Path>) -> Option<PathBuf> {
     known_folder_path(&FOLDERID_Videos)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn user_videos_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
+    home_dir.map(|home_dir| home_dir.join("Movies"))
+}
+#[cfg(target_os = "linux")]
 pub(crate) fn user_videos_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     home_dir.map(|home_dir| home_dir.join("Videos"))
 }
@@ -148,6 +152,34 @@ pub(crate) fn macos_bin_dir(home_dir: Option<&Path>) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_local_os_drive_root() -> Option<PathBuf> {
+    use std::path::Path;
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0u16; 260]; // MAX_PATH length
+    unsafe {
+        let length = GetSystemDirectoryW(Some(&mut buffer));
+        if length > 0 {
+            buffer.truncate(length as usize);
+            let system_dir = String::from_utf16(&buffer).ok()?;
+            if let Some(root) = Path::new(&system_dir).components().next() {
+                println!("windows_local_os_drive_root: {:?}", root.as_os_str());
+                return Some(PathBuf::from(format!(
+                    "{}\\",
+                    root.as_os_str().to_string_lossy()
+                )));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn windows_local_os_drive_root() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(target_os = "windows")]

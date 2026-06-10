@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use crate::explorer::filesystem::windows_local_os_drive_root;
 use crate::explorer::{
-    drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir, user_home_dir,
-    DirectoryKind,
+    DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
+    user_home_dir,
 };
 use crate::settings::SidebarLocation;
 
@@ -19,6 +20,7 @@ pub(super) enum SidebarItemKind {
     Directory(DirectoryKind),
     CustomDirectory,
     Drive,
+    DriveWindows,
 }
 
 pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarSections {
@@ -53,16 +55,8 @@ fn user_directory_items_from_paths(
             DirectoryKind::Home,
         ),
         ("Desktop".to_owned(), desktop, DirectoryKind::Desktop),
-        (
-            "Documents".to_owned(),
-            documents,
-            DirectoryKind::Documents,
-        ),
-        (
-            "Downloads".to_owned(),
-            downloads,
-            DirectoryKind::Downloads,
-        ),
+        ("Documents".to_owned(), documents, DirectoryKind::Documents),
+        ("Downloads".to_owned(), downloads, DirectoryKind::Downloads),
     ]
     .into_iter()
     .filter_map(|(label, path, kind)| {
@@ -182,11 +176,19 @@ fn macos_system_location_items_from_paths(
 fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
     roots
         .into_iter()
-        .map(|path| SidebarItem {
-            label: sidebar_drive_label(&path),
-            path,
-            kind: SidebarItemKind::Drive,
-            configured_index: None,
+        .map(|path| {
+            let kind = if windows_local_os_drive_root().as_ref() == Some(&path) {
+                SidebarItemKind::DriveWindows
+            } else {
+                SidebarItemKind::Drive
+            };
+
+            SidebarItem {
+                label: sidebar_drive_label(&path),
+                path,
+                kind,
+                configured_index: None,
+            }
         })
         .collect()
 }
@@ -398,7 +400,11 @@ mod tests {
         })]);
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].kind, SidebarItemKind::Drive);
+        if cfg!(target_os = "windows") {
+            assert_eq!(items[0].kind, SidebarItemKind::DriveWindows);
+        } else {
+            assert_eq!(items[0].kind, SidebarItemKind::Drive);
+        }
 
         if cfg!(target_os = "windows") {
             let fallback_items = drive_items_from_roots(vec![PathBuf::from(r"?:\")]);

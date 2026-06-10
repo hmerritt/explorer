@@ -52,11 +52,12 @@ png_icon!(
     "sidebar",
     "macos-applications.png"
 );
+png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
+png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
 png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
 png_icon!(DOWNLOADS_SIDEBAR_ICON, "sidebar", "downloads.png");
-png_icon!(DRIVE_SIDEBAR_ICON, "sidebar", "drive.png");
 png_icon!(MUSIC_SIDEBAR_ICON, "sidebar", "music.png");
 png_icon!(PICTURES_SIDEBAR_ICON, "sidebar", "pictures.png");
 png_icon!(VIDEOS_SIDEBAR_ICON, "sidebar", "videos.png");
@@ -158,7 +159,11 @@ pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
 }
 
 pub(super) fn drive_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DRIVE_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+    image_icon(DRIVE_ICON.clone(), 24.0, 24.0, scale_factor)
+}
+
+pub(super) fn drive_windows_icon(scale_factor: f32) -> AnyElement {
+    image_icon(DRIVE_WINDOWS_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn directory_kind_icon(kind: DirectoryKind, scale_factor: f32) -> AnyElement {
@@ -172,6 +177,8 @@ pub(super) fn directory_kind_icon(kind: DirectoryKind, scale_factor: f32) -> Any
         DirectoryKind::Videos => videos_folder_icon(scale_factor),
         DirectoryKind::Applications => applications_sidebar_icon(scale_factor),
         DirectoryKind::Bin => bin_sidebar_icon(scale_factor),
+        DirectoryKind::Drive => drive_icon(scale_factor),
+        DirectoryKind::DriveWindows => drive_windows_icon(scale_factor),
     }
 }
 

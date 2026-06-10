@@ -1,10 +1,10 @@
+use crate::explorer::filesystem::{
+    local_drive_roots, macos_applications_dir, macos_bin_dir, user_desktop_dir, user_documents_dir,
+    user_downloads_dir, user_home_dir, user_music_dir, user_pictures_dir, user_videos_dir,
+    windows_local_os_drive_root,
+};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use crate::explorer::filesystem::{
-    user_home_dir, user_desktop_dir, user_documents_dir, user_downloads_dir,
-    user_pictures_dir, user_videos_dir, user_music_dir,
-    macos_applications_dir, macos_bin_dir
-};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryKind {
@@ -17,6 +17,8 @@ pub enum DirectoryKind {
     Videos,
     Applications,
     Bin,
+    Drive,
+    DriveWindows,
 }
 
 pub fn resolve_directory_kind(path: &Path) -> Option<DirectoryKind> {
@@ -25,13 +27,38 @@ pub fn resolve_directory_kind(path: &Path) -> Option<DirectoryKind> {
         let home = user_home_dir();
         let mut dirs = Vec::new();
 
-        if let Some(p) = &home { dirs.push((p.clone(), DirectoryKind::Home)); }
-        if let Some(p) = user_desktop_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Desktop)); }
-        if let Some(p) = user_documents_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Documents)); }
-        if let Some(p) = user_downloads_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Downloads)); }
-        if let Some(p) = user_pictures_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Pictures)); }
-        if let Some(p) = user_videos_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Videos)); }
-        if let Some(p) = user_music_dir(home.as_deref()) { dirs.push((p, DirectoryKind::Music)); }
+        #[cfg(target_os = "windows")]
+        if let Some(root) = windows_local_os_drive_root() {
+            dirs.push((root.clone(), DirectoryKind::DriveWindows));
+        }
+
+        if let Some(roots) = Some(local_drive_roots()) {
+            for root in roots {
+                dirs.push((root.clone(), DirectoryKind::Drive));
+            }
+        }
+
+        if let Some(p) = &home {
+            dirs.push((p.clone(), DirectoryKind::Home));
+        }
+        if let Some(p) = user_desktop_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Desktop));
+        }
+        if let Some(p) = user_documents_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Documents));
+        }
+        if let Some(p) = user_downloads_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Downloads));
+        }
+        if let Some(p) = user_pictures_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Pictures));
+        }
+        if let Some(p) = user_videos_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Videos));
+        }
+        if let Some(p) = user_music_dir(home.as_deref()) {
+            dirs.push((p, DirectoryKind::Music));
+        }
 
         if let Some(p) = macos_applications_dir() {
             dirs.push((p, DirectoryKind::Applications));
@@ -43,14 +70,17 @@ pub fn resolve_directory_kind(path: &Path) -> Option<DirectoryKind> {
         dirs
     });
 
-    special_dirs.iter().find(|(p, _)| p == path).map(|(_, k)| *k)
+    special_dirs
+        .iter()
+        .find(|(p, _)| p == path)
+        .map(|(_, k)| *k)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::explorer::test_support::TempDir;
+    use std::fs;
 
     #[test]
     fn test_resolve_directory_kind() {
