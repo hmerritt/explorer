@@ -2,7 +2,7 @@ use std::sync::{Arc, LazyLock};
 
 use gpui::{
     AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, Pixels, StyledImage, div, font,
-    img, prelude::*, px, rgb,
+    img, prelude::*, px,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -105,12 +105,20 @@ impl FileEntry {
     }
 
     pub(super) fn is_app_bundle(&self) -> bool {
-        self.is_directory_like()
-            && self
-                .path
-                .extension()
-                .and_then(OsStr::to_str)
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        #[cfg(target_os = "macos")]
+        {
+            self.is_directory_like()
+                && self
+                    .path
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 
     pub(super) fn uses_app_bundle_icon(&self) -> bool {
@@ -331,6 +339,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn app_bundle_icon_detection_matches_app_directories_only() {
         let entry = FileEntry::test("Preview.app", true, None, None);
         assert!(entry.is_app_bundle());
@@ -355,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn display_name_hides_app_bundle_extension_case_insensitively() {
         assert_eq!(
             FileEntry::test("Preview.app", true, None, None).display_name(),
@@ -363,6 +373,15 @@ mod tests {
         assert_eq!(
             FileEntry::test("Terminal.APP", true, None, None).display_name(),
             "Terminal"
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn display_name_keeps_app_bundle_extension_on_non_macos() {
+        assert_eq!(
+            FileEntry::test("Preview.app", true, None, None).display_name(),
+            "Preview.app"
         );
     }
 
@@ -392,10 +411,13 @@ mod tests {
             FileEntry::test("target.lnk", false, Some(1), None).display_name_with_extensions(true),
             "target"
         );
+
+        #[cfg(target_os = "macos")]
         assert_eq!(
             FileEntry::test("Preview.app", true, None, None).display_name_with_extensions(true),
             "Preview"
         );
+
         assert_eq!(
             FileEntry::test("readme.md", false, Some(1), None).display_name_with_extensions(true),
             "readme.md"
@@ -430,9 +452,17 @@ mod tests {
                 .display_name_with_extensions(false),
             "folder.with.dots"
         );
+
+        #[cfg(target_os = "macos")]
         assert_eq!(
             FileEntry::test("Terminal.app", true, None, None).display_name_with_extensions(false),
             "Terminal"
+        );
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            FileEntry::test("Terminal.app", true, None, None).display_name_with_extensions(false),
+            "Terminal.app"
         );
     }
 

@@ -410,6 +410,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn double_click_opens_app_bundles_instead_of_navigating_into_them() {
         let temp = TempDir::new();
         let app = temp.path().join("Preview.app");
@@ -470,10 +471,13 @@ mod tests {
     #[test]
     fn middle_click_target_ignores_files_and_app_bundles() {
         let file = FileEntry::test("file.txt", false, Some(4), None);
-        let app = FileEntry::test("Preview.app", true, None, None);
-
         assert_eq!(directory_new_tab_target(&file), None);
-        assert_eq!(directory_new_tab_target(&app), None);
+
+        #[cfg(target_os = "macos")]
+        {
+            let app = FileEntry::test("Preview.app", true, None, None);
+            assert_eq!(directory_new_tab_target(&app), None);
+        }
     }
 
     #[test]
@@ -603,6 +607,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn focused_activation_opens_app_bundles_on_enter() {
         let mut view = ExplorerView::new(PathBuf::from("root"));
         view.entries = vec![FileEntry::test("Preview.app", true, None, None)];
@@ -616,6 +621,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn right_arrow_activation_ignores_app_bundles() {
         let mut view = ExplorerView::new(PathBuf::from("root"));
         view.entries = vec![FileEntry::test("Preview.app", true, None, None)];

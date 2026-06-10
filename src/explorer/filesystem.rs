@@ -2521,6 +2521,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn applications_view_includes_direct_and_one_level_nested_app_bundles() {
         let temp = TempDir::new();
         let preview = temp.path().join("Preview.app");
@@ -2552,6 +2553,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn applications_view_omits_hidden_direct_and_nested_app_bundles() {
         let temp = TempDir::new();
         let visible = temp.path().join("Visible.app");

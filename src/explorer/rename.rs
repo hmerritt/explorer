@@ -1377,6 +1377,7 @@ mod tests {
             true,
             None,
         );
+        #[cfg(target_os = "macos")]
         let app = RenameState::new(
             &FileEntry::test("Preview.app", true, None, None),
             true,
@@ -1392,9 +1393,12 @@ mod tests {
         shortcut.content = "renamed".to_owned();
         assert_eq!(shortcut.target_file_name(), "renamed.LNK");
 
-        let mut app = app;
-        app.content = "Terminal".to_owned();
-        assert_eq!(app.target_file_name(), "Terminal.app");
+        #[cfg(target_os = "macos")]
+        {
+            let mut app = app;
+            app.content = "Terminal".to_owned();
+            assert_eq!(app.target_file_name(), "Terminal.app");
+        }
 
         let mut file = file;
         file.content = "notes.txt".to_owned();

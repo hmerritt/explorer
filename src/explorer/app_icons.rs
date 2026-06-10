@@ -524,6 +524,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cache_schedules_app_bundle_once() {
         let mut cache = AppIconCache::default();
         let entry = FileEntry::test("Preview.app", true, None, None);
@@ -543,6 +544,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn failed_icon_loads_fall_back_without_rescheduling() {
         let mut cache = AppIconCache::default();
         let entry = FileEntry::test("Preview.app", true, None, None);
@@ -555,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn ready_icon_loads_are_reused() {
         let mut cache = AppIconCache::default();
         let entry = FileEntry::test("Preview.app", true, None, None);
@@ -568,6 +571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn non_app_directories_do_not_schedule_icon_loads() {
         let mut cache = AppIconCache::default();
         let entry = FileEntry::test("Folder", true, None, None);
