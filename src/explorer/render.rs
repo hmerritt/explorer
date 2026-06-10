@@ -942,6 +942,8 @@ impl ExplorerView {
         };
         let entity = cx.entity();
 
+        let click_path = path.clone();
+        let middle_click_path = path.clone();
         let mut row = div()
             .id(("explorer-sidebar-row", id))
             .flex()
@@ -963,10 +965,20 @@ impl ExplorerView {
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.navigate_to_sidebar_path_with_watcher(path.clone(), cx);
+                this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                    cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(
+                        middle_click_path.clone(),
+                    ));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(sidebar_item_icon(icon_item, scale_factor))
             .child(
                 div()
