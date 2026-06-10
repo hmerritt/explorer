@@ -13,10 +13,6 @@ pub(super) enum NavIcon {
     Refresh,
 }
 
-const DOWNLOADS_FOLDER_FALLBACK_GLYPH: &str = "\u{E896}";
-const DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL: f32 = 24.0;
-const DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR: u32 = 0x10893e;
-
 // Helper to define SVG icons with consistent naming
 macro_rules! svg_icon {
     ($name:ident, $sub_dir:expr, $file:expr) => {
@@ -46,9 +42,9 @@ macro_rules! png_icon {
     };
 }
 
+png_icon!(DOCUMENT_ICON, "common", "document.png");
 png_icon!(FOLDER_ICON, "common", "folder.png");
 png_icon!(FOLDER_SHORTCUT_ICON, "common", "folder_shortcut.png");
-png_icon!(DOCUMENT_ICON, "common", "document.png");
 
 png_icon!(
     APPLICATIONS_SIDEBAR_ICON,
@@ -56,21 +52,22 @@ png_icon!(
     "macos-applications.png"
 );
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
-png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
+png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
+png_icon!(DOWNLOADS_SIDEBAR_ICON, "sidebar", "downloads.png");
 png_icon!(DRIVE_SIDEBAR_ICON, "sidebar", "drive.png");
+png_icon!(MUSIC_SIDEBAR_ICON, "sidebar", "music.png");
 png_icon!(PICTURES_SIDEBAR_ICON, "sidebar", "pictures.png");
 png_icon!(VIDEOS_SIDEBAR_ICON, "sidebar", "videos.png");
-png_icon!(MUSIC_SIDEBAR_ICON, "sidebar", "music.png");
 
-svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
 svg_icon!(COPY_ICON, "utility", "copy.svg");
 svg_icon!(CUT_ICON, "utility", "cut.svg");
-svg_icon!(PASTE_ICON, "utility", "paste.svg");
-svg_icon!(RENAME_ICON, "utility", "rename.svg");
 svg_icon!(DELETE_ICON, "utility", "delete.svg");
 svg_icon!(DETAILS_ICON, "utility", "details.svg");
 svg_icon!(EXTRACT_ICON, "utility", "extract.svg");
+svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
+svg_icon!(PASTE_ICON, "utility", "paste.svg");
+svg_icon!(RENAME_ICON, "utility", "rename.svg");
 
 impl NavIcon {
     pub(super) fn glyph(self) -> &'static str {
@@ -136,7 +133,7 @@ pub(super) fn documents_folder_icon(scale_factor: f32) -> AnyElement {
 }
 
 pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
-    downloads_folder_fallback_icon(scale_factor).into_any_element()
+    image_icon(DOWNLOADS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
 }
 
 pub(super) fn pictures_folder_icon(scale_factor: f32) -> AnyElement {
@@ -177,34 +174,6 @@ pub(super) fn image_icon(
         .into_any_element()
 }
 
-fn downloads_folder_fallback_icon(scale_factor: f32) -> Div {
-    special_folder_glyph_icon(
-        DOWNLOADS_FOLDER_FALLBACK_GLYPH,
-        DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL,
-        DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR,
-        scale_factor,
-    )
-}
-
-fn special_folder_glyph_icon(
-    glyph: &'static str,
-    icon_size_physical: f32,
-    icon_color: u32,
-    scale_factor: f32,
-) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
-        .flex_shrink_0()
-        .font(nav_icon_font())
-        .text_size(device_px(icon_size_physical, scale_factor))
-        .text_color(rgb(icon_color))
-        .child(glyph)
-}
-
 pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
     div()
         .w(device_px(22.0, scale_factor))
@@ -243,13 +212,6 @@ mod tests {
         assert_eq!(NavIcon::Forward.glyph(), "\u{E72A}");
         assert_eq!(NavIcon::Up.glyph(), "\u{E74A}");
         assert_eq!(NavIcon::Refresh.glyph(), "\u{E72C}");
-    }
-
-    #[test]
-    fn downloads_fallback_icon_uses_windows_explorer_download_glyph() {
-        assert_eq!(DOWNLOADS_FOLDER_FALLBACK_GLYPH, "\u{E896}");
-        assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_SIZE_PHYSICAL, 24.0);
-        assert_eq!(DOWNLOADS_FOLDER_FALLBACK_ICON_COLOR, 0x10893e);
     }
 
     #[test]
