@@ -1898,6 +1898,10 @@ impl ExplorerView {
                         let viewport_size = viewport_size(&bounds);
                         let modifiers = SelectionModifiers::from_gpui(event.modifiers);
                         let _ = entity.update(cx, |this, cx| {
+                            if this.context_menu.is_some() {
+                                return;
+                            }
+
                             if this.begin_mouse_selection_drag_for_intent(
                                 local_position,
                                 viewport_size,
@@ -2655,6 +2659,9 @@ fn context_menu_dropdown(width: f32) -> Div {
         .border_color(rgb(0xd8d8d8))
         .shadow_md()
         .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
 }
 
 fn render_context_menu_level(
@@ -2862,6 +2869,7 @@ fn context_menu_row_base(
 ) -> gpui::Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .flex_row()
         .items_center()

@@ -1000,6 +1000,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         actions::{RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
+        clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
         view::tab_label_for_path,
     };
@@ -1075,6 +1076,7 @@ mod tests {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
         let position = bounds.center();
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
     }
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
@@ -1231,6 +1233,79 @@ mod tests {
                     ..
                 })
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_cut_preserves_selection_and_marks_folder_cut(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let path = temp.path().join("a");
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-cut");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a"]);
+            assert!(view.entry_is_cut(&path));
+            assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_copy_preserves_selection_and_copies_folder(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let path = temp.path().join("a");
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-copy");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a"]);
+            assert!(view.context_menu.is_none());
+        });
+        cx.update(|_, app| {
+            let clipboard = app
+                .read_from_clipboard()
+                .as_ref()
+                .and_then(file_clipboard_from_item);
+            assert_eq!(
+                clipboard,
+                Some(FileClipboard::new(FileClipboardOperation::Copy, vec![path]))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_delete_removes_selected_folder(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let path = temp.path().join("a");
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-delete");
+
+        assert!(!path.exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
+            assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_rename_preserves_selection_and_starts_rename(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let path = temp.path().join("a");
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-rename");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a"]);
+            assert!(view.rename_is_active_for_path(&path));
+            assert!(view.context_menu.is_none());
         });
     }
 

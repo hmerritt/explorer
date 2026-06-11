@@ -1,10 +1,21 @@
 ## New
 
+When name column is clicked, shows the current directory contextmenu, when the other columns are right-clicked, instantly selects and trigers context menus
+
 Folder context menu changes:
+
+- When multiple folders are selected, context menu item "Open in new tab" should open all items in new tabs
 
 - When no item is selected and a user right-clicks on a directory, no NOT focus on it or open that items contextmenu, instead open the current directory context menu (this is the behaviour of Windows explorer)
 - Only open folder/file context menu if/when there is an active selection for one or more of those items.
-- Cut/copy/delete/rename does not currently work correctly. The item is de-selected when the menu is pressed and nothing happens.
+
+---
+
+Implement a 'default focus' system for dialog buttons. Generally the 'yes' / continue button should be focused, which allows "Enter" key to be pressed to activate.
+
+e.g. Delete file dialog should focus on "Yes", Enter should trigger that option (prevent propagation for unwanted behaviour outside the dialog), Right key arrow should switch focus to "No", Left key arrow back to "Yes"
+
+Same for conflict dialog (first open is focused)
 
 ---
 
@@ -39,6 +50,7 @@ There is no full right-click model yet:
 - Split-screen (Zed style)
 - Shell-extension system
 - rsync copy/sync builtin
+- Customizable context menus (add items to settings)
 - Network drives (rclone https://rclone.org/ builtin)
 - rclone https://rclone.org/ builtin, adding support for
 
