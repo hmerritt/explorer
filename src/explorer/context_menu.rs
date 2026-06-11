@@ -6,7 +6,7 @@ use std::{
 
 use gpui::{Context, Pixels, Point, Window};
 
-use crate::explorer::{formatting::format_modified, view::ExplorerView};
+use crate::explorer::{DirectoryKind, formatting::format_modified, view::ExplorerView};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
@@ -56,6 +56,7 @@ pub(super) enum ContextMenuIcon {
     New,
     File,
     Folder,
+    FolderKind(Option<DirectoryKind>),
     NewTab,
     Unpin,
 }
@@ -122,6 +123,7 @@ impl ExplorerView {
         origin: Point<Pixels>,
         path: PathBuf,
         configured_index: usize,
+        open_icon_kind: Option<DirectoryKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -135,7 +137,7 @@ impl ExplorerView {
         self.open_utility_menu = None;
         self.context_menu = Some(ContextMenuState::new_with_source(
             origin,
-            configured_sidebar_context_menu_items(path, configured_index),
+            configured_sidebar_context_menu_items(path, configured_index, open_icon_kind),
             ContextMenuSource::SidebarItem { configured_index },
         ));
         true
@@ -184,11 +186,12 @@ impl ExplorerView {
 pub(super) fn configured_sidebar_context_menu_items(
     path: PathBuf,
     configured_index: usize,
+    open_icon_kind: Option<DirectoryKind>,
 ) -> Vec<ContextMenuItem> {
     vec![
         ContextMenuItem::Action {
             id: "context-menu-sidebar-open",
-            icon: Some(ContextMenuIcon::Folder),
+            icon: Some(ContextMenuIcon::FolderKind(open_icon_kind)),
             label: "Open",
             command: ContextMenuCommand::OpenSidebar { path: path.clone() },
             enabled: true,
@@ -530,14 +533,15 @@ mod tests {
     #[test]
     fn configured_sidebar_menu_contains_expected_items_icons_and_commands() {
         let path = PathBuf::from("/tmp/custom");
-        let items = configured_sidebar_context_menu_items(path.clone(), 2);
+        let items =
+            configured_sidebar_context_menu_items(path.clone(), 2, Some(DirectoryKind::Downloads));
 
         assert_eq!(items.len(), 4);
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
                 id: "context-menu-sidebar-open",
-                icon: Some(ContextMenuIcon::Folder),
+                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Downloads))),
                 label: "Open",
                 command: ContextMenuCommand::OpenSidebar { path: path.clone() },
                 enabled: true,

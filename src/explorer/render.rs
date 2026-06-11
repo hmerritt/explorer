@@ -148,6 +148,7 @@ const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 16.0;
 const CONTEXT_MENU_ROW_CHILD_GAP: f32 = 10.0;
 const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 16.0;
 const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 12.0;
+const CONTEXT_MENU_TEXT_WIDTH_SLACK: f32 = 8.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -1071,7 +1072,9 @@ impl ExplorerView {
                     .child(SharedString::from(label)),
             );
 
-        if let Some((context_path, context_configured_index)) = configured_context_menu_target {
+        if let Some((context_path, context_configured_index, open_icon_kind)) =
+            configured_context_menu_target
+        {
             row = row.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1080,6 +1083,7 @@ impl ExplorerView {
                         event,
                         context_path.clone(),
                         context_configured_index,
+                        open_icon_kind,
                         window,
                         cx,
                     );
@@ -2323,8 +2327,15 @@ fn sidebar_item_is_dragging(
     configured_index.is_some() && configured_index == dragging_index
 }
 
-fn configured_sidebar_context_menu_target(item: &SidebarItem) -> Option<(PathBuf, usize)> {
-    Some((item.path.clone(), item.configured_index?))
+fn configured_sidebar_context_menu_target(
+    item: &SidebarItem,
+) -> Option<(PathBuf, usize, Option<DirectoryKind>)> {
+    let open_icon_kind = match item.kind {
+        SidebarItemKind::Directory(kind) => Some(kind),
+        SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
+        SidebarItemKind::Drive | SidebarItemKind::DriveWindows => None,
+    };
+    Some((item.path.clone(), item.configured_index?, open_icon_kind))
 }
 
 fn sidebar_context_menu_is_active(
@@ -2456,11 +2467,19 @@ fn open_configured_sidebar_context_menu_from_event(
     event: &MouseDownEvent,
     path: PathBuf,
     configured_index: usize,
+    open_icon_kind: Option<DirectoryKind>,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
     let origin = local_context_menu_origin(event.position, this.view_origin);
-    if this.open_configured_sidebar_context_menu(origin, path, configured_index, window, cx) {
+    if this.open_configured_sidebar_context_menu(
+        origin,
+        path,
+        configured_index,
+        open_icon_kind,
+        window,
+        cx,
+    ) {
         cx.notify();
     }
     cx.stop_propagation();
@@ -2881,13 +2900,7 @@ fn context_menu_width_for_natural_width(natural_width: f32) -> f32 {
 fn context_menu_item_width(item: &ContextMenuItem, window: &Window) -> f32 {
     match item {
         ContextMenuItem::Action { label, .. } | ContextMenuItem::Submenu { label, .. } => {
-            CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
-                + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
-                + CONTEXT_MENU_ICON_SLOT_SIZE
-                + CONTEXT_MENU_ROW_CHILD_GAP
-                + measure_context_menu_text(label, window)
-                + CONTEXT_MENU_ROW_CHILD_GAP
-                + CONTEXT_MENU_TRAILING_SLOT_WIDTH
+            context_menu_action_width_for_text_width(measure_context_menu_text(label, window))
         }
         ContextMenuItem::Detail { label, value, .. } => {
             CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
@@ -2899,6 +2912,17 @@ fn context_menu_item_width(item: &ContextMenuItem, window: &Window) -> f32 {
         }
         ContextMenuItem::Separator => 0.0,
     }
+}
+
+fn context_menu_action_width_for_text_width(text_width: f32) -> f32 {
+    CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
+        + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
+        + CONTEXT_MENU_ICON_SLOT_SIZE
+        + CONTEXT_MENU_ROW_CHILD_GAP
+        + text_width
+        + CONTEXT_MENU_TEXT_WIDTH_SLACK
+        + CONTEXT_MENU_ROW_CHILD_GAP
+        + CONTEXT_MENU_TRAILING_SLOT_WIDTH
 }
 
 fn measure_context_menu_text(text: &str, window: &Window) -> f32 {
@@ -2954,6 +2978,9 @@ fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
         ContextMenuIcon::New => utility_new_icon().into_any_element(),
         ContextMenuIcon::File => file_icon().into_any_element(),
         ContextMenuIcon::Folder => folder_icon().into_any_element(),
+        ContextMenuIcon::FolderKind(kind) => kind
+            .map(directory_kind_icon)
+            .unwrap_or_else(|| folder_icon().into_any_element()),
         ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
             .w(px(16.0))
             .h(px(16.0))
@@ -3802,10 +3829,11 @@ mod tests {
     };
 
     use super::{
-        CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE,
-        UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, clipboard_has_file_clipboard,
-        configured_sidebar_context_menu_target, context_menu_width_for_natural_width,
+        CONTEXT_MENU_TEXT_WIDTH_SLACK, CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH,
+        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
+        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
+        clipboard_has_file_clipboard, configured_sidebar_context_menu_target,
+        context_menu_action_width_for_text_width, context_menu_width_for_natural_width,
         drop_indicator_target_width, filename_text_width, folder_status_summary,
         is_normal_entry_click, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
@@ -3838,6 +3866,15 @@ mod tests {
     #[test]
     fn context_menu_width_clamps_to_maximum() {
         assert_eq!(context_menu_width_for_natural_width(320.0), 280.0);
+    }
+
+    #[test]
+    fn context_menu_action_width_includes_text_safety_slack() {
+        let text_width = 80.0;
+        let width = context_menu_action_width_for_text_width(text_width);
+
+        assert_eq!(CONTEXT_MENU_TEXT_WIDTH_SLACK, 8.0);
+        assert!(width >= text_width + CONTEXT_MENU_TEXT_WIDTH_SLACK);
     }
 
     #[test]
@@ -3950,11 +3987,11 @@ mod tests {
 
         assert_eq!(
             configured_sidebar_context_menu_target(&custom),
-            Some((path.clone(), 3))
+            Some((path.clone(), 3, None))
         );
         assert_eq!(
             configured_sidebar_context_menu_target(&builtin_configured),
-            Some((path.join("downloads"), 1))
+            Some((path.join("downloads"), 1, Some(DirectoryKind::Downloads)))
         );
         assert_eq!(
             configured_sidebar_context_menu_target(&custom_unconfigured),
