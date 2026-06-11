@@ -136,6 +136,7 @@ const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const CONTEXT_MENU_MIN_WIDTH: f32 = 150.0;
 const CONTEXT_MENU_MAX_WIDTH: f32 = 280.0;
+const CONTEXT_MENU_BORDER_WIDTH: f32 = 1.0;
 const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
 const CONTEXT_MENU_ITEM_VERTICAL_GAP: f32 = 4.0;
 const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
@@ -148,7 +149,6 @@ const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 16.0;
 const CONTEXT_MENU_ROW_CHILD_GAP: f32 = 10.0;
 const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 16.0;
 const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 12.0;
-const CONTEXT_MENU_TEXT_WIDTH_SLACK: f32 = 8.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -2762,25 +2762,18 @@ fn context_menu_action_row(
     active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(
-        id,
-        icon,
-        ContextMenuIconSlot::Reserve,
-        label,
-        path,
-        active,
-        cx,
-    )
-    .when(!enabled, |this| this.opacity(0.45))
-    .when(enabled, |this| {
-        this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.execute_context_menu_command(command.clone(), window, cx);
-            cx.stop_propagation();
-            cx.notify();
-        }))
-    })
-    .child(context_menu_trailing_slot(None))
-    .into_any_element()
+    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, path, active, cx)
+        .child(context_menu_label(label, true))
+        .when(!enabled, |this| this.opacity(0.45))
+        .when(enabled, |this| {
+            this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.execute_context_menu_command(command.clone(), window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+        })
+        .child(context_menu_trailing_slot(None))
+        .into_any_element()
 }
 
 fn context_menu_submenu_row(
@@ -2791,17 +2784,10 @@ fn context_menu_submenu_row(
     active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(
-        id,
-        icon,
-        ContextMenuIconSlot::Reserve,
-        label,
-        path,
-        active,
-        cx,
-    )
-    .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
-    .into_any_element()
+    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, path, active, cx)
+        .child(context_menu_label(label, true))
+        .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
+        .into_any_element()
 }
 
 fn context_menu_detail_row(
@@ -2818,10 +2804,12 @@ fn context_menu_detail_row(
         _ => "context-menu-detail",
     };
 
-    context_menu_row_base(id, None, icon_slot, label, path, active, cx)
+    context_menu_row_base(id, None, icon_slot, path, active, cx)
+        .child(context_menu_label(label, false))
         .child(
             div()
-                .ml(px(12.0))
+                .debug_selector(|| "context-menu-detail-value".to_owned())
+                .ml(px(CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN))
                 .min_w(px(0.0))
                 .flex_1()
                 .truncate()
@@ -2838,7 +2826,6 @@ fn context_menu_row_base(
     id: &'static str,
     icon: Option<ContextMenuIcon>,
     icon_slot: ContextMenuIconSlot,
-    label: &'static str,
     path: Vec<usize>,
     active: bool,
     cx: &mut Context<ExplorerView>,
@@ -2850,9 +2837,9 @@ fn context_menu_row_base(
         .items_center()
         .h(px(CONTEXT_MENU_ROW_HEIGHT))
         .my(px(CONTEXT_MENU_ITEM_VERTICAL_GAP / 2.0))
-        .mx(px(4.0))
-        .px(px(8.0))
-        .gap(px(10.0))
+        .mx(px(CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING / 2.0))
+        .px(px(CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING / 2.0))
+        .gap(px(CONTEXT_MENU_ROW_CHILD_GAP))
         .rounded(px(4.0))
         .cursor_default()
         .when(active, |this| this.bg(rgb(0xe5f3ff)))
@@ -2866,15 +2853,16 @@ fn context_menu_row_base(
         .when(icon_slot == ContextMenuIconSlot::Reserve, |this| {
             this.child(context_menu_icon_slot(icon))
         })
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(CONTEXT_MENU_TEXT_SIZE))
-                .text_color(rgb(0x1f1f1f))
-                .child(label),
-        )
+}
+
+fn context_menu_label(label: &'static str, flexible: bool) -> Div {
+    div()
+        .when(flexible, |this| this.flex_1().min_w(px(0.0)))
+        .when(!flexible, |this| this.flex_shrink_0())
+        .truncate()
+        .text_size(px(CONTEXT_MENU_TEXT_SIZE))
+        .text_color(rgb(0x1f1f1f))
+        .child(label)
 }
 
 fn context_menu_width(items: &[ContextMenuItem], window: &Window) -> f32 {
@@ -2895,40 +2883,62 @@ fn context_menu_width_for_natural_width(natural_width: f32) -> f32 {
 fn context_menu_item_width(item: &ContextMenuItem, window: &Window) -> f32 {
     match item {
         ContextMenuItem::Action { label, .. } | ContextMenuItem::Submenu { label, .. } => {
-            context_menu_action_width_for_text_width(measure_context_menu_text(label, window))
+            context_menu_action_width_for_text_width(context_menu_text_width(label, window))
         }
-        ContextMenuItem::Detail { label, value, .. } => {
-            CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
-                + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
-                + measure_context_menu_text(label, window)
-                + CONTEXT_MENU_ROW_CHILD_GAP
-                + CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN
-                + measure_context_menu_text(value, window)
-        }
+        ContextMenuItem::Detail {
+            label,
+            value,
+            icon_slot,
+        } => context_menu_detail_width_for_text_widths(
+            context_menu_text_width(label, window),
+            context_menu_text_width(value, window),
+            *icon_slot,
+        ),
         ContextMenuItem::Separator => 0.0,
     }
 }
 
 fn context_menu_action_width_for_text_width(text_width: f32) -> f32 {
-    CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
-        + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
-        + CONTEXT_MENU_ICON_SLOT_SIZE
-        + CONTEXT_MENU_ROW_CHILD_GAP
+    context_menu_row_horizontal_chrome(ContextMenuIconSlot::Reserve, 2)
         + text_width
-        + CONTEXT_MENU_TEXT_WIDTH_SLACK
-        + CONTEXT_MENU_ROW_CHILD_GAP
         + CONTEXT_MENU_TRAILING_SLOT_WIDTH
 }
 
-fn measure_context_menu_text(text: &str, window: &Window) -> f32 {
+fn context_menu_detail_width_for_text_widths(
+    label_width: f32,
+    value_width: f32,
+    icon_slot: ContextMenuIconSlot,
+) -> f32 {
+    context_menu_row_horizontal_chrome(icon_slot, 2)
+        + label_width
+        + CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN
+        + value_width
+}
+
+fn context_menu_row_horizontal_chrome(icon_slot: ContextMenuIconSlot, child_count: usize) -> f32 {
+    let (icon_width, total_child_count) = match icon_slot {
+        ContextMenuIconSlot::Reserve => (CONTEXT_MENU_ICON_SLOT_SIZE, child_count + 1),
+        ContextMenuIconSlot::Collapse => (0.0, child_count),
+    };
+    let child_gaps = total_child_count.saturating_sub(1) as f32 * CONTEXT_MENU_ROW_CHILD_GAP;
+
+    CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
+        + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
+        + CONTEXT_MENU_BORDER_WIDTH * 2.0
+        + child_gaps
+        + icon_width
+}
+
+fn context_menu_text_width(text: &str, window: &Window) -> f32 {
     if text.is_empty() {
         return 0.0;
     }
 
+    let style = window.text_style();
     let run = TextRun {
         len: text.len(),
-        font: font(".SystemUIFont"),
-        color: rgb(0x1f1f1f).into(),
+        font: style.font(),
+        color: style.color,
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -2938,7 +2948,8 @@ fn measure_context_menu_text(text: &str, window: &Window) -> f32 {
         window
             .text_system()
             .layout_line(text, px(CONTEXT_MENU_TEXT_SIZE), &[run], None)
-            .width,
+            .width
+            .ceil(),
     )
 }
 
@@ -3806,7 +3817,9 @@ mod tests {
         MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
-    use crate::explorer::context_menu::{ContextMenuSource, ContextMenuState};
+    use crate::explorer::context_menu::{
+        ContextMenuIconSlot, ContextMenuItem, ContextMenuSource, ContextMenuState,
+    };
     use crate::explorer::{
         DirectoryKind,
         clipboard::{FileClipboard, FileClipboardOperation, clipboard_item_for_files},
@@ -3824,12 +3837,14 @@ mod tests {
     };
 
     use super::{
-        CONTEXT_MENU_TEXT_WIDTH_SLACK, CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH,
-        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
-        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
-        clipboard_has_file_clipboard, context_menu_action_width_for_text_width,
-        context_menu_width_for_natural_width, drop_indicator_target_width, filename_text_width,
-        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
+        CONTEXT_MENU_MAX_WIDTH, CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY,
+        DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
+        RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
+        available_filename_text_width, clipboard_has_file_clipboard,
+        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
+        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
+        drop_indicator_target_width, filename_text_width, folder_status_summary,
+        is_normal_entry_click, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
         sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
@@ -3863,12 +3878,24 @@ mod tests {
     }
 
     #[test]
-    fn context_menu_action_width_includes_text_safety_slack() {
-        let text_width = 80.0;
-        let width = context_menu_action_width_for_text_width(text_width);
+    fn context_menu_action_and_submenu_width_account_for_all_row_chrome() {
+        assert_eq!(context_menu_action_width_for_text_width(80.0), 160.0);
+    }
 
-        assert_eq!(CONTEXT_MENU_TEXT_WIDTH_SLACK, 8.0);
-        assert!(width >= text_width + CONTEXT_MENU_TEXT_WIDTH_SLACK);
+    #[test]
+    fn context_menu_collapsed_detail_width_accounts_for_label_and_value() {
+        assert_eq!(
+            context_menu_detail_width_for_text_widths(40.0, 100.0, ContextMenuIconSlot::Collapse),
+            188.0
+        );
+    }
+
+    #[test]
+    fn context_menu_reserved_detail_width_accounts_for_icon_slot() {
+        assert_eq!(
+            context_menu_detail_width_for_text_widths(40.0, 100.0, ContextMenuIconSlot::Reserve),
+            216.0
+        );
     }
 
     #[test]
@@ -3911,6 +3938,87 @@ mod tests {
             let menu = view.context_menu.as_ref().expect("context menu");
             assert_eq!(menu.origin, event_position);
         });
+    }
+
+    #[gpui::test]
+    fn context_menu_detail_value_receives_its_natural_width(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let value = "January 2, 2026, 10:30 AM";
+        let items = vec![ContextMenuItem::Detail {
+            label: "Created",
+            value: value.to_owned(),
+            icon_slot: ContextMenuIconSlot::Collapse,
+        }];
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+        let expected_value_width = cx.update(|window, _| context_menu_text_width(value, window));
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.context_menu = Some(ContextMenuState::new(
+                    gpui::point(gpui::px(20.0), gpui::px(20.0)),
+                    items,
+                ));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let menu_width = f32::from(
+            cx.debug_bounds("context-menu")
+                .expect("context menu bounds")
+                .size
+                .width,
+        );
+        let value_width = f32::from(
+            cx.debug_bounds("context-menu-detail-value")
+                .expect("detail value bounds")
+                .size
+                .width,
+        );
+
+        assert!(menu_width > CONTEXT_MENU_MIN_WIDTH);
+        assert!(menu_width < CONTEXT_MENU_MAX_WIDTH);
+        assert_eq!(value_width, expected_value_width);
+    }
+
+    #[gpui::test]
+    fn context_menu_levels_calculate_widths_independently(cx: &mut gpui::TestAppContext) {
+        let child_items = vec![ContextMenuItem::Action {
+            id: "context-menu-child",
+            icon: None,
+            label: "A significantly wider submenu action",
+            command: crate::explorer::context_menu::ContextMenuCommand::Paste,
+            enabled: true,
+        }];
+        let root_items = vec![ContextMenuItem::Submenu {
+            id: "context-menu-root",
+            icon: None,
+            label: "New",
+            children: child_items.clone(),
+        }];
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        let (root_width, child_width) = cx.update(|window, _| {
+            (
+                context_menu_width(&root_items, window),
+                context_menu_width(&child_items, window),
+            )
+        });
+
+        assert_eq!(root_width, CONTEXT_MENU_MIN_WIDTH);
+        assert!(child_width > root_width);
+        assert!(child_width <= CONTEXT_MENU_MAX_WIDTH);
     }
 
     #[test]
