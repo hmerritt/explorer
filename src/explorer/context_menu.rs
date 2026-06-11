@@ -219,10 +219,10 @@ pub(super) fn clamped_context_menu_origin(
     menu_size: (f32, f32),
     window_size: (f32, f32),
 ) -> (f32, f32) {
-    let max_x = (window_size.0 - menu_size.0 - 4.0).max(4.0);
-    let max_y = (window_size.1 - menu_size.1 - 4.0).max(4.0);
+    let max_x = (window_size.0 - menu_size.0).max(0.0);
+    let max_y = (window_size.1 - menu_size.1).max(0.0);
 
-    (origin.0.clamp(4.0, max_x), origin.1.clamp(4.0, max_y))
+    (origin.0.clamp(0.0, max_x), origin.1.clamp(0.0, max_y))
 }
 
 pub(super) fn context_menu_pointer_tip_origin(
@@ -258,11 +258,11 @@ mod tests {
         );
         assert_eq!(
             context_menu_pointer_tip_origin((780.0, 580.0), (220.0, 180.0), (800.0, 600.0)),
-            (576.0, 416.0)
+            (580.0, 420.0)
         );
         assert_eq!(
             context_menu_pointer_tip_origin((-20.0, -10.0), (220.0, 180.0), (800.0, 600.0)),
-            (4.0, 4.0)
+            (0.0, 0.0)
         );
     }
 

@@ -1,11 +1,11 @@
 use std::{any::Any, collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
-    ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, prelude::*, px,
-    rgb, transparent_black, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -1935,6 +1935,7 @@ fn search_bar_icon_button(
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        let entity = cx.entity();
 
         div()
             .key_context("Explorer")
@@ -2069,6 +2070,11 @@ impl Render for ExplorerView {
             .relative()
             .flex()
             .flex_col()
+            .on_children_prepainted(move |child_bounds, _, cx| {
+                let _ = entity.update(cx, |this, _| {
+                    this.update_view_origin_from_child_bounds(&child_bounds);
+                });
+            })
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
@@ -2349,15 +2355,35 @@ fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
     item.and_then(file_clipboard_from_item).is_some()
 }
 
+fn local_context_menu_origin(
+    window_position: Point<Pixels>,
+    view_origin: Point<Pixels>,
+) -> Point<Pixels> {
+    window_position - view_origin
+}
+
+impl ExplorerView {
+    fn update_view_origin_from_child_bounds(&mut self, child_bounds: &[Bounds<Pixels>]) {
+        if self.context_menu.is_some() {
+            return;
+        }
+
+        if let Some(first_child) = child_bounds.first() {
+            self.view_origin = first_child.origin;
+        }
+    }
+}
+
 fn open_current_folder_context_menu_from_event(
     this: &mut ExplorerView,
-    _: &MouseDownEvent,
+    event: &MouseDownEvent,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
     let clipboard = cx.read_from_clipboard();
     let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
-    if this.open_folder_context_menu(window.mouse_position(), can_paste, window, cx) {
+    let origin = local_context_menu_origin(event.position, this.view_origin);
+    if this.open_folder_context_menu(origin, can_paste, window, cx) {
         cx.notify();
     }
     cx.stop_propagation();
@@ -2494,6 +2520,7 @@ fn utility_dropdown() -> Div {
 
 fn context_menu_dropdown(items: &[ContextMenuItem]) -> Div {
     div()
+        .debug_selector(|| "context-menu".to_owned())
         .w(px(CONTEXT_MENU_WIDTH))
         .h(px(context_menu_height(
             items,
@@ -3590,8 +3617,8 @@ mod tests {
     use std::{collections::BTreeSet, fs, path::PathBuf};
 
     use gpui::{
-        ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers, MouseButton,
-        MouseClickEvent, MouseDownEvent, MouseUpEvent,
+        AppContext, ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers,
+        MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
     use crate::explorer::{
@@ -3605,6 +3632,7 @@ mod tests {
         entry::FileEntry,
         selection::SelectionModifiers,
         test_support::TempDir,
+        view::ExplorerView,
     };
 
     use super::{
@@ -3612,9 +3640,9 @@ mod tests {
         NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE,
         UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, clipboard_has_file_clipboard,
         drop_indicator_target_width, filename_text_width, folder_status_summary,
-        is_normal_entry_click, recursive_result_text_width, search_working_detail,
-        selection_modifiers_for_click, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        text_cell_width,
+        is_normal_entry_click, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, text_cell_width,
     };
 
     #[test]
@@ -3641,6 +3669,34 @@ mod tests {
         assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
         assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
         assert!(!clipboard_has_file_clipboard(None));
+    }
+
+    #[gpui::test]
+    fn context_menu_opener_uses_mouse_down_event_position(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let event_position = gpui::point(gpui::px(123.0), gpui::px(45.0));
+        let event = MouseDownEvent {
+            button: MouseButton::Right,
+            position: event_position,
+            ..MouseDownEvent::default()
+        };
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                open_current_folder_context_menu_from_event(view, &event, window, cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("context menu");
+            assert_eq!(menu.origin, event_position);
+        });
     }
 
     #[test]

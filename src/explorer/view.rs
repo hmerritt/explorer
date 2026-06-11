@@ -5,8 +5,8 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, Context, EventEmitter, FocusHandle, Subscription, Task,
-    UniformListScrollHandle,
+    AnyWindowHandle, Context, EventEmitter, FocusHandle, Pixels, Point, Subscription, Task,
+    UniformListScrollHandle, point, px,
 };
 
 use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
@@ -60,6 +60,7 @@ pub struct ExplorerView {
     pub(super) show_file_name_extensions: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
+    pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
     pub(super) sidebar_items: Vec<SidebarLocation>,
     pub(super) sidebar_sections: SidebarSections,
@@ -175,6 +176,7 @@ impl ExplorerView {
             show_file_name_extensions: settings.show_file_name_extensions,
             open_utility_menu: None,
             context_menu: None,
+            view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
             sidebar_items: settings.sidebar_items.clone(),
             sidebar_sections: SidebarSections::default(),
