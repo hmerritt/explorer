@@ -1,3 +1,5 @@
+use crate::explorer::constants::FILE_ICON_SIZE;
+use crate::explorer::constants::SIDEBAR_ICON_SIZE;
 use std::sync::{Arc, LazyLock};
 
 use crate::explorer::directory_kind::DirectoryKind;
@@ -92,66 +94,82 @@ pub(super) fn nav_icon_font() -> gpui::Font {
 
 pub(super) fn folder_icon() -> Div {
     div()
-        .w(px(22.0))
-        .h(px(22.0))
+        .w(px(FILE_ICON_SIZE))
+        .h(px(FILE_ICON_SIZE))
         .flex_shrink_0()
-        .child(image_icon(FOLDER_ICON.clone(), 22.0, 22.0))
+        .child(image_icon(
+            FOLDER_ICON.clone(),
+            FILE_ICON_SIZE,
+            FILE_ICON_SIZE,
+        ))
+}
+
+pub(super) fn directory_shortcut_icon() -> Div {
+    div()
+        .w(px(FILE_ICON_SIZE))
+        .h(px(FILE_ICON_SIZE))
+        .flex_shrink_0()
+        .child(image_icon(
+            FOLDER_SHORTCUT_ICON.clone(),
+            FILE_ICON_SIZE,
+            FILE_ICON_SIZE,
+        ))
 }
 
 pub(super) fn file_icon() -> Div {
     div()
-        .w(px(22.0))
-        .h(px(22.0))
+        .w(px(FILE_ICON_SIZE))
+        .h(px(FILE_ICON_SIZE))
         .flex_shrink_0()
-        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0))
+        .child(image_icon(
+            DOCUMENT_ICON.clone(),
+            FILE_ICON_SIZE,
+            FILE_ICON_SIZE,
+        ))
 }
 
-pub(super) fn folder_sidebar_icon() -> Div {
-    div()
-        .w(px(24.0))
-        .h(px(24.0))
-        .flex_shrink_0()
-        .child(image_icon(FOLDER_ICON.clone(), 24.0, 24.0))
+pub(super) fn folder_sidebar_icon() -> AnyElement {
+    image_sidebar_icon(FOLDER_ICON.clone())
 }
 
 pub(super) fn desktop_folder_icon() -> AnyElement {
-    image_icon(DESKTOP_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(DESKTOP_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn documents_folder_icon() -> AnyElement {
-    image_icon(DOCUMENTS_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(DOCUMENTS_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn downloads_folder_icon() -> AnyElement {
-    image_icon(DOWNLOADS_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(DOWNLOADS_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn pictures_folder_icon() -> AnyElement {
-    image_icon(PICTURES_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(PICTURES_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn videos_folder_icon() -> AnyElement {
-    image_icon(VIDEOS_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(VIDEOS_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn music_folder_icon() -> AnyElement {
-    image_icon(MUSIC_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(MUSIC_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn applications_sidebar_icon() -> AnyElement {
-    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(APPLICATIONS_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn bin_sidebar_icon() -> AnyElement {
-    image_icon(BIN_SIDEBAR_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(BIN_SIDEBAR_ICON.clone())
 }
 
 pub(super) fn drive_icon() -> AnyElement {
-    image_icon(DRIVE_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(DRIVE_ICON.clone())
 }
 
 pub(super) fn drive_windows_icon() -> AnyElement {
-    image_icon(DRIVE_WINDOWS_ICON.clone(), 24.0, 24.0)
+    image_sidebar_icon(DRIVE_WINDOWS_ICON.clone())
 }
 
 pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
@@ -179,12 +197,8 @@ pub(super) fn image_icon(image: Arc<Image>, width: f32, height: f32) -> AnyEleme
         .into_any_element()
 }
 
-pub(super) fn directory_shortcut_icon() -> Div {
-    div()
-        .w(px(22.0))
-        .h(px(22.0))
-        .flex_shrink_0()
-        .child(image_icon(FOLDER_SHORTCUT_ICON.clone(), 22.0, 22.0))
+pub(super) fn image_sidebar_icon(image: Arc<Image>) -> AnyElement {
+    image_icon(image, SIDEBAR_ICON_SIZE, SIDEBAR_ICON_SIZE)
 }
 
 #[cfg(test)]
@@ -210,8 +224,8 @@ mod tests {
 
     #[test]
     fn drive_icon_uses_fixed_explorer_list_slot() {
-        assert_eq!(FILE_ICON_SLOT_WIDTH, 22.0);
-        assert_eq!(FILE_ICON_SLOT_HEIGHT, 22.0);
+        assert_eq!(FILE_ICON_SLOT_WIDTH, 16.0);
+        assert_eq!(FILE_ICON_SLOT_HEIGHT, 16.0);
     }
 
     #[test]
