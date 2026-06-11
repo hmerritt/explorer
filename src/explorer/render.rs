@@ -86,10 +86,12 @@ const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 4.0;
 struct SidebarItemDrag {
     configured_index: usize,
     label: SharedString,
+    kind: SidebarItemKind,
 }
 
 struct SidebarItemDragPreview {
     label: SharedString,
+    kind: SidebarItemKind,
 }
 
 impl Render for SidebarItemDragPreview {
@@ -106,7 +108,7 @@ impl Render for SidebarItemDragPreview {
             .border_1()
             .border_color(rgb(0x8a8a8a))
             .shadow_md()
-            .child(folder_icon())
+            .child(sidebar_item_kind_icon(self.kind))
             .child(
                 div()
                     .min_w(px(0.0))
@@ -1055,6 +1057,7 @@ impl ExplorerView {
 
         if let Some(configured_index) = configured_index {
             let drag_label = SharedString::from(item.label.clone());
+            let drag_kind = item.kind;
             row = row
                 .on_mouse_up(
                     MouseButton::Left,
@@ -1076,6 +1079,7 @@ impl ExplorerView {
                     SidebarItemDrag {
                         configured_index,
                         label: drag_label,
+                        kind: drag_kind,
                     },
                     {
                         let entity = entity.clone();
@@ -1086,6 +1090,7 @@ impl ExplorerView {
                             });
                             cx.new(|_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
+                                kind: drag.kind,
                             })
                         }
                     },
@@ -2281,7 +2286,11 @@ fn sidebar_item_is_dragging(
 }
 
 fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
-    match item.kind {
+    sidebar_item_kind_icon(item.kind)
+}
+
+fn sidebar_item_kind_icon(kind: SidebarItemKind) -> AnyElement {
+    match kind {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
