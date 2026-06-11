@@ -1022,9 +1022,8 @@ impl ExplorerView {
 
         let click_path = path.clone();
         let middle_click_path = path.clone();
-        let configured_context_menu_target = configured_sidebar_context_menu_target(&item);
-        let context_menu_active =
-            sidebar_context_menu_is_active(self.context_menu.as_ref(), configured_index);
+        let context_menu_target = sidebar_context_menu_target(&item);
+        let context_menu_active = sidebar_context_menu_is_active(self.context_menu.as_ref(), id);
         let mut row = div()
             .id(("explorer-sidebar-row", id))
             .flex()
@@ -1072,24 +1071,22 @@ impl ExplorerView {
                     .child(SharedString::from(label)),
             );
 
-        if let Some((context_path, context_configured_index, open_icon_kind)) =
-            configured_context_menu_target
-        {
-            row = row.on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    open_configured_sidebar_context_menu_from_event(
-                        this,
-                        event,
-                        context_path.clone(),
-                        context_configured_index,
-                        open_icon_kind,
-                        window,
-                        cx,
-                    );
-                }),
-            );
-        }
+        let (context_path, context_configured_index, open_icon_kind) = context_menu_target;
+        row = row.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                open_sidebar_context_menu_from_event(
+                    this,
+                    event,
+                    context_path.clone(),
+                    id,
+                    context_configured_index,
+                    open_icon_kind,
+                    window,
+                    cx,
+                );
+            }),
+        );
 
         if let Some(configured_index) = configured_index {
             let drag_label = SharedString::from(item.label.clone());
@@ -2327,29 +2324,25 @@ fn sidebar_item_is_dragging(
     configured_index.is_some() && configured_index == dragging_index
 }
 
-fn configured_sidebar_context_menu_target(
+fn sidebar_context_menu_target(
     item: &SidebarItem,
-) -> Option<(PathBuf, usize, Option<DirectoryKind>)> {
+) -> (PathBuf, Option<usize>, Option<DirectoryKind>) {
     let open_icon_kind = match item.kind {
         SidebarItemKind::Directory(kind) => Some(kind),
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
-        SidebarItemKind::Drive | SidebarItemKind::DriveWindows => None,
+        SidebarItemKind::Drive => Some(DirectoryKind::Drive),
+        SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
     };
-    Some((item.path.clone(), item.configured_index?, open_icon_kind))
+    (item.path.clone(), item.configured_index, open_icon_kind)
 }
 
 fn sidebar_context_menu_is_active(
     context_menu: Option<&crate::explorer::context_menu::ContextMenuState>,
-    configured_index: Option<usize>,
+    row_id: usize,
 ) -> bool {
     matches!(
-        (context_menu.and_then(|menu| menu.source), configured_index),
-        (
-            Some(ContextMenuSource::SidebarItem {
-                configured_index: active_index
-            }),
-            Some(row_index)
-        ) if active_index == row_index
+        context_menu.and_then(|menu| menu.source),
+        Some(ContextMenuSource::SidebarItem { row_id: active_id }) if active_id == row_id
     )
 }
 
@@ -2462,19 +2455,21 @@ fn open_current_folder_context_menu_from_event(
     cx.stop_propagation();
 }
 
-fn open_configured_sidebar_context_menu_from_event(
+fn open_sidebar_context_menu_from_event(
     this: &mut ExplorerView,
     event: &MouseDownEvent,
     path: PathBuf,
-    configured_index: usize,
+    row_id: usize,
+    configured_index: Option<usize>,
     open_icon_kind: Option<DirectoryKind>,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
     let origin = local_context_menu_origin(event.position, this.view_origin);
-    if this.open_configured_sidebar_context_menu(
+    if this.open_sidebar_context_menu(
         origin,
         path,
+        row_id,
         configured_index,
         open_icon_kind,
         window,
@@ -3832,13 +3827,12 @@ mod tests {
         CONTEXT_MENU_TEXT_WIDTH_SLACK, CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
-        clipboard_has_file_clipboard, configured_sidebar_context_menu_target,
-        context_menu_action_width_for_text_width, context_menu_width_for_natural_width,
-        drop_indicator_target_width, filename_text_width, folder_status_summary,
-        is_normal_entry_click, open_current_folder_context_menu_from_event,
+        clipboard_has_file_clipboard, context_menu_action_width_for_text_width,
+        context_menu_width_for_natural_width, drop_indicator_target_width, filename_text_width,
+        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_context_menu_is_active, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, text_cell_width,
+        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -3958,7 +3952,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_sidebar_context_menu_requires_configured_item() {
+    fn sidebar_context_menu_target_supports_all_sidebar_item_kinds() {
         let path = PathBuf::from("/custom");
         let custom = SidebarItem {
             label: "Custom".to_owned(),
@@ -3984,36 +3978,54 @@ mod tests {
             kind: SidebarItemKind::Drive,
             configured_index: None,
         };
+        let windows_drive = SidebarItem {
+            label: "Windows".to_owned(),
+            path: PathBuf::from("C:\\"),
+            kind: SidebarItemKind::DriveWindows,
+            configured_index: None,
+        };
 
         assert_eq!(
-            configured_sidebar_context_menu_target(&custom),
-            Some((path.clone(), 3, None))
+            sidebar_context_menu_target(&custom),
+            (path.clone(), Some(3), None)
         );
         assert_eq!(
-            configured_sidebar_context_menu_target(&builtin_configured),
-            Some((path.join("downloads"), 1, Some(DirectoryKind::Downloads)))
+            sidebar_context_menu_target(&builtin_configured),
+            (
+                path.join("downloads"),
+                Some(1),
+                Some(DirectoryKind::Downloads)
+            )
         );
         assert_eq!(
-            configured_sidebar_context_menu_target(&custom_unconfigured),
-            None
+            sidebar_context_menu_target(&custom_unconfigured),
+            (PathBuf::from("/other"), None, None)
         );
-        assert_eq!(configured_sidebar_context_menu_target(&drive), None);
+        assert_eq!(
+            sidebar_context_menu_target(&drive),
+            (PathBuf::from("/"), None, Some(DirectoryKind::Drive))
+        );
+        assert_eq!(
+            sidebar_context_menu_target(&windows_drive),
+            (
+                PathBuf::from("C:\\"),
+                None,
+                Some(DirectoryKind::DriveWindows)
+            )
+        );
     }
 
     #[test]
-    fn sidebar_context_menu_active_matches_configured_source() {
+    fn sidebar_context_menu_active_matches_row_source() {
         let menu = ContextMenuState::new_with_source(
             gpui::point(gpui::px(0.0), gpui::px(0.0)),
             Vec::new(),
-            ContextMenuSource::SidebarItem {
-                configured_index: 2,
-            },
+            ContextMenuSource::SidebarItem { row_id: 2_000 },
         );
 
-        assert!(sidebar_context_menu_is_active(Some(&menu), Some(2)));
-        assert!(!sidebar_context_menu_is_active(Some(&menu), Some(1)));
-        assert!(!sidebar_context_menu_is_active(Some(&menu), None));
-        assert!(!sidebar_context_menu_is_active(None, Some(2)));
+        assert!(sidebar_context_menu_is_active(Some(&menu), 2_000));
+        assert!(!sidebar_context_menu_is_active(Some(&menu), 1_000));
+        assert!(!sidebar_context_menu_is_active(None, 2_000));
     }
 
     #[test]

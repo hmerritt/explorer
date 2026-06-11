@@ -18,7 +18,7 @@ pub(super) struct ContextMenuState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuSource {
-    SidebarItem { configured_index: usize },
+    SidebarItem { row_id: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -118,11 +118,12 @@ impl ExplorerView {
         true
     }
 
-    pub(super) fn open_configured_sidebar_context_menu(
+    pub(super) fn open_sidebar_context_menu(
         &mut self,
         origin: Point<Pixels>,
         path: PathBuf,
-        configured_index: usize,
+        row_id: usize,
+        configured_index: Option<usize>,
         open_icon_kind: Option<DirectoryKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -137,8 +138,8 @@ impl ExplorerView {
         self.open_utility_menu = None;
         self.context_menu = Some(ContextMenuState::new_with_source(
             origin,
-            configured_sidebar_context_menu_items(path, configured_index, open_icon_kind),
-            ContextMenuSource::SidebarItem { configured_index },
+            sidebar_context_menu_items(path, configured_index, open_icon_kind),
+            ContextMenuSource::SidebarItem { row_id },
         ));
         true
     }
@@ -183,12 +184,12 @@ impl ExplorerView {
     }
 }
 
-pub(super) fn configured_sidebar_context_menu_items(
+pub(super) fn sidebar_context_menu_items(
     path: PathBuf,
-    configured_index: usize,
+    configured_index: Option<usize>,
     open_icon_kind: Option<DirectoryKind>,
 ) -> Vec<ContextMenuItem> {
-    vec![
+    let mut items = vec![
         ContextMenuItem::Action {
             id: "context-menu-sidebar-open",
             icon: Some(ContextMenuIcon::FolderKind(open_icon_kind)),
@@ -203,15 +204,18 @@ pub(super) fn configured_sidebar_context_menu_items(
             command: ContextMenuCommand::OpenSidebarInNewTab { path },
             enabled: true,
         },
-        ContextMenuItem::Separator,
-        ContextMenuItem::Action {
+    ];
+    if let Some(configured_index) = configured_index {
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Action {
             id: "context-menu-sidebar-unpin",
             icon: Some(ContextMenuIcon::Unpin),
             label: "Unpin",
             command: ContextMenuCommand::UnpinSidebar { configured_index },
             enabled: true,
-        },
-    ]
+        });
+    }
+    items
 }
 
 pub(super) fn folder_context_menu_items(path: &Path, can_paste: bool) -> Vec<ContextMenuItem> {
@@ -470,9 +474,7 @@ mod tests {
                 y: gpui::px(20.0),
             },
             Vec::new(),
-            ContextMenuSource::SidebarItem {
-                configured_index: 1,
-            },
+            ContextMenuSource::SidebarItem { row_id: 1 },
         );
         let second = ContextMenuState::new_with_source(
             Point {
@@ -480,22 +482,16 @@ mod tests {
                 y: gpui::px(80.0),
             },
             Vec::new(),
-            ContextMenuSource::SidebarItem {
-                configured_index: 4,
-            },
+            ContextMenuSource::SidebarItem { row_id: 4 },
         );
 
         assert_eq!(
             first.source,
-            Some(ContextMenuSource::SidebarItem {
-                configured_index: 1
-            })
+            Some(ContextMenuSource::SidebarItem { row_id: 1 })
         );
         assert_eq!(
             second.source,
-            Some(ContextMenuSource::SidebarItem {
-                configured_index: 4
-            })
+            Some(ContextMenuSource::SidebarItem { row_id: 4 })
         );
     }
 
@@ -534,7 +530,7 @@ mod tests {
     fn configured_sidebar_menu_contains_expected_items_icons_and_commands() {
         let path = PathBuf::from("/tmp/custom");
         let items =
-            configured_sidebar_context_menu_items(path.clone(), 2, Some(DirectoryKind::Downloads));
+            sidebar_context_menu_items(path.clone(), Some(2), Some(DirectoryKind::Downloads));
 
         assert_eq!(items.len(), 4);
         assert_eq!(
@@ -567,6 +563,34 @@ mod tests {
                 command: ContextMenuCommand::UnpinSidebar {
                     configured_index: 2
                 },
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn unconfigured_sidebar_menu_omits_separator_and_unpin() {
+        let path = PathBuf::from("/tmp/drive");
+        let items = sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive));
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open",
+                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Drive))),
+                label: "Open",
+                command: ContextMenuCommand::OpenSidebar { path: path.clone() },
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            items[1],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open-new-tab",
+                icon: Some(ContextMenuIcon::NewTab),
+                label: "Open in new tab",
+                command: ContextMenuCommand::OpenSidebarInNewTab { path },
                 enabled: true,
             }
         );
