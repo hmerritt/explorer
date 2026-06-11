@@ -1907,7 +1907,6 @@ fn search_bar_icon_button(
 ) -> AnyElement {
     div()
         .id(id)
-        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -2393,6 +2392,7 @@ fn utility_text_button_base(
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -2550,7 +2550,7 @@ fn render_context_menu_level(
             active_submenu = Some((children.as_slice(), path.clone(), row_top));
         }
 
-        menu = menu.child(render_context_menu_item(item, path, cx));
+        menu = menu.child(render_context_menu_item(item, path, hovered_path, cx));
     }
 
     elements.push(menu.into_any_element());
@@ -2592,8 +2592,11 @@ fn render_context_menu_level(
 fn render_context_menu_item(
     item: &ContextMenuItem,
     path: Vec<usize>,
+    hovered_path: &[usize],
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
+    let active = context_menu_path_is_active(hovered_path, &path);
+
     match item {
         ContextMenuItem::Action {
             id,
@@ -2601,16 +2604,16 @@ fn render_context_menu_item(
             label,
             command,
             enabled,
-        } => context_menu_action_row(*id, *icon, label, *command, *enabled, path, cx),
+        } => context_menu_action_row(*id, *icon, label, *command, *enabled, path, active, cx),
         ContextMenuItem::Submenu {
             id, icon, label, ..
-        } => context_menu_submenu_row(*id, *icon, label, path, cx),
+        } => context_menu_submenu_row(*id, *icon, label, path, active, cx),
         ContextMenuItem::Separator => context_menu_separator().into_any_element(),
         ContextMenuItem::Detail {
             label,
             value,
             icon_slot,
-        } => context_menu_detail_row(label, value, *icon_slot, path, cx),
+        } => context_menu_detail_row(label, value, *icon_slot, path, active, cx),
     }
 }
 
@@ -2621,19 +2624,28 @@ fn context_menu_action_row(
     command: ContextMenuCommand,
     enabled: bool,
     path: Vec<usize>,
+    active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, label, path, cx)
-        .when(!enabled, |this| this.opacity(0.45))
-        .when(enabled, |this| {
-            this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.execute_context_menu_command(command, window, cx);
-                cx.stop_propagation();
-                cx.notify();
-            }))
-        })
-        .child(context_menu_trailing_slot(None))
-        .into_any_element()
+    context_menu_row_base(
+        id,
+        icon,
+        ContextMenuIconSlot::Reserve,
+        label,
+        path,
+        active,
+        cx,
+    )
+    .when(!enabled, |this| this.opacity(0.45))
+    .when(enabled, |this| {
+        this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.execute_context_menu_command(command, window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+    })
+    .child(context_menu_trailing_slot(None))
+    .into_any_element()
 }
 
 fn context_menu_submenu_row(
@@ -2641,11 +2653,20 @@ fn context_menu_submenu_row(
     icon: Option<ContextMenuIcon>,
     label: &'static str,
     path: Vec<usize>,
+    active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, label, path, cx)
-        .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
-        .into_any_element()
+    context_menu_row_base(
+        id,
+        icon,
+        ContextMenuIconSlot::Reserve,
+        label,
+        path,
+        active,
+        cx,
+    )
+    .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
+    .into_any_element()
 }
 
 fn context_menu_detail_row(
@@ -2653,6 +2674,7 @@ fn context_menu_detail_row(
     value: &str,
     icon_slot: ContextMenuIconSlot,
     path: Vec<usize>,
+    active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     let id = match label {
@@ -2661,7 +2683,7 @@ fn context_menu_detail_row(
         _ => "context-menu-detail",
     };
 
-    context_menu_row_base(id, None, icon_slot, label, path, cx)
+    context_menu_row_base(id, None, icon_slot, label, path, active, cx)
         .child(
             div()
                 .ml(px(12.0))
@@ -2683,6 +2705,7 @@ fn context_menu_row_base(
     icon_slot: ContextMenuIconSlot,
     label: &'static str,
     path: Vec<usize>,
+    active: bool,
     cx: &mut Context<ExplorerView>,
 ) -> gpui::Stateful<Div> {
     div()
@@ -2696,6 +2719,7 @@ fn context_menu_row_base(
         .gap(px(10.0))
         .rounded(px(4.0))
         .cursor_default()
+        .when(active, |this| this.bg(rgb(0xe5f3ff)))
         .hover(|style| style.bg(rgb(0xe5f3ff)))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if *hovered {

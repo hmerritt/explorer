@@ -1,5 +1,16 @@
 ## New
 
+- Context menu is not rendered exactly where the mouse is positioned - lets fix this.
+- Context menu submenus currently have a gap. Let's remove this gap so the menu edges are touching. Let's also -1px so there is not a double-border visible
+- Add item gap (or vertical margin) to context menu items of 4px
+
+---
+
+- Remove Ctrl+Shift+F keybinding for creating a new file. Instead use that keybinding to trigger and focus a recursive search. Ctrl+F triggers a regular search (turns off recursive search if active)
+- When extracting zips, skip "\_\_MACOSX" directory
+
+---
+
 Plan to implement: Context menus
 
 There is no full right-click model yet:
