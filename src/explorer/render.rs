@@ -39,9 +39,9 @@ use crate::explorer::{
         UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH, effective_name_column_width,
     },
     context_menu::{
-        ContextMenuCommand, ContextMenuIcon, ContextMenuItem, clamped_context_menu_origin,
-        context_menu_height, context_menu_item_top, context_menu_path_is_active,
-        context_menu_pointer_tip_origin,
+        ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
+        clamped_context_menu_origin, context_menu_height, context_menu_item_top,
+        context_menu_path_is_active, context_menu_pointer_tip_origin,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -2597,7 +2597,11 @@ fn render_context_menu_item(
             id, icon, label, ..
         } => context_menu_submenu_row(*id, *icon, label, path, cx),
         ContextMenuItem::Separator => context_menu_separator().into_any_element(),
-        ContextMenuItem::Detail { label, value } => context_menu_detail_row(label, value, path, cx),
+        ContextMenuItem::Detail {
+            label,
+            value,
+            icon_slot,
+        } => context_menu_detail_row(label, value, *icon_slot, path, cx),
     }
 }
 
@@ -2610,7 +2614,7 @@ fn context_menu_action_row(
     path: Vec<usize>,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(id, icon, label, path, cx)
+    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, label, path, cx)
         .when(!enabled, |this| this.opacity(0.45))
         .when(enabled, |this| {
             this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -2630,7 +2634,7 @@ fn context_menu_submenu_row(
     path: Vec<usize>,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    context_menu_row_base(id, icon, label, path, cx)
+    context_menu_row_base(id, icon, ContextMenuIconSlot::Reserve, label, path, cx)
         .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
         .into_any_element()
 }
@@ -2638,6 +2642,7 @@ fn context_menu_submenu_row(
 fn context_menu_detail_row(
     label: &'static str,
     value: &str,
+    icon_slot: ContextMenuIconSlot,
     path: Vec<usize>,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
@@ -2647,7 +2652,7 @@ fn context_menu_detail_row(
         _ => "context-menu-detail",
     };
 
-    context_menu_row_base(id, None, label, path, cx)
+    context_menu_row_base(id, None, icon_slot, label, path, cx)
         .child(
             div()
                 .ml(px(12.0))
@@ -2664,6 +2669,7 @@ fn context_menu_detail_row(
 fn context_menu_row_base(
     id: &'static str,
     icon: Option<ContextMenuIcon>,
+    icon_slot: ContextMenuIconSlot,
     label: &'static str,
     path: Vec<usize>,
     cx: &mut Context<ExplorerView>,
@@ -2686,7 +2692,9 @@ fn context_menu_row_base(
                 cx.notify();
             }
         }))
-        .child(context_menu_icon_slot(icon))
+        .when(icon_slot == ContextMenuIconSlot::Reserve, |this| {
+            this.child(context_menu_icon_slot(icon))
+        })
         .child(
             div()
                 .flex_1()

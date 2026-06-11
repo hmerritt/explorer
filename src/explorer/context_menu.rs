@@ -30,7 +30,14 @@ pub(super) enum ContextMenuItem {
     Detail {
         label: &'static str,
         value: String,
+        icon_slot: ContextMenuIconSlot,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContextMenuIconSlot {
+    Reserve,
+    Collapse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,10 +165,12 @@ pub(super) fn folder_context_menu_items_from_times(
         ContextMenuItem::Detail {
             label: "Created",
             value: format_modified(created),
+            icon_slot: ContextMenuIconSlot::Collapse,
         },
         ContextMenuItem::Detail {
             label: "Modified",
             value: format_modified(modified),
+            icon_slot: ContextMenuIconSlot::Collapse,
         },
     ]
 }
@@ -318,6 +327,7 @@ mod tests {
             ContextMenuItem::Detail {
                 label: "Created",
                 value: String::new(),
+                icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
         assert_eq!(
@@ -325,6 +335,7 @@ mod tests {
             ContextMenuItem::Detail {
                 label: "Modified",
                 value: String::new(),
+                icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
     }
@@ -341,6 +352,7 @@ mod tests {
             ContextMenuItem::Detail {
                 label: "Created",
                 value: "01/06/2026 09:15".to_owned(),
+                icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
         assert_eq!(
@@ -348,6 +360,7 @@ mod tests {
             ContextMenuItem::Detail {
                 label: "Modified",
                 value: "02/06/2026 10:30".to_owned(),
+                icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
     }
