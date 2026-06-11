@@ -2,8 +2,8 @@ use std::sync::{Arc, LazyLock};
 
 use crate::explorer::directory_kind::DirectoryKind;
 use gpui::{
-    AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, Pixels, StyledImage, div, font,
-    img, prelude::*, px,
+    AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, StyledImage, div, font, img,
+    prelude::*, px,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,18 +82,6 @@ impl NavIcon {
     }
 }
 
-pub(super) fn device_px(value: f32, scale_factor: f32) -> Pixels {
-    px(device_px_value(value, scale_factor))
-}
-
-pub(super) fn device_px_value(value: f32, scale_factor: f32) -> f32 {
-    if scale_factor <= 0.0 {
-        value
-    } else {
-        value / scale_factor
-    }
-}
-
 pub(super) fn nav_icon_font() -> gpui::Font {
     let mut font = font("Segoe Fluent Icons");
     font.fallbacks = Some(FontFallbacks::from_fonts(vec![
@@ -102,131 +90,110 @@ pub(super) fn nav_icon_font() -> gpui::Font {
     font
 }
 
-pub(super) fn folder_icon(scale_factor: f32) -> Div {
+pub(super) fn folder_icon() -> Div {
     div()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
+        .w(px(22.0))
+        .h(px(22.0))
         .flex_shrink_0()
-        .child(image_icon(FOLDER_ICON.clone(), 22.0, 22.0, scale_factor))
+        .child(image_icon(FOLDER_ICON.clone(), 22.0, 22.0))
 }
 
-pub(super) fn file_icon(scale_factor: f32) -> Div {
+pub(super) fn file_icon() -> Div {
     div()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
+        .w(px(22.0))
+        .h(px(22.0))
         .flex_shrink_0()
-        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0, scale_factor))
+        .child(image_icon(DOCUMENT_ICON.clone(), 22.0, 22.0))
 }
 
-pub(super) fn folder_sidebar_icon(scale_factor: f32) -> Div {
+pub(super) fn folder_sidebar_icon() -> Div {
     div()
-        .w(device_px(24.0, scale_factor))
-        .h(device_px(24.0, scale_factor))
+        .w(px(24.0))
+        .h(px(24.0))
         .flex_shrink_0()
-        .child(image_icon(FOLDER_ICON.clone(), 24.0, 24.0, scale_factor))
+        .child(image_icon(FOLDER_ICON.clone(), 24.0, 24.0))
 }
 
-pub(super) fn desktop_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DESKTOP_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn desktop_folder_icon() -> AnyElement {
+    image_icon(DESKTOP_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn documents_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DOCUMENTS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn documents_folder_icon() -> AnyElement {
+    image_icon(DOCUMENTS_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn downloads_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DOWNLOADS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn downloads_folder_icon() -> AnyElement {
+    image_icon(DOWNLOADS_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn pictures_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(PICTURES_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn pictures_folder_icon() -> AnyElement {
+    image_icon(PICTURES_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn videos_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(VIDEOS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn videos_folder_icon() -> AnyElement {
+    image_icon(VIDEOS_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn music_folder_icon(scale_factor: f32) -> AnyElement {
-    image_icon(MUSIC_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn music_folder_icon() -> AnyElement {
+    image_icon(MUSIC_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn applications_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn applications_sidebar_icon() -> AnyElement {
+    image_icon(APPLICATIONS_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn bin_sidebar_icon(scale_factor: f32) -> AnyElement {
-    image_icon(BIN_SIDEBAR_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn bin_sidebar_icon() -> AnyElement {
+    image_icon(BIN_SIDEBAR_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn drive_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DRIVE_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn drive_icon() -> AnyElement {
+    image_icon(DRIVE_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn drive_windows_icon(scale_factor: f32) -> AnyElement {
-    image_icon(DRIVE_WINDOWS_ICON.clone(), 24.0, 24.0, scale_factor)
+pub(super) fn drive_windows_icon() -> AnyElement {
+    image_icon(DRIVE_WINDOWS_ICON.clone(), 24.0, 24.0)
 }
 
-pub(super) fn directory_kind_icon(kind: DirectoryKind, scale_factor: f32) -> AnyElement {
+pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
     match kind {
-        DirectoryKind::Home => folder_sidebar_icon(scale_factor).into_any_element(),
-        DirectoryKind::Desktop => desktop_folder_icon(scale_factor),
-        DirectoryKind::Documents => documents_folder_icon(scale_factor),
-        DirectoryKind::Downloads => downloads_folder_icon(scale_factor),
-        DirectoryKind::Pictures => pictures_folder_icon(scale_factor),
-        DirectoryKind::Music => music_folder_icon(scale_factor),
-        DirectoryKind::Videos => videos_folder_icon(scale_factor),
-        DirectoryKind::Applications => applications_sidebar_icon(scale_factor),
-        DirectoryKind::Bin => bin_sidebar_icon(scale_factor),
-        DirectoryKind::Drive => drive_icon(scale_factor),
-        DirectoryKind::DriveWindows => drive_windows_icon(scale_factor),
+        DirectoryKind::Home => folder_sidebar_icon().into_any_element(),
+        DirectoryKind::Desktop => desktop_folder_icon(),
+        DirectoryKind::Documents => documents_folder_icon(),
+        DirectoryKind::Downloads => downloads_folder_icon(),
+        DirectoryKind::Pictures => pictures_folder_icon(),
+        DirectoryKind::Music => music_folder_icon(),
+        DirectoryKind::Videos => videos_folder_icon(),
+        DirectoryKind::Applications => applications_sidebar_icon(),
+        DirectoryKind::Bin => bin_sidebar_icon(),
+        DirectoryKind::Drive => drive_icon(),
+        DirectoryKind::DriveWindows => drive_windows_icon(),
     }
 }
 
-pub(super) fn image_icon(
-    image: Arc<Image>,
-    width_physical: f32,
-    height_physical: f32,
-    scale_factor: f32,
-) -> AnyElement {
+pub(super) fn image_icon(image: Arc<Image>, width: f32, height: f32) -> AnyElement {
     img(image)
-        .w(device_px(width_physical, scale_factor))
-        .h(device_px(height_physical, scale_factor))
+        .w(px(width))
+        .h(px(height))
         .flex_shrink_0()
         .object_fit(ObjectFit::Contain)
         .into_any_element()
 }
 
-pub(super) fn directory_shortcut_icon(scale_factor: f32) -> Div {
+pub(super) fn directory_shortcut_icon() -> Div {
     div()
-        .w(device_px(22.0, scale_factor))
-        .h(device_px(22.0, scale_factor))
+        .w(px(22.0))
+        .h(px(22.0))
         .flex_shrink_0()
-        .child(image_icon(
-            FOLDER_SHORTCUT_ICON.clone(),
-            22.0,
-            22.0,
-            scale_factor,
-        ))
+        .child(image_icon(FOLDER_SHORTCUT_ICON.clone(), 22.0, 22.0))
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use crate::explorer::constants::NAV_ICON_TEXT_SIZE;
-
-    #[test]
-    fn device_pixel_values_convert_to_logical_pixels() {
-        assert_eq!(device_px_value(22.0, 1.0), 22.0);
-        assert!((device_px_value(22.0, 1.5) - 14.666_667).abs() < 0.000_01);
-        assert!((device_px_value(17.0, 1.5) - 11.333_333).abs() < 0.000_01);
-    }
-
-    #[test]
-    fn device_pixel_conversion_handles_invalid_scale() {
-        assert_eq!(device_px_value(22.0, 0.0), 22.0);
-        assert_eq!(device_px_value(22.0, -1.0), 22.0);
-    }
+    use crate::explorer::constants::{
+        FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, NAV_ICON_TEXT_SIZE,
+    };
 
     #[test]
     fn nav_icons_use_windows_explorer_glyphs() {
@@ -243,14 +210,8 @@ mod tests {
 
     #[test]
     fn drive_icon_uses_fixed_explorer_list_slot() {
-        assert_eq!(device_px_value(22.0, 1.0), 22.0);
-        assert_eq!(device_px_value(22.0, 1.0), 22.0);
-    }
-
-    #[test]
-    fn special_folder_fallback_icons_use_sidebar_icon_slot() {
-        assert_eq!(device_px_value(22.0, 1.0), 22.0);
-        assert_eq!(device_px_value(22.0, 1.0), 22.0);
+        assert_eq!(FILE_ICON_SLOT_WIDTH, 22.0);
+        assert_eq!(FILE_ICON_SLOT_HEIGHT, 22.0);
     }
 
     #[test]

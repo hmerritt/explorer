@@ -54,7 +54,6 @@ struct TabDragPreview {
     label: SharedString,
     path: PathBuf,
     is_active: bool,
-    scale_factor: f32,
 }
 
 pub struct ExplorerTabs {
@@ -396,15 +395,14 @@ impl ExplorerTabs {
         }
     }
 
-    fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let scale_factor = window.scale_factor();
+    fn render_tab_bar(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let can_close = self.tabs.len() > 1;
         let can_drag = can_drag_tab(self.tabs.len());
         let mut tab_children = self
             .tabs
             .iter()
             .map(|tab| {
-                self.render_tab(tab, can_close, can_drag, scale_factor, cx)
+                self.render_tab(tab, can_close, can_drag, cx)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -441,7 +439,6 @@ impl ExplorerTabs {
         tab: &ExplorerTab,
         can_close: bool,
         can_drag: bool,
-        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = tab.id == self.active_tab;
@@ -510,7 +507,6 @@ impl ExplorerTabs {
             .child(tab_inner_contents(
                 label.clone(),
                 Some(&path),
-                scale_factor,
                 can_close.then(|| close_tab_button(tab_id, cx)),
             ))
             .can_drop({
@@ -576,8 +572,7 @@ impl ExplorerTabs {
                         path: drag_path,
                         is_active,
                     },
-                    move |drag, _, window, cx| {
-                        let scale_factor = window.scale_factor();
+                    move |drag, _, _, cx| {
                         let _ = entity.update(cx, |this, cx| {
                             this.start_tab_drag(drag.id);
                             cx.notify();
@@ -586,7 +581,6 @@ impl ExplorerTabs {
                             label: drag.label.clone(),
                             path: drag.path.clone(),
                             is_active: drag.is_active,
-                            scale_factor,
                         })
                     },
                 )
@@ -679,21 +673,11 @@ impl Render for ExplorerTabs {
 
 impl Render for TabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tab_preview_visual(
-            self.label.clone(),
-            &self.path,
-            self.is_active,
-            self.scale_factor,
-        )
+        tab_preview_visual(self.label.clone(), &self.path, self.is_active)
     }
 }
 
-fn tab_preview_visual(
-    label: SharedString,
-    path: &Path,
-    is_active: bool,
-    scale_factor: f32,
-) -> impl IntoElement {
+fn tab_preview_visual(label: SharedString, path: &Path, is_active: bool) -> impl IntoElement {
     div()
         .relative()
         .flex()
@@ -715,7 +699,6 @@ fn tab_preview_visual(
         .child(tab_inner_contents(
             label,
             Some(path),
-            scale_factor,
             Some(close_tab_glyph_visual().into_any_element()),
         ))
 }
@@ -723,7 +706,6 @@ fn tab_preview_visual(
 fn tab_inner_contents(
     label: SharedString,
     path: Option<&Path>,
-    scale_factor: f32,
     close_glyph: Option<AnyElement>,
 ) -> AnyElement {
     div()
@@ -734,7 +716,7 @@ fn tab_inner_contents(
         .min_w(px(0.0))
         .gap(px(TAB_ICON_GAP))
         .overflow_hidden()
-        .child(tab_icon(path, scale_factor))
+        .child(tab_icon(path))
         .child(
             div()
                 .flex_1()
@@ -748,16 +730,16 @@ fn tab_inner_contents(
         .into_any_element()
 }
 
-fn tab_icon(path: Option<&Path>, scale_factor: f32) -> AnyElement {
+fn tab_icon(path: Option<&Path>) -> AnyElement {
     let Some(path) = path else {
-        return folder_icon(scale_factor).into_any_element();
+        return folder_icon().into_any_element();
     };
 
     if let Some(kind) = crate::explorer::resolve_directory_kind(path) {
-        return crate::explorer::icons::directory_kind_icon(kind, scale_factor);
+        return crate::explorer::icons::directory_kind_icon(kind);
     }
 
-    folder_icon(scale_factor).into_any_element()
+    folder_icon().into_any_element()
 }
 
 fn close_tab_glyph_visual() -> gpui::Div {

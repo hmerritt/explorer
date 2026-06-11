@@ -23,21 +23,20 @@ use crate::explorer::{
         DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
         DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
         DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
-        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT_PHYSICAL, FILE_ICON_SLOT_WIDTH_PHYSICAL,
-        HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE,
-        NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT,
-        NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING,
-        OPEN_ERROR_VERTICAL_PADDING, RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT,
-        SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
-        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
-        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG, SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH,
-        SEARCH_NO_MATCHES_MESSAGE, SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING,
-        SIDEBAR_ICON_TEXT_GAP_PHYSICAL, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH,
-        STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
-        STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT,
-        UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT,
-        UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
-        effective_name_column_width,
+        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, HEADER_HEIGHT,
+        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
+        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
+        NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING,
+        RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
+        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
+        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
+        SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP,
+        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
+        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
+        STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
+        UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
+        UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH, effective_name_column_width,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -47,9 +46,8 @@ use crate::explorer::{
     formatting::{format_modified, format_size},
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, NavIcon,
-        PASTE_ICON, RENAME_ICON, device_px, device_px_value, directory_kind_icon,
-        directory_shortcut_icon, drive_icon, drive_windows_icon, file_icon, folder_icon,
-        image_icon, nav_icon_font,
+        PASTE_ICON, RENAME_ICON, directory_kind_icon, directory_shortcut_icon, drive_icon,
+        drive_windows_icon, file_icon, folder_icon, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -66,7 +64,7 @@ use crate::settings::SettingsState;
 use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
-const NAME_ICON_TEXT_GAP_PHYSICAL: f32 = 8.0;
+const NAME_ICON_TEXT_GAP: f32 = 8.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
 const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
@@ -87,7 +85,6 @@ struct SidebarItemDrag {
 
 struct SidebarItemDragPreview {
     label: SharedString,
-    scale_factor: f32,
 }
 
 impl Render for SidebarItemDragPreview {
@@ -104,11 +101,11 @@ impl Render for SidebarItemDragPreview {
             .border_1()
             .border_color(rgb(0x8a8a8a))
             .shadow_md()
-            .child(folder_icon(self.scale_factor))
+            .child(folder_icon())
             .child(
                 div()
                     .min_w(px(0.0))
-                    .ml(device_px(SIDEBAR_ICON_TEXT_GAP_PHYSICAL, self.scale_factor))
+                    .ml(px(SIDEBAR_ICON_TEXT_GAP))
                     .truncate()
                     .text_size(px(SIDEBAR_TEXT_SIZE))
                     .child(self.label.clone()),
@@ -468,7 +465,7 @@ impl ExplorerView {
             UtilityMenu::New => utility_dropdown()
                 .child(utility_menu_row(
                     "utility-new-folder",
-                    Some(folder_icon(1.4).into_any_element()),
+                    Some(folder_icon().into_any_element()),
                     "Folder",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
@@ -809,7 +806,7 @@ impl ExplorerView {
             .child(scrollbar_header_spacer())
     }
 
-    fn render_sidebar(&self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let sections = &self.sidebar_sections;
         let mut children = Vec::new();
         let has_user_directories = !sections.user_directories.is_empty();
@@ -821,7 +818,7 @@ impl ExplorerView {
                 SIDEBAR_INSERTION_ZONE_HEIGHT,
                 cx,
             ));
-            children.push(self.render_sidebar_row(index, item, scale_factor, cx));
+            children.push(self.render_sidebar_row(index, item, cx));
         }
         let final_insertion_index = sections
             .user_directories
@@ -845,7 +842,7 @@ impl ExplorerView {
         }
 
         for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
-            children.push(self.render_sidebar_row(index + 1_000, item, scale_factor, cx));
+            children.push(self.render_sidebar_row(index + 1_000, item, cx));
         }
 
         if !children.is_empty() && !sections.drives.is_empty() {
@@ -853,7 +850,7 @@ impl ExplorerView {
         }
 
         for (index, item) in sections.drives.iter().cloned().enumerate() {
-            children.push(self.render_sidebar_row(index + 2_000, item, scale_factor, cx));
+            children.push(self.render_sidebar_row(index + 2_000, item, cx));
         }
 
         div()
@@ -916,7 +913,6 @@ impl ExplorerView {
         &self,
         id: usize,
         item: SidebarItem,
-        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_current = item.path == self.path;
@@ -973,12 +969,12 @@ impl ExplorerView {
                     cx.notify();
                 }),
             )
-            .child(sidebar_item_icon(icon_item, scale_factor))
+            .child(sidebar_item_icon(icon_item))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .ml(device_px(SIDEBAR_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+                    .ml(px(SIDEBAR_ICON_TEXT_GAP))
                     .truncate()
                     .text_size(px(SIDEBAR_TEXT_SIZE))
                     .text_color(rgb(0x1f1f1f))
@@ -1011,15 +1007,13 @@ impl ExplorerView {
                     },
                     {
                         let entity = entity.clone();
-                        move |drag, _, window, cx| {
-                            let scale_factor = window.scale_factor();
+                        move |drag, _, _, cx| {
                             let _ = entity.update(cx, |this, cx| {
                                 this.dragging_sidebar_item = Some(drag.configured_index);
                                 cx.notify();
                             });
                             cx.new(|_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
-                                scale_factor,
                             })
                         }
                     },
@@ -1145,13 +1139,7 @@ impl ExplorerView {
         row.into_any_element()
     }
 
-    fn render_row(
-        &mut self,
-        ix: usize,
-        scale_factor: f32,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_row(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
         let app_icon = self.app_icon_for_entry(&entry, cx);
         let is_selected = self.entry_is_selected(ix);
@@ -1398,21 +1386,14 @@ impl ExplorerView {
         };
 
         let name_cell = if self.rename_is_active_for_path(&entry.path) {
-            rename_name_cell(
-                &entry,
-                app_icon,
-                scale_factor,
-                self.active_rename_focus_handle(),
-                cx,
-            )
-            .into_any_element()
+            rename_name_cell(&entry, app_icon, self.active_rename_focus_handle(), cx)
+                .into_any_element()
         } else {
             let name_click_entry = entry.clone();
             let name_middle_clicked_entry = entry.clone();
             name_cell(
                 &entry,
                 app_icon,
-                scale_factor,
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
                 window,
@@ -1580,10 +1561,9 @@ impl ExplorerView {
                             "explorer-entries",
                             self.entries.len(),
                             cx.processor(|this, range: Range<usize>, window, cx| {
-                                let scale_factor = window.scale_factor();
                                 let mut rows = Vec::with_capacity(range.end - range.start);
                                 for ix in range {
-                                    rows.push(this.render_row(ix, scale_factor, window, cx));
+                                    rows.push(this.render_row(ix, window, cx));
                                 }
                                 rows
                             }),
@@ -1838,7 +1818,6 @@ fn search_bar_icon_button(
 
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let scale_factor = window.scale_factor();
         let focus_handle = self.focus_handle(cx);
 
         div()
@@ -1986,7 +1965,7 @@ impl Render for ExplorerView {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
-                    .child(self.render_sidebar(scale_factor, cx))
+                    .child(self.render_sidebar(cx))
                     .child(
                         div()
                             .flex()
@@ -2185,12 +2164,12 @@ fn sidebar_item_is_dragging(
     configured_index.is_some() && configured_index == dragging_index
 }
 
-fn sidebar_item_icon(item: SidebarItem, scale_factor: f32) -> AnyElement {
+fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
     match item.kind {
-        SidebarItemKind::Directory(kind) => directory_kind_icon(kind, scale_factor),
-        SidebarItemKind::CustomDirectory => folder_icon(scale_factor).into_any_element(),
-        SidebarItemKind::Drive => drive_icon(scale_factor).into_any_element(),
-        SidebarItemKind::DriveWindows => drive_windows_icon(scale_factor).into_any_element(),
+        SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
+        SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
+        SidebarItemKind::Drive => drive_icon().into_any_element(),
+        SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
     }
 }
 
@@ -2842,16 +2821,15 @@ fn name_header_cell() -> Div {
 fn name_cell(
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
-    scale_factor: f32,
     show_file_name_extensions: bool,
     show_full_path: bool,
     window: &Window,
 ) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
     let text_width = if show_full_path {
-        recursive_result_text_width(list_viewport_width, scale_factor)
+        recursive_result_text_width(list_viewport_width)
     } else {
-        available_filename_text_width(list_viewport_width, scale_factor)
+        available_filename_text_width(list_viewport_width)
     };
     let filename = truncated_text(
         entry.display_name_with_extensions(show_file_name_extensions),
@@ -2867,7 +2845,7 @@ fn name_cell(
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(entry_icon(entry, app_icon, scale_factor))
+        .child(entry_icon(entry, app_icon))
         .child(if show_full_path {
             let full_path = truncated_text_with_size(
                 &entry.path.display().to_string(),
@@ -2883,7 +2861,7 @@ fn name_cell(
                 .justify_center()
                 .flex_1()
                 .min_w(px(0.0))
-                .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+                .ml(px(NAME_ICON_TEXT_GAP))
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(
                     div()
@@ -2905,7 +2883,7 @@ fn name_cell(
             div()
                 .flex_1()
                 .min_w(px(0.0))
-                .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+                .ml(px(NAME_ICON_TEXT_GAP))
                 .truncate()
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(filename)
@@ -2915,7 +2893,6 @@ fn name_cell(
 fn rename_name_cell(
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
-    scale_factor: f32,
     focus_handle: Option<FocusHandle>,
     cx: &mut Context<ExplorerView>,
 ) -> Div {
@@ -2926,7 +2903,7 @@ fn rename_name_cell(
         .flex_1()
         .min_w(px(0.0))
         .h(px(20.0))
-        .ml(device_px(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor))
+        .ml(px(NAME_ICON_TEXT_GAP))
         .px(px(2.0))
         .border_1()
         .border_color(rgb(0x0078d7))
@@ -2985,42 +2962,35 @@ fn rename_name_cell(
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(entry_icon(entry, app_icon, scale_factor))
+        .child(entry_icon(entry, app_icon))
         .child(input)
 }
 
-fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>, scale_factor: f32) -> AnyElement {
+fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     if let Some(app_icon) = app_icon {
-        return image_icon(
-            app_icon,
-            FILE_ICON_SLOT_WIDTH_PHYSICAL,
-            FILE_ICON_SLOT_HEIGHT_PHYSICAL,
-            scale_factor,
-        );
+        return image_icon(app_icon, FILE_ICON_SLOT_WIDTH, FILE_ICON_SLOT_HEIGHT);
     }
 
     if entry.uses_directory_shortcut_icon() {
-        directory_shortcut_icon(scale_factor).into_any_element()
+        directory_shortcut_icon().into_any_element()
     } else if entry.is_directory_like() {
-        folder_icon(scale_factor).into_any_element()
+        folder_icon().into_any_element()
     } else {
-        file_icon(scale_factor).into_any_element()
+        file_icon().into_any_element()
     }
 }
 
-fn filename_text_width(name_column_width: f32, scale_factor: f32) -> f32 {
-    let icon_width = device_px_value(FILE_ICON_SLOT_WIDTH_PHYSICAL, scale_factor);
-    let gap_width = device_px_value(NAME_ICON_TEXT_GAP_PHYSICAL, scale_factor);
-
-    (name_column_width - NAME_CELL_LEFT_PADDING - icon_width - gap_width).max(0.0)
+fn filename_text_width(name_column_width: f32) -> f32 {
+    (name_column_width - NAME_CELL_LEFT_PADDING - FILE_ICON_SLOT_WIDTH - NAME_ICON_TEXT_GAP)
+        .max(0.0)
 }
 
-fn available_filename_text_width(viewport_width: f32, scale_factor: f32) -> f32 {
-    filename_text_width(effective_name_column_width(viewport_width), scale_factor)
+fn available_filename_text_width(viewport_width: f32) -> f32 {
+    filename_text_width(effective_name_column_width(viewport_width))
 }
 
-fn recursive_result_text_width(viewport_width: f32, scale_factor: f32) -> f32 {
-    available_filename_text_width(viewport_width, scale_factor)
+fn recursive_result_text_width(viewport_width: f32) -> f32 {
+    available_filename_text_width(viewport_width)
 }
 
 fn truncated_text(
@@ -3192,8 +3162,8 @@ mod tests {
         constants::{
             COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
             EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-            EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH_PHYSICAL, MB_BYTES,
-            NAV_BUTTON_ACTIVE_OPACITY, SCROLLBAR_GUTTER_WIDTH,
+            EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES, NAV_BUTTON_ACTIVE_OPACITY,
+            SCROLLBAR_GUTTER_WIDTH,
         },
         entry::FileEntry,
         selection::SelectionModifiers,
@@ -3202,12 +3172,12 @@ mod tests {
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP_PHYSICAL, RecursiveSearchProgressSnapshot,
-        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
-        clipboard_has_file_clipboard, drop_indicator_target_width, filename_text_width,
-        folder_status_summary, is_normal_entry_click, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, text_cell_width,
+        NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE,
+        UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, clipboard_has_file_clipboard,
+        drop_indicator_target_width, filename_text_width, folder_status_summary,
+        is_normal_entry_click, recursive_result_text_width, search_working_detail,
+        selection_modifiers_for_click, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        text_cell_width,
     };
 
     #[test]
@@ -3318,33 +3288,30 @@ mod tests {
             + SCROLLBAR_GUTTER_WIDTH;
 
         assert_eq!(
-            available_filename_text_width(viewport_width, 1.0),
-            name_column_width
-                - NAME_CELL_LEFT_PADDING
-                - FILE_ICON_SLOT_WIDTH_PHYSICAL
-                - NAME_ICON_TEXT_GAP_PHYSICAL
+            available_filename_text_width(viewport_width),
+            name_column_width - NAME_CELL_LEFT_PADDING - FILE_ICON_SLOT_WIDTH - NAME_ICON_TEXT_GAP
         );
     }
 
     #[test]
     fn name_text_width_respects_name_column_minimum() {
         assert_eq!(
-            available_filename_text_width(100.0, 1.0),
+            available_filename_text_width(100.0),
             COLUMN_NAME_MIN_WIDTH
                 - NAME_CELL_LEFT_PADDING
-                - FILE_ICON_SLOT_WIDTH_PHYSICAL
-                - NAME_ICON_TEXT_GAP_PHYSICAL
+                - FILE_ICON_SLOT_WIDTH
+                - NAME_ICON_TEXT_GAP
         );
     }
 
     #[test]
     fn recursive_result_text_width_matches_name_text_width() {
         for viewport_width in [100.0, 900.0] {
-            let recursive_width = recursive_result_text_width(viewport_width, 1.0);
+            let recursive_width = recursive_result_text_width(viewport_width);
 
             assert_eq!(
                 recursive_width,
-                available_filename_text_width(viewport_width, 1.0)
+                available_filename_text_width(viewport_width)
             );
             assert!(recursive_width > 0.0);
         }
@@ -3352,7 +3319,7 @@ mod tests {
 
     #[test]
     fn name_text_width_clamps_when_chrome_consumes_column() {
-        assert_eq!(filename_text_width(10.0, 1.0), 0.0);
+        assert_eq!(filename_text_width(10.0), 0.0);
     }
 
     #[test]
