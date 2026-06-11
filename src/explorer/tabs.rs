@@ -1004,8 +1004,29 @@ mod tests {
         view::tab_label_for_path,
     };
     use crate::settings::{ExplorerSettings, SettingsState};
-    use gpui::{AppContext, Modifiers, TestAppContext};
+    use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
     use std::fs;
+
+    fn test_tabs_with_files<'a>(
+        cx: &'a mut TestAppContext,
+        names: &[&str],
+    ) -> (
+        TempDir,
+        Entity<ExplorerTabs>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        for name in names {
+            fs::write(temp.path().join(name), b"file").expect("write test file");
+        }
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new_for_test(path, focus_handle, cx)
+        });
+        (temp, tabs, cx)
+    }
 
     fn test_tabs_with_two_files<'a>(
         cx: &'a mut TestAppContext,
@@ -1014,16 +1035,7 @@ mod tests {
         Entity<ExplorerTabs>,
         &'a mut gpui::VisualTestContext,
     ) {
-        let temp = TempDir::new();
-        fs::write(temp.path().join("a.txt"), b"a").expect("write first file");
-        fs::write(temp.path().join("b.txt"), b"b").expect("write second file");
-        let path = temp.path().to_path_buf();
-        let (tabs, cx) = cx.add_window_view(move |window, cx| {
-            let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
-            ExplorerTabs::new_for_test(path, focus_handle, cx)
-        });
-        (temp, tabs, cx)
+        test_tabs_with_files(cx, &["a.txt", "b.txt"])
     }
 
     fn active_test_view(
@@ -1036,6 +1048,12 @@ mod tests {
     fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
         cx.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    fn right_click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect("element bounds");
+        let position = bounds.center();
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
     }
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
@@ -1094,6 +1112,108 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn right_click_entry_opens_folder_context_menu_without_selecting(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let first_position = cx
+            .debug_bounds("explorer-entry-0")
+            .expect("first entry bounds")
+            .center();
+        let second_position = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds")
+            .center();
+
+        cx.simulate_mouse_down(first_position, MouseButton::Right, Modifiers::default());
+        let first_menu_origin = cx
+            .debug_bounds("context-menu")
+            .expect("context menu")
+            .origin;
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert_eq!(first_menu_origin, first_position);
+            assert_eq!(selected_names(view), Vec::<String>::new());
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.close_context_menu();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_down(second_position, MouseButton::Right, Modifiers::default());
+        let second_menu_origin = cx
+            .debug_bounds("context-menu")
+            .expect("context menu")
+            .origin;
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert_eq!(second_menu_origin, second_position);
+            assert_eq!(selected_names(view), Vec::<String>::new());
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_entry_closes_context_menu_and_selects_with_one_click(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_files(
+            cx,
+            &[
+                "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt", "i.txt",
+                "j.txt",
+            ],
+        );
+        let view = active_test_view(&tabs, cx);
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+        });
+
+        click_selector(cx, "explorer-entry-9");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+            assert_eq!(selected_names(view), vec!["j.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_sidebar_closes_context_menu(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+        });
+
+        click_selector(cx, "explorer-sidebar");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_address_or_search_closes_context_menu(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "directory-bar");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+        });
+
+        right_click_selector(cx, "explorer-entry-0");
+        click_selector(cx, "search-bar");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
         });
     }
 

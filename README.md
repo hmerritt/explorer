@@ -35,9 +35,9 @@ curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh
 - [x] Search
     - [x] Type-to-search current directory
     - [x] Recursive search (much faster than Windows)
-- [x] Sidebar custom pins (drag-to-pin)
 - [x] Tabs
 - [x] Arrow keys navigation
+- [x] Sidebar custom pins (drag-to-pin)
 - [x] Key bindings for ~everything~ most things
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
 

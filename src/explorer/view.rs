@@ -5,13 +5,15 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, Context, EventEmitter, FocusHandle, Subscription, Task,
-    UniformListScrollHandle,
+    AnyWindowHandle, Context, EventEmitter, FocusHandle, Pixels, Point, Subscription, Task,
+    UniformListScrollHandle, point, px,
 };
 
+use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
     app_icons::AppIconCache,
+    context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
@@ -23,7 +25,6 @@ use crate::explorer::{
     watcher::DirectoryWatcher,
 };
 use crate::settings::{ExplorerSettings, SidebarLocation};
-use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -58,6 +59,8 @@ pub struct ExplorerView {
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
+    pub(super) context_menu: Option<ContextMenuState>,
+    pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
     pub(super) sidebar_items: Vec<SidebarLocation>,
     pub(super) sidebar_sections: SidebarSections,
@@ -172,6 +175,8 @@ impl ExplorerView {
             show_hidden_files: settings.show_hidden_files,
             show_file_name_extensions: settings.show_file_name_extensions,
             open_utility_menu: None,
+            context_menu: None,
+            view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
             sidebar_items: settings.sidebar_items.clone(),
             sidebar_sections: SidebarSections::default(),
@@ -198,6 +203,7 @@ impl ExplorerView {
     }
 
     pub fn reload(&mut self) {
+        self.context_menu = None;
         self.open_error = None;
         let selected_paths = self.selected_paths();
 
@@ -246,6 +252,7 @@ impl ExplorerView {
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
         self.finish_search_edit();
+        self.close_context_menu();
         self.cancel_mouse_selection_drag();
         self.clear_drop_indicator();
         self.pending_permanent_delete = None;

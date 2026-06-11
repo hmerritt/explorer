@@ -1,11 +1,11 @@
 use std::{any::Any, collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
-    ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb,
-    transparent_black, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -37,6 +37,11 @@ use crate::explorer::{
         STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
         UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
         UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH, effective_name_column_width,
+    },
+    context_menu::{
+        ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
+        clamped_context_menu_origin, context_menu_height, context_menu_item_top,
+        context_menu_path_is_active, context_menu_pointer_tip_origin, context_submenu_left,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -81,10 +86,12 @@ const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 4.0;
 struct SidebarItemDrag {
     configured_index: usize,
     label: SharedString,
+    kind: SidebarItemKind,
 }
 
 struct SidebarItemDragPreview {
     label: SharedString,
+    kind: SidebarItemKind,
 }
 
 impl Render for SidebarItemDragPreview {
@@ -101,7 +108,7 @@ impl Render for SidebarItemDragPreview {
             .border_1()
             .border_color(rgb(0x8a8a8a))
             .shadow_md()
-            .child(folder_icon())
+            .child(sidebar_item_kind_icon(self.kind))
             .child(
                 div()
                     .min_w(px(0.0))
@@ -124,6 +131,20 @@ const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
+const CONTEXT_MENU_MIN_WIDTH: f32 = 150.0;
+const CONTEXT_MENU_MAX_WIDTH: f32 = 280.0;
+const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
+const CONTEXT_MENU_ITEM_VERTICAL_GAP: f32 = 4.0;
+const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 18.0;
+const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
+const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
+const CONTEXT_MENU_TEXT_SIZE: f32 = 12.0;
+const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 8.0;
+const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 16.0;
+const CONTEXT_MENU_ROW_CHILD_GAP: f32 = 10.0;
+const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 16.0;
+const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 12.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -158,6 +179,7 @@ impl ExplorerView {
                 NavIcon::Back,
                 self.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_back_with_watcher(cx);
                     cx.notify();
                 }),
@@ -167,6 +189,7 @@ impl ExplorerView {
                 NavIcon::Forward,
                 self.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_forward_with_watcher(cx);
                     cx.notify();
                 }),
@@ -176,6 +199,7 @@ impl ExplorerView {
                 NavIcon::Up,
                 self.can_go_up(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_up_with_watcher(cx);
                     cx.notify();
                 }),
@@ -185,6 +209,7 @@ impl ExplorerView {
                 NavIcon::Refresh,
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.reload();
                     this.refresh_search_after_external_change(cx);
                     cx.notify();
@@ -339,6 +364,7 @@ impl ExplorerView {
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
                         None
@@ -355,6 +381,7 @@ impl ExplorerView {
                 CUT_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.cut_selected_to_clipboard(cx);
@@ -368,6 +395,7 @@ impl ExplorerView {
                 COPY_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.copy_selected_to_clipboard(cx);
@@ -381,6 +409,7 @@ impl ExplorerView {
                 PASTE_ICON.clone(),
                 can_paste,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.paste_clipboard_files(cx);
@@ -394,6 +423,7 @@ impl ExplorerView {
                 RENAME_ICON.clone(),
                 can_rename,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.start_rename_selected(window, cx);
@@ -407,6 +437,7 @@ impl ExplorerView {
                 DELETE_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.trash_selected_paths(cx);
@@ -422,6 +453,7 @@ impl ExplorerView {
                 "View",
                 self.open_utility_menu == Some(UtilityMenu::View),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
                         None
@@ -443,6 +475,7 @@ impl ExplorerView {
                     ),
                     "Extract",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_context_menu();
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
                             this.extract_selected_archives(cx);
@@ -551,6 +584,51 @@ impl ExplorerView {
                 )
                 .into_any_element(),
         )
+    }
+
+    fn render_context_menu_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.context_menu.as_ref()?;
+        let window_width = f32::from(window.bounds().size.width);
+        let window_height = f32::from(window.bounds().size.height);
+        let root_height = context_menu_height(
+            &menu.items,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let root_width = context_menu_width(&menu.items, window);
+        let (left, top) = context_menu_pointer_tip_origin(
+            (f32::from(menu.origin.x), f32::from(menu.origin.y)),
+            (root_width, root_height),
+            (window_width, window_height),
+        );
+        let mut menu_elements = Vec::new();
+
+        render_context_menu_level(
+            &menu.items,
+            &menu.hovered_path,
+            Vec::new(),
+            Point {
+                x: px(left),
+                y: px(top),
+            },
+            (window_width, window_height),
+            window,
+            cx,
+            &mut menu_elements,
+        );
+
+        let mut overlay = div().absolute().left(px(0.0)).top(px(0.0)).size_full();
+
+        for menu in menu_elements {
+            overlay = overlay.child(menu);
+        }
+
+        Some(overlay.into_any_element())
     }
 
     fn render_address_suggestions_overlay(
@@ -865,6 +943,12 @@ impl ExplorerView {
             .border_color(rgb(0xe7e7e7))
             .pt(px(8.0))
             .overflow_hidden()
+            .debug_selector(|| "explorer-sidebar".to_owned())
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if this.close_context_menu() {
+                    cx.notify();
+                }
+            }))
             .children(children)
             .into_any_element()
     }
@@ -955,6 +1039,7 @@ impl ExplorerView {
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
                 this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
                 cx.stop_propagation();
                 cx.notify();
@@ -983,6 +1068,7 @@ impl ExplorerView {
 
         if let Some(configured_index) = configured_index {
             let drag_label = SharedString::from(item.label.clone());
+            let drag_kind = item.kind;
             row = row
                 .on_mouse_up(
                     MouseButton::Left,
@@ -1004,6 +1090,7 @@ impl ExplorerView {
                     SidebarItemDrag {
                         configured_index,
                         label: drag_label,
+                        kind: drag_kind,
                     },
                     {
                         let entity = entity.clone();
@@ -1014,6 +1101,7 @@ impl ExplorerView {
                             });
                             cx.new(|_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
+                                kind: drag.kind,
                             })
                         }
                     },
@@ -1185,6 +1273,7 @@ impl ExplorerView {
                     return;
                 }
 
+                this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
                     cx.stop_propagation();
@@ -1209,6 +1298,12 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1405,6 +1500,7 @@ impl ExplorerView {
                     return;
                 }
 
+                this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
                     cx.stop_propagation();
@@ -1538,7 +1634,19 @@ impl ExplorerView {
                             cx.notify();
                         }
                     }))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            open_current_folder_context_menu_from_event(this, event, window, cx);
+                        }),
+                    )
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        if !event.standard_click() {
+                            cx.stop_propagation();
+                            return;
+                        }
+
+                        this.close_context_menu();
                         if this.suppress_next_click() {
                             this.cancel_pending_click_rename();
                             cx.stop_propagation();
@@ -1553,6 +1661,7 @@ impl ExplorerView {
                         }
 
                         this.clear_selection();
+                        this.close_context_menu();
                         cx.notify();
                     }))
                     .child(self.render_mouse_selection_hit_layer(cx))
@@ -1649,6 +1758,25 @@ impl ExplorerView {
                     cx.stop_propagation();
                     cx.notify();
                 }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if !event.standard_click() {
+                    cx.stop_propagation();
+                    return;
+                }
+
+                this.close_context_menu();
+                if this.commit_active_rename_before_interaction(window, cx) {
+                    this.clear_selection();
+                }
+                cx.stop_propagation();
+                cx.notify();
             }))
             .child(render_empty_folder_message(message, detail))
             .into_any_element()
@@ -1790,7 +1918,6 @@ fn search_bar_icon_button(
 ) -> AnyElement {
     div()
         .id(id)
-        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -1819,6 +1946,7 @@ fn search_bar_icon_button(
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        let entity = cx.entity();
 
         div()
             .key_context("Explorer")
@@ -1953,6 +2081,11 @@ impl Render for ExplorerView {
             .relative()
             .flex()
             .flex_col()
+            .on_children_prepainted(move |child_bounds, _, cx| {
+                let _ = entity.update(cx, |this, _| {
+                    this.update_view_origin_from_child_bounds(&child_bounds);
+                });
+            })
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
@@ -2024,6 +2157,10 @@ impl Render for ExplorerView {
             })
             .when_some(
                 self.render_address_suggestions_overlay(window, cx),
+                |this, menu| this.child(menu),
+            )
+            .when_some(
+                self.render_context_menu_overlay(window, cx),
                 |this, menu| this.child(menu),
             )
     }
@@ -2165,7 +2302,11 @@ fn sidebar_item_is_dragging(
 }
 
 fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
-    match item.kind {
+    sidebar_item_kind_icon(item.kind)
+}
+
+fn sidebar_item_kind_icon(kind: SidebarItemKind) -> AnyElement {
+    match kind {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
@@ -2225,6 +2366,40 @@ fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
     item.and_then(file_clipboard_from_item).is_some()
 }
 
+fn local_context_menu_origin(
+    window_position: Point<Pixels>,
+    view_origin: Point<Pixels>,
+) -> Point<Pixels> {
+    window_position - view_origin
+}
+
+impl ExplorerView {
+    fn update_view_origin_from_child_bounds(&mut self, child_bounds: &[Bounds<Pixels>]) {
+        if self.context_menu.is_some() {
+            return;
+        }
+
+        if let Some(first_child) = child_bounds.first() {
+            self.view_origin = first_child.origin;
+        }
+    }
+}
+
+fn open_current_folder_context_menu_from_event(
+    this: &mut ExplorerView,
+    event: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let clipboard = cx.read_from_clipboard();
+    let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+    let origin = local_context_menu_origin(event.position, this.view_origin);
+    if this.open_folder_context_menu(origin, can_paste, window, cx) {
+        cx.notify();
+    }
+    cx.stop_propagation();
+}
+
 fn utility_text_button(
     id: &'static str,
     left_icon: Option<AnyElement>,
@@ -2254,6 +2429,7 @@ fn utility_text_button_base(
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -2351,6 +2527,373 @@ fn utility_dropdown() -> Div {
         .border_color(rgb(0xd8d8d8))
         .shadow_md()
         .occlude()
+}
+
+fn context_menu_dropdown(items: &[ContextMenuItem], width: f32) -> Div {
+    div()
+        .debug_selector(|| "context-menu".to_owned())
+        .w(px(width))
+        .h(px(context_menu_height(
+            items,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        )))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xd8d8d8))
+        .shadow_md()
+        .occlude()
+}
+
+fn render_context_menu_level(
+    items: &[ContextMenuItem],
+    hovered_path: &[usize],
+    path_prefix: Vec<usize>,
+    origin: Point<Pixels>,
+    window_size: (f32, f32),
+    window: &Window,
+    cx: &mut Context<ExplorerView>,
+    elements: &mut Vec<AnyElement>,
+) {
+    let menu_width = context_menu_width(items, window);
+    let menu_height = context_menu_height(
+        items,
+        CONTEXT_MENU_ROW_HEIGHT,
+        CONTEXT_MENU_ITEM_VERTICAL_GAP,
+        CONTEXT_MENU_SEPARATOR_HEIGHT,
+    );
+    let (left, top) = clamped_context_menu_origin(
+        (f32::from(origin.x), f32::from(origin.y)),
+        (menu_width, menu_height),
+        window_size,
+    );
+    let mut menu = context_menu_dropdown(items, menu_width)
+        .absolute()
+        .left(px(left))
+        .top(px(top));
+    let mut active_submenu: Option<(&[ContextMenuItem], Vec<usize>, f32)> = None;
+
+    for (index, item) in items.iter().enumerate() {
+        let mut path = path_prefix.clone();
+        path.push(index);
+        let row_top = context_menu_item_top(
+            items,
+            index,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+
+        if let ContextMenuItem::Submenu { children, .. } = item
+            && context_menu_path_is_active(hovered_path, &path)
+        {
+            active_submenu = Some((children.as_slice(), path.clone(), row_top));
+        }
+
+        menu = menu.child(render_context_menu_item(item, path, hovered_path, cx));
+    }
+
+    elements.push(menu.into_any_element());
+
+    if let Some((children, child_path, row_top)) = active_submenu {
+        let child_width = context_menu_width(children, window);
+        let child_height = context_menu_height(
+            children,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let child_left = context_submenu_left(
+            left,
+            menu_width,
+            child_width,
+            CONTEXT_MENU_SUBMENU_OVERLAP,
+            window_size.0,
+        );
+        let (_, child_top) = clamped_context_menu_origin(
+            (child_left, top + row_top - 4.0),
+            (child_width, child_height),
+            window_size,
+        );
+
+        render_context_menu_level(
+            children,
+            hovered_path,
+            child_path,
+            Point {
+                x: px(child_left),
+                y: px(child_top),
+            },
+            window_size,
+            window,
+            cx,
+            elements,
+        );
+    }
+}
+
+fn render_context_menu_item(
+    item: &ContextMenuItem,
+    path: Vec<usize>,
+    hovered_path: &[usize],
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let active = context_menu_path_is_active(hovered_path, &path);
+
+    match item {
+        ContextMenuItem::Action {
+            id,
+            icon,
+            label,
+            command,
+            enabled,
+        } => context_menu_action_row(*id, *icon, label, *command, *enabled, path, active, cx),
+        ContextMenuItem::Submenu {
+            id, icon, label, ..
+        } => context_menu_submenu_row(*id, *icon, label, path, active, cx),
+        ContextMenuItem::Separator => context_menu_separator().into_any_element(),
+        ContextMenuItem::Detail {
+            label,
+            value,
+            icon_slot,
+        } => context_menu_detail_row(label, value, *icon_slot, path, active, cx),
+    }
+}
+
+fn context_menu_action_row(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    label: &'static str,
+    command: ContextMenuCommand,
+    enabled: bool,
+    path: Vec<usize>,
+    active: bool,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    context_menu_row_base(
+        id,
+        icon,
+        ContextMenuIconSlot::Reserve,
+        label,
+        path,
+        active,
+        cx,
+    )
+    .when(!enabled, |this| this.opacity(0.45))
+    .when(enabled, |this| {
+        this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.execute_context_menu_command(command, window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+    })
+    .child(context_menu_trailing_slot(None))
+    .into_any_element()
+}
+
+fn context_menu_submenu_row(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    label: &'static str,
+    path: Vec<usize>,
+    active: bool,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    context_menu_row_base(
+        id,
+        icon,
+        ContextMenuIconSlot::Reserve,
+        label,
+        path,
+        active,
+        cx,
+    )
+    .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
+    .into_any_element()
+}
+
+fn context_menu_detail_row(
+    label: &'static str,
+    value: &str,
+    icon_slot: ContextMenuIconSlot,
+    path: Vec<usize>,
+    active: bool,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let id = match label {
+        "Created" => "context-menu-created",
+        "Modified" => "context-menu-modified",
+        _ => "context-menu-detail",
+    };
+
+    context_menu_row_base(id, None, icon_slot, label, path, active, cx)
+        .child(
+            div()
+                .ml(px(12.0))
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_align(TextAlign::Right)
+                .text_size(px(CONTEXT_MENU_TEXT_SIZE))
+                .text_color(rgb(0x595959))
+                .opacity(0.8)
+                .child(SharedString::from(value.to_owned())),
+        )
+        .into_any_element()
+}
+
+fn context_menu_row_base(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    icon_slot: ContextMenuIconSlot,
+    label: &'static str,
+    path: Vec<usize>,
+    active: bool,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(CONTEXT_MENU_ROW_HEIGHT))
+        .my(px(CONTEXT_MENU_ITEM_VERTICAL_GAP / 2.0))
+        .mx(px(4.0))
+        .px(px(8.0))
+        .gap(px(10.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .when(active, |this| this.bg(rgb(0xe5f3ff)))
+        .hover(|style| style.bg(rgb(0xe5f3ff)))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if *hovered {
+                this.set_context_menu_hovered_path(path.clone());
+                cx.notify();
+            }
+        }))
+        .when(icon_slot == ContextMenuIconSlot::Reserve, |this| {
+            this.child(context_menu_icon_slot(icon))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(CONTEXT_MENU_TEXT_SIZE))
+                .text_color(rgb(0x1f1f1f))
+                .child(label),
+        )
+}
+
+fn context_menu_width(items: &[ContextMenuItem], window: &Window) -> f32 {
+    let natural_width = items
+        .iter()
+        .map(|item| context_menu_item_width(item, window))
+        .fold(0.0, f32::max);
+
+    context_menu_width_for_natural_width(natural_width)
+}
+
+fn context_menu_width_for_natural_width(natural_width: f32) -> f32 {
+    natural_width
+        .max(CONTEXT_MENU_MIN_WIDTH)
+        .min(CONTEXT_MENU_MAX_WIDTH)
+}
+
+fn context_menu_item_width(item: &ContextMenuItem, window: &Window) -> f32 {
+    match item {
+        ContextMenuItem::Action { label, .. } | ContextMenuItem::Submenu { label, .. } => {
+            CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
+                + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
+                + CONTEXT_MENU_ICON_SLOT_SIZE
+                + CONTEXT_MENU_ROW_CHILD_GAP
+                + measure_context_menu_text(label, window)
+                + CONTEXT_MENU_ROW_CHILD_GAP
+                + CONTEXT_MENU_TRAILING_SLOT_WIDTH
+        }
+        ContextMenuItem::Detail { label, value, .. } => {
+            CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING
+                + CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING
+                + measure_context_menu_text(label, window)
+                + CONTEXT_MENU_ROW_CHILD_GAP
+                + CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN
+                + measure_context_menu_text(value, window)
+        }
+        ContextMenuItem::Separator => 0.0,
+    }
+}
+
+fn measure_context_menu_text(text: &str, window: &Window) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+
+    let run = TextRun {
+        len: text.len(),
+        font: font(".SystemUIFont"),
+        color: rgb(0x1f1f1f).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    f32::from(
+        window
+            .text_system()
+            .layout_line(text, px(CONTEXT_MENU_TEXT_SIZE), &[run], None)
+            .width,
+    )
+}
+
+fn context_menu_separator() -> Div {
+    div()
+        .h(px(CONTEXT_MENU_SEPARATOR_HEIGHT))
+        .mx(px(10.0))
+        .flex()
+        .items_center()
+        .child(div().h(px(1.0)).w_full().bg(rgb(0xe5e5e5)))
+}
+
+fn context_menu_icon_slot(icon: Option<ContextMenuIcon>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(CONTEXT_MENU_ICON_SLOT_SIZE))
+        .h(px(CONTEXT_MENU_ICON_SLOT_SIZE))
+        .flex_shrink_0()
+        .when_some(icon.and_then(context_menu_icon_element), |this, icon| {
+            this.child(icon)
+        })
+}
+
+fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
+    Some(match icon {
+        ContextMenuIcon::Paste => gpui::img(PASTE_ICON.clone())
+            .w(px(16.0))
+            .h(px(16.0))
+            .into_any_element(),
+        ContextMenuIcon::New => utility_new_icon().into_any_element(),
+        ContextMenuIcon::File => utility_menu_glyph_icon(UTILITY_ICON_FILE),
+        ContextMenuIcon::Folder => folder_icon().into_any_element(),
+    })
+}
+
+fn context_menu_trailing_slot(glyph: Option<&'static str>) -> Div {
+    div()
+        .ml_auto()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(16.0))
+        .h(px(16.0))
+        .font(nav_icon_font())
+        .text_size(px(12.0))
+        .text_color(rgb(0x1f1f1f))
+        .when_some(glyph, |this, glyph| this.child(glyph))
 }
 
 fn utility_menu_row(
@@ -2516,6 +3059,7 @@ fn nav_button(
 fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> AnyElement {
     div()
         .id("directory-bar")
+        .debug_selector(|| "directory-bar".to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -3153,8 +3697,8 @@ mod tests {
     use std::{collections::BTreeSet, fs, path::PathBuf};
 
     use gpui::{
-        ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers, MouseButton,
-        MouseClickEvent, MouseDownEvent, MouseUpEvent,
+        AppContext, ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers,
+        MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
     use crate::explorer::{
@@ -3168,16 +3712,17 @@ mod tests {
         entry::FileEntry,
         selection::SelectionModifiers,
         test_support::TempDir,
+        view::ExplorerView,
     };
 
     use super::{
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
         NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE,
         UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, clipboard_has_file_clipboard,
-        drop_indicator_target_width, filename_text_width, folder_status_summary,
-        is_normal_entry_click, recursive_result_text_width, search_working_detail,
-        selection_modifiers_for_click, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        text_cell_width,
+        context_menu_width_for_natural_width, drop_indicator_target_width, filename_text_width,
+        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, text_cell_width,
     };
 
     #[test]
@@ -3193,6 +3738,21 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_width_clamps_to_minimum() {
+        assert_eq!(context_menu_width_for_natural_width(120.0), 150.0);
+    }
+
+    #[test]
+    fn context_menu_width_preserves_natural_width_inside_bounds() {
+        assert_eq!(context_menu_width_for_natural_width(220.0), 220.0);
+    }
+
+    #[test]
+    fn context_menu_width_clamps_to_maximum() {
+        assert_eq!(context_menu_width_for_natural_width(320.0), 280.0);
+    }
+
+    #[test]
     fn paste_button_availability_requires_explorer_file_clipboard() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
@@ -3204,6 +3764,34 @@ mod tests {
         assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
         assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
         assert!(!clipboard_has_file_clipboard(None));
+    }
+
+    #[gpui::test]
+    fn context_menu_opener_uses_mouse_down_event_position(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let event_position = gpui::point(gpui::px(123.0), gpui::px(45.0));
+        let event = MouseDownEvent {
+            button: MouseButton::Right,
+            position: event_position,
+            ..MouseDownEvent::default()
+        };
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                open_current_folder_context_menu_from_event(view, &event, window, cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("context menu");
+            assert_eq!(menu.origin, event_position);
+        });
     }
 
     #[test]
