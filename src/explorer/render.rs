@@ -48,7 +48,7 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
-    formatting::{format_modified, format_size},
+    formatting::{format_size, format_timestamp},
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
         NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, PASTE_ICON, RENAME_ICON, directory_kind_icon,
@@ -1470,7 +1470,7 @@ impl ExplorerView {
         }
 
         let date_cell = text_cell(
-            format_modified(entry.modified),
+            format_timestamp(entry.modified),
             COLUMN_DATE_WIDTH,
             false,
             window,

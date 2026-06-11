@@ -4,13 +4,13 @@ use chrono::{DateTime, Local};
 
 use crate::explorer::constants::{GB_BYTES, KB_BYTES, MB_BYTES, TB_BYTES};
 
-pub(super) fn format_modified(modified: Option<SystemTime>) -> String {
-    let Some(modified) = modified else {
+pub(super) fn format_timestamp(timestamp: Option<SystemTime>) -> String {
+    let Some(timestamp) = timestamp else {
         return String::new();
     };
 
-    let local: DateTime<Local> = modified.into();
-    local.format("%d/%m/%Y %H:%M").to_string()
+    let local: DateTime<Local> = timestamp.into();
+    local.format("%Y/%m/%d %H:%M").to_string()
 }
 
 pub(super) fn format_size(size: Option<u64>) -> String {
@@ -109,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn modified_time_uses_local_explorer_format() {
+    fn timestamp_uses_local_explorer_format() {
         let local = Local.with_ymd_and_hms(2026, 5, 31, 21, 48, 12).unwrap();
-        assert_eq!(format_modified(Some(local.into())), "31/05/2026 21:48");
+        assert_eq!(format_timestamp(Some(local.into())), "2026/05/31 21:48");
     }
 }

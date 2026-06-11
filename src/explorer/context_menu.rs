@@ -6,7 +6,7 @@ use std::{
 
 use gpui::{Context, Pixels, Point, Window};
 
-use crate::explorer::{DirectoryKind, formatting::format_modified, view::ExplorerView};
+use crate::explorer::{DirectoryKind, formatting::format_timestamp, view::ExplorerView};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
@@ -263,12 +263,12 @@ pub(super) fn folder_context_menu_items_from_times(
         ContextMenuItem::Separator,
         ContextMenuItem::Detail {
             label: "Created",
-            value: format_modified(created),
+            value: format_timestamp(created),
             icon_slot: ContextMenuIconSlot::Collapse,
         },
         ContextMenuItem::Detail {
             label: "Modified",
-            value: format_modified(modified),
+            value: format_timestamp(modified),
             icon_slot: ContextMenuIconSlot::Collapse,
         },
     ]
@@ -629,7 +629,7 @@ mod tests {
             items[3],
             ContextMenuItem::Detail {
                 label: "Created",
-                value: "01/06/2026 09:15".to_owned(),
+                value: "2026/06/01 09:15".to_owned(),
                 icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
@@ -637,7 +637,7 @@ mod tests {
             items[4],
             ContextMenuItem::Detail {
                 label: "Modified",
-                value: "02/06/2026 10:30".to_owned(),
+                value: "2026/06/02 10:30".to_owned(),
                 icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
