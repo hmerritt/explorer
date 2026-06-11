@@ -525,6 +525,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> bool {
         self.cancel_pending_click_rename();
+        self.close_context_menu();
         self.open_utility_menu = None;
         self.finish_search_edit();
 

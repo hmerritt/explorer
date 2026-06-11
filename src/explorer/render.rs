@@ -41,6 +41,7 @@ use crate::explorer::{
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuItem, clamped_context_menu_origin,
         context_menu_height, context_menu_item_top, context_menu_path_is_active,
+        context_menu_pointer_tip_origin,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -168,6 +169,7 @@ impl ExplorerView {
                 NavIcon::Back,
                 self.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_back_with_watcher(cx);
                     cx.notify();
                 }),
@@ -177,6 +179,7 @@ impl ExplorerView {
                 NavIcon::Forward,
                 self.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_forward_with_watcher(cx);
                     cx.notify();
                 }),
@@ -186,6 +189,7 @@ impl ExplorerView {
                 NavIcon::Up,
                 self.can_go_up(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.navigate_up_with_watcher(cx);
                     cx.notify();
                 }),
@@ -195,6 +199,7 @@ impl ExplorerView {
                 NavIcon::Refresh,
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.reload();
                     this.refresh_search_after_external_change(cx);
                     cx.notify();
@@ -349,6 +354,7 @@ impl ExplorerView {
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
                         None
@@ -365,6 +371,7 @@ impl ExplorerView {
                 CUT_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.cut_selected_to_clipboard(cx);
@@ -378,6 +385,7 @@ impl ExplorerView {
                 COPY_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.copy_selected_to_clipboard(cx);
@@ -391,6 +399,7 @@ impl ExplorerView {
                 PASTE_ICON.clone(),
                 can_paste,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.paste_clipboard_files(cx);
@@ -404,6 +413,7 @@ impl ExplorerView {
                 RENAME_ICON.clone(),
                 can_rename,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.start_rename_selected(window, cx);
@@ -417,6 +427,7 @@ impl ExplorerView {
                 DELETE_ICON.clone(),
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
                         this.trash_selected_paths(cx);
@@ -432,6 +443,7 @@ impl ExplorerView {
                 "View",
                 self.open_utility_menu == Some(UtilityMenu::View),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
                     this.cancel_pending_click_rename();
                     this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
                         None
@@ -453,6 +465,7 @@ impl ExplorerView {
                     ),
                     "Extract",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_context_menu();
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
                             this.extract_selected_archives(cx);
@@ -576,7 +589,7 @@ impl ExplorerView {
             CONTEXT_MENU_ROW_HEIGHT,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         );
-        let (left, top) = clamped_context_menu_origin(
+        let (left, top) = context_menu_pointer_tip_origin(
             (f32::from(menu.origin.x), f32::from(menu.origin.y)),
             (CONTEXT_MENU_WIDTH, root_height),
             (window_width, window_height),
@@ -596,27 +609,7 @@ impl ExplorerView {
             &mut menu_elements,
         );
 
-        let click_catcher = div()
-            .id("context-menu-click-catcher")
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .size_full()
-            .cursor_default()
-            .bg(transparent_black())
-            .occlude()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.close_context_menu();
-                cx.stop_propagation();
-                cx.notify();
-            }));
-
-        let mut overlay = div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .size_full()
-            .child(click_catcher);
+        let mut overlay = div().absolute().left(px(0.0)).top(px(0.0)).size_full();
 
         for menu in menu_elements {
             overlay = overlay.child(menu);
@@ -937,6 +930,12 @@ impl ExplorerView {
             .border_color(rgb(0xe7e7e7))
             .pt(px(8.0))
             .overflow_hidden()
+            .debug_selector(|| "explorer-sidebar".to_owned())
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if this.close_context_menu() {
+                    cx.notify();
+                }
+            }))
             .children(children)
             .into_any_element()
     }
@@ -1027,6 +1026,7 @@ impl ExplorerView {
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
                 this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
                 cx.stop_propagation();
                 cx.notify();
@@ -1257,6 +1257,7 @@ impl ExplorerView {
                     return;
                 }
 
+                this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
                     cx.stop_propagation();
@@ -1283,8 +1284,8 @@ impl ExplorerView {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_: &mut Self, _: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
                 }),
             )
             .on_mouse_down(
@@ -1483,6 +1484,7 @@ impl ExplorerView {
                     return;
                 }
 
+                this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
                     cx.stop_propagation();
@@ -1619,13 +1621,7 @@ impl ExplorerView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            let clipboard = cx.read_from_clipboard();
-                            let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
-                            if this.open_folder_context_menu(event.position, can_paste, window, cx)
-                            {
-                                cx.notify();
-                            }
-                            cx.stop_propagation();
+                            open_current_folder_context_menu_from_event(this, event, window, cx);
                         }),
                     )
                     .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
@@ -1750,12 +1746,7 @@ impl ExplorerView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    let clipboard = cx.read_from_clipboard();
-                    let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
-                    if this.open_folder_context_menu(event.position, can_paste, window, cx) {
-                        cx.notify();
-                    }
-                    cx.stop_propagation();
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
                 }),
             )
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
@@ -2350,6 +2341,20 @@ fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
     item.and_then(file_clipboard_from_item).is_some()
 }
 
+fn open_current_folder_context_menu_from_event(
+    this: &mut ExplorerView,
+    _: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let clipboard = cx.read_from_clipboard();
+    let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+    if this.open_folder_context_menu(window.mouse_position(), can_paste, window, cx) {
+        cx.notify();
+    }
+    cx.stop_propagation();
+}
+
 fn utility_text_button(
     id: &'static str,
     left_icon: Option<AnyElement>,
@@ -2684,6 +2689,7 @@ fn context_menu_row_base(
         .child(context_menu_icon_slot(icon))
         .child(
             div()
+                .flex_1()
                 .min_w(px(0.0))
                 .truncate()
                 .text_size(px(12.0))
@@ -2903,6 +2909,7 @@ fn nav_button(
 fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> AnyElement {
     div()
         .id("directory-bar")
+        .debug_selector(|| "directory-bar".to_owned())
         .flex()
         .flex_row()
         .items_center()

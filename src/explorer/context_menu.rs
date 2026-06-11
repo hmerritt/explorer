@@ -136,7 +136,7 @@ pub(super) fn folder_context_menu_items_from_times(
         ContextMenuItem::Submenu {
             id: "context-menu-new",
             icon: Some(ContextMenuIcon::New),
-            label: "+ New",
+            label: "New",
             children: vec![
                 ContextMenuItem::Action {
                     id: "context-menu-new-file",
@@ -216,6 +216,14 @@ pub(super) fn clamped_context_menu_origin(
     (origin.0.clamp(4.0, max_x), origin.1.clamp(4.0, max_y))
 }
 
+pub(super) fn context_menu_pointer_tip_origin(
+    pointer: (f32, f32),
+    menu_size: (f32, f32),
+    window_size: (f32, f32),
+) -> (f32, f32) {
+    clamped_context_menu_origin(pointer, menu_size, window_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,13 +244,38 @@ mod tests {
     #[test]
     fn root_menu_position_clamps_inside_window() {
         assert_eq!(
-            clamped_context_menu_origin((780.0, 580.0), (220.0, 180.0), (800.0, 600.0)),
+            context_menu_pointer_tip_origin((120.0, 90.0), (220.0, 180.0), (800.0, 600.0)),
+            (120.0, 90.0)
+        );
+        assert_eq!(
+            context_menu_pointer_tip_origin((780.0, 580.0), (220.0, 180.0), (800.0, 600.0)),
             (576.0, 416.0)
         );
         assert_eq!(
-            clamped_context_menu_origin((-20.0, -10.0), (220.0, 180.0), (800.0, 600.0)),
+            context_menu_pointer_tip_origin((-20.0, -10.0), (220.0, 180.0), (800.0, 600.0)),
             (4.0, 4.0)
         );
+    }
+
+    #[test]
+    fn new_state_replaces_origin_for_reopen() {
+        let first = ContextMenuState::new(
+            Point {
+                x: gpui::px(10.0),
+                y: gpui::px(20.0),
+            },
+            Vec::new(),
+        );
+        let second = ContextMenuState::new(
+            Point {
+                x: gpui::px(70.0),
+                y: gpui::px(80.0),
+            },
+            Vec::new(),
+        );
+
+        assert_ne!(first.origin, second.origin);
+        assert_eq!(second.hovered_path, Vec::<usize>::new());
     }
 
     #[test]
@@ -271,7 +304,7 @@ mod tests {
             panic!("expected New submenu");
         };
         assert_eq!(*icon, Some(ContextMenuIcon::New));
-        assert_eq!(*label, "+ New");
+        assert_eq!(*label, "New");
         assert_eq!(children.len(), 2);
         assert!(matches!(items[2], ContextMenuItem::Separator));
     }
