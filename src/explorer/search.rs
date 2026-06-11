@@ -33,10 +33,11 @@ use gpui::{
 
 use crate::explorer::{
     actions::{
-        SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut,
-        SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
-        SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
-        SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight,
+        RecursiveSearchEdit, SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit,
+        SearchCopy, SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft,
+        SearchPaste, SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome,
+        SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight,
+        SearchWordLeft, SearchWordRight,
     },
     entry::FileEntry,
     recursive_search::{
@@ -268,6 +269,18 @@ impl ExplorerView {
         self.refresh_search_filter_with_selection(&selected_paths, cx);
     }
 
+    fn set_recursive_search_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.search.recursive_enabled == enabled {
+            return;
+        }
+
+        let selected_paths = self.selected_paths();
+        self.search.recursive_enabled = enabled;
+        self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
+        self.search.recursive_cache = None;
+        self.refresh_search_filter_with_selection(&selected_paths, cx);
+    }
+
     pub(super) fn refresh_search_after_external_change(&mut self, cx: &mut Context<Self>) {
         let selected_paths = self.selected_paths();
         self.refresh_search_filter_with_selection(&selected_paths, cx);
@@ -319,7 +332,22 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.start_search_edit(window, cx);
+        if self.start_search_edit(window, cx) {
+            self.set_recursive_search_enabled(false, cx);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_recursive_search_edit(
+        &mut self,
+        _: &RecursiveSearchEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.start_search_edit(window, cx) {
+            self.set_recursive_search_enabled(true, cx);
+        }
         cx.stop_propagation();
         cx.notify();
     }

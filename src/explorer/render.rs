@@ -2025,6 +2025,7 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_address_suggestion_down))
             .on_action(cx.listener(Self::handle_address_accept_suggestion))
             .on_action(cx.listener(Self::handle_search_edit))
+            .on_action(cx.listener(Self::handle_recursive_search_edit))
             .on_action(cx.listener(Self::handle_search_commit))
             .on_action(cx.listener(Self::handle_search_cancel))
             .on_action(cx.listener(Self::handle_search_backspace))

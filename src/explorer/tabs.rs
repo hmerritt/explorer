@@ -999,7 +999,7 @@ fn reorder_tab_ids(
 mod tests {
     use super::*;
     use crate::explorer::{
-        actions::{RenameCommit, SearchCommit},
+        actions::{RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
         test_support::{TempDir, selected_names},
         view::tab_label_for_path,
     };
@@ -1248,6 +1248,56 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(view.search_is_editing());
             assert_eq!(view.search_query(), "b");
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_f_action_forces_regular_search(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.search.recursive_enabled = true;
+                view.set_search_query("a".to_owned());
+                cx.notify();
+            });
+        });
+        cx.dispatch_action(SearchEdit);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert!(!view.recursive_search_is_enabled());
+            assert_eq!(view.search_query(), "a");
+            assert_eq!(view.entries.len(), 1);
+            assert_eq!(view.entries[0].name, "a.txt");
+        });
+    }
+
+    #[gpui::test]
+    fn recursive_search_action_forces_recursive_search(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.dispatch_action(RecursiveSearchEdit);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert!(view.recursive_search_is_enabled());
+        });
+    }
+
+    #[gpui::test]
+    fn recursive_search_action_is_not_a_toggle(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        cx.dispatch_action(RecursiveSearchEdit);
+        cx.dispatch_action(RecursiveSearchEdit);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert!(view.recursive_search_is_enabled());
         });
     }
 

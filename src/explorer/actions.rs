@@ -84,6 +84,7 @@ actions!(
         AddressSuggestionDown,
         AddressAcceptSuggestion,
         SearchEdit,
+        RecursiveSearchEdit,
         SearchCommit,
         SearchCancel,
         SearchBackspace,
