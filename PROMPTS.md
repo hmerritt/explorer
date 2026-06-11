@@ -1,9 +1,5 @@
 ## New
 
-- Context menu container + item spacing. The final item does not have the same bottom gap as the sides/top does. Let's make the left/right top/bottom margins the same for the container.
-
----
-
 - Remove Ctrl+Shift+F keybinding for creating a new file. Instead use that keybinding to trigger and focus a recursive search. Ctrl+F triggers a regular search (turns off recursive search if active)
 - When extracting zips, skip "\_\_MACOSX" directory
 - Replace file/document icon used in both the utility bar, and context menu, for "New" > "File" - it should use DOCUMENT_ICON

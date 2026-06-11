@@ -237,15 +237,16 @@ pub(super) fn context_menu_pointer_tip_origin(
 
 pub(super) fn context_submenu_left(
     parent_left: f32,
-    menu_width: f32,
+    parent_width: f32,
+    child_width: f32,
     overlap: f32,
     window_width: f32,
 ) -> f32 {
-    let right_left = parent_left + menu_width - overlap;
-    if right_left + menu_width <= window_width {
+    let right_left = parent_left + parent_width - overlap;
+    if right_left + child_width <= window_width {
         right_left
     } else {
-        parent_left - menu_width + overlap
+        parent_left - child_width + overlap
     }
 }
 
@@ -284,8 +285,14 @@ mod tests {
 
     #[test]
     fn submenu_position_overlaps_parent_border() {
-        assert_eq!(context_submenu_left(100.0, 250.0, 1.0, 800.0), 349.0);
-        assert_eq!(context_submenu_left(500.0, 250.0, 1.0, 800.0), 251.0);
+        assert_eq!(context_submenu_left(100.0, 250.0, 250.0, 1.0, 800.0), 349.0);
+        assert_eq!(context_submenu_left(500.0, 250.0, 250.0, 1.0, 800.0), 251.0);
+    }
+
+    #[test]
+    fn submenu_position_uses_child_width_for_edge_fit() {
+        assert_eq!(context_submenu_left(500.0, 180.0, 120.0, 1.0, 800.0), 679.0);
+        assert_eq!(context_submenu_left(500.0, 180.0, 280.0, 1.0, 800.0), 221.0);
     }
 
     #[test]
