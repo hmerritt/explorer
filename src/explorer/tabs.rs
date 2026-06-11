@@ -1038,6 +1038,27 @@ mod tests {
         test_tabs_with_files(cx, &["a.txt", "b.txt"])
     }
 
+    fn test_tabs_with_directories<'a>(
+        cx: &'a mut TestAppContext,
+        names: &[&str],
+    ) -> (
+        TempDir,
+        Entity<ExplorerTabs>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        for name in names {
+            fs::create_dir(temp.path().join(name)).expect("create test directory");
+        }
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new_for_test(path, focus_handle, cx)
+        });
+        (temp, tabs, cx)
+    }
+
     fn active_test_view(
         tabs: &Entity<ExplorerTabs>,
         cx: &gpui::VisualTestContext,
@@ -1116,7 +1137,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_entry_opens_folder_context_menu_without_selecting(cx: &mut TestAppContext) {
+    fn right_click_file_opens_current_folder_context_menu_without_selecting(
+        cx: &mut TestAppContext,
+    ) {
         let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);
         let first_position = cx
@@ -1155,6 +1178,117 @@ mod tests {
             assert!(view.context_menu.is_some());
             assert_eq!(second_menu_origin, second_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
+        });
+    }
+
+    #[gpui::test]
+    fn right_click_unselected_folder_selects_it_and_opens_entry_menu(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_selector(cx, "explorer-entry-1");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b"]);
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenDirectory {
+                        ..
+                    },
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn right_click_selected_folder_preserves_multi_selection_and_disables_rename(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                view.toggle_selection_index(1);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        right_click_selector(cx, "explorer-entry-1");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a", "b"]);
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(matches!(
+                menu.items.last(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    command: crate::explorer::context_menu::ContextMenuCommand::RenameSelected,
+                    enabled: false,
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_open_navigates_active_tab(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let target = temp.path().join("a");
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.execute_context_menu_command(
+                    crate::explorer::context_menu::ContextMenuCommand::OpenDirectory {
+                        path: target.clone(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, target);
+            assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_open_in_new_tab_uses_existing_tab_event(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let target = temp.path().join("a");
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+        });
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.execute_context_menu_command(
+                    crate::explorer::context_menu::ContextMenuCommand::OpenDirectoryInNewTab {
+                        path: target.clone(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, target);
         });
     }
 

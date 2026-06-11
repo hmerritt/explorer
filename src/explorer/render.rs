@@ -56,7 +56,7 @@ use crate::explorer::{
         file_icon, file_icon_sized, folder_icon, folder_icon_sized, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
-    navigation::{EntryAction, HistoryMode},
+    navigation::{EntryAction, HistoryMode, directory_new_tab_target},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
@@ -1262,6 +1262,7 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
+        let context_clicked_entry = entry.clone();
         let middle_clicked_entry = entry.clone();
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
@@ -1329,8 +1330,18 @@ impl ExplorerView {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    open_current_folder_context_menu_from_event(this, event, window, cx);
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if directory_new_tab_target(&context_clicked_entry).is_some() {
+                        open_entry_context_menu_from_event(
+                            this,
+                            event,
+                            &context_clicked_entry,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        open_current_folder_context_menu_from_event(this, event, window, cx);
+                    }
                 }),
             )
             .on_mouse_down(
@@ -2466,6 +2477,20 @@ fn open_current_folder_context_menu_from_event(
     cx.stop_propagation();
 }
 
+fn open_entry_context_menu_from_event(
+    this: &mut ExplorerView,
+    event: &MouseDownEvent,
+    entry: &FileEntry,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let origin = local_context_menu_origin(event.position, this.view_origin);
+    if this.open_entry_context_menu(origin, entry, window, cx) {
+        cx.notify();
+    }
+    cx.stop_propagation();
+}
+
 fn open_sidebar_context_menu_from_event(
     this: &mut ExplorerView,
     event: &MouseDownEvent,
@@ -2980,7 +3005,23 @@ fn context_menu_icon_slot(icon: Option<ContextMenuIcon>) -> Div {
 
 fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
     Some(match icon {
+        ContextMenuIcon::Cut => gpui::img(CUT_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::Copy => gpui::img(COPY_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
         ContextMenuIcon::Paste => gpui::img(PASTE_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::Delete => gpui::img(DELETE_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::Rename => gpui::img(RENAME_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
