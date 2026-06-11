@@ -127,7 +127,6 @@ const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + (UTILITY_ICON_BUTTON_SIZE * 5.0)
     + UTILITY_SEPARATOR_OUTER_WIDTH
     + (UTILITY_BAR_ITEM_GAP * 8.0);
-const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
@@ -511,7 +510,7 @@ impl ExplorerView {
                 ))
                 .child(utility_menu_row(
                     "utility-new-file",
-                    Some(utility_menu_glyph_icon(UTILITY_ICON_FILE)),
+                    Some(file_icon().into_any_element()),
                     "File",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
@@ -2878,7 +2877,7 @@ fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
             .h(px(16.0))
             .into_any_element(),
         ContextMenuIcon::New => utility_new_icon().into_any_element(),
-        ContextMenuIcon::File => utility_menu_glyph_icon(UTILITY_ICON_FILE),
+        ContextMenuIcon::File => file_icon().into_any_element(),
         ContextMenuIcon::Folder => folder_icon().into_any_element(),
     })
 }
