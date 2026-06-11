@@ -2660,7 +2660,9 @@ fn context_menu_detail_row(
                 .flex_1()
                 .truncate()
                 .text_align(TextAlign::Right)
+                .text_size(px(12.0))
                 .text_color(rgb(0x595959))
+                .opacity(0.8)
                 .child(SharedString::from(value.to_owned())),
         )
         .into_any_element()
@@ -2682,7 +2684,7 @@ fn context_menu_row_base(
         .h(px(CONTEXT_MENU_ROW_HEIGHT))
         .mx(px(4.0))
         .px(px(8.0))
-        .gap(px(8.0))
+        .gap(px(10.0))
         .rounded(px(4.0))
         .cursor_default()
         .hover(|style| style.bg(rgb(0xe5f3ff)))
