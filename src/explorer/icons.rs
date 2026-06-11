@@ -99,15 +99,15 @@ pub(super) fn nav_icon_font() -> gpui::Font {
 }
 
 pub(super) fn folder_icon() -> Div {
+    folder_icon_sized(FILE_ICON_SIZE)
+}
+
+pub(super) fn folder_icon_sized(size: f32) -> Div {
     div()
-        .w(px(FILE_ICON_SIZE))
-        .h(px(FILE_ICON_SIZE))
+        .w(px(size))
+        .h(px(size))
         .flex_shrink_0()
-        .child(image_icon(
-            FOLDER_ICON.clone(),
-            FILE_ICON_SIZE,
-            FILE_ICON_SIZE,
-        ))
+        .child(image_icon(FOLDER_ICON.clone(), size, size))
 }
 
 pub(super) fn directory_shortcut_icon() -> Div {
@@ -123,15 +123,15 @@ pub(super) fn directory_shortcut_icon() -> Div {
 }
 
 pub(super) fn file_icon() -> Div {
+    file_icon_sized(FILE_ICON_SIZE)
+}
+
+pub(super) fn file_icon_sized(size: f32) -> Div {
     div()
-        .w(px(FILE_ICON_SIZE))
-        .h(px(FILE_ICON_SIZE))
+        .w(px(size))
+        .h(px(size))
         .flex_shrink_0()
-        .child(image_icon(
-            DOCUMENT_ICON.clone(),
-            FILE_ICON_SIZE,
-            FILE_ICON_SIZE,
-        ))
+        .child(image_icon(DOCUMENT_ICON.clone(), size, size))
 }
 
 pub(super) fn folder_sidebar_icon() -> AnyElement {
@@ -192,6 +192,23 @@ pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
         DirectoryKind::Drive => drive_icon(),
         DirectoryKind::DriveWindows => drive_windows_icon(),
     }
+}
+
+pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyElement {
+    let image = match kind {
+        DirectoryKind::Home => FOLDER_ICON.clone(),
+        DirectoryKind::Desktop => DESKTOP_SIDEBAR_ICON.clone(),
+        DirectoryKind::Documents => DOCUMENTS_SIDEBAR_ICON.clone(),
+        DirectoryKind::Downloads => DOWNLOADS_SIDEBAR_ICON.clone(),
+        DirectoryKind::Pictures => PICTURES_SIDEBAR_ICON.clone(),
+        DirectoryKind::Music => MUSIC_SIDEBAR_ICON.clone(),
+        DirectoryKind::Videos => VIDEOS_SIDEBAR_ICON.clone(),
+        DirectoryKind::Applications => APPLICATIONS_SIDEBAR_ICON.clone(),
+        DirectoryKind::Bin => BIN_SIDEBAR_ICON.clone(),
+        DirectoryKind::Drive => DRIVE_ICON.clone(),
+        DirectoryKind::DriveWindows => DRIVE_WINDOWS_ICON.clone(),
+    };
+    image_icon(image, size, size)
 }
 
 pub(super) fn image_icon(image: Arc<Image>, width: f32, height: f32) -> AnyElement {

@@ -52,8 +52,8 @@ use crate::explorer::{
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
         NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, PASTE_ICON, RENAME_ICON, directory_kind_icon,
-        directory_shortcut_icon, drive_icon, drive_windows_icon, file_icon, folder_icon,
-        image_icon, nav_icon_font,
+        directory_kind_icon_sized, directory_shortcut_icon, drive_icon, drive_windows_icon,
+        file_icon, file_icon_sized, folder_icon, folder_icon_sized, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -134,21 +134,22 @@ const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
-const CONTEXT_MENU_MIN_WIDTH: f32 = 150.0;
+const CONTEXT_MENU_MIN_WIDTH: f32 = 170.0;
 const CONTEXT_MENU_MAX_WIDTH: f32 = 280.0;
 const CONTEXT_MENU_BORDER_WIDTH: f32 = 1.0;
-const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
-const CONTEXT_MENU_ITEM_VERTICAL_GAP: f32 = 4.0;
-const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
-const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 18.0;
+const CONTEXT_MENU_ROW_HEIGHT: f32 = 30.0;
+const CONTEXT_MENU_ITEM_VERTICAL_GAP: f32 = 6.0;
+const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 10.0;
+const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 14.0;
+const CONTEXT_MENU_ICON_SIZE: f32 = 14.0;
 const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
 const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
-const CONTEXT_MENU_TEXT_SIZE: f32 = 12.0;
-const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 8.0;
-const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 16.0;
+const CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
+const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 0.0;
+const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 18.0;
 const CONTEXT_MENU_ROW_CHILD_GAP: f32 = 10.0;
-const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 16.0;
-const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 12.0;
+const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 14.0;
+const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 16.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -2619,17 +2620,10 @@ fn utility_dropdown() -> Div {
         .occlude()
 }
 
-fn context_menu_dropdown(items: &[ContextMenuItem], width: f32) -> Div {
+fn context_menu_dropdown(width: f32) -> Div {
     div()
         .debug_selector(|| "context-menu".to_owned())
         .w(px(width))
-        .h(px(context_menu_height(
-            items,
-            CONTEXT_MENU_ROW_HEIGHT,
-            CONTEXT_MENU_ITEM_VERTICAL_GAP,
-            CONTEXT_MENU_SEPARATOR_HEIGHT,
-        )))
-        .py(px(4.0))
         .rounded(px(6.0))
         .bg(rgb(0xffffff))
         .border_1()
@@ -2660,7 +2654,7 @@ fn render_context_menu_level(
         (menu_width, menu_height),
         window_size,
     );
-    let mut menu = context_menu_dropdown(items, menu_width)
+    let mut menu = context_menu_dropdown(menu_width)
         .absolute()
         .left(px(left))
         .top(px(top));
@@ -2703,8 +2697,9 @@ fn render_context_menu_level(
             CONTEXT_MENU_SUBMENU_OVERLAP,
             window_size.0,
         );
+        let submenu_y_middle_offset = 10.0;
         let (_, child_top) = clamped_context_menu_origin(
-            (child_left, top + row_top - 4.0),
+            (child_left, top + row_top - submenu_y_middle_offset),
             (child_width, child_height),
             window_size,
         );
@@ -2846,11 +2841,9 @@ fn context_menu_row_base(
         .flex_row()
         .items_center()
         .h(px(CONTEXT_MENU_ROW_HEIGHT))
-        .my(px(CONTEXT_MENU_ITEM_VERTICAL_GAP / 2.0))
         .mx(px(CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING / 2.0))
         .px(px(CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING / 2.0))
         .gap(px(CONTEXT_MENU_ROW_CHILD_GAP))
-        .rounded(px(4.0))
         .cursor_default()
         .when(active, |this| this.bg(rgb(0xe5f3ff)))
         .hover(|style| style.bg(rgb(0xe5f3ff)))
@@ -2988,22 +2981,25 @@ fn context_menu_icon_slot(icon: Option<ContextMenuIcon>) -> Div {
 fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
     Some(match icon {
         ContextMenuIcon::Paste => gpui::img(PASTE_ICON.clone())
-            .w(px(16.0))
-            .h(px(16.0))
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
-        ContextMenuIcon::New => utility_new_icon().into_any_element(),
-        ContextMenuIcon::File => file_icon().into_any_element(),
-        ContextMenuIcon::Folder => folder_icon().into_any_element(),
+        ContextMenuIcon::New => gpui::img(NEW_ITEM_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::File => file_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
+        ContextMenuIcon::Folder => folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
         ContextMenuIcon::FolderKind(kind) => kind
-            .map(directory_kind_icon)
-            .unwrap_or_else(|| folder_icon().into_any_element()),
+            .map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
+            .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
-            .w(px(16.0))
-            .h(px(16.0))
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
         ContextMenuIcon::Unpin => gpui::img(FAVORITE_PIN_REMOVE_ICON.clone())
-            .w(px(16.0))
-            .h(px(16.0))
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
     })
 }
