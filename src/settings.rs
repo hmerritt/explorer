@@ -237,6 +237,15 @@ pub(crate) fn reorder_sidebar_item(
     })
 }
 
+pub(crate) fn unpin_sidebar_item(
+    configured_index: usize,
+    cx: &mut impl BorrowAppContext,
+) -> Option<SidebarLocation> {
+    update_settings(cx, |settings| {
+        unpin_sidebar_item_in_settings(configured_index, settings)
+    })
+}
+
 fn update_settings<R>(
     cx: &mut impl BorrowAppContext,
     update: impl FnOnce(&mut ExplorerSettings) -> R,
@@ -314,6 +323,14 @@ fn reorder_sidebar_item_in_settings(
     let item = settings.sidebar_items.remove(source_index);
     settings.sidebar_items.insert(new_index, item);
     Some(new_index)
+}
+
+fn unpin_sidebar_item_in_settings(
+    configured_index: usize,
+    settings: &mut ExplorerSettings,
+) -> Option<SidebarLocation> {
+    (configured_index < settings.sidebar_items.len())
+        .then(|| settings.sidebar_items.remove(configured_index))
 }
 
 fn settings_watcher(
@@ -765,6 +782,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sidebar_unpin_removes_requested_item_and_preserves_order() {
+        let first = PathBuf::from("/custom/first");
+        let second = PathBuf::from("/custom/second");
+        let mut settings = ExplorerSettings {
+            sidebar_items: vec![
+                SidebarLocation::Home,
+                SidebarLocation::Custom {
+                    path: first.clone(),
+                    label: None,
+                },
+                SidebarLocation::Custom {
+                    path: second.clone(),
+                    label: Some("Second".to_owned()),
+                },
+                SidebarLocation::Downloads,
+            ],
+            ..ExplorerSettings::default()
+        };
+
+        assert_eq!(
+            unpin_sidebar_item_in_settings(1, &mut settings),
+            Some(SidebarLocation::Custom {
+                path: first,
+                label: None,
+            })
+        );
+        assert_eq!(
+            settings.sidebar_items,
+            vec![
+                SidebarLocation::Home,
+                SidebarLocation::Custom {
+                    path: second,
+                    label: Some("Second".to_owned()),
+                },
+                SidebarLocation::Downloads,
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_unpin_ignores_invalid_indices() {
+        let mut settings = ExplorerSettings {
+            sidebar_items: vec![SidebarLocation::Home, SidebarLocation::Downloads],
+            ..ExplorerSettings::default()
+        };
+        let original = settings.sidebar_items.clone();
+
+        assert_eq!(unpin_sidebar_item_in_settings(2, &mut settings), None);
+        assert_eq!(
+            unpin_sidebar_item_in_settings(usize::MAX, &mut settings),
+            None
+        );
+        assert_eq!(settings.sidebar_items, original);
     }
 
     #[test]

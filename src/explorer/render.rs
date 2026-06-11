@@ -40,7 +40,7 @@ use crate::explorer::{
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
-        clamped_context_menu_origin, context_menu_height, context_menu_item_top,
+        ContextMenuSource, clamped_context_menu_origin, context_menu_height, context_menu_item_top,
         context_menu_path_is_active, context_menu_pointer_tip_origin, context_submenu_left,
     },
     drag_drop::{
@@ -50,9 +50,10 @@ use crate::explorer::{
     entry::FileEntry,
     formatting::{format_modified, format_size},
     icons::{
-        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, NEW_ITEM_ICON, NavIcon,
-        PASTE_ICON, RENAME_ICON, directory_kind_icon, directory_shortcut_icon, drive_icon,
-        drive_windows_icon, file_icon, folder_icon, image_icon, nav_icon_font,
+        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
+        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, PASTE_ICON, RENAME_ICON, directory_kind_icon,
+        directory_shortcut_icon, drive_icon, drive_windows_icon, file_icon, folder_icon,
+        image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -81,6 +82,9 @@ const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
 const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 4.0;
+const SIDEBAR_ROW_BG: u32 = 0xffffff;
+const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
+const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SidebarItemDrag {
@@ -1017,6 +1021,9 @@ impl ExplorerView {
 
         let click_path = path.clone();
         let middle_click_path = path.clone();
+        let configured_context_menu_target = configured_sidebar_context_menu_target(&item);
+        let context_menu_active =
+            sidebar_context_menu_is_active(self.context_menu.as_ref(), configured_index);
         let mut row = div()
             .id(("explorer-sidebar-row", id))
             .flex()
@@ -1028,13 +1035,12 @@ impl ExplorerView {
             .rounded(px(4.0))
             .cursor_default()
             .when(is_dragging, |this| this.opacity(0.4))
-            .bg(if is_current {
-                rgb(0xcce8ff)
-            } else {
-                rgb(0xffffff)
-            })
-            .when(!is_current, |this| {
-                this.hover(|style| style.bg(rgb(0xe5f3ff)))
+            .bg(rgb(sidebar_row_background_color(
+                is_current,
+                context_menu_active,
+            )))
+            .when(!is_current && !context_menu_active, |this| {
+                this.hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1064,6 +1070,22 @@ impl ExplorerView {
                     .text_color(rgb(0x1f1f1f))
                     .child(SharedString::from(label)),
             );
+
+        if let Some((context_path, context_configured_index)) = configured_context_menu_target {
+            row = row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    open_configured_sidebar_context_menu_from_event(
+                        this,
+                        event,
+                        context_path.clone(),
+                        context_configured_index,
+                        window,
+                        cx,
+                    );
+                }),
+            );
+        }
 
         if let Some(configured_index) = configured_index {
             let drag_label = SharedString::from(item.label.clone());
@@ -2301,6 +2323,35 @@ fn sidebar_item_is_dragging(
     configured_index.is_some() && configured_index == dragging_index
 }
 
+fn configured_sidebar_context_menu_target(item: &SidebarItem) -> Option<(PathBuf, usize)> {
+    Some((item.path.clone(), item.configured_index?))
+}
+
+fn sidebar_context_menu_is_active(
+    context_menu: Option<&crate::explorer::context_menu::ContextMenuState>,
+    configured_index: Option<usize>,
+) -> bool {
+    matches!(
+        (context_menu.and_then(|menu| menu.source), configured_index),
+        (
+            Some(ContextMenuSource::SidebarItem {
+                configured_index: active_index
+            }),
+            Some(row_index)
+        ) if active_index == row_index
+    )
+}
+
+fn sidebar_row_background_color(is_current: bool, context_menu_active: bool) -> u32 {
+    if is_current {
+        SIDEBAR_ROW_CURRENT_BG
+    } else if context_menu_active {
+        SIDEBAR_ROW_HOVER_BG
+    } else {
+        SIDEBAR_ROW_BG
+    }
+}
+
 fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
     sidebar_item_kind_icon(item.kind)
 }
@@ -2395,6 +2446,21 @@ fn open_current_folder_context_menu_from_event(
     let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
     let origin = local_context_menu_origin(event.position, this.view_origin);
     if this.open_folder_context_menu(origin, can_paste, window, cx) {
+        cx.notify();
+    }
+    cx.stop_propagation();
+}
+
+fn open_configured_sidebar_context_menu_from_event(
+    this: &mut ExplorerView,
+    event: &MouseDownEvent,
+    path: PathBuf,
+    configured_index: usize,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let origin = local_context_menu_origin(event.position, this.view_origin);
+    if this.open_configured_sidebar_context_menu(origin, path, configured_index, window, cx) {
         cx.notify();
     }
     cx.stop_propagation();
@@ -2650,7 +2716,16 @@ fn render_context_menu_item(
             label,
             command,
             enabled,
-        } => context_menu_action_row(*id, *icon, label, *command, *enabled, path, active, cx),
+        } => context_menu_action_row(
+            *id,
+            *icon,
+            label,
+            command.clone(),
+            *enabled,
+            path,
+            active,
+            cx,
+        ),
         ContextMenuItem::Submenu {
             id, icon, label, ..
         } => context_menu_submenu_row(*id, *icon, label, path, active, cx),
@@ -2685,7 +2760,7 @@ fn context_menu_action_row(
     .when(!enabled, |this| this.opacity(0.45))
     .when(enabled, |this| {
         this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.execute_context_menu_command(command, window, cx);
+            this.execute_context_menu_command(command.clone(), window, cx);
             cx.stop_propagation();
             cx.notify();
         }))
@@ -2879,6 +2954,14 @@ fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
         ContextMenuIcon::New => utility_new_icon().into_any_element(),
         ContextMenuIcon::File => file_icon().into_any_element(),
         ContextMenuIcon::Folder => folder_icon().into_any_element(),
+        ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
+            .w(px(16.0))
+            .h(px(16.0))
+            .into_any_element(),
+        ContextMenuIcon::Unpin => gpui::img(FAVORITE_PIN_REMOVE_ICON.clone())
+            .w(px(16.0))
+            .h(px(16.0))
+            .into_any_element(),
     })
 }
 
@@ -3701,7 +3784,9 @@ mod tests {
         MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
+    use crate::explorer::context_menu::{ContextMenuSource, ContextMenuState};
     use crate::explorer::{
+        DirectoryKind,
         clipboard::{FileClipboard, FileClipboardOperation, clipboard_item_for_files},
         constants::{
             COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
@@ -3711,6 +3796,7 @@ mod tests {
         },
         entry::FileEntry,
         selection::SelectionModifiers,
+        sidebar::{SidebarItem, SidebarItemKind},
         test_support::TempDir,
         view::ExplorerView,
     };
@@ -3719,10 +3805,12 @@ mod tests {
         CUT_ITEM_OPACITY, DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING,
         NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE,
         UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, clipboard_has_file_clipboard,
-        context_menu_width_for_natural_width, drop_indicator_target_width, filename_text_width,
-        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
+        configured_sidebar_context_menu_target, context_menu_width_for_natural_width,
+        drop_indicator_target_width, filename_text_width, folder_status_summary,
+        is_normal_entry_click, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_item_is_dragging, sidebar_pin_path_from_value, text_cell_width,
+        sidebar_context_menu_is_active, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -3830,6 +3918,73 @@ mod tests {
         assert!(!sidebar_item_is_dragging(Some(2), None));
         assert!(!sidebar_item_is_dragging(None, None));
         assert!(!sidebar_item_is_dragging(None, Some(2)));
+    }
+
+    #[test]
+    fn configured_sidebar_context_menu_requires_configured_item() {
+        let path = PathBuf::from("/custom");
+        let custom = SidebarItem {
+            label: "Custom".to_owned(),
+            path: path.clone(),
+            kind: SidebarItemKind::CustomDirectory,
+            configured_index: Some(3),
+        };
+        let builtin_configured = SidebarItem {
+            label: "Downloads".to_owned(),
+            path: path.join("downloads"),
+            kind: SidebarItemKind::Directory(DirectoryKind::Downloads),
+            configured_index: Some(1),
+        };
+        let custom_unconfigured = SidebarItem {
+            label: "Custom".to_owned(),
+            path: PathBuf::from("/other"),
+            kind: SidebarItemKind::CustomDirectory,
+            configured_index: None,
+        };
+        let drive = SidebarItem {
+            label: "Drive".to_owned(),
+            path: PathBuf::from("/"),
+            kind: SidebarItemKind::Drive,
+            configured_index: None,
+        };
+
+        assert_eq!(
+            configured_sidebar_context_menu_target(&custom),
+            Some((path.clone(), 3))
+        );
+        assert_eq!(
+            configured_sidebar_context_menu_target(&builtin_configured),
+            Some((path.join("downloads"), 1))
+        );
+        assert_eq!(
+            configured_sidebar_context_menu_target(&custom_unconfigured),
+            None
+        );
+        assert_eq!(configured_sidebar_context_menu_target(&drive), None);
+    }
+
+    #[test]
+    fn sidebar_context_menu_active_matches_configured_source() {
+        let menu = ContextMenuState::new_with_source(
+            gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            Vec::new(),
+            ContextMenuSource::SidebarItem {
+                configured_index: 2,
+            },
+        );
+
+        assert!(sidebar_context_menu_is_active(Some(&menu), Some(2)));
+        assert!(!sidebar_context_menu_is_active(Some(&menu), Some(1)));
+        assert!(!sidebar_context_menu_is_active(Some(&menu), None));
+        assert!(!sidebar_context_menu_is_active(None, Some(2)));
+    }
+
+    #[test]
+    fn sidebar_context_menu_background_matches_windows_hover_precedence() {
+        assert_eq!(sidebar_row_background_color(false, false), 0xffffff);
+        assert_eq!(sidebar_row_background_color(false, true), 0xe5f3ff);
+        assert_eq!(sidebar_row_background_color(true, false), 0xcce8ff);
+        assert_eq!(sidebar_row_background_color(true, true), 0xcce8ff);
     }
 
     #[test]

@@ -1,4 +1,8 @@
-use std::{fs, path::Path, time::SystemTime};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use gpui::{Context, Pixels, Point, Window};
 
@@ -9,6 +13,12 @@ pub(super) struct ContextMenuState {
     pub(super) origin: Point<Pixels>,
     pub(super) items: Vec<ContextMenuItem>,
     pub(super) hovered_path: Vec<usize>,
+    pub(super) source: Option<ContextMenuSource>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContextMenuSource {
+    SidebarItem { configured_index: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,13 +56,18 @@ pub(super) enum ContextMenuIcon {
     New,
     File,
     Folder,
+    NewTab,
+    Unpin,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuCommand {
     Paste,
     NewFile,
     NewFolder,
+    OpenSidebar { path: PathBuf },
+    OpenSidebarInNewTab { path: PathBuf },
+    UnpinSidebar { configured_index: usize },
 }
 
 impl ContextMenuState {
@@ -61,6 +76,20 @@ impl ContextMenuState {
             origin,
             items,
             hovered_path: Vec::new(),
+            source: None,
+        }
+    }
+
+    pub(super) fn new_with_source(
+        origin: Point<Pixels>,
+        items: Vec<ContextMenuItem>,
+        source: ContextMenuSource,
+    ) -> Self {
+        Self {
+            origin,
+            items,
+            hovered_path: Vec::new(),
+            source: Some(source),
         }
     }
 }
@@ -84,6 +113,30 @@ impl ExplorerView {
         self.context_menu = Some(ContextMenuState::new(
             origin,
             folder_context_menu_items(&self.path, can_paste),
+        ));
+        true
+    }
+
+    pub(super) fn open_configured_sidebar_context_menu(
+        &mut self,
+        origin: Point<Pixels>,
+        path: PathBuf,
+        configured_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.commit_active_rename_before_interaction(window, cx) {
+            return false;
+        }
+
+        self.finish_search_edit();
+        self.cancel_address_bar_edit();
+        self.cancel_pending_click_rename();
+        self.open_utility_menu = None;
+        self.context_menu = Some(ContextMenuState::new_with_source(
+            origin,
+            configured_sidebar_context_menu_items(path, configured_index),
+            ContextMenuSource::SidebarItem { configured_index },
         ));
         true
     }
@@ -115,8 +168,47 @@ impl ExplorerView {
             ContextMenuCommand::Paste => self.paste_clipboard_files(cx),
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
+            ContextMenuCommand::OpenSidebar { path } => {
+                self.navigate_to_sidebar_path_with_watcher(path, cx);
+            }
+            ContextMenuCommand::OpenSidebarInNewTab { path } => {
+                cx.emit(crate::explorer::view::ExplorerViewEvent::OpenDirectoryInNewTab(path));
+            }
+            ContextMenuCommand::UnpinSidebar { configured_index } => {
+                crate::settings::unpin_sidebar_item(configured_index, cx);
+            }
         }
     }
+}
+
+pub(super) fn configured_sidebar_context_menu_items(
+    path: PathBuf,
+    configured_index: usize,
+) -> Vec<ContextMenuItem> {
+    vec![
+        ContextMenuItem::Action {
+            id: "context-menu-sidebar-open",
+            icon: Some(ContextMenuIcon::Folder),
+            label: "Open",
+            command: ContextMenuCommand::OpenSidebar { path: path.clone() },
+            enabled: true,
+        },
+        ContextMenuItem::Action {
+            id: "context-menu-sidebar-open-new-tab",
+            icon: Some(ContextMenuIcon::NewTab),
+            label: "Open in new tab",
+            command: ContextMenuCommand::OpenSidebarInNewTab { path },
+            enabled: true,
+        },
+        ContextMenuItem::Separator,
+        ContextMenuItem::Action {
+            id: "context-menu-sidebar-unpin",
+            icon: Some(ContextMenuIcon::Unpin),
+            label: "Unpin",
+            command: ContextMenuCommand::UnpinSidebar { configured_index },
+            enabled: true,
+        },
+    ]
 }
 
 pub(super) fn folder_context_menu_items(path: &Path, can_paste: bool) -> Vec<ContextMenuItem> {
@@ -364,6 +456,44 @@ mod tests {
 
         assert_ne!(first.origin, second.origin);
         assert_eq!(second.hovered_path, Vec::<usize>::new());
+        assert_eq!(second.source, None);
+    }
+
+    #[test]
+    fn state_records_and_replaces_menu_source() {
+        let first = ContextMenuState::new_with_source(
+            Point {
+                x: gpui::px(10.0),
+                y: gpui::px(20.0),
+            },
+            Vec::new(),
+            ContextMenuSource::SidebarItem {
+                configured_index: 1,
+            },
+        );
+        let second = ContextMenuState::new_with_source(
+            Point {
+                x: gpui::px(70.0),
+                y: gpui::px(80.0),
+            },
+            Vec::new(),
+            ContextMenuSource::SidebarItem {
+                configured_index: 4,
+            },
+        );
+
+        assert_eq!(
+            first.source,
+            Some(ContextMenuSource::SidebarItem {
+                configured_index: 1
+            })
+        );
+        assert_eq!(
+            second.source,
+            Some(ContextMenuSource::SidebarItem {
+                configured_index: 4
+            })
+        );
     }
 
     #[test]
@@ -395,6 +525,47 @@ mod tests {
         assert_eq!(*label, "New");
         assert_eq!(children.len(), 2);
         assert!(matches!(items[2], ContextMenuItem::Separator));
+    }
+
+    #[test]
+    fn configured_sidebar_menu_contains_expected_items_icons_and_commands() {
+        let path = PathBuf::from("/tmp/custom");
+        let items = configured_sidebar_context_menu_items(path.clone(), 2);
+
+        assert_eq!(items.len(), 4);
+        assert_eq!(
+            items[0],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open",
+                icon: Some(ContextMenuIcon::Folder),
+                label: "Open",
+                command: ContextMenuCommand::OpenSidebar { path: path.clone() },
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            items[1],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open-new-tab",
+                icon: Some(ContextMenuIcon::NewTab),
+                label: "Open in new tab",
+                command: ContextMenuCommand::OpenSidebarInNewTab { path },
+                enabled: true,
+            }
+        );
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert_eq!(
+            items[3],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-unpin",
+                icon: Some(ContextMenuIcon::Unpin),
+                label: "Unpin",
+                command: ContextMenuCommand::UnpinSidebar {
+                    configured_index: 2
+                },
+                enabled: true,
+            }
+        );
     }
 
     #[test]

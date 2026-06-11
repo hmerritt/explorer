@@ -69,7 +69,13 @@ svg_icon!(CUT_ICON, "utility", "cut.svg");
 svg_icon!(DELETE_ICON, "utility", "delete.svg");
 svg_icon!(DETAILS_ICON, "utility", "details.svg");
 svg_icon!(EXTRACT_ICON, "utility", "extract.svg");
+svg_icon!(
+    FAVORITE_PIN_REMOVE_ICON,
+    "utility",
+    "favorite_pin_remove.svg"
+);
 svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
+svg_icon!(NEW_TAB_ICON, "utility", "new_tab.svg");
 svg_icon!(PASTE_ICON, "utility", "paste.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 
