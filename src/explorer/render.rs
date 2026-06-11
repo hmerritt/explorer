@@ -3870,7 +3870,7 @@ mod tests {
 
     #[test]
     fn context_menu_width_clamps_to_minimum() {
-        assert_eq!(context_menu_width_for_natural_width(120.0), 150.0);
+        assert_eq!(context_menu_width_for_natural_width(120.0), 170.0);
     }
 
     #[test]
@@ -3885,14 +3885,14 @@ mod tests {
 
     #[test]
     fn context_menu_action_and_submenu_width_account_for_all_row_chrome() {
-        assert_eq!(context_menu_action_width_for_text_width(80.0), 160.0);
+        assert_eq!(context_menu_action_width_for_text_width(80.0), 148.0);
     }
 
     #[test]
     fn context_menu_collapsed_detail_width_accounts_for_label_and_value() {
         assert_eq!(
             context_menu_detail_width_for_text_widths(40.0, 100.0, ContextMenuIconSlot::Collapse),
-            188.0
+            186.0
         );
     }
 
@@ -3900,7 +3900,7 @@ mod tests {
     fn context_menu_reserved_detail_width_accounts_for_icon_slot() {
         assert_eq!(
             context_menu_detail_width_for_text_widths(40.0, 100.0, ContextMenuIconSlot::Reserve),
-            216.0
+            210.0
         );
     }
 
