@@ -20,6 +20,7 @@ const COMPOUND_ARCHIVE_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "tar.xz", "t
 const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
     "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar", "7z",
 ];
+const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_start_path() -> PathBuf {
@@ -395,7 +396,9 @@ pub(super) fn should_hide_entry_with_metadata(
 }
 
 fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
-    name == OsStr::new(".localized") || name == OsStr::new(".DS_Store")
+    name == OsStr::new(".localized")
+        || name == OsStr::new(".DS_Store")
+        || name == OsStr::new(MACOSX_ARCHIVE_METADATA_DIRECTORY)
 }
 
 fn is_hidden_entry(name: &OsStr, path: &Path) -> bool {
@@ -1338,8 +1341,10 @@ fn extract_archive_with_entry_progress(
                         return false;
                     }
 
+                    let is_planned_entry = entry_weights.contains_key(path);
                     let is_conflict = conflict_destinations.contains(path);
-                    let is_allowed = !is_conflict || conflict_choice == ConflictChoice::Replace;
+                    let is_allowed = is_planned_entry
+                        && (!is_conflict || conflict_choice == ConflictChoice::Replace);
                     if is_allowed {
                         if let Some(weight) = entry_weights.get(path) {
                             let _ = tx.send((path.to_path_buf(), *weight));
@@ -1379,6 +1384,10 @@ fn extract_archive_with_entry_progress(
             on_progress(progress.clone());
         }
 
+        let planned_paths = entries
+            .iter()
+            .map(|entry| entry.destination.clone())
+            .collect::<HashSet<_>>();
         let conflict_paths = entries
             .iter()
             .filter(|entry| entry.conflict)
@@ -1390,7 +1399,9 @@ fn extract_archive_with_entry_progress(
                 if cancel_filter.load(Ordering::Relaxed) {
                     return false;
                 }
-                conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path)
+                planned_paths.contains(path)
+                    && (conflict_choice == ConflictChoice::Replace
+                        || !conflict_paths.contains(path))
             })
             .build()
             .map_err(|error| {
@@ -1609,6 +1620,12 @@ fn extract_rar_archive_to_temp(
             ))
         })?;
         let display_path = sanitized_archive_entry_path(Path::new(&rar_entry.filename));
+        if !archive_sanitized_entry_should_extract(&display_path) {
+            let output = temp_directory.join(&display_path);
+            remove_temp_extract_output(&output)
+                .map_err(|error| operation_error("remove", &output, error))?;
+            continue;
+        }
         let planned_entry = entries
             .iter()
             .find(|entry| entry.display_path == display_path)
@@ -1694,7 +1711,11 @@ fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
     let mut top_level_entries = Vec::new();
     let mut seen = HashSet::new();
     for entry in entries {
-        let Some(top_level) = top_level_archive_component(Path::new(entry)) else {
+        let relative = sanitized_archive_entry_path(Path::new(entry));
+        if !archive_sanitized_entry_should_extract(&relative) {
+            continue;
+        }
+        let Some(top_level) = top_level_archive_component_from_sanitized(&relative) else {
             continue;
         };
         if seen.insert(top_level.clone()) {
@@ -1721,13 +1742,13 @@ fn planned_extract_entries_from_listing(
     let mut seen = HashSet::new();
     for entry in entries {
         let relative = sanitized_archive_entry_path(Path::new(entry));
-        if relative.as_os_str().is_empty() {
+        if !archive_sanitized_entry_should_extract(&relative) {
             continue;
         }
-        let output = destination.join(relative);
+        let output = destination.join(&relative);
         if seen.insert(output.clone()) {
             planned_entries.push(ArchiveExtractEntry {
-                display_path: sanitized_archive_entry_path(Path::new(entry)),
+                display_path: relative,
                 destination: output,
                 conflict: false,
                 byte_weight: 0,
@@ -1869,14 +1890,22 @@ fn archive_is_rar(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn top_level_archive_component(path: &Path) -> Option<PathBuf> {
-    sanitized_archive_entry_path(path)
-        .components()
+fn top_level_archive_component_from_sanitized(path: &Path) -> Option<PathBuf> {
+    path.components()
         .next()
         .and_then(|component| match component {
             Component::Normal(name) => Some(PathBuf::from(name)),
             _ => None,
         })
+}
+
+fn archive_sanitized_entry_should_extract(path: &Path) -> bool {
+    path.components().next().is_some_and(|component| {
+        !matches!(
+            component,
+            Component::Normal(name) if name == OsStr::new(MACOSX_ARCHIVE_METADATA_DIRECTORY)
+        )
+    })
 }
 
 fn sanitized_archive_entry_path(path: &Path) -> PathBuf {
@@ -2238,6 +2267,7 @@ mod tests {
             "file.txt".to_owned(),
             "folder/a.txt".to_owned(),
             "folder/nested/b.txt".to_owned(),
+            "__MACOSX/._file.txt".to_owned(),
             "../ignored.txt".to_owned(),
             "/rooted.txt".to_owned(),
         ];
@@ -2298,6 +2328,7 @@ mod tests {
             "folder/a.txt".to_owned(),
             "folder/a.txt".to_owned(),
             "./folder/b.txt".to_owned(),
+            "__MACOSX/._a.txt".to_owned(),
             "../outside.txt".to_owned(),
         ];
 
@@ -2309,6 +2340,40 @@ mod tests {
                 PathBuf::from("dest/outside.txt"),
             ]
         );
+    }
+
+    #[test]
+    fn archive_planning_skips_top_level_macosx_metadata_directory() {
+        let entries = vec![
+            "__MACOSX/._a.txt".to_owned(),
+            "__MACOSX/nested/._b.txt".to_owned(),
+            "folder/__MACOSX/kept.txt".to_owned(),
+            "folder/file.txt".to_owned(),
+        ];
+
+        assert_eq!(
+            top_level_entries_from_listing(&entries),
+            vec![PathBuf::from("folder")]
+        );
+        assert_eq!(
+            planned_output_paths_from_listing(&entries, Path::new("dest")),
+            vec![
+                PathBuf::from("dest/folder/__MACOSX/kept.txt"),
+                PathBuf::from("dest/folder/file.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn archive_planning_treats_macosx_metadata_only_listing_as_empty() {
+        let entries = vec![
+            "__MACOSX".to_owned(),
+            "__MACOSX/".to_owned(),
+            "__MACOSX/._file.txt".to_owned(),
+        ];
+
+        assert!(top_level_entries_from_listing(&entries).is_empty());
+        assert!(planned_output_paths_from_listing(&entries, Path::new("dest")).is_empty());
     }
 
     #[test]
@@ -2553,6 +2618,7 @@ mod tests {
         fs::write(temp.path().join(".DS_Store"), b"metadata").expect("create ds store file");
         fs::write(temp.path().join(".hidden"), b"hidden").expect("create hidden file");
         fs::write(temp.path().join(".localized"), b"metadata").expect("create localized file");
+        fs::create_dir(temp.path().join("__MACOSX")).expect("create macos archive metadata dir");
         fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
 
         let entries = load_entries_with_options(
