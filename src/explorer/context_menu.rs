@@ -233,6 +233,20 @@ pub(super) fn context_menu_pointer_tip_origin(
     clamped_context_menu_origin(pointer, menu_size, window_size)
 }
 
+pub(super) fn context_submenu_left(
+    parent_left: f32,
+    menu_width: f32,
+    overlap: f32,
+    window_width: f32,
+) -> f32 {
+    let right_left = parent_left + menu_width - overlap;
+    if right_left + menu_width <= window_width {
+        right_left
+    } else {
+        parent_left - menu_width + overlap
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +278,12 @@ mod tests {
             context_menu_pointer_tip_origin((-20.0, -10.0), (220.0, 180.0), (800.0, 600.0)),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn submenu_position_overlaps_parent_border() {
+        assert_eq!(context_submenu_left(100.0, 250.0, 1.0, 800.0), 349.0);
+        assert_eq!(context_submenu_left(500.0, 250.0, 1.0, 800.0), 251.0);
     }
 
     #[test]

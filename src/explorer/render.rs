@@ -41,7 +41,7 @@ use crate::explorer::{
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
         clamped_context_menu_origin, context_menu_height, context_menu_item_top,
-        context_menu_path_is_active, context_menu_pointer_tip_origin,
+        context_menu_path_is_active, context_menu_pointer_tip_origin, context_submenu_left,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -135,7 +135,7 @@ const CONTEXT_MENU_WIDTH: f32 = 250.0;
 const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
 const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 18.0;
-const CONTEXT_MENU_SUBMENU_GAP: f32 = 2.0;
+const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
 const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
@@ -2588,13 +2588,12 @@ fn render_context_menu_level(
             CONTEXT_MENU_ROW_HEIGHT,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         );
-        let right_left = left + CONTEXT_MENU_WIDTH + CONTEXT_MENU_SUBMENU_GAP;
-        let left_left = left - CONTEXT_MENU_WIDTH - CONTEXT_MENU_SUBMENU_GAP;
-        let child_left = if right_left + CONTEXT_MENU_WIDTH <= window_size.0 - 4.0 {
-            right_left
-        } else {
-            left_left
-        };
+        let child_left = context_submenu_left(
+            left,
+            CONTEXT_MENU_WIDTH,
+            CONTEXT_MENU_SUBMENU_OVERLAP,
+            window_size.0,
+        );
         let (_, child_top) = clamped_context_menu_origin(
             (child_left, top + row_top - 4.0),
             (CONTEXT_MENU_WIDTH, child_height),
