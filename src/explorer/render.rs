@@ -81,7 +81,7 @@ const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
 const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
-const SIDEBAR_INSERTION_ZONE_HEIGHT: f32 = 4.0;
+const SIDEBAR_ITEM_GAP: f32 = 4.0;
 const SIDEBAR_ROW_BG: u32 = 0xffffff;
 const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
@@ -897,7 +897,7 @@ impl ExplorerView {
             children.push(self.render_sidebar_insertion_zone(
                 item.configured_index.unwrap_or(self.sidebar_items.len()),
                 index,
-                SIDEBAR_INSERTION_ZONE_HEIGHT,
+                SIDEBAR_ITEM_GAP,
                 cx,
             ));
             children.push(self.render_sidebar_row(index, item, cx));
@@ -912,7 +912,7 @@ impl ExplorerView {
             final_insertion_index,
             sections.user_directories.len(),
             if has_user_directories {
-                SIDEBAR_INSERTION_ZONE_HEIGHT
+                SIDEBAR_ITEM_GAP
             } else {
                 SIDEBAR_ROW_HEIGHT
             },
@@ -924,6 +924,9 @@ impl ExplorerView {
         }
 
         for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
+            if index > 0 {
+                children.push(sidebar_item_gap().into_any_element());
+            }
             children.push(self.render_sidebar_row(index + 1_000, item, cx));
         }
 
@@ -932,6 +935,9 @@ impl ExplorerView {
         }
 
         for (index, item) in sections.drives.iter().cloned().enumerate() {
+            if index > 0 {
+                children.push(sidebar_item_gap().into_any_element());
+            }
             children.push(self.render_sidebar_row(index + 2_000, item, cx));
         }
 
@@ -2300,6 +2306,10 @@ fn sidebar_separator() -> Div {
         .my(px(12.0))
         .bg(rgb(0xe5e5e5))
         .flex_shrink_0()
+}
+
+fn sidebar_item_gap() -> Div {
+    div().h(px(SIDEBAR_ITEM_GAP)).flex_shrink_0()
 }
 
 fn sidebar_pin_path_from_value(dragged_value: &dyn Any) -> Option<PathBuf> {
