@@ -4,6 +4,7 @@ mod app_icons;
 mod breadcrumb;
 mod clipboard;
 pub(crate) mod constants;
+mod context_menu;
 mod dialog;
 mod directory_kind;
 mod drag_drop;

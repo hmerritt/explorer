@@ -1,0 +1,321 @@
+use std::{fs, path::Path, time::SystemTime};
+
+use gpui::{Context, Pixels, Point, Window};
+
+use crate::explorer::{formatting::format_modified, view::ExplorerView};
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ContextMenuState {
+    pub(super) origin: Point<Pixels>,
+    pub(super) items: Vec<ContextMenuItem>,
+    pub(super) hovered_path: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ContextMenuItem {
+    Action {
+        id: &'static str,
+        icon: Option<ContextMenuIcon>,
+        label: &'static str,
+        command: ContextMenuCommand,
+        enabled: bool,
+    },
+    Submenu {
+        id: &'static str,
+        icon: Option<ContextMenuIcon>,
+        label: &'static str,
+        children: Vec<ContextMenuItem>,
+    },
+    Separator,
+    Detail {
+        label: &'static str,
+        value: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContextMenuIcon {
+    Paste,
+    New,
+    File,
+    Folder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContextMenuCommand {
+    Paste,
+    NewFile,
+    NewFolder,
+}
+
+impl ContextMenuState {
+    pub(super) fn new(origin: Point<Pixels>, items: Vec<ContextMenuItem>) -> Self {
+        Self {
+            origin,
+            items,
+            hovered_path: Vec::new(),
+        }
+    }
+}
+
+impl ExplorerView {
+    pub(super) fn open_folder_context_menu(
+        &mut self,
+        origin: Point<Pixels>,
+        can_paste: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.commit_active_rename_before_interaction(window, cx) {
+            return false;
+        }
+
+        self.finish_search_edit();
+        self.cancel_address_bar_edit();
+        self.cancel_pending_click_rename();
+        self.open_utility_menu = None;
+        self.context_menu = Some(ContextMenuState::new(
+            origin,
+            folder_context_menu_items(&self.path, can_paste),
+        ));
+        true
+    }
+
+    pub(super) fn close_context_menu(&mut self) -> bool {
+        self.context_menu.take().is_some()
+    }
+
+    pub(super) fn set_context_menu_hovered_path(&mut self, path: Vec<usize>) {
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.hovered_path = path;
+        }
+    }
+
+    pub(super) fn execute_context_menu_command(
+        &mut self,
+        command: ContextMenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_context_menu();
+        self.open_utility_menu = None;
+
+        if !self.commit_active_rename_before_interaction(window, cx) {
+            return;
+        }
+
+        match command {
+            ContextMenuCommand::Paste => self.paste_clipboard_files(cx),
+            ContextMenuCommand::NewFile => self.create_new_file(window, cx),
+            ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
+        }
+    }
+}
+
+pub(super) fn folder_context_menu_items(path: &Path, can_paste: bool) -> Vec<ContextMenuItem> {
+    let (created, modified) = fs::metadata(path)
+        .map(|metadata| (metadata.created().ok(), metadata.modified().ok()))
+        .unwrap_or((None, None));
+
+    folder_context_menu_items_from_times(can_paste, created, modified)
+}
+
+pub(super) fn folder_context_menu_items_from_times(
+    can_paste: bool,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+) -> Vec<ContextMenuItem> {
+    vec![
+        ContextMenuItem::Action {
+            id: "context-menu-paste",
+            icon: Some(ContextMenuIcon::Paste),
+            label: "Paste",
+            command: ContextMenuCommand::Paste,
+            enabled: can_paste,
+        },
+        ContextMenuItem::Submenu {
+            id: "context-menu-new",
+            icon: Some(ContextMenuIcon::New),
+            label: "+ New",
+            children: vec![
+                ContextMenuItem::Action {
+                    id: "context-menu-new-file",
+                    icon: Some(ContextMenuIcon::File),
+                    label: "File",
+                    command: ContextMenuCommand::NewFile,
+                    enabled: true,
+                },
+                ContextMenuItem::Action {
+                    id: "context-menu-new-folder",
+                    icon: Some(ContextMenuIcon::Folder),
+                    label: "Folder",
+                    command: ContextMenuCommand::NewFolder,
+                    enabled: true,
+                },
+            ],
+        },
+        ContextMenuItem::Separator,
+        ContextMenuItem::Detail {
+            label: "Created",
+            value: format_modified(created),
+        },
+        ContextMenuItem::Detail {
+            label: "Modified",
+            value: format_modified(modified),
+        },
+    ]
+}
+
+pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]) -> bool {
+    hovered_path.len() >= path.len() && hovered_path[..path.len()] == *path
+}
+
+pub(super) fn context_menu_height(
+    items: &[ContextMenuItem],
+    row_height: f32,
+    separator_height: f32,
+) -> f32 {
+    let content_height: f32 = items
+        .iter()
+        .map(|item| match item {
+            ContextMenuItem::Separator => separator_height,
+            ContextMenuItem::Action { .. }
+            | ContextMenuItem::Submenu { .. }
+            | ContextMenuItem::Detail { .. } => row_height,
+        })
+        .sum();
+
+    content_height + 8.0
+}
+
+pub(super) fn context_menu_item_top(
+    items: &[ContextMenuItem],
+    index: usize,
+    row_height: f32,
+    separator_height: f32,
+) -> f32 {
+    4.0 + items[..index]
+        .iter()
+        .map(|item| match item {
+            ContextMenuItem::Separator => separator_height,
+            ContextMenuItem::Action { .. }
+            | ContextMenuItem::Submenu { .. }
+            | ContextMenuItem::Detail { .. } => row_height,
+        })
+        .sum::<f32>()
+}
+
+pub(super) fn clamped_context_menu_origin(
+    origin: (f32, f32),
+    menu_size: (f32, f32),
+    window_size: (f32, f32),
+) -> (f32, f32) {
+    let max_x = (window_size.0 - menu_size.0 - 4.0).max(4.0);
+    let max_y = (window_size.1 - menu_size.1 - 4.0).max(4.0);
+
+    (origin.0.clamp(4.0, max_x), origin.1.clamp(4.0, max_y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Local, TimeZone};
+
+    #[test]
+    fn hovered_path_matches_active_branch() {
+        let hovered = vec![1, 0, 2];
+
+        assert!(context_menu_path_is_active(&hovered, &[1]));
+        assert!(context_menu_path_is_active(&hovered, &[1, 0]));
+        assert!(context_menu_path_is_active(&hovered, &[1, 0, 2]));
+        assert!(!context_menu_path_is_active(&hovered, &[0]));
+        assert!(!context_menu_path_is_active(&hovered, &[1, 1]));
+        assert!(!context_menu_path_is_active(&hovered, &[1, 0, 2, 0]));
+    }
+
+    #[test]
+    fn root_menu_position_clamps_inside_window() {
+        assert_eq!(
+            clamped_context_menu_origin((780.0, 580.0), (220.0, 180.0), (800.0, 600.0)),
+            (576.0, 416.0)
+        );
+        assert_eq!(
+            clamped_context_menu_origin((-20.0, -10.0), (220.0, 180.0), (800.0, 600.0)),
+            (4.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn folder_menu_contains_expected_items_and_icons() {
+        let items = folder_context_menu_items_from_times(false, None, None);
+
+        assert_eq!(items.len(), 5);
+        assert_eq!(
+            items[0],
+            ContextMenuItem::Action {
+                id: "context-menu-paste",
+                icon: Some(ContextMenuIcon::Paste),
+                label: "Paste",
+                command: ContextMenuCommand::Paste,
+                enabled: false,
+            }
+        );
+
+        let ContextMenuItem::Submenu {
+            icon,
+            label,
+            children,
+            ..
+        } = &items[1]
+        else {
+            panic!("expected New submenu");
+        };
+        assert_eq!(*icon, Some(ContextMenuIcon::New));
+        assert_eq!(*label, "+ New");
+        assert_eq!(children.len(), 2);
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+    }
+
+    #[test]
+    fn detail_rows_have_no_icons_and_blank_unsupported_dates() {
+        let items = folder_context_menu_items_from_times(true, None, None);
+
+        assert_eq!(
+            items[3],
+            ContextMenuItem::Detail {
+                label: "Created",
+                value: String::new(),
+            }
+        );
+        assert_eq!(
+            items[4],
+            ContextMenuItem::Detail {
+                label: "Modified",
+                value: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn detail_rows_format_supported_dates() {
+        let created = Local.with_ymd_and_hms(2026, 6, 1, 9, 15, 0).unwrap();
+        let modified = Local.with_ymd_and_hms(2026, 6, 2, 10, 30, 0).unwrap();
+        let items =
+            folder_context_menu_items_from_times(true, Some(created.into()), Some(modified.into()));
+
+        assert_eq!(
+            items[3],
+            ContextMenuItem::Detail {
+                label: "Created",
+                value: "01/06/2026 09:15".to_owned(),
+            }
+        );
+        assert_eq!(
+            items[4],
+            ContextMenuItem::Detail {
+                label: "Modified",
+                value: "02/06/2026 10:30".to_owned(),
+            }
+        );
+    }
+}

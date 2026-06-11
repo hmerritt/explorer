@@ -4,8 +4,8 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent, Entity,
     ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextRun, Window, canvas, div, font, prelude::*, px, rgb,
-    transparent_black, uniform_list,
+    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, prelude::*, px,
+    rgb, transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -37,6 +37,10 @@ use crate::explorer::{
         STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
         UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
         UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH, effective_name_column_width,
+    },
+    context_menu::{
+        ContextMenuCommand, ContextMenuIcon, ContextMenuItem, clamped_context_menu_origin,
+        context_menu_height, context_menu_item_top, context_menu_path_is_active,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -124,6 +128,12 @@ const UTILITY_ICON_FILE: &str = "\u{E8A5}";
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
+const CONTEXT_MENU_WIDTH: f32 = 250.0;
+const CONTEXT_MENU_ROW_HEIGHT: f32 = 34.0;
+const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
+const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 22.0;
+const CONTEXT_MENU_SUBMENU_GAP: f32 = 2.0;
+const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
@@ -551,6 +561,68 @@ impl ExplorerView {
                 )
                 .into_any_element(),
         )
+    }
+
+    fn render_context_menu_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.context_menu.as_ref()?;
+        let window_width = f32::from(window.bounds().size.width);
+        let window_height = f32::from(window.bounds().size.height);
+        let root_height = context_menu_height(
+            &menu.items,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let (left, top) = clamped_context_menu_origin(
+            (f32::from(menu.origin.x), f32::from(menu.origin.y)),
+            (CONTEXT_MENU_WIDTH, root_height),
+            (window_width, window_height),
+        );
+        let mut menu_elements = Vec::new();
+
+        render_context_menu_level(
+            &menu.items,
+            &menu.hovered_path,
+            Vec::new(),
+            Point {
+                x: px(left),
+                y: px(top),
+            },
+            (window_width, window_height),
+            cx,
+            &mut menu_elements,
+        );
+
+        let click_catcher = div()
+            .id("context-menu-click-catcher")
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .size_full()
+            .cursor_default()
+            .bg(transparent_black())
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
+                cx.stop_propagation();
+                cx.notify();
+            }));
+
+        let mut overlay = div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .size_full()
+            .child(click_catcher);
+
+        for menu in menu_elements {
+            overlay = overlay.child(menu);
+        }
+
+        Some(overlay.into_any_element())
     }
 
     fn render_address_suggestions_overlay(
@@ -1210,6 +1282,12 @@ impl ExplorerView {
                 cx.notify();
             }))
             .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_: &mut Self, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if !this.commit_active_rename_before_interaction(window, cx) {
@@ -1538,7 +1616,25 @@ impl ExplorerView {
                             cx.notify();
                         }
                     }))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            let clipboard = cx.read_from_clipboard();
+                            let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+                            if this.open_folder_context_menu(event.position, can_paste, window, cx)
+                            {
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        if !event.standard_click() {
+                            cx.stop_propagation();
+                            return;
+                        }
+
+                        this.close_context_menu();
                         if this.suppress_next_click() {
                             this.cancel_pending_click_rename();
                             cx.stop_propagation();
@@ -1553,6 +1649,7 @@ impl ExplorerView {
                         }
 
                         this.clear_selection();
+                        this.close_context_menu();
                         cx.notify();
                     }))
                     .child(self.render_mouse_selection_hit_layer(cx))
@@ -1649,6 +1746,30 @@ impl ExplorerView {
                     cx.stop_propagation();
                     cx.notify();
                 }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let clipboard = cx.read_from_clipboard();
+                    let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+                    if this.open_folder_context_menu(event.position, can_paste, window, cx) {
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if !event.standard_click() {
+                    cx.stop_propagation();
+                    return;
+                }
+
+                this.close_context_menu();
+                if this.commit_active_rename_before_interaction(window, cx) {
+                    this.clear_selection();
+                }
+                cx.stop_propagation();
+                cx.notify();
             }))
             .child(render_empty_folder_message(message, detail))
             .into_any_element()
@@ -2026,6 +2147,10 @@ impl Render for ExplorerView {
                 self.render_address_suggestions_overlay(window, cx),
                 |this, menu| this.child(menu),
             )
+            .when_some(
+                self.render_context_menu_overlay(window, cx),
+                |this, menu| this.child(menu),
+            )
     }
 }
 
@@ -2351,6 +2476,268 @@ fn utility_dropdown() -> Div {
         .border_color(rgb(0xd8d8d8))
         .shadow_md()
         .occlude()
+}
+
+fn context_menu_dropdown(items: &[ContextMenuItem]) -> Div {
+    div()
+        .w(px(CONTEXT_MENU_WIDTH))
+        .h(px(context_menu_height(
+            items,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        )))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xd8d8d8))
+        .shadow_md()
+        .occlude()
+}
+
+fn render_context_menu_level(
+    items: &[ContextMenuItem],
+    hovered_path: &[usize],
+    path_prefix: Vec<usize>,
+    origin: Point<Pixels>,
+    window_size: (f32, f32),
+    cx: &mut Context<ExplorerView>,
+    elements: &mut Vec<AnyElement>,
+) {
+    let menu_height = context_menu_height(
+        items,
+        CONTEXT_MENU_ROW_HEIGHT,
+        CONTEXT_MENU_SEPARATOR_HEIGHT,
+    );
+    let (left, top) = clamped_context_menu_origin(
+        (f32::from(origin.x), f32::from(origin.y)),
+        (CONTEXT_MENU_WIDTH, menu_height),
+        window_size,
+    );
+    let mut menu = context_menu_dropdown(items)
+        .absolute()
+        .left(px(left))
+        .top(px(top));
+    let mut active_submenu: Option<(&[ContextMenuItem], Vec<usize>, f32)> = None;
+
+    for (index, item) in items.iter().enumerate() {
+        let mut path = path_prefix.clone();
+        path.push(index);
+        let row_top = context_menu_item_top(
+            items,
+            index,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+
+        if let ContextMenuItem::Submenu { children, .. } = item
+            && context_menu_path_is_active(hovered_path, &path)
+        {
+            active_submenu = Some((children.as_slice(), path.clone(), row_top));
+        }
+
+        menu = menu.child(render_context_menu_item(item, path, cx));
+    }
+
+    elements.push(menu.into_any_element());
+
+    if let Some((children, child_path, row_top)) = active_submenu {
+        let child_height = context_menu_height(
+            children,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let right_left = left + CONTEXT_MENU_WIDTH + CONTEXT_MENU_SUBMENU_GAP;
+        let left_left = left - CONTEXT_MENU_WIDTH - CONTEXT_MENU_SUBMENU_GAP;
+        let child_left = if right_left + CONTEXT_MENU_WIDTH <= window_size.0 - 4.0 {
+            right_left
+        } else {
+            left_left
+        };
+        let (_, child_top) = clamped_context_menu_origin(
+            (child_left, top + row_top - 4.0),
+            (CONTEXT_MENU_WIDTH, child_height),
+            window_size,
+        );
+
+        render_context_menu_level(
+            children,
+            hovered_path,
+            child_path,
+            Point {
+                x: px(child_left),
+                y: px(child_top),
+            },
+            window_size,
+            cx,
+            elements,
+        );
+    }
+}
+
+fn render_context_menu_item(
+    item: &ContextMenuItem,
+    path: Vec<usize>,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    match item {
+        ContextMenuItem::Action {
+            id,
+            icon,
+            label,
+            command,
+            enabled,
+        } => context_menu_action_row(*id, *icon, label, *command, *enabled, path, cx),
+        ContextMenuItem::Submenu {
+            id, icon, label, ..
+        } => context_menu_submenu_row(*id, *icon, label, path, cx),
+        ContextMenuItem::Separator => context_menu_separator().into_any_element(),
+        ContextMenuItem::Detail { label, value } => context_menu_detail_row(label, value, path, cx),
+    }
+}
+
+fn context_menu_action_row(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    label: &'static str,
+    command: ContextMenuCommand,
+    enabled: bool,
+    path: Vec<usize>,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    context_menu_row_base(id, icon, label, path, cx)
+        .when(!enabled, |this| this.opacity(0.45))
+        .when(enabled, |this| {
+            this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.execute_context_menu_command(command, window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+        })
+        .child(context_menu_trailing_slot(None))
+        .into_any_element()
+}
+
+fn context_menu_submenu_row(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    label: &'static str,
+    path: Vec<usize>,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    context_menu_row_base(id, icon, label, path, cx)
+        .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
+        .into_any_element()
+}
+
+fn context_menu_detail_row(
+    label: &'static str,
+    value: &str,
+    path: Vec<usize>,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let id = match label {
+        "Created" => "context-menu-created",
+        "Modified" => "context-menu-modified",
+        _ => "context-menu-detail",
+    };
+
+    context_menu_row_base(id, None, label, path, cx)
+        .child(
+            div()
+                .ml(px(12.0))
+                .min_w(px(0.0))
+                .flex_1()
+                .truncate()
+                .text_align(TextAlign::Right)
+                .text_color(rgb(0x595959))
+                .child(SharedString::from(value.to_owned())),
+        )
+        .into_any_element()
+}
+
+fn context_menu_row_base(
+    id: &'static str,
+    icon: Option<ContextMenuIcon>,
+    label: &'static str,
+    path: Vec<usize>,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(CONTEXT_MENU_ROW_HEIGHT))
+        .mx(px(4.0))
+        .px(px(8.0))
+        .gap(px(8.0))
+        .rounded(px(4.0))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(0xe5f3ff)))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if *hovered {
+                this.set_context_menu_hovered_path(path.clone());
+                cx.notify();
+            }
+        }))
+        .child(context_menu_icon_slot(icon))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(rgb(0x1f1f1f))
+                .child(label),
+        )
+}
+
+fn context_menu_separator() -> Div {
+    div()
+        .h(px(CONTEXT_MENU_SEPARATOR_HEIGHT))
+        .mx(px(10.0))
+        .flex()
+        .items_center()
+        .child(div().h(px(1.0)).w_full().bg(rgb(0xe5e5e5)))
+}
+
+fn context_menu_icon_slot(icon: Option<ContextMenuIcon>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(CONTEXT_MENU_ICON_SLOT_SIZE))
+        .h(px(CONTEXT_MENU_ICON_SLOT_SIZE))
+        .flex_shrink_0()
+        .when_some(icon.and_then(context_menu_icon_element), |this, icon| {
+            this.child(icon)
+        })
+}
+
+fn context_menu_icon_element(icon: ContextMenuIcon) -> Option<AnyElement> {
+    Some(match icon {
+        ContextMenuIcon::Paste => gpui::img(PASTE_ICON.clone())
+            .w(px(16.0))
+            .h(px(16.0))
+            .into_any_element(),
+        ContextMenuIcon::New => utility_new_icon().into_any_element(),
+        ContextMenuIcon::File => utility_menu_glyph_icon(UTILITY_ICON_FILE),
+        ContextMenuIcon::Folder => folder_icon().into_any_element(),
+    })
+}
+
+fn context_menu_trailing_slot(glyph: Option<&'static str>) -> Div {
+    div()
+        .ml_auto()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(16.0))
+        .h(px(16.0))
+        .font(nav_icon_font())
+        .text_size(px(12.0))
+        .text_color(rgb(0x1f1f1f))
+        .when_some(glyph, |this, glyph| this.child(glyph))
 }
 
 fn utility_menu_row(
