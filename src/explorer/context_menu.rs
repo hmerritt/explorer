@@ -182,6 +182,7 @@ pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]
 pub(super) fn context_menu_height(
     items: &[ContextMenuItem],
     row_height: f32,
+    row_gap: f32,
     separator_height: f32,
 ) -> f32 {
     let content_height: f32 = items
@@ -190,7 +191,7 @@ pub(super) fn context_menu_height(
             ContextMenuItem::Separator => separator_height,
             ContextMenuItem::Action { .. }
             | ContextMenuItem::Submenu { .. }
-            | ContextMenuItem::Detail { .. } => row_height,
+            | ContextMenuItem::Detail { .. } => row_height + row_gap,
         })
         .sum();
 
@@ -201,6 +202,7 @@ pub(super) fn context_menu_item_top(
     items: &[ContextMenuItem],
     index: usize,
     row_height: f32,
+    row_gap: f32,
     separator_height: f32,
 ) -> f32 {
     4.0 + items[..index]
@@ -209,7 +211,7 @@ pub(super) fn context_menu_item_top(
             ContextMenuItem::Separator => separator_height,
             ContextMenuItem::Action { .. }
             | ContextMenuItem::Submenu { .. }
-            | ContextMenuItem::Detail { .. } => row_height,
+            | ContextMenuItem::Detail { .. } => row_height + row_gap,
         })
         .sum::<f32>()
 }
@@ -284,6 +286,56 @@ mod tests {
     fn submenu_position_overlaps_parent_border() {
         assert_eq!(context_submenu_left(100.0, 250.0, 1.0, 800.0), 349.0);
         assert_eq!(context_submenu_left(500.0, 250.0, 1.0, 800.0), 251.0);
+    }
+
+    #[test]
+    fn menu_height_includes_item_gaps() {
+        let items = vec![
+            ContextMenuItem::Action {
+                id: "context-menu-paste",
+                icon: Some(ContextMenuIcon::Paste),
+                label: "Paste",
+                command: ContextMenuCommand::Paste,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Detail {
+                label: "Created",
+                value: String::new(),
+                icon_slot: ContextMenuIconSlot::Collapse,
+            },
+        ];
+
+        assert_eq!(context_menu_height(&items, 28.0, 4.0, 9.0), 81.0);
+    }
+
+    #[test]
+    fn item_top_includes_prior_item_gaps() {
+        let items = vec![
+            ContextMenuItem::Action {
+                id: "context-menu-paste",
+                icon: Some(ContextMenuIcon::Paste),
+                label: "Paste",
+                command: ContextMenuCommand::Paste,
+                enabled: true,
+            },
+            ContextMenuItem::Submenu {
+                id: "context-menu-new",
+                icon: Some(ContextMenuIcon::New),
+                label: "New",
+                children: Vec::new(),
+            },
+            ContextMenuItem::Separator,
+            ContextMenuItem::Detail {
+                label: "Created",
+                value: String::new(),
+                icon_slot: ContextMenuIconSlot::Collapse,
+            },
+        ];
+
+        assert_eq!(context_menu_item_top(&items, 0, 28.0, 4.0, 9.0), 4.0);
+        assert_eq!(context_menu_item_top(&items, 1, 28.0, 4.0, 9.0), 36.0);
+        assert_eq!(context_menu_item_top(&items, 3, 28.0, 4.0, 9.0), 77.0);
     }
 
     #[test]

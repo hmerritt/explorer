@@ -133,6 +133,7 @@ const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const CONTEXT_MENU_WIDTH: f32 = 250.0;
 const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
+const CONTEXT_MENU_ITEM_VERTICAL_GAP: f32 = 4.0;
 const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 9.0;
 const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 18.0;
 const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
@@ -589,6 +590,7 @@ impl ExplorerView {
         let root_height = context_menu_height(
             &menu.items,
             CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         );
         let (left, top) = context_menu_pointer_tip_origin(
@@ -2525,6 +2527,7 @@ fn context_menu_dropdown(items: &[ContextMenuItem]) -> Div {
         .h(px(context_menu_height(
             items,
             CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         )))
         .py(px(4.0))
@@ -2548,6 +2551,7 @@ fn render_context_menu_level(
     let menu_height = context_menu_height(
         items,
         CONTEXT_MENU_ROW_HEIGHT,
+        CONTEXT_MENU_ITEM_VERTICAL_GAP,
         CONTEXT_MENU_SEPARATOR_HEIGHT,
     );
     let (left, top) = clamped_context_menu_origin(
@@ -2568,6 +2572,7 @@ fn render_context_menu_level(
             items,
             index,
             CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         );
 
@@ -2586,6 +2591,7 @@ fn render_context_menu_level(
         let child_height = context_menu_height(
             children,
             CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
             CONTEXT_MENU_SEPARATOR_HEIGHT,
         );
         let child_left = context_submenu_left(
@@ -2740,6 +2746,7 @@ fn context_menu_row_base(
         .flex_row()
         .items_center()
         .h(px(CONTEXT_MENU_ROW_HEIGHT))
+        .my(px(CONTEXT_MENU_ITEM_VERTICAL_GAP / 2.0))
         .mx(px(4.0))
         .px(px(8.0))
         .gap(px(10.0))

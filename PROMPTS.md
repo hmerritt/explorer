@@ -1,7 +1,6 @@
 ## New
 
-- Context menu submenus currently have a gap. Let's remove this gap so the menu edges are touching. Let's also -1px so there is not a double-border visible
-- Add item gap (or vertical margin) to context menu items of 4px
+- Context menu container + item spacing. The final item does not have the same bottom gap as the sides/top does. Let's make the left/right top/bottom margins the same for the container.
 
 ---
 
