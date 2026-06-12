@@ -18,7 +18,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
-    formatting::format_size,
+    formatting::{format_size, format_timestamp},
     icons::{
         DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON, image_icon,
     },
@@ -135,12 +135,13 @@ pub(super) struct PermanentDeleteDialogText {
     pub(super) item_name: Option<String>,
     pub(super) item_kind: Option<PermanentDeleteItemKind>,
     pub(super) size_label: Option<String>,
+    pub(super) date_modified_label: Option<String>,
     pub(super) folder_size_path: Option<PathBuf>,
 }
 
 impl PermanentDeleteDialogText {
     fn has_file_details(&self) -> bool {
-        self.item_name.is_some() || self.size_label.is_some()
+        self.item_name.is_some() || self.size_label.is_some() || self.date_modified_label.is_some()
     }
 }
 
@@ -897,7 +898,7 @@ fn permanent_delete_dialog_height(text: &PermanentDeleteDialogText, cx: &App) ->
 fn permanent_delete_text_stack_height(prompt_height: f32) -> f32 {
     prompt_height
         + DELETE_DIALOG_DETAILS_TOP_MARGIN
-        + (dialog_line_height(DELETE_DIALOG_PROMPT_TEXT_SIZE) * 2.0)
+        + (dialog_line_height(DELETE_DIALOG_PROMPT_TEXT_SIZE) * 3.0)
 }
 
 fn permanent_delete_dialog_height_for_content_height(content_height: f32) -> f32 {
@@ -1089,6 +1090,9 @@ fn render_permanent_delete_file_body(
                 })
                 .when_some(text.size_label, |this, size_label| {
                     this.child(SharedString::from(size_label))
+                })
+                .when_some(text.date_modified_label, |this, date_modified_label| {
+                    this.child(SharedString::from(date_modified_label))
                 }),
         )
         .into_any_element()
@@ -1291,17 +1295,18 @@ fn dialog_command_row(
 pub(super) fn permanent_delete_dialog_text(
     pending: &PendingPermanentDelete,
 ) -> PermanentDeleteDialogText {
-    let (item_name, item_kind, size_label, folder_size_path) =
+    let (item_name, item_kind, size_label, date_modified_label, folder_size_path) =
         if let [path] = pending.paths.as_slice() {
             let detail = permanent_delete_file_detail(path);
             (
                 Some(detail.item_name),
                 Some(detail.item_kind),
                 Some(detail.size_label),
+                Some(detail.date_modified_label),
                 detail.folder_size_path,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
     let message = match item_kind {
@@ -1322,6 +1327,7 @@ pub(super) fn permanent_delete_dialog_text(
         item_name,
         item_kind,
         size_label,
+        date_modified_label,
         folder_size_path,
     }
 }
@@ -1352,6 +1358,7 @@ pub(super) fn trash_dialog_text(pending: &PendingTrash) -> PermanentDeleteDialog
         item_name,
         item_kind,
         size_label: None,
+        date_modified_label: None,
         folder_size_path: None,
     }
 }
@@ -1371,6 +1378,7 @@ struct PermanentDeleteFileDetail {
     item_name: String,
     item_kind: PermanentDeleteItemKind,
     size_label: String,
+    date_modified_label: String,
     folder_size_path: Option<PathBuf>,
 }
 
@@ -1389,6 +1397,7 @@ fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
             } else {
                 format!("Size: {}", format_size(entry.size))
             },
+            date_modified_label: format!("Date Modified: {}", format_timestamp(entry.modified)),
             folder_size_path: is_folder.then(|| path.to_path_buf()),
         };
     }
@@ -1397,6 +1406,7 @@ fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
         item_name: path_display_name(path),
         item_kind: PermanentDeleteItemKind::File,
         size_label: "Size: ".to_owned(),
+        date_modified_label: "Date Modified: ".to_owned(),
         folder_size_path: None,
     }
 }
@@ -1504,6 +1514,10 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.path().join("a.tif");
         fs::write(&path, []).expect("create selected file");
+        let modified = fs::metadata(&path)
+            .expect("read selected file metadata")
+            .modified()
+            .ok();
 
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![path],
@@ -1517,6 +1531,10 @@ mod tests {
         assert_eq!(text.item_name, Some("a.tif".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: 0 bytes".to_owned()));
+        assert_eq!(
+            text.date_modified_label,
+            Some(format!("Date Modified: {}", format_timestamp(modified)))
+        );
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -1525,6 +1543,10 @@ mod tests {
         let temp = TempDir::new();
         let folder = temp.path().join("folder");
         fs::create_dir(&folder).expect("create selected folder");
+        let modified = fs::metadata(&folder)
+            .expect("read selected folder metadata")
+            .modified()
+            .ok();
 
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![folder.clone()],
@@ -1538,6 +1560,10 @@ mod tests {
         assert_eq!(text.item_name, Some("folder".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::Folder));
         assert_eq!(text.size_label, Some("Size: calculating...".to_owned()));
+        assert_eq!(
+            text.date_modified_label,
+            Some(format!("Date Modified: {}", format_timestamp(modified)))
+        );
         assert_eq!(text.folder_size_path, Some(folder));
     }
 
@@ -1551,6 +1577,7 @@ mod tests {
         assert_eq!(text.item_name, Some("missing.txt".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: ".to_owned()));
+        assert_eq!(text.date_modified_label, Some("Date Modified: ".to_owned()));
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -1590,6 +1617,7 @@ mod tests {
         assert_eq!(text.item_name, None);
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
+        assert_eq!(text.date_modified_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -1692,6 +1720,7 @@ mod tests {
         assert_eq!(text.item_name, Some("a.txt".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, None);
+        assert_eq!(text.date_modified_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -1709,6 +1738,7 @@ mod tests {
         assert_eq!(text.item_name, None);
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
+        assert_eq!(text.date_modified_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -1860,7 +1890,7 @@ mod tests {
         let content_height = permanent_delete_text_stack_height(prompt_height);
         let height = permanent_delete_dialog_height_for_content_height(content_height);
 
-        assert_approx_eq(height, 151.0);
+        assert_approx_eq(height, 170.0);
     }
 
     #[test]
