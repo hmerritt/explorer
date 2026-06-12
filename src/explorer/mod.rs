@@ -60,7 +60,10 @@ pub(crate) use filesystem::{
     user_music_dir, user_pictures_dir, user_videos_dir,
 };
 #[cfg(feature = "benchmarks")]
-pub use recursive_search::benchmark_support;
+pub mod benchmark_support {
+    pub use super::filesystem::benchmark_support::load_entries;
+    pub use super::recursive_search::benchmark_support::*;
+}
 pub use tabs::ExplorerTabs;
 #[allow(unused_imports)]
 pub use view::ExplorerView;

@@ -232,6 +232,14 @@ impl ExplorerView {
         self.set_search_query(String::new());
     }
 
+    pub(super) fn reset_search_for_navigation(&mut self) {
+        self.search.content.clear();
+        self.search.selected_range = 0..0;
+        self.search.selection_reversed = false;
+        self.search.marked_range = None;
+        self.cancel_recursive_search();
+    }
+
     pub(super) fn apply_search_filter_preserving_selection(
         &mut self,
         selected_paths: &[std::path::PathBuf],
@@ -1154,6 +1162,23 @@ mod tests {
         view.navigate_to_directory(child, HistoryMode::Record);
         assert_eq!(view.search_query(), "");
         assert_eq!(names(&view.entries), vec!["b.png"]);
+    }
+
+    #[test]
+    fn navigating_up_clears_active_filter_and_selects_origin() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+        fs::write(child.join("a.txt"), b"a").expect("create txt");
+        fs::write(child.join("b.png"), b"b").expect("create png");
+        let mut view = ExplorerView::new(child.clone());
+        view.set_search_query("*.txt".to_owned());
+
+        view.navigate_up();
+
+        assert_eq!(view.search_query(), "");
+        assert_eq!(names(&view.entries), vec!["child"]);
+        assert_eq!(view.selected_paths(), vec![child]);
     }
 
     #[test]

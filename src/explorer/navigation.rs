@@ -44,6 +44,7 @@ impl ExplorerView {
         history_mode: HistoryMode,
         mut cx: Option<&mut Context<Self>>,
     ) {
+        let _timing_batch = crate::debug_options::NavTimingBatch::start();
         let total_started = Instant::now();
         let original_path = self.path.clone();
         crate::debug_options::log_nav_timing(
@@ -96,7 +97,7 @@ impl ExplorerView {
         }
 
         self.path = path;
-        self.clear_search();
+        self.reset_search_for_navigation();
         self.clear_selection();
         self.read_error = None;
         self.open_error = None;
@@ -110,7 +111,7 @@ impl ExplorerView {
         );
 
         let reload_started = Instant::now();
-        self.reload();
+        self.reload_for_navigation();
         if let Some(cx) = cx.as_deref_mut() {
             self.schedule_pending_shell_shortcut_resolution(cx);
         }
@@ -130,7 +131,7 @@ impl ExplorerView {
                 format_args!(
                     "navigate.select_origin path={:?} selected={}",
                     path,
-                    self.selected_paths().len()
+                    self.selection.selected_indices.len()
                 ),
             );
         }

@@ -1,5 +1,9 @@
 ## New
 
+Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
+
+Set a default value to: 1000
+
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.
@@ -11,19 +15,37 @@
 
 ## Ideas
 
-- Split-screen (Zed style)
-- Shell-extension system
-- rsync copy/sync builtin
-- Customizable context menus (add items to settings)
-- Network drives (rclone https://rclone.org/ builtin)
-- rclone https://rclone.org/ builtin, adding support for
+## 1
 
-- Context menu
+- Dialog icon improvements. Remove the existing delete icon used
+    - Delete file(s) icon: assets\icons\files\large\delete.png
+    - Delete folder(s) icon: assets\icons\folders\delete.png
+    - Delete files/folders icon: assets\icons\emblems\alert.png
+- Dialog button improvements
+    - Focus state: Blue border, with an additional dashed black border inset 1px
 - File icons
 - Large icons grid view (alternate to the current Details view)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
-- ssh drive support
+
+## 2
+
+- Split-screen (see Zed)
+- Customizable context menus (add items to settings)
+- OS Window navigation within app (see Zed)
+- [Windows-only] detext WSL Linux install, show drive for it
+- File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
+
+## 3
+
+- “Open with” picker
+- rsync copy/sync builtin
+- Shell-extension system
+- SSH drive support
+- Google Drive, OneDrive, etc... mounting
+- Network drives (rclone https://rclone.org/ builtin)
 - rclone hook for drive, B2, S3, etc...
+- rclone https://rclone.org/ builtin, adding support for
+- Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## File move/copy/sync engine
 

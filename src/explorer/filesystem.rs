@@ -444,17 +444,25 @@ fn load_applications_entries(
         };
 
         let filter_started = timings_enabled.then(Instant::now);
-        let should_skip = should_skip_directory_entry(&directory_entry, options);
+        let candidate = visible_directory_entry_candidate(&directory_entry, options);
         if let Some(started) = filter_started {
             stats.filter_elapsed += started.elapsed();
         }
-        if should_skip {
-            stats.hidden_entries += 1;
+        let DirectoryEntryCandidate::Visible {
+            path,
+            link_metadata,
+        } = candidate
+        else {
+            match candidate {
+                DirectoryEntryCandidate::Hidden => stats.hidden_entries += 1,
+                DirectoryEntryCandidate::Skipped => stats.skipped_entries += 1,
+                DirectoryEntryCandidate::Visible { .. } => unreachable!(),
+            }
             continue;
-        }
+        };
 
         let materialize_started = timings_enabled.then(Instant::now);
-        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+        let Some(entry) = materialize_visible_entry(path, link_metadata) else {
             if let Some(started) = materialize_started {
                 stats.materialize_elapsed += started.elapsed();
             }
@@ -561,17 +569,25 @@ fn collect_visible_entries(
         };
 
         let filter_started = timings_enabled.then(Instant::now);
-        let should_skip = should_skip_directory_entry(&directory_entry, options);
+        let candidate = visible_directory_entry_candidate(&directory_entry, options);
         if let Some(started) = filter_started {
             stats.filter_elapsed += started.elapsed();
         }
-        if should_skip {
-            stats.hidden_entries += 1;
+        let DirectoryEntryCandidate::Visible {
+            path,
+            link_metadata,
+        } = candidate
+        else {
+            match candidate {
+                DirectoryEntryCandidate::Hidden => stats.hidden_entries += 1,
+                DirectoryEntryCandidate::Skipped => stats.skipped_entries += 1,
+                DirectoryEntryCandidate::Visible { .. } => unreachable!(),
+            }
             continue;
-        }
+        };
 
         let materialize_started = timings_enabled.then(Instant::now);
-        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+        let Some(entry) = materialize_visible_entry(path, link_metadata) else {
             if let Some(started) = materialize_started {
                 stats.materialize_elapsed += started.elapsed();
             }
@@ -591,6 +607,62 @@ fn collect_visible_entries(
     stats
 }
 
+enum DirectoryEntryCandidate {
+    Hidden,
+    Skipped,
+    Visible {
+        path: PathBuf,
+        link_metadata: Option<fs::Metadata>,
+    },
+}
+
+fn visible_directory_entry_candidate(
+    entry: &fs::DirEntry,
+    options: EntryLoadOptions,
+) -> DirectoryEntryCandidate {
+    let name = entry.file_name();
+    if is_always_hidden_metadata_entry_name(&name) {
+        return DirectoryEntryCandidate::Hidden;
+    }
+
+    if !options.hide_hidden_entries {
+        return DirectoryEntryCandidate::Visible {
+            path: entry.path(),
+            link_metadata: None,
+        };
+    }
+
+    if name.to_string_lossy().starts_with('.') {
+        return DirectoryEntryCandidate::Hidden;
+    }
+
+    let path = entry.path();
+    let Ok(link_metadata) = fs::symlink_metadata(&path) else {
+        return DirectoryEntryCandidate::Skipped;
+    };
+
+    if has_macos_hidden_flag_with_metadata(&path, &link_metadata)
+        || has_windows_hidden_attribute_with_metadata(&path, &link_metadata)
+    {
+        return DirectoryEntryCandidate::Hidden;
+    }
+
+    DirectoryEntryCandidate::Visible {
+        path,
+        link_metadata: Some(link_metadata),
+    }
+}
+
+fn materialize_visible_entry(
+    path: PathBuf,
+    link_metadata: Option<fs::Metadata>,
+) -> Option<FileEntry> {
+    match link_metadata {
+        Some(link_metadata) => FileEntry::from_path_with_link_metadata(path, link_metadata),
+        None => FileEntry::from_path(path),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn should_use_applications_view(path: &Path) -> bool {
     path == Path::new("/Applications")
@@ -599,10 +671,6 @@ fn should_use_applications_view(path: &Path) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn should_use_applications_view(_: &Path) -> bool {
     false
-}
-
-fn should_skip_directory_entry(entry: &fs::DirEntry, options: EntryLoadOptions) -> bool {
-    should_hide_directory_entry(entry, !options.hide_hidden_entries)
 }
 
 pub(super) fn should_hide_directory_entry(entry: &fs::DirEntry, show_hidden_files: bool) -> bool {
@@ -692,6 +760,18 @@ fn has_windows_hidden_attribute_with_metadata(_: &Path, _: &fs::Metadata) -> boo
 
 pub(super) fn open_path_with_default_app(path: &Path) -> std::io::Result<()> {
     open::that_detached(path)
+}
+
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod benchmark_support {
+    use std::path::Path;
+
+    use crate::explorer::FileEntry;
+
+    pub fn load_entries(path: &Path, show_hidden_files: bool) -> Vec<FileEntry> {
+        super::load_entries(path, show_hidden_files).expect("load benchmark entries")
+    }
 }
 
 pub(super) fn format_open_error(path: &Path, error: &std::io::Error) -> String {

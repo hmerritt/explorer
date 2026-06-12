@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     ffi::OsString,
     fmt,
     sync::atomic::{AtomicU8, Ordering},
@@ -12,6 +13,67 @@ const DEBUG_SEARCH: u8 = 1 << 1;
 const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
+
+thread_local! {
+    static NAV_TIMING_BATCH: RefCell<Option<NavTimingBatchState>> = const { RefCell::new(None) };
+}
+
+struct NavTimingBatchState {
+    depth: usize,
+    lines: Vec<String>,
+}
+
+pub(crate) struct NavTimingBatch {
+    active: bool,
+}
+
+impl NavTimingBatch {
+    pub(crate) fn start() -> Self {
+        if !nav_timings_enabled() {
+            return Self { active: false };
+        }
+
+        NAV_TIMING_BATCH.with(|batch| {
+            let mut batch = batch.borrow_mut();
+            if let Some(batch) = batch.as_mut() {
+                batch.depth += 1;
+            } else {
+                *batch = Some(NavTimingBatchState {
+                    depth: 1,
+                    lines: Vec::new(),
+                });
+            }
+        });
+
+        Self { active: true }
+    }
+}
+
+impl Drop for NavTimingBatch {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let lines = NAV_TIMING_BATCH.with(|batch| {
+            let mut batch = batch.borrow_mut();
+            let Some(state) = batch.as_mut() else {
+                return Vec::new();
+            };
+
+            state.depth -= 1;
+            if state.depth > 0 {
+                return Vec::new();
+            }
+
+            batch.take().map(|state| state.lines).unwrap_or_default()
+        });
+
+        for line in lines {
+            eprintln!("{line}");
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DebugOptions {
@@ -67,7 +129,23 @@ pub(crate) fn search_timings_enabled() -> bool {
 
 pub(crate) fn log_nav_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
     if nav_timings_enabled() {
-        eprintln!("[nav] {} {message}", format_timing_duration(elapsed));
+        let mut line = Some(format!(
+            "[nav] {} {message}",
+            format_timing_duration(elapsed)
+        ));
+        let batched = NAV_TIMING_BATCH.with(|batch| {
+            let mut batch = batch.borrow_mut();
+            let Some(batch) = batch.as_mut() else {
+                return false;
+            };
+
+            batch.lines.push(line.take().expect("nav timing line"));
+            true
+        });
+
+        if !batched {
+            eprintln!("{}", line.expect("nav timing line"));
+        }
     }
 }
 

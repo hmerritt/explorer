@@ -55,6 +55,11 @@ name = "recursive_search"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "navigation_pipeline"
+harness = false
+required-features = ["benchmarks"]
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 

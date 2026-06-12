@@ -216,11 +216,30 @@ impl ExplorerView {
     }
 
     pub fn reload(&mut self) {
+        let _timing_batch = crate::debug_options::NavTimingBatch::start();
+        self.reload_inner(ReloadMode {
+            preserve_selection: true,
+            rebuild_sidebar: true,
+        });
+    }
+
+    pub(super) fn reload_for_navigation(&mut self) {
+        self.reload_inner(ReloadMode {
+            preserve_selection: false,
+            rebuild_sidebar: false,
+        });
+    }
+
+    fn reload_inner(&mut self, mode: ReloadMode) {
         let total_started = Instant::now();
         self.context_menu = None;
         self.open_error = None;
         let selected_paths_started = Instant::now();
-        let selected_paths = self.selected_paths();
+        let selected_paths = if mode.preserve_selection {
+            self.selected_paths()
+        } else {
+            Vec::new()
+        };
         crate::debug_options::log_nav_timing(
             selected_paths_started.elapsed(),
             format_args!(
@@ -230,12 +249,14 @@ impl ExplorerView {
             ),
         );
 
-        let sidebar_started = Instant::now();
-        self.sidebar_sections = sidebar_sections(&self.sidebar_items);
-        crate::debug_options::log_nav_timing(
-            sidebar_started.elapsed(),
-            format_args!("reload.sidebar_sections path={:?}", self.path),
-        );
+        if mode.rebuild_sidebar {
+            let sidebar_started = Instant::now();
+            self.sidebar_sections = sidebar_sections(&self.sidebar_items);
+            crate::debug_options::log_nav_timing(
+                sidebar_started.elapsed(),
+                format_args!("reload.sidebar_sections path={:?}", self.path),
+            );
+        }
 
         let load_started = Instant::now();
         match load_entries(&self.path, self.show_hidden_files) {
@@ -248,10 +269,20 @@ impl ExplorerView {
                         entries.len()
                     ),
                 );
-                self.all_entries = entries;
                 self.read_error = None;
                 let filter_started = Instant::now();
-                self.apply_search_filter_preserving_selection(&selected_paths);
+                if self.search_is_active() {
+                    self.all_entries = entries;
+                    self.apply_search_filter_preserving_selection(&selected_paths);
+                } else {
+                    self.entries = entries.clone();
+                    self.all_entries = entries;
+                    if mode.preserve_selection {
+                        self.restore_selection_from_paths(&selected_paths);
+                    } else {
+                        self.selection = SelectionState::default();
+                    }
+                }
                 crate::debug_options::log_nav_timing(
                     filter_started.elapsed(),
                     format_args!(
@@ -259,7 +290,7 @@ impl ExplorerView {
                         self.path,
                         self.search_query(),
                         self.entries.len(),
-                        self.selected_paths().len()
+                        self.selection.selected_indices.len()
                     ),
                 );
             }
@@ -409,6 +440,12 @@ impl ExplorerView {
 
         self.directory_watcher = None;
     }
+}
+
+#[derive(Clone, Copy)]
+struct ReloadMode {
+    preserve_selection: bool,
+    rebuild_sidebar: bool,
 }
 
 pub(super) fn tab_label_for_path(path: &Path) -> String {
