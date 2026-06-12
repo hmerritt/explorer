@@ -650,9 +650,8 @@ mod tests {
             test_window_state_path(ConfigPlatform::MacOS, &[("HOME", "home")]),
             Some(
                 PathBuf::from("home")
-                    .join("Library")
-                    .join("Application Support")
-                    .join(APP_ID)
+                    .join(".config")
+                    .join("explorer")
                     .join(WINDOW_STATE_FILE_NAME)
             )
         );

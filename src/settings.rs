@@ -507,11 +507,9 @@ pub(crate) fn config_dir_for(
     mut env_path: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     match platform {
-        ConfigPlatform::MacOS => env_path("HOME").map(|home| {
-            home.join("Library")
-                .join("Application Support")
-                .join(APP_ID)
-        }),
+        ConfigPlatform::MacOS => {
+            env_path("HOME").map(|home| home.join(".config").join(LINUX_CONFIG_DIR_NAME))
+        }
         ConfigPlatform::Linux => env_path("XDG_CONFIG_HOME")
             .map(|config_home| config_home.join(LINUX_CONFIG_DIR_NAME))
             .or_else(|| {
@@ -846,9 +844,8 @@ mod tests {
             test_config_dir(ConfigPlatform::MacOS, &[("HOME", "home")]),
             Some(
                 PathBuf::from("home")
-                    .join("Library")
-                    .join("Application Support")
-                    .join(APP_ID)
+                    .join(".config")
+                    .join(LINUX_CONFIG_DIR_NAME)
             )
         );
         assert_eq!(

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-EXPLORER_VERSION="0.3.0"
+EXPLORER_VERSION="0.10.0"
 
 main() {
     platform="$(uname -s)"
