@@ -1866,12 +1866,13 @@ impl ExplorerView {
     }
 
     fn render_mouse_selection_box(&self) -> AnyElement {
-        let Some(selection_box) = self.active_selection_box() else {
+        let Some(selection_box) = self.visible_mouse_selection_box() else {
             return div().into_any_element();
         };
 
         let bounds = selection_box_bounds(selection_box);
         div()
+            .debug_selector(|| "mouse-selection-box".to_owned())
             .absolute()
             .left(bounds.origin.x)
             .top(bounds.origin.y)

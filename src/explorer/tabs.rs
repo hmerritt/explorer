@@ -1180,8 +1180,16 @@ mod tests {
 
         cx.simulate_click(second_position, Modifiers::default());
         cx.simulate_mouse_down(first_position, MouseButton::Right, Modifiers::default());
+        assert!(cx.debug_bounds("mouse-selection-box").is_some());
         cx.read_entity(&view, |view, _| {
             assert!(view.context_menu.is_none());
+            assert!(
+                !view
+                    .mouse_selection_drag
+                    .as_ref()
+                    .expect("selection drag")
+                    .active
+            );
         });
         cx.simulate_mouse_up(first_position, MouseButton::Right, Modifiers::default());
         let first_menu_origin = cx
@@ -1190,6 +1198,7 @@ mod tests {
             .origin;
         cx.read_entity(&view, |view, _| {
             assert!(view.context_menu.is_some());
+            assert!(view.mouse_selection_drag.is_none());
             assert_eq!(first_menu_origin, first_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
         });
@@ -1236,6 +1245,17 @@ mod tests {
         let end = gpui::point(first.left() + gpui::px(100.0), first.top() + gpui::px(2.0));
 
         cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        let initial_box = cx
+            .debug_bounds("mouse-selection-box")
+            .expect("right-button selection box");
+        assert!(initial_box.size.width > gpui::px(0.0));
+        assert!(initial_box.size.height > gpui::px(0.0));
+        cx.read_entity(&view, |view, _| {
+            let drag = view.mouse_selection_drag.as_ref().expect("selection drag");
+            assert!(drag.visible);
+            assert!(!drag.active);
+        });
+
         cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
         cx.read_entity(&view, |view, _| {
             assert!(view.context_menu.is_none());

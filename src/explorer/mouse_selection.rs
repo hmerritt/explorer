@@ -20,6 +20,7 @@ pub(super) struct MouseSelectionDrag {
     pub(super) current_scroll_top: f32,
     pub(super) modifiers: SelectionModifiers,
     pub(super) initial_selection: BTreeSet<usize>,
+    pub(super) visible: bool,
     pub(super) active: bool,
 }
 
@@ -118,6 +119,7 @@ impl ExplorerView {
             current_scroll_top: scroll_top,
             modifiers,
             initial_selection: self.selection.selected_indices.clone(),
+            visible: button == MouseButton::Right,
             active: false,
         });
     }
@@ -138,6 +140,7 @@ impl ExplorerView {
         drag.current = local_position;
         if !drag.active && drag_distance(drag.start, drag.current) >= DRAG_ACTIVATION_DISTANCE {
             drag.active = true;
+            drag.visible = true;
         }
 
         if drag.active {
@@ -172,10 +175,10 @@ impl ExplorerView {
         suppress
     }
 
-    pub(super) fn active_selection_box(&self) -> Option<SelectionBox> {
+    pub(super) fn visible_mouse_selection_box(&self) -> Option<SelectionBox> {
         let drag = self.mouse_selection_drag.as_ref()?;
-        drag.active
-            .then(|| visible_selection_box_for_drag(drag, drag.current_scroll_top))
+        drag.visible
+            .then(|| visible_selection_box_for_drag(drag, drag.current_scroll_top).for_render())
     }
 
     fn apply_mouse_selection_drag(
@@ -218,6 +221,16 @@ impl ExplorerView {
 }
 
 impl SelectionBox {
+    fn for_render(self) -> Self {
+        const MINIMUM_SIZE: f32 = 2.0;
+
+        Self {
+            width: self.width.max(MINIMUM_SIZE),
+            height: self.height.max(MINIMUM_SIZE),
+            ..self
+        }
+    }
+
     fn clipped_horizontally(self, viewport_width: f32) -> Self {
         let left = self.left.clamp(0.0, viewport_width);
         let right = (self.left + self.width).clamp(0.0, viewport_width);
@@ -548,6 +561,67 @@ mod tests {
     }
 
     #[test]
+    fn right_rubber_band_is_visible_but_inactive_on_mouse_down() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+
+        view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Right,
+            gpui::point(px(10.0), px(ROW_HEIGHT * 2.0)),
+            size(px(800.0), px(100.0)),
+            SelectionModifiers::default(),
+        );
+
+        let drag = view
+            .mouse_selection_drag
+            .as_ref()
+            .expect("rubber-band drag");
+        assert!(drag.visible);
+        assert!(!drag.active);
+        assert_eq!(
+            view.visible_mouse_selection_box(),
+            Some(SelectionBox {
+                left: 10.0,
+                top: ROW_HEIGHT * 2.0,
+                width: 2.0,
+                height: 2.0,
+            })
+        );
+    }
+
+    #[test]
+    fn left_rubber_band_stays_hidden_until_drag_activation() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+
+        view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
+            gpui::point(px(10.0), px(ROW_HEIGHT * 2.0)),
+            size(px(800.0), px(100.0)),
+            SelectionModifiers::default(),
+        );
+
+        let drag = view
+            .mouse_selection_drag
+            .as_ref()
+            .expect("rubber-band drag");
+        assert!(!drag.visible);
+        assert!(!drag.active);
+        assert!(view.visible_mouse_selection_box().is_none());
+
+        view.update_mouse_selection_drag(
+            gpui::point(px(14.0), px(ROW_HEIGHT * 2.0)),
+            size(px(800.0), px(100.0)),
+        );
+
+        let drag = view
+            .mouse_selection_drag
+            .as_ref()
+            .expect("rubber-band drag");
+        assert!(drag.visible);
+        assert!(drag.active);
+        assert!(view.visible_mouse_selection_box().is_some());
+    }
+
+    #[test]
     fn plain_rubber_band_start_clears_existing_selection() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
         view.select_single_index(0);
@@ -651,12 +725,12 @@ mod tests {
             gpui::point(px(40.0), px(ROW_HEIGHT * 2.0)),
             size(px(100.0), px(100.0)),
         );
-        assert!(view.active_selection_box().is_some());
+        assert!(view.visible_mouse_selection_box().is_some());
 
         assert!(view.cancel_mouse_selection_drag());
 
         assert!(view.mouse_selection_drag.is_none());
-        assert!(view.active_selection_box().is_none());
+        assert!(view.visible_mouse_selection_box().is_none());
     }
 
     #[test]
@@ -697,6 +771,7 @@ mod tests {
             current_scroll_top: 112.0,
             modifiers: SelectionModifiers::default(),
             initial_selection: BTreeSet::new(),
+            visible: true,
             active: true,
         };
 
@@ -740,6 +815,7 @@ mod tests {
             current_scroll_top: ROW_HEIGHT * 4.0,
             modifiers: SelectionModifiers::default(),
             initial_selection: BTreeSet::new(),
+            visible: true,
             active: true,
         };
 
