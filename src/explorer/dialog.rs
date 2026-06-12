@@ -19,6 +19,9 @@ use crate::explorer::{
     filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::format_size,
+    icons::{
+        DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON, image_icon,
+    },
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
 
@@ -51,7 +54,7 @@ const DELETE_DIALOG_WIDTH: f32 = 460.0;
 const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 12.0;
 const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 24.0;
 const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
-const DELETE_DIALOG_ICON_SLOT_WIDTH: f32 = 46.0;
+const DELETE_DIALOG_ICON_SLOT_WIDTH: f32 = 40.0;
 const DELETE_DIALOG_ICON_SLOT_HEIGHT: f32 = 64.0;
 const DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT: f32 = 46.0;
 const DELETE_DIALOG_ICON_GAP: f32 = 16.0;
@@ -111,6 +114,13 @@ enum DialogActivation {
     ConfirmTrash,
     ReplaceConflicts,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeleteDialogIconKind {
+    File,
+    Folder,
+    Mixed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -568,6 +578,7 @@ impl ExplorerDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let icon_kind = delete_dialog_icon_kind(&pending.paths);
         let mut text = permanent_delete_dialog_text(&pending);
         if let Some(path) = text.folder_size_path.as_deref() {
             text.size_label = Some(self.folder_size_label(path));
@@ -577,9 +588,9 @@ impl ExplorerDialog {
             .as_deref()
             .map(|name| truncated_permanent_delete_file_name(name, window));
         let body = if text.has_file_details() {
-            render_permanent_delete_file_body(text, item_name)
+            render_permanent_delete_file_body(text, item_name, icon_kind)
         } else {
-            render_permanent_delete_compact_body(text.message)
+            render_permanent_delete_compact_body(text.message, icon_kind)
         };
 
         div()
@@ -631,15 +642,16 @@ impl ExplorerDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let icon_kind = delete_dialog_icon_kind(&pending.paths);
         let text = trash_dialog_text(&pending);
         let item_name = text
             .item_name
             .as_deref()
             .map(|name| truncated_permanent_delete_file_name(name, window));
         let body = if text.has_file_details() {
-            render_permanent_delete_file_body(text, item_name)
+            render_permanent_delete_file_body(text, item_name, icon_kind)
         } else {
-            render_permanent_delete_compact_body(text.message)
+            render_permanent_delete_compact_body(text.message, icon_kind)
         };
 
         div()
@@ -1047,13 +1059,17 @@ fn dialog_activation(
 fn render_permanent_delete_file_body(
     text: PermanentDeleteDialogText,
     file_name: Option<SharedString>,
+    icon_kind: DeleteDialogIconKind,
 ) -> AnyElement {
     div()
         .flex()
         .flex_row()
         .items_start()
         .gap(px(DELETE_DIALOG_ICON_GAP))
-        .child(render_delete_file_icon(DELETE_DIALOG_ICON_SLOT_HEIGHT))
+        .child(render_delete_file_icon(
+            icon_kind,
+            DELETE_DIALOG_ICON_SLOT_HEIGHT,
+        ))
         .child(
             div()
                 .flex()
@@ -1078,13 +1094,17 @@ fn render_permanent_delete_file_body(
         .into_any_element()
 }
 
-fn render_permanent_delete_compact_body(message: String) -> AnyElement {
+fn render_permanent_delete_compact_body(
+    message: String,
+    icon_kind: DeleteDialogIconKind,
+) -> AnyElement {
     div()
         .flex()
         .flex_row()
         .items_start()
         .gap(px(DELETE_DIALOG_ICON_GAP))
         .child(render_delete_file_icon(
+            icon_kind,
             DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT,
         ))
         .child(
@@ -1097,49 +1117,22 @@ fn render_permanent_delete_compact_body(message: String) -> AnyElement {
         .into_any_element()
 }
 
-fn render_delete_file_icon(slot_height: f32) -> gpui::Div {
+fn render_delete_file_icon(icon_kind: DeleteDialogIconKind, slot_height: f32) -> gpui::Div {
+    let image = match icon_kind {
+        DeleteDialogIconKind::File => DELETE_FILE_DIALOG_ICON.clone(),
+        DeleteDialogIconKind::Folder => DELETE_FOLDER_DIALOG_ICON.clone(),
+        DeleteDialogIconKind::Mixed => DELETE_MIXED_DIALOG_ICON.clone(),
+    };
+
     div()
-        .relative()
         .w(px(DELETE_DIALOG_ICON_SLOT_WIDTH))
         .h(px(slot_height))
         .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(px(6.0))
-                .top(px(0.0))
-                .w(px(34.0))
-                .h(px(46.0))
-                .border_1()
-                .border_color(rgb(0x9a9a9a))
-                .bg(rgb(0xffffff))
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(0.0))
-                        .top(px(0.0))
-                        .w(px(11.0))
-                        .h(px(11.0))
-                        .border_l_1()
-                        .border_b_1()
-                        .border_color(rgb(0xc8c8c8))
-                        .bg(rgb(0xf4f4f4)),
-                ),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(24.0))
-                .top(px(26.0))
-                .w(px(18.0))
-                .h(px(18.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(24.0))
-                .text_color(rgb(0xd13438))
-                .child("X"),
-        )
+        .child(image_icon(
+            image,
+            DELETE_DIALOG_ICON_SLOT_WIDTH,
+            DELETE_DIALOG_ICON_SLOT_WIDTH,
+        ))
 }
 
 fn truncated_permanent_delete_file_name(name: &str, window: &Window) -> SharedString {
@@ -1408,6 +1401,53 @@ fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
     }
 }
 
+fn delete_dialog_icon_kind(paths: &[PathBuf]) -> DeleteDialogIconKind {
+    let Some((first, rest)) = paths.split_first() else {
+        return DeleteDialogIconKind::Mixed;
+    };
+
+    let Some(first_kind) = delete_dialog_item_kind(first) else {
+        return if rest.is_empty() {
+            DeleteDialogIconKind::File
+        } else {
+            DeleteDialogIconKind::Mixed
+        };
+    };
+
+    let mut has_file = first_kind == PermanentDeleteItemKind::File;
+    let mut has_folder = first_kind == PermanentDeleteItemKind::Folder;
+
+    for path in rest {
+        let Some(item_kind) = delete_dialog_item_kind(path) else {
+            return DeleteDialogIconKind::Mixed;
+        };
+
+        match item_kind {
+            PermanentDeleteItemKind::File => has_file = true,
+            PermanentDeleteItemKind::Folder => has_folder = true,
+        }
+
+        if has_file && has_folder {
+            return DeleteDialogIconKind::Mixed;
+        }
+    }
+
+    if has_folder {
+        DeleteDialogIconKind::Folder
+    } else {
+        DeleteDialogIconKind::File
+    }
+}
+
+fn delete_dialog_item_kind(path: &Path) -> Option<PermanentDeleteItemKind> {
+    let entry = FileEntry::from_path(path.to_path_buf())?;
+    Some(if entry.is_directory_like() {
+        PermanentDeleteItemKind::Folder
+    } else {
+        PermanentDeleteItemKind::File
+    })
+}
+
 fn path_display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1551,6 +1591,87 @@ mod tests {
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
         assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn delete_dialog_icon_uses_file_for_single_file() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, []).expect("create selected file");
+
+        assert_eq!(delete_dialog_icon_kind(&[file]), DeleteDialogIconKind::File);
+    }
+
+    #[test]
+    fn delete_dialog_icon_uses_folder_for_single_folder() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        assert_eq!(
+            delete_dialog_icon_kind(&[folder]),
+            DeleteDialogIconKind::Folder
+        );
+    }
+
+    #[test]
+    fn delete_dialog_icon_uses_file_for_multiple_files() {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.txt");
+        let second = temp.path().join("b.txt");
+        fs::write(&first, []).expect("create first selected file");
+        fs::write(&second, []).expect("create second selected file");
+
+        assert_eq!(
+            delete_dialog_icon_kind(&[first, second]),
+            DeleteDialogIconKind::File
+        );
+    }
+
+    #[test]
+    fn delete_dialog_icon_uses_folder_for_multiple_folders() {
+        let temp = TempDir::new();
+        let first = temp.path().join("a");
+        let second = temp.path().join("b");
+        fs::create_dir(&first).expect("create first selected folder");
+        fs::create_dir(&second).expect("create second selected folder");
+
+        assert_eq!(
+            delete_dialog_icon_kind(&[first, second]),
+            DeleteDialogIconKind::Folder
+        );
+    }
+
+    #[test]
+    fn delete_dialog_icon_uses_alert_for_mixed_file_and_folder() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        let folder = temp.path().join("folder");
+        fs::write(&file, []).expect("create selected file");
+        fs::create_dir(&folder).expect("create selected folder");
+
+        assert_eq!(
+            delete_dialog_icon_kind(&[file, folder]),
+            DeleteDialogIconKind::Mixed
+        );
+    }
+
+    #[test]
+    fn delete_dialog_icon_falls_back_for_missing_paths() {
+        let single_missing = PathBuf::from("missing.txt");
+        let multi_missing = vec![
+            PathBuf::from("missing-a.txt"),
+            PathBuf::from("missing-b.txt"),
+        ];
+
+        assert_eq!(
+            delete_dialog_icon_kind(&[single_missing]),
+            DeleteDialogIconKind::File
+        );
+        assert_eq!(
+            delete_dialog_icon_kind(&multi_missing),
+            DeleteDialogIconKind::Mixed
+        );
     }
 
     #[test]

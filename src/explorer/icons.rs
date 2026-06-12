@@ -46,6 +46,9 @@ macro_rules! png_icon {
 }
 
 png_icon!(DOCUMENT_ICON, "files", "generic.png");
+png_icon!(DELETE_FILE_DIALOG_ICON, "files/large", "delete.png");
+png_icon!(DELETE_FOLDER_DIALOG_ICON, "folders", "delete.png");
+png_icon!(DELETE_MIXED_DIALOG_ICON, "emblems", "alert.png");
 png_icon!(FOLDER_ICON, "folders", "folder.png");
 png_icon!(FOLDER_SHORTCUT_ICON, "folders", "shortcut.png");
 
@@ -255,5 +258,12 @@ mod tests {
     fn sidebar_image_icons_use_bundled_png_assets() {
         assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn dialog_delete_icons_use_bundled_png_assets() {
+        assert!(!DELETE_FILE_DIALOG_ICON_BYTES.is_empty());
+        assert!(!DELETE_FOLDER_DIALOG_ICON_BYTES.is_empty());
+        assert!(!DELETE_MIXED_DIALOG_ICON_BYTES.is_empty());
     }
 }

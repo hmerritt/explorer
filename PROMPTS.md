@@ -17,10 +17,6 @@ Set a default value to: 1000
 
 ## 1
 
-- Dialog icon improvements. Remove the existing delete icon used
-    - Delete file(s) icon: assets\icons\files\large\delete.png
-    - Delete folder(s) icon: assets\icons\folders\delete.png
-    - Delete files/folders icon: assets\icons\emblems\alert.png
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
 - File icons
