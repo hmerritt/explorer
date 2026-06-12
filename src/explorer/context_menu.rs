@@ -122,6 +122,7 @@ impl ExplorerView {
             return false;
         }
 
+        self.clear_selection();
         self.finish_search_edit();
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();
@@ -147,6 +148,7 @@ impl ExplorerView {
             return false;
         }
 
+        self.clear_selection();
         self.finish_search_edit();
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();

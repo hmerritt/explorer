@@ -1261,6 +1261,7 @@ impl ExplorerView {
         let entry = self.entries[ix].clone();
         let app_icon = self.app_icon_for_entry(&entry, cx);
         let is_selected = self.entry_is_selected(ix);
+        let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
         let clicked_entry = entry.clone();
         let context_clicked_entry = entry.clone();
@@ -1290,9 +1291,10 @@ impl ExplorerView {
             } else {
                 rgb(0xffffff)
             })
-            .when(!is_selected, |this| {
-                this.hover(|style| style.bg(rgb(0xe5f3ff)))
-            })
+            .when(
+                entry_row_hover_enabled(is_selected, context_menu_active),
+                |this| this.hover(|style| style.bg(rgb(0xe5f3ff))),
+            )
             .border_1()
             .border_color(rgb(0xffffff))
             // .border_color(rgb(0x949494))
@@ -2381,6 +2383,10 @@ fn sidebar_row_background_color(is_current: bool, context_menu_active: bool) -> 
     } else {
         SIDEBAR_ROW_BG
     }
+}
+
+fn entry_row_hover_enabled(is_selected: bool, context_menu_active: bool) -> bool {
+    !is_selected && !context_menu_active
 }
 
 fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
@@ -3902,8 +3908,8 @@ mod tests {
         available_filename_text_width, clipboard_has_file_clipboard,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        drop_indicator_target_width, filename_text_width, folder_status_summary,
-        is_normal_entry_click, open_current_folder_context_menu_from_event,
+        drop_indicator_target_width, entry_row_hover_enabled, filename_text_width,
+        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
         sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
@@ -4201,6 +4207,14 @@ mod tests {
         assert_eq!(sidebar_row_background_color(false, true), 0xe5f3ff);
         assert_eq!(sidebar_row_background_color(true, false), 0xcce8ff);
         assert_eq!(sidebar_row_background_color(true, true), 0xcce8ff);
+    }
+
+    #[test]
+    fn entry_hover_is_only_enabled_for_unselected_rows_without_a_context_menu() {
+        assert!(entry_row_hover_enabled(false, false));
+        assert!(!entry_row_hover_enabled(true, false));
+        assert!(!entry_row_hover_enabled(false, true));
+        assert!(!entry_row_hover_enabled(true, true));
     }
 
     #[test]

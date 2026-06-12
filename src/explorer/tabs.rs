@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_file_opens_current_folder_context_menu_without_selecting(
+    fn right_click_file_opens_current_folder_context_menu_and_clears_selection(
         cx: &mut TestAppContext,
     ) {
         let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
@@ -1178,6 +1178,7 @@ mod tests {
             .expect("second entry bounds")
             .center();
 
+        cx.simulate_click(second_position, Modifiers::default());
         cx.simulate_mouse_down(first_position, MouseButton::Right, Modifiers::default());
         let first_menu_origin = cx
             .debug_bounds("context-menu")
@@ -1196,6 +1197,8 @@ mod tests {
             });
         });
         cx.run_until_parked();
+
+        cx.simulate_click(first_position, Modifiers::default());
         cx.simulate_mouse_down(second_position, MouseButton::Right, Modifiers::default());
         let second_menu_origin = cx
             .debug_bounds("context-menu")
@@ -1205,6 +1208,34 @@ mod tests {
             assert!(view.context_menu.is_some());
             assert_eq!(second_menu_origin, second_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
+        });
+    }
+
+    #[gpui::test]
+    fn opening_sidebar_context_menu_clears_entry_selection(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let sidebar_path = temp.path().to_path_buf();
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(1);
+                assert!(view.open_sidebar_context_menu(
+                    gpui::point(gpui::px(20.0), gpui::px(20.0)),
+                    sidebar_path,
+                    42,
+                    None,
+                    None,
+                    window,
+                    cx,
+                ));
+                cx.notify();
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert!(selected_names(view).is_empty());
         });
     }
 

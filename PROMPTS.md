@@ -4,7 +4,6 @@ When name column is clicked, shows the current directory contextmenu, when the o
 
 Folder context menu changes:
 
-- Contextmenu should de-select any items that are not part of the current contextmenu. i.e current directory contextmenu should deselect items (currently it does not). Also when a context menu is active hide hover states for folder/file items - a single-click should still select them, or a single right-click change selection and open contextmenu, but just hide the hover state
 - Contextmenu should open on click-up, not click-down
 - Rubber-band multiselect should also activate for right-click (down), so on right-click (up) contextmenu for the newly selected items opens
 
