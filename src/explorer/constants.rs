@@ -47,7 +47,6 @@ pub(super) const STATUS_BAR_TEXT_SIZE: f32 = 12.0;
 pub(super) const STATUS_BAR_TEXT_COLOR: u32 = 0x595959;
 pub(super) const STATUS_BAR_SEPARATOR_COLOR: u32 = 0xe5e5e5;
 pub(crate) const EXPLORER_COPY_GREEN: u32 = 0x36a646; // 0x0f7b0f | 0x36a646 | 0x06b025
-pub(super) const SIDEBAR_WIDTH: f32 = 225.0;
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 30.0;
 pub(super) const SIDEBAR_ICON_SIZE: f32 = 16.0;
 pub(super) const SIDEBAR_ICON_TEXT_GAP: f32 = 10.0;

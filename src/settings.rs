@@ -15,6 +15,8 @@ pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
+pub(crate) const SIDEBAR_DEFAULT_WIDTH: u32 = 225;
+pub(crate) const SIDEBAR_MIN_WIDTH: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConfigPlatform {
@@ -60,6 +62,11 @@ pub struct ExplorerSettings {
     pub show_hidden_files: bool,
     pub show_file_name_extensions: bool,
     pub startup_location: StartupLocation,
+    #[serde(
+        default = "default_sidebar_width",
+        deserialize_with = "deserialize_sidebar_width"
+    )]
+    pub sidebar_width: u32,
 }
 
 impl Default for ExplorerSettings {
@@ -74,6 +81,7 @@ impl Default for ExplorerSettings {
             show_hidden_files: false,
             show_file_name_extensions: true,
             startup_location: StartupLocation::Downloads,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
         }
     }
 }
@@ -205,6 +213,16 @@ pub(crate) fn set_show_hidden_files(value: bool, cx: &mut impl BorrowAppContext)
 
 pub(crate) fn set_show_file_name_extensions(value: bool, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.show_file_name_extensions = value);
+}
+
+pub(crate) fn set_sidebar_width(value: u32, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| {
+        settings.sidebar_width = normalized_sidebar_width(value);
+    });
+}
+
+pub(crate) fn normalized_sidebar_width(value: u32) -> u32 {
+    value.max(SIDEBAR_MIN_WIDTH)
 }
 
 pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> bool {
@@ -476,6 +494,17 @@ fn save_settings_to_path(path: &Path, settings: &ExplorerSettings) -> io::Result
     fs::write(path, json)
 }
 
+fn default_sidebar_width() -> u32 {
+    SIDEBAR_DEFAULT_WIDTH
+}
+
+fn deserialize_sidebar_width<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(normalized_sidebar_width)
+}
+
 pub(crate) fn settings_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME))
 }
@@ -535,6 +564,7 @@ mod tests {
         assert!(!settings.show_hidden_files);
         assert!(settings.show_file_name_extensions);
         assert_eq!(settings.startup_location, StartupLocation::Downloads);
+        assert_eq!(settings.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar_items.len(), 4);
     }
 
@@ -564,7 +594,41 @@ mod tests {
                 .expect("deserialize partial settings");
         assert!(settings.show_hidden_files);
         assert!(settings.show_file_name_extensions);
+        assert_eq!(settings.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar_items.len(), 4);
+    }
+
+    #[test]
+    fn sidebar_width_is_normalized_from_settings() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"sidebar_width":50}"#).expect("deserialize settings");
+
+        assert_eq!(settings.sidebar_width, SIDEBAR_MIN_WIDTH);
+        assert_eq!(normalized_sidebar_width(99), SIDEBAR_MIN_WIDTH);
+        assert_eq!(normalized_sidebar_width(100), SIDEBAR_MIN_WIDTH);
+        assert_eq!(normalized_sidebar_width(250), 250);
+    }
+
+    #[gpui::test]
+    fn set_sidebar_width_persists_clamped_value(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("sidebar-width").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        let sidebar_width = cx.update(|cx| {
+            set_sidebar_width(50, cx);
+            cx.global::<SettingsState>().value.sidebar_width
+        });
+
+        assert_eq!(sidebar_width, SIDEBAR_MIN_WIDTH);
+        assert_eq!(
+            load_settings_from_path(&path).unwrap().sidebar_width,
+            SIDEBAR_MIN_WIDTH
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

@@ -32,11 +32,11 @@ use crate::explorer::{
         SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
         SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
         SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP,
-        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, SIDEBAR_WIDTH, STATUS_BAR_HEIGHT,
-        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
-        STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
-        UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
-        UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH, effective_name_column_width,
+        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
+        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
+        UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
+        UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
+        UTILITY_MENU_WIDTH, effective_name_column_width,
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
@@ -64,7 +64,10 @@ use crate::explorer::{
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
-    view::{ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu},
+    view::{
+        ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu,
+        normalized_sidebar_width_f32,
+    },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::SettingsState;
@@ -86,6 +89,7 @@ const SIDEBAR_ITEM_GAP: f32 = 4.0;
 const SIDEBAR_ROW_BG: u32 = 0xffffff;
 const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
+const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SidebarItemDrag {
@@ -97,6 +101,7 @@ struct SidebarItemDrag {
 struct SidebarItemDragPreview {
     label: SharedString,
     kind: SidebarItemKind,
+    width: f32,
 }
 
 impl Render for SidebarItemDragPreview {
@@ -106,7 +111,7 @@ impl Render for SidebarItemDragPreview {
             .flex_row()
             .items_center()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .w(px(SIDEBAR_WIDTH - 16.0))
+            .w(px((self.width - 16.0).max(0.0)))
             .px(px(SIDEBAR_HORIZONTAL_PADDING))
             .rounded(px(4.0))
             .bg(rgb(0xffffff))
@@ -894,6 +899,7 @@ impl ExplorerView {
         let sections = &self.sidebar_sections;
         let mut children = Vec::new();
         let has_user_directories = !sections.user_directories.is_empty();
+        let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
 
         for (index, item) in sections.user_directories.iter().cloned().enumerate() {
             children.push(self.render_sidebar_insertion_zone(
@@ -945,10 +951,11 @@ impl ExplorerView {
 
         div()
             .id("explorer-sidebar")
+            .relative()
             .flex()
             .flex_col()
             .h_full()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(sidebar_width))
             .flex_shrink_0()
             .bg(rgb(0xffffff))
             .border_r_1()
@@ -962,6 +969,83 @@ impl ExplorerView {
                 }
             }))
             .children(children)
+            .child(self.render_sidebar_resize_handle(cx))
+            .into_any_element()
+    }
+
+    fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        div()
+            .id("explorer-sidebar-resizer")
+            .debug_selector(|| "explorer-sidebar-resizer".to_owned())
+            .absolute()
+            .top(px(0.0))
+            .right(px(-(SIDEBAR_RESIZE_HIT_WIDTH / 2.0)))
+            .w(px(SIDEBAR_RESIZE_HIT_WIDTH))
+            .h_full()
+            .cursor(CursorStyle::ResizeColumn)
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseDownEvent, _, _, cx| {
+                                if event.button != MouseButton::Left
+                                    || !bounds.contains(&event.position)
+                                {
+                                    return;
+                                }
+
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    this.begin_sidebar_resize(f32::from(event.position.x));
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                });
+                            }
+                        });
+
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseMoveEvent, _, _, cx| {
+                                if event.pressed_button != Some(MouseButton::Left) {
+                                    return;
+                                }
+
+                                let _ = entity.update(cx, |this, cx| {
+                                    if this.sidebar_resize_drag.is_none() {
+                                        return;
+                                    }
+
+                                    if this.update_sidebar_resize(f32::from(event.position.x)) {
+                                        cx.notify();
+                                    }
+                                    cx.stop_propagation();
+                                });
+                            }
+                        });
+
+                        window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                            if event.button != MouseButton::Left {
+                                return;
+                            }
+
+                            let _ = entity.update(cx, |this, cx| {
+                                let Some(width) = this.finish_sidebar_resize() else {
+                                    return;
+                                };
+
+                                crate::settings::set_sidebar_width(width, cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            });
+                        });
+                    },
+                )
+                .size_full(),
+            )
             .into_any_element()
     }
 
@@ -1125,13 +1209,15 @@ impl ExplorerView {
                     {
                         let entity = entity.clone();
                         move |drag, _, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
+                            let width = entity.update(cx, |this, cx| {
                                 this.dragging_sidebar_item = Some(drag.configured_index);
                                 cx.notify();
+                                this.sidebar_width
                             });
-                            cx.new(|_| SidebarItemDragPreview {
+                            cx.new(move |_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
                                 kind: drag.kind,
+                                width,
                             })
                         }
                     },
@@ -1531,6 +1617,7 @@ impl ExplorerView {
                 app_icon,
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
+                self.sidebar_width,
                 window,
             )
             .id(("explorer-entry-name", ix))
@@ -3721,9 +3808,12 @@ fn name_cell(
     app_icon: Option<Arc<Image>>,
     show_file_name_extensions: bool,
     show_full_path: bool,
+    sidebar_width: f32,
     window: &Window,
 ) -> Div {
-    let list_viewport_width = (f32::from(window.bounds().size.width) - SIDEBAR_WIDTH).max(0.0);
+    let list_viewport_width = (f32::from(window.bounds().size.width)
+        - normalized_sidebar_width_f32(sidebar_width))
+    .max(0.0);
     let text_width = if show_full_path {
         recursive_result_text_width(list_viewport_width)
     } else {
@@ -4380,6 +4470,30 @@ mod tests {
         assert_eq!(sidebar_row_background_color(false, true), 0xe5f3ff);
         assert_eq!(sidebar_row_background_color(true, false), 0xcce8ff);
         assert_eq!(sidebar_row_background_color(true, true), 0xcce8ff);
+    }
+
+    #[gpui::test]
+    fn sidebar_render_uses_configured_width(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 312.0;
+            view
+        });
+
+        cx.run_until_parked();
+
+        let sidebar_width = f32::from(
+            cx.debug_bounds("explorer-sidebar")
+                .expect("sidebar bounds")
+                .size
+                .width,
+        );
+        assert_eq!(sidebar_width, 312.0);
+        assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
     }
 
     #[test]

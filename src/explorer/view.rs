@@ -45,6 +45,8 @@ pub struct ExplorerView {
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) dragging_sidebar_item: Option<usize>,
+    pub(super) sidebar_width: f32,
+    pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) app_icon_cache: AppIconCache,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
@@ -73,6 +75,12 @@ pub(super) struct FileOperationState {
     pub(super) progress: FileOperationProgress,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct SidebarResizeDrag {
+    pub(super) start_pointer_x: f32,
+    pub(super) start_width: f32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +178,8 @@ impl ExplorerView {
             cut_paths: BTreeSet::new(),
             active_drop_indicator: None,
             dragging_sidebar_item: None,
+            sidebar_width: settings.sidebar_width as f32,
+            sidebar_resize_drag: None,
             app_icon_cache: AppIconCache::default(),
             pending_permanent_delete: None,
             pending_trash: None,
@@ -203,6 +213,9 @@ impl ExplorerView {
         self.show_file_name_extensions = settings.show_file_name_extensions;
 
         self.sidebar_items = settings.sidebar_items.clone();
+        if self.sidebar_resize_drag.is_none() {
+            self.sidebar_width = settings.sidebar_width as f32;
+        }
 
         if hidden_changed {
             self.invalidate_recursive_search_cache();
@@ -421,12 +434,39 @@ impl ExplorerView {
         self.active_drop_indicator.clone()
     }
 
+    pub(super) fn begin_sidebar_resize(&mut self, pointer_x: f32) {
+        self.sidebar_resize_drag = Some(SidebarResizeDrag {
+            start_pointer_x: pointer_x,
+            start_width: self.sidebar_width,
+        });
+    }
+
+    pub(super) fn update_sidebar_resize(&mut self, pointer_x: f32) -> bool {
+        let Some(drag) = self.sidebar_resize_drag else {
+            return false;
+        };
+
+        let width = sidebar_width_for_drag(drag.start_width, pointer_x - drag.start_pointer_x);
+        if (self.sidebar_width - width).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.sidebar_width = width;
+        true
+    }
+
+    pub(super) fn finish_sidebar_resize(&mut self) -> Option<u32> {
+        self.sidebar_resize_drag.take()?;
+        Some(normalized_sidebar_width_f32(self.sidebar_width).round() as u32)
+    }
+
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
         self.finish_search_edit();
         self.close_context_menu();
         self.cancel_mouse_selection_drag();
+        self.sidebar_resize_drag = None;
         self.clear_drop_indicator();
         self.pending_permanent_delete = None;
         self.pending_trash = None;
@@ -440,6 +480,18 @@ impl ExplorerView {
 
         self.directory_watcher = None;
     }
+}
+
+pub(super) fn normalized_sidebar_width_f32(width: f32) -> f32 {
+    if width.is_finite() {
+        width.max(crate::settings::SIDEBAR_MIN_WIDTH as f32)
+    } else {
+        crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
+    }
+}
+
+pub(super) fn sidebar_width_for_drag(start_width: f32, pointer_delta_x: f32) -> f32 {
+    normalized_sidebar_width_f32(start_width + pointer_delta_x)
 }
 
 #[derive(Clone, Copy)]
@@ -503,6 +555,7 @@ mod tests {
 
     use super::*;
     use crate::explorer::entry::{DirectoryLinkKind, EntryKind, FileEntry};
+    use gpui::AppContext;
     use std::path::PathBuf;
 
     fn test_pending_shell_shortcut(path: &str, target: &str) -> FileEntry {
@@ -533,8 +586,64 @@ mod tests {
 
         assert!(!view.show_hidden_files);
         assert!(view.show_file_name_extensions);
+        assert_eq!(
+            view.sidebar_width,
+            crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
+        );
         assert_eq!(view.open_utility_menu, None);
         assert!(view.directory_watcher.is_none());
+    }
+
+    #[test]
+    fn view_uses_configured_sidebar_width() {
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                sidebar_width: 320,
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert_eq!(view.sidebar_width, 320.0);
+    }
+
+    #[gpui::test]
+    fn apply_settings_updates_sidebar_width(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        sidebar_width: 333,
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.sidebar_width, 333.0);
+        });
+    }
+
+    #[test]
+    fn sidebar_resize_drag_clamps_to_minimum() {
+        assert_eq!(
+            normalized_sidebar_width_f32((crate::settings::SIDEBAR_MIN_WIDTH - 1) as f32),
+            crate::settings::SIDEBAR_MIN_WIDTH as f32
+        );
+        assert_eq!(sidebar_width_for_drag(225.0, 25.0), 250.0);
+        assert_eq!(
+            sidebar_width_for_drag(225.0, -200.0),
+            crate::settings::SIDEBAR_MIN_WIDTH as f32
+        );
     }
 
     #[test]

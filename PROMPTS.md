@@ -6,8 +6,8 @@ Set a default value to: 1000
 
 ## Specific / for-later
 
+- Right-click side-bar drag border to reset to default width
 - Alt-double-click opens a "Details" window, for both files/folders.
-- Left side-bar drag re-sizable (save width in settings), min-width 100
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe) Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
