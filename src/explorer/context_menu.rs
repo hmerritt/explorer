@@ -415,6 +415,15 @@ pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]
     hovered_path.len() >= path.len() && hovered_path[..path.len()] == *path
 }
 
+pub(super) fn context_menu_item_is_persistently_active(
+    item: &ContextMenuItem,
+    hovered_path: &[usize],
+    path: &[usize],
+) -> bool {
+    matches!(item, ContextMenuItem::Submenu { .. })
+        && context_menu_path_is_active(hovered_path, path)
+}
+
 pub(super) fn context_menu_height(
     items: &[ContextMenuItem],
     row_height: f32,
@@ -501,6 +510,50 @@ mod tests {
         assert!(!context_menu_path_is_active(&hovered, &[0]));
         assert!(!context_menu_path_is_active(&hovered, &[1, 1]));
         assert!(!context_menu_path_is_active(&hovered, &[1, 0, 2, 0]));
+    }
+
+    #[test]
+    fn only_active_submenu_parents_are_persistently_active() {
+        let action = ContextMenuItem::Action {
+            id: "action",
+            icon: None,
+            label: "Action".to_owned(),
+            command: ContextMenuCommand::Paste,
+            enabled: true,
+        };
+        let detail = ContextMenuItem::Detail {
+            label: "Created",
+            value: "Today".to_owned(),
+            icon_slot: ContextMenuIconSlot::Collapse,
+        };
+        let submenu = ContextMenuItem::Submenu {
+            id: "submenu",
+            icon: None,
+            label: "New",
+            children: Vec::new(),
+        };
+        let hovered = vec![1, 0];
+
+        assert!(!context_menu_item_is_persistently_active(
+            &action,
+            &hovered,
+            &[1, 0]
+        ));
+        assert!(!context_menu_item_is_persistently_active(
+            &detail,
+            &hovered,
+            &[1, 0]
+        ));
+        assert!(context_menu_item_is_persistently_active(
+            &submenu,
+            &hovered,
+            &[1]
+        ));
+        assert!(!context_menu_item_is_persistently_active(
+            &submenu,
+            &hovered,
+            &[0]
+        ));
     }
 
     #[test]

@@ -40,7 +40,8 @@ use crate::explorer::{
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
-        ContextMenuSource, clamped_context_menu_origin, context_menu_height, context_menu_item_top,
+        ContextMenuSource, clamped_context_menu_origin, context_menu_height,
+        context_menu_item_is_persistently_active, context_menu_item_top,
         context_menu_path_is_active, context_menu_pointer_tip_origin, context_submenu_left,
     },
     drag_drop::{
@@ -2758,7 +2759,7 @@ fn render_context_menu_item(
     hovered_path: &[usize],
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    let active = context_menu_path_is_active(hovered_path, &path);
+    let active = context_menu_item_is_persistently_active(item, hovered_path, &path);
 
     match item {
         ContextMenuItem::Action {
