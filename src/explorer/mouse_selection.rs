@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use gpui::{Bounds, Pixels, Point, px, size};
+use gpui::{Bounds, MouseButton, Pixels, Point, px, size};
 
 use crate::explorer::{
     constants::{SCROLLBAR_GUTTER_WIDTH, effective_name_column_width},
@@ -13,6 +13,7 @@ const DRAG_AUTOSCROLL_MARGIN: f32 = 24.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct MouseSelectionDrag {
+    pub(super) button: MouseButton,
     pub(super) start: Point<Pixels>,
     pub(super) current: Point<Pixels>,
     pub(super) start_scroll_top: f32,
@@ -79,6 +80,7 @@ impl ExplorerView {
 
     pub(super) fn begin_mouse_selection_drag_for_intent(
         &mut self,
+        button: MouseButton,
         local_position: Point<Pixels>,
         viewport_size: gpui::Size<Pixels>,
         modifiers: SelectionModifiers,
@@ -88,7 +90,7 @@ impl ExplorerView {
                 if !modifiers.toggle && !modifiers.extend {
                     self.clear_selection();
                 }
-                self.begin_mouse_selection_drag(local_position, modifiers);
+                self.begin_mouse_selection_drag(button, local_position, modifiers);
                 true
             }
             Some(PointerDragIntent::ItemDrag) => {
@@ -101,6 +103,7 @@ impl ExplorerView {
 
     pub(super) fn begin_mouse_selection_drag(
         &mut self,
+        button: MouseButton,
         local_position: Point<Pixels>,
         modifiers: SelectionModifiers,
     ) {
@@ -108,6 +111,7 @@ impl ExplorerView {
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
         self.mouse_selection_drag = Some(MouseSelectionDrag {
+            button,
             start: local_position,
             current: local_position,
             start_scroll_top: scroll_top,
@@ -147,14 +151,19 @@ impl ExplorerView {
         self.mouse_selection_drag = Some(drag);
     }
 
-    pub(super) fn end_mouse_selection_drag(&mut self) {
-        if self
-            .mouse_selection_drag
-            .take()
-            .is_some_and(|drag| drag.active)
-        {
+    pub(super) fn end_mouse_selection_drag(&mut self, button: MouseButton) -> bool {
+        let Some(drag) = self.mouse_selection_drag.take() else {
+            return false;
+        };
+        if drag.button != button {
+            self.mouse_selection_drag = Some(drag);
+            return false;
+        }
+
+        if drag.active && button == MouseButton::Left {
             self.suppress_next_click = true;
         }
+        drag.active
     }
 
     pub(super) fn suppress_next_click(&mut self) -> bool {
@@ -514,6 +523,7 @@ mod tests {
         view.select_single_index(0);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
@@ -528,6 +538,7 @@ mod tests {
         view.select_single_index(0);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
@@ -542,6 +553,7 @@ mod tests {
         view.select_single_index(0);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
@@ -563,6 +575,7 @@ mod tests {
         view.select_single_index(0);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers {
@@ -589,6 +602,7 @@ mod tests {
         view.select_single_index(4);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(ROW_HEIGHT * 7.0 + 1.0)),
             size(px(800.0), px(300.0)),
             SelectionModifiers {
@@ -606,7 +620,7 @@ mod tests {
             BTreeSet::from([4])
         );
 
-        view.end_mouse_selection_drag();
+        view.end_mouse_selection_drag(MouseButton::Left);
         view.apply_click_selection(
             7,
             SelectionModifiers {
@@ -628,6 +642,7 @@ mod tests {
         let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
 
         view.begin_mouse_selection_drag_for_intent(
+            MouseButton::Left,
             gpui::point(px(1.0), px(1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
@@ -653,8 +668,29 @@ mod tests {
     }
 
     #[test]
+    fn mouse_selection_drag_only_ends_for_initiating_button() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.begin_mouse_selection_drag(
+            MouseButton::Right,
+            gpui::point(px(1.0), px(1.0)),
+            SelectionModifiers::default(),
+        );
+        view.update_mouse_selection_drag(
+            gpui::point(px(40.0), px(ROW_HEIGHT * 2.0)),
+            size(px(100.0), px(100.0)),
+        );
+
+        assert!(!view.end_mouse_selection_drag(MouseButton::Left));
+        assert!(view.mouse_selection_drag.is_some());
+        assert!(view.end_mouse_selection_drag(MouseButton::Right));
+        assert!(view.mouse_selection_drag.is_none());
+        assert!(!view.suppress_next_click);
+    }
+
+    #[test]
     fn content_drag_box_keeps_start_pinned_after_scrolling() {
         let drag = MouseSelectionDrag {
+            button: MouseButton::Left,
             start: gpui::point(px(10.0), px(60.0)),
             current: gpui::point(px(80.0), px(40.0)),
             start_scroll_top: 0.0,
@@ -697,6 +733,7 @@ mod tests {
     #[test]
     fn reverse_content_drag_selects_rows_above_current_viewport() {
         let drag = MouseSelectionDrag {
+            button: MouseButton::Left,
             start: gpui::point(px(80.0), px(70.0)),
             current: gpui::point(px(10.0), px(8.0)),
             start_scroll_top: ROW_HEIGHT * 8.0,

@@ -197,6 +197,38 @@ impl ExplorerView {
         true
     }
 
+    pub(super) fn open_selected_entries_context_menu(
+        &mut self,
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.commit_active_rename_before_interaction(window, cx) {
+            return false;
+        }
+
+        let Some(entry) = self.focused_entry().cloned() else {
+            return false;
+        };
+
+        self.finish_search_edit();
+        self.cancel_address_bar_edit();
+        self.cancel_pending_click_rename();
+        self.open_utility_menu = None;
+        let selected_count = self.selection.selected_indices.len();
+        let selected_directory_count = self.selected_directory_new_tab_targets().len();
+        self.context_menu = Some(ContextMenuState::new(
+            origin,
+            entry_context_menu_items(
+                entry.navigation_path().to_path_buf(),
+                selected_count,
+                selected_directory_count,
+                self.can_start_selected_rename(),
+            ),
+        ));
+        true
+    }
+
     pub(super) fn close_context_menu(&mut self) -> bool {
         self.context_menu.take().is_some()
     }

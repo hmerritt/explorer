@@ -1101,7 +1101,7 @@ mod tests {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
         let position = bounds.center();
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
-        cx.run_until_parked();
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
     }
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
@@ -1180,6 +1180,10 @@ mod tests {
 
         cx.simulate_click(second_position, Modifiers::default());
         cx.simulate_mouse_down(first_position, MouseButton::Right, Modifiers::default());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+        });
+        cx.simulate_mouse_up(first_position, MouseButton::Right, Modifiers::default());
         let first_menu_origin = cx
             .debug_bounds("context-menu")
             .expect("context menu")
@@ -1200,6 +1204,10 @@ mod tests {
 
         cx.simulate_click(first_position, Modifiers::default());
         cx.simulate_mouse_down(second_position, MouseButton::Right, Modifiers::default());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+        });
+        cx.simulate_mouse_up(second_position, MouseButton::Right, Modifiers::default());
         let second_menu_origin = cx
             .debug_bounds("context-menu")
             .expect("context menu")
@@ -1209,6 +1217,68 @@ mod tests {
             assert_eq!(second_menu_origin, second_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
         });
+    }
+
+    #[gpui::test]
+    fn right_button_rubber_band_opens_context_menu_for_new_selection(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let first = cx
+            .debug_bounds("explorer-entry-0")
+            .expect("first entry bounds");
+        let second = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        let start = gpui::point(
+            first.left() + gpui::px(10.0),
+            second.bottom() + gpui::px(20.0),
+        );
+        let end = gpui::point(first.left() + gpui::px(100.0), first.top() + gpui::px(2.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Right, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
+        });
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
+    }
+
+    #[gpui::test]
+    fn right_button_rubber_band_with_empty_selection_opens_folder_context_menu(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let second = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        let start = gpui::point(
+            second.left() + gpui::px(10.0),
+            second.bottom() + gpui::px(20.0),
+        );
+        let end = gpui::point(
+            second.left() + gpui::px(100.0),
+            second.bottom() + gpui::px(40.0),
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Right, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert!(selected_names(view).is_empty());
+        });
+        assert!(cx.debug_bounds("context-menu-paste").is_some());
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_none());
     }
 
     #[gpui::test]

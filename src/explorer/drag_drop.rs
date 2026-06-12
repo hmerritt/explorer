@@ -1004,6 +1004,7 @@ mod tests {
         let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
         view.select_single_index(0);
         view.begin_mouse_selection_drag(
+            gpui::MouseButton::Left,
             gpui::point(px(1.0), px(1.0)),
             SelectionModifiers::default(),
         );
@@ -1021,6 +1022,7 @@ mod tests {
         assert!(!view.can_start_item_drag_for_index(1));
 
         assert!(view.begin_mouse_selection_drag_for_intent(
+            gpui::MouseButton::Left,
             gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
             gpui::size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
@@ -1044,6 +1046,7 @@ mod tests {
         assert!(!view.can_start_item_drag_for_index(0));
 
         assert!(view.begin_mouse_selection_drag_for_intent(
+            gpui::MouseButton::Left,
             gpui::point(px(1.0), px(1.0)),
             gpui::size(px(800.0), px(100.0)),
             SelectionModifiers::default(),

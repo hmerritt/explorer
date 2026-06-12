@@ -1080,9 +1080,9 @@ impl ExplorerView {
             );
 
         let (context_path, context_configured_index, open_icon_kind) = context_menu_target;
-        row = row.on_mouse_down(
+        row = row.on_mouse_up(
             MouseButton::Right,
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            cx.listener(move |this, event: &MouseUpEvent, window, cx| {
                 open_sidebar_context_menu_from_event(
                     this,
                     event,
@@ -1331,9 +1331,9 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .on_mouse_down(
+            .on_mouse_up(
                 MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
                     if directory_new_tab_target(&context_clicked_entry).is_some() {
                         open_entry_context_menu_from_event(
                             this,
@@ -1677,9 +1677,9 @@ impl ExplorerView {
                             cx.notify();
                         }
                     }))
-                    .on_mouse_down(
+                    .on_mouse_up(
                         MouseButton::Right,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
                             open_current_folder_context_menu_from_event(this, event, window, cx);
                         }),
                     )
@@ -1802,9 +1802,9 @@ impl ExplorerView {
                     cx.notify();
                 }
             }))
-            .on_mouse_down(
+            .on_mouse_up(
                 MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     open_current_folder_context_menu_from_event(this, event, window, cx);
                 }),
             )
@@ -1893,7 +1893,9 @@ impl ExplorerView {
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseDownEvent, _, _, cx| {
-                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                        if !matches!(event.button, MouseButton::Left | MouseButton::Right)
+                            || !bounds.contains(&event.position)
+                        {
                             return;
                         }
 
@@ -1906,6 +1908,7 @@ impl ExplorerView {
                             }
 
                             if this.begin_mouse_selection_drag_for_intent(
+                                event.button,
                                 local_position,
                                 viewport_size,
                                 modifiers,
@@ -1919,14 +1922,21 @@ impl ExplorerView {
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseMoveEvent, _, _, cx| {
-                        if !event.dragging() {
+                        if !matches!(
+                            event.pressed_button,
+                            Some(MouseButton::Left | MouseButton::Right)
+                        ) {
                             return;
                         }
 
                         let local_position = local_point(event.position, &bounds);
                         let viewport_size = viewport_size(&bounds);
                         let _ = entity.update(cx, |this, cx| {
-                            if this.mouse_selection_drag.is_none() {
+                            if this
+                                .mouse_selection_drag
+                                .as_ref()
+                                .is_none_or(|drag| Some(drag.button) != event.pressed_button)
+                            {
                                 return;
                             }
 
@@ -1936,13 +1946,34 @@ impl ExplorerView {
                     }
                 });
 
-                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
-                    if event.button != MouseButton::Left {
+                window.on_mouse_event(move |event: &MouseUpEvent, _, window, cx| {
+                    if !matches!(event.button, MouseButton::Left | MouseButton::Right) {
                         return;
                     }
 
                     let _ = entity.update(cx, |this, cx| {
-                        this.end_mouse_selection_drag();
+                        if this
+                            .mouse_selection_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.button == event.button)
+                        {
+                            this.update_mouse_selection_drag(
+                                local_point(event.position, &bounds),
+                                viewport_size(&bounds),
+                            );
+                        }
+                        let activated = this.end_mouse_selection_drag(event.button);
+                        if activated && event.button == MouseButton::Right {
+                            if this.selection.selected_indices.is_empty() {
+                                open_current_folder_context_menu_from_event(
+                                    this, event, window, cx,
+                                );
+                            } else {
+                                open_selected_entries_context_menu_from_event(
+                                    this, event, window, cx,
+                                );
+                            }
+                        }
                         cx.notify();
                     });
                 });
@@ -2475,7 +2506,7 @@ impl ExplorerView {
 
 fn open_current_folder_context_menu_from_event(
     this: &mut ExplorerView,
-    event: &MouseDownEvent,
+    event: &MouseUpEvent,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
@@ -2490,7 +2521,7 @@ fn open_current_folder_context_menu_from_event(
 
 fn open_entry_context_menu_from_event(
     this: &mut ExplorerView,
-    event: &MouseDownEvent,
+    event: &MouseUpEvent,
     entry: &FileEntry,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
@@ -2502,9 +2533,22 @@ fn open_entry_context_menu_from_event(
     cx.stop_propagation();
 }
 
+fn open_selected_entries_context_menu_from_event(
+    this: &mut ExplorerView,
+    event: &MouseUpEvent,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let origin = local_context_menu_origin(event.position, this.view_origin);
+    if this.open_selected_entries_context_menu(origin, window, cx) {
+        cx.notify();
+    }
+    cx.stop_propagation();
+}
+
 fn open_sidebar_context_menu_from_event(
     this: &mut ExplorerView,
-    event: &MouseDownEvent,
+    event: &MouseUpEvent,
     path: PathBuf,
     row_id: usize,
     configured_index: Option<usize>,
@@ -3978,14 +4022,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn context_menu_opener_uses_mouse_down_event_position(cx: &mut gpui::TestAppContext) {
+    fn context_menu_opener_uses_mouse_up_event_position(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let event_position = gpui::point(gpui::px(123.0), gpui::px(45.0));
-        let event = MouseDownEvent {
+        let event = MouseUpEvent {
             button: MouseButton::Right,
             position: event_position,
-            ..MouseDownEvent::default()
+            ..MouseUpEvent::default()
         };
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
