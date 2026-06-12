@@ -8,6 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use filetime::FileTime;
@@ -293,6 +294,29 @@ struct EntryLoadOptions {
     applications_view: bool,
 }
 
+#[derive(Default)]
+struct EntryLoadTimingStats {
+    directory_entries: usize,
+    entry_errors: usize,
+    hidden_entries: usize,
+    skipped_entries: usize,
+    materialized_entries: usize,
+    filter_elapsed: Duration,
+    materialize_elapsed: Duration,
+}
+
+impl EntryLoadTimingStats {
+    fn add(&mut self, other: Self) {
+        self.directory_entries += other.directory_entries;
+        self.entry_errors += other.entry_errors;
+        self.hidden_entries += other.hidden_entries;
+        self.skipped_entries += other.skipped_entries;
+        self.materialized_entries += other.materialized_entries;
+        self.filter_elapsed += other.filter_elapsed;
+        self.materialize_elapsed += other.materialize_elapsed;
+    }
+}
+
 impl EntryLoadOptions {
     fn for_path(path: &Path, show_hidden_files: bool) -> Self {
         Self {
@@ -310,13 +334,75 @@ fn load_entries_with_options(
         return load_applications_entries(path, options);
     }
 
-    let mut entries = fs::read_dir(path)?
-        .filter_map(Result::ok)
-        .filter(|entry| !should_skip_directory_entry(entry, options))
-        .filter_map(|entry| FileEntry::from_path(entry.path()))
-        .collect::<Vec<_>>();
+    let total_started = Instant::now();
+    let read_dir_started = Instant::now();
+    let directory_entries = match fs::read_dir(path) {
+        Ok(entries) => {
+            crate::debug_options::log_nav_timing(
+                read_dir_started.elapsed(),
+                format_args!("load_entries.read_dir path={path:?} ok=true"),
+            );
+            entries
+        }
+        Err(error) => {
+            crate::debug_options::log_nav_timing(
+                read_dir_started.elapsed(),
+                format_args!("load_entries.read_dir path={path:?} ok=false error={error}"),
+            );
+            return Err(error);
+        }
+    };
 
+    let mut entries = Vec::new();
+    let scan_started = Instant::now();
+    let timings_enabled = crate::debug_options::nav_timings_enabled();
+    let stats = collect_visible_entries(
+        directory_entries,
+        options,
+        timings_enabled,
+        &mut entries,
+        |_| true,
+    );
+    crate::debug_options::log_nav_timing(
+        stats.filter_elapsed,
+        format_args!(
+            "load_entries.filter path={path:?} scanned={} hidden={} entry_errors={}",
+            stats.directory_entries.separate_with_commas(),
+            stats.hidden_entries.separate_with_commas(),
+            stats.entry_errors.separate_with_commas()
+        ),
+    );
+    crate::debug_options::log_nav_timing(
+        stats.materialize_elapsed,
+        format_args!(
+            "load_entries.materialize path={path:?} entries={} skipped={}",
+            stats.materialized_entries.separate_with_commas(),
+            stats.skipped_entries.separate_with_commas()
+        ),
+    );
+    crate::debug_options::log_nav_timing(
+        scan_started.elapsed(),
+        format_args!(
+            "load_entries.scan path={path:?} scanned={} entries={}",
+            stats.directory_entries.separate_with_commas(),
+            entries.len().separate_with_commas()
+        ),
+    );
+
+    let sort_started = Instant::now();
     sort_entries(&mut entries);
+    crate::debug_options::log_nav_timing(
+        sort_started.elapsed(),
+        format_args!("load_entries.sort path={path:?} entries={}", entries.len()),
+    );
+    crate::debug_options::log_nav_timing(
+        total_started.elapsed(),
+        format_args!(
+            "load_entries.total path={path:?} entries={} show_hidden={}",
+            entries.len().separate_with_commas(),
+            !options.hide_hidden_entries
+        ),
+    );
     Ok(entries)
 }
 
@@ -324,43 +410,185 @@ fn load_applications_entries(
     path: &Path,
     options: EntryLoadOptions,
 ) -> std::io::Result<Vec<FileEntry>> {
-    let mut entries = Vec::new();
+    let total_started = Instant::now();
+    let read_dir_started = Instant::now();
+    let directory_entries = match fs::read_dir(path) {
+        Ok(entries) => {
+            crate::debug_options::log_nav_timing(
+                read_dir_started.elapsed(),
+                format_args!("load_entries.read_dir path={path:?} applications_view=true ok=true"),
+            );
+            entries
+        }
+        Err(error) => {
+            crate::debug_options::log_nav_timing(
+                read_dir_started.elapsed(),
+                format_args!(
+                    "load_entries.read_dir path={path:?} applications_view=true ok=false error={error}"
+                ),
+            );
+            return Err(error);
+        }
+    };
 
-    for directory_entry in fs::read_dir(path)?
-        .filter_map(Result::ok)
-        .filter(|entry| !should_skip_directory_entry(entry, options))
-    {
-        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+    let mut entries = Vec::new();
+    let mut stats = EntryLoadTimingStats::default();
+    let scan_started = Instant::now();
+    let timings_enabled = crate::debug_options::nav_timings_enabled();
+
+    for directory_entry in directory_entries {
+        stats.directory_entries += 1;
+        let Ok(directory_entry) = directory_entry else {
+            stats.entry_errors += 1;
             continue;
         };
+
+        let filter_started = timings_enabled.then(Instant::now);
+        let should_skip = should_skip_directory_entry(&directory_entry, options);
+        if let Some(started) = filter_started {
+            stats.filter_elapsed += started.elapsed();
+        }
+        if should_skip {
+            stats.hidden_entries += 1;
+            continue;
+        }
+
+        let materialize_started = timings_enabled.then(Instant::now);
+        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+            if let Some(started) = materialize_started {
+                stats.materialize_elapsed += started.elapsed();
+            }
+            stats.skipped_entries += 1;
+            continue;
+        };
+        if let Some(started) = materialize_started {
+            stats.materialize_elapsed += started.elapsed();
+        }
+        stats.materialized_entries += 1;
 
         if entry.is_app_bundle() {
             entries.push(entry);
         } else if entry.is_directory_like() {
-            collect_nested_applications(entry.navigation_path(), options, &mut entries);
+            let nested_stats = collect_nested_applications(
+                entry.navigation_path(),
+                options,
+                timings_enabled,
+                &mut entries,
+            );
+            stats.add(nested_stats);
         }
     }
 
+    crate::debug_options::log_nav_timing(
+        stats.filter_elapsed,
+        format_args!(
+            "load_entries.filter path={path:?} applications_view=true scanned={} hidden={} entry_errors={}",
+            stats.directory_entries.separate_with_commas(),
+            stats.hidden_entries.separate_with_commas(),
+            stats.entry_errors.separate_with_commas()
+        ),
+    );
+    crate::debug_options::log_nav_timing(
+        stats.materialize_elapsed,
+        format_args!(
+            "load_entries.materialize path={path:?} applications_view=true entries={} skipped={}",
+            stats.materialized_entries.separate_with_commas(),
+            stats.skipped_entries.separate_with_commas()
+        ),
+    );
+    crate::debug_options::log_nav_timing(
+        scan_started.elapsed(),
+        format_args!(
+            "load_entries.scan path={path:?} applications_view=true scanned={} entries={}",
+            stats.directory_entries.separate_with_commas(),
+            entries.len().separate_with_commas()
+        ),
+    );
+
+    let sort_started = Instant::now();
     sort_entries(&mut entries);
+    crate::debug_options::log_nav_timing(
+        sort_started.elapsed(),
+        format_args!(
+            "load_entries.sort path={path:?} applications_view=true entries={}",
+            entries.len()
+        ),
+    );
+    crate::debug_options::log_nav_timing(
+        total_started.elapsed(),
+        format_args!(
+            "load_entries.total path={path:?} applications_view=true entries={} show_hidden={}",
+            entries.len().separate_with_commas(),
+            !options.hide_hidden_entries
+        ),
+    );
     Ok(entries)
 }
 
 fn collect_nested_applications(
     path: &Path,
     options: EntryLoadOptions,
+    timings_enabled: bool,
     entries: &mut Vec<FileEntry>,
-) {
+) -> EntryLoadTimingStats {
     let Ok(nested_entries) = fs::read_dir(path) else {
-        return;
+        return EntryLoadTimingStats::default();
     };
 
-    entries.extend(
-        nested_entries
-            .filter_map(Result::ok)
-            .filter(|entry| !should_skip_directory_entry(entry, options))
-            .filter_map(|entry| FileEntry::from_path(entry.path()))
-            .filter(FileEntry::is_app_bundle),
-    );
+    collect_visible_entries(
+        nested_entries,
+        options,
+        timings_enabled,
+        entries,
+        FileEntry::is_app_bundle,
+    )
+}
+
+fn collect_visible_entries(
+    directory_entries: fs::ReadDir,
+    options: EntryLoadOptions,
+    timings_enabled: bool,
+    entries: &mut Vec<FileEntry>,
+    keep_entry: impl Fn(&FileEntry) -> bool,
+) -> EntryLoadTimingStats {
+    let mut stats = EntryLoadTimingStats::default();
+
+    for directory_entry in directory_entries {
+        stats.directory_entries += 1;
+        let Ok(directory_entry) = directory_entry else {
+            stats.entry_errors += 1;
+            continue;
+        };
+
+        let filter_started = timings_enabled.then(Instant::now);
+        let should_skip = should_skip_directory_entry(&directory_entry, options);
+        if let Some(started) = filter_started {
+            stats.filter_elapsed += started.elapsed();
+        }
+        if should_skip {
+            stats.hidden_entries += 1;
+            continue;
+        }
+
+        let materialize_started = timings_enabled.then(Instant::now);
+        let Some(entry) = FileEntry::from_path(directory_entry.path()) else {
+            if let Some(started) = materialize_started {
+                stats.materialize_elapsed += started.elapsed();
+            }
+            stats.skipped_entries += 1;
+            continue;
+        };
+        if let Some(started) = materialize_started {
+            stats.materialize_elapsed += started.elapsed();
+        }
+        stats.materialized_entries += 1;
+
+        if keep_entry(&entry) {
+            entries.push(entry);
+        }
+    }
+
+    stats
 }
 
 #[cfg(target_os = "macos")]

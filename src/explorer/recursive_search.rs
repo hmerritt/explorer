@@ -8,16 +8,12 @@ use std::{
     },
 };
 
-#[cfg(debug_assertions)]
 use std::time::Instant;
-#[cfg(debug_assertions)]
 use thousands::Separable;
 
-#[cfg(debug_assertions)]
 macro_rules! recursive_search_timing {
     ($generation:expr, $elapsed:expr, $($message:tt)*) => {
-        eprintln!(
-            "[recursive-search:{}] {:<10.3?} {}",
+        crate::debug_options::log_recursive_search_timing(
             $generation,
             $elapsed,
             format_args!($($message)*)
@@ -98,9 +94,7 @@ pub(super) fn recursive_search_entries(
     cancel: Arc<AtomicBool>,
     progress: Arc<RecursiveSearchProgress>,
 ) -> RecursiveSearchOutput {
-    #[cfg(debug_assertions)]
     let total_started = Instant::now();
-    #[cfg(debug_assertions)]
     let cache_hit = cached_search.is_some();
 
     let scanned_paths = match cached_search {
@@ -111,7 +105,6 @@ pub(super) fn recursive_search_entries(
             cache.paths
         }
         None => {
-            #[cfg(debug_assertions)]
             let scan_started = Instant::now();
             progress.scanned_paths.store(0, Ordering::Relaxed);
             progress.scanning.store(true, Ordering::Relaxed);
@@ -122,7 +115,6 @@ pub(super) fn recursive_search_entries(
                 Some(&progress.scanned_paths),
             );
             progress.scanning.store(false, Ordering::Relaxed);
-            #[cfg(debug_assertions)]
             recursive_search_timing!(
                 generation,
                 scan_started.elapsed(),
@@ -134,14 +126,12 @@ pub(super) fn recursive_search_entries(
         }
     };
 
-    #[cfg(debug_assertions)]
     let filter_started = Instant::now();
     let result_paths = if cancel.load(Ordering::Relaxed) {
         Vec::new()
     } else {
         filter_recursive_paths(&scanned_paths, &query, &cancel)
     };
-    #[cfg(debug_assertions)]
     recursive_search_timing!(
         generation,
         filter_started.elapsed(),
@@ -150,20 +140,16 @@ pub(super) fn recursive_search_entries(
         cancel.load(Ordering::Relaxed)
     );
 
-    #[cfg(debug_assertions)]
     let result_path_count = result_paths.len();
-    #[cfg(debug_assertions)]
     let materialize_started = Instant::now();
     let entries =
         materialize_recursive_entries(&scanned_paths, &result_paths, show_hidden_files, &cancel);
-    #[cfg(debug_assertions)]
     recursive_search_timing!(
         generation,
         materialize_started.elapsed(),
         "materialize matches={result_path_count} entries={}",
         entries.len()
     );
-    #[cfg(debug_assertions)]
     recursive_search_timing!(
         generation,
         total_started.elapsed(),

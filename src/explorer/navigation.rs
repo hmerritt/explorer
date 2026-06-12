@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use gpui::Context;
 
@@ -41,18 +44,49 @@ impl ExplorerView {
         history_mode: HistoryMode,
         mut cx: Option<&mut Context<Self>>,
     ) {
+        let total_started = Instant::now();
+        let original_path = self.path.clone();
+        crate::debug_options::log_nav_timing(
+            total_started.elapsed(),
+            format_args!(
+                "navigate.start from={original_path:?} to={path:?} history={history_mode:?} same_path={}",
+                path == original_path
+            ),
+        );
+
         if path == self.path {
+            let reload_started = Instant::now();
             self.reload();
+            crate::debug_options::log_nav_timing(
+                reload_started.elapsed(),
+                format_args!("navigate.reload same_path=true path={:?}", self.path),
+            );
             if let Some(cx) = cx.as_deref_mut() {
+                let refresh_started = Instant::now();
                 self.refresh_search_after_external_change(cx);
+                crate::debug_options::log_nav_timing(
+                    refresh_started.elapsed(),
+                    format_args!(
+                        "navigate.refresh_search same_path=true path={:?}",
+                        self.path
+                    ),
+                );
                 self.restart_directory_watcher(cx);
             }
+            crate::debug_options::log_nav_timing(
+                total_started.elapsed(),
+                format_args!(
+                    "navigate.total from={original_path:?} to={:?} same_path=true",
+                    self.path
+                ),
+            );
             return;
         }
 
         let select_entry_after_reload =
             (self.path.parent() == Some(path.as_path())).then(|| self.path.clone());
 
+        let pre_reload_started = Instant::now();
         if matches!(history_mode, HistoryMode::Record) {
             self.back_stack.push(self.path.clone());
             self.forward_stack.clear();
@@ -64,14 +98,45 @@ impl ExplorerView {
         self.read_error = None;
         self.open_error = None;
         self.scroll_to_top();
+        crate::debug_options::log_nav_timing(
+            pre_reload_started.elapsed(),
+            format_args!(
+                "navigate.pre_reload from={original_path:?} to={:?} history={history_mode:?}",
+                self.path
+            ),
+        );
+
+        let reload_started = Instant::now();
         self.reload();
+        crate::debug_options::log_nav_timing(
+            reload_started.elapsed(),
+            format_args!("navigate.reload same_path=false path={:?}", self.path),
+        );
         if let Some(cx) = cx.as_deref_mut() {
             self.restart_directory_watcher(cx);
         }
 
         if let Some(path) = select_entry_after_reload {
+            let selection_started = Instant::now();
             self.select_single_path(&path);
+            crate::debug_options::log_nav_timing(
+                selection_started.elapsed(),
+                format_args!(
+                    "navigate.select_origin path={:?} selected={}",
+                    path,
+                    self.selected_paths().len()
+                ),
+            );
         }
+        crate::debug_options::log_nav_timing(
+            total_started.elapsed(),
+            format_args!(
+                "navigate.total from={original_path:?} to={:?} same_path=false entries={} read_error={}",
+                self.path,
+                self.entries.len(),
+                self.read_error.is_some()
+            ),
+        );
     }
 
     #[cfg(test)]

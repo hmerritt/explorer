@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::{
     ops::{Deref, DerefMut, Range},
     path::PathBuf,
@@ -8,14 +9,9 @@ use std::{
     time::Duration,
 };
 
-#[cfg(debug_assertions)]
-use std::time::Instant;
-
-#[cfg(debug_assertions)]
 macro_rules! recursive_search_timing {
     ($generation:expr, $elapsed:expr, $($message:tt)*) => {
-        eprintln!(
-            "[recursive-search:{}] {:<10.3?} {}",
+        crate::debug_options::log_recursive_search_timing(
             $generation,
             $elapsed,
             format_args!($($message)*)
@@ -739,7 +735,6 @@ impl ExplorerView {
         let root = self.path.clone();
         let query = self.search.content.clone();
         let show_hidden_files = self.show_hidden_files;
-        #[cfg(debug_assertions)]
         let cache_clone_started = Instant::now();
         let cached_search = self
             .search
@@ -753,7 +748,6 @@ impl ExplorerView {
                 .map(|cache| cache.paths.len())
                 .filter(|count| *count > 0),
         );
-        #[cfg(debug_assertions)]
         recursive_search_timing!(
             generation,
             cache_clone_started.elapsed(),
@@ -765,18 +759,14 @@ impl ExplorerView {
         let progress = Arc::new(RecursiveSearchProgress::default());
         self.search.recursive_cancel = Some(cancel.clone());
 
-        #[cfg(debug_assertions)]
         let schedule_started = Instant::now();
         let task = cx.spawn(async move |this, cx| {
-            #[cfg(debug_assertions)]
             let debounce_started = Instant::now();
             cx.background_executor()
                 .timer(Duration::from_millis(200))
                 .await;
-            #[cfg(debug_assertions)]
             recursive_search_timing!(generation, debounce_started.elapsed(), "schedule.debounce");
             if cancel.load(Ordering::Relaxed) {
-                #[cfg(debug_assertions)]
                 recursive_search_timing!(
                     generation,
                     schedule_started.elapsed(),
@@ -858,10 +848,9 @@ impl ExplorerView {
     fn cancel_recursive_search(&mut self) {
         if let Some(cancel) = self.search.recursive_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[recursive-search:{}] {:<10} schedule.cancel_requested cancelled=true",
-                self.search.recursive_generation, "-"
+            crate::debug_options::log_recursive_search_marker(
+                self.search.recursive_generation,
+                format_args!("schedule.cancel_requested cancelled=true"),
             );
         }
         self.search.recursive_task = None;

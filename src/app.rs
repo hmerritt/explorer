@@ -1,12 +1,12 @@
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
 };
-#[cfg(any(target_os = "linux", test))]
-use std::{env, ffi::OsString};
 
 use gpui::{
     App, Application, Bounds, Context, KeyBinding, Pixels, SharedString, TitlebarOptions, Window,
@@ -429,6 +429,7 @@ pub fn run() {
 
     app.run(|cx: &mut App| {
         register_embedded_fonts(cx);
+        crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),

@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
 
 use gpui::{
@@ -203,25 +204,77 @@ impl ExplorerView {
     }
 
     pub fn reload(&mut self) {
+        let total_started = Instant::now();
         self.context_menu = None;
         self.open_error = None;
+        let selected_paths_started = Instant::now();
         let selected_paths = self.selected_paths();
+        crate::debug_options::log_nav_timing(
+            selected_paths_started.elapsed(),
+            format_args!(
+                "reload.selected_paths path={:?} selected={}",
+                self.path,
+                selected_paths.len()
+            ),
+        );
 
+        let sidebar_started = Instant::now();
         self.sidebar_sections = sidebar_sections(&self.sidebar_items);
+        crate::debug_options::log_nav_timing(
+            sidebar_started.elapsed(),
+            format_args!("reload.sidebar_sections path={:?}", self.path),
+        );
 
+        let load_started = Instant::now();
         match load_entries(&self.path, self.show_hidden_files) {
             Ok(entries) => {
+                crate::debug_options::log_nav_timing(
+                    load_started.elapsed(),
+                    format_args!(
+                        "reload.load_entries path={:?} ok=true entries={}",
+                        self.path,
+                        entries.len()
+                    ),
+                );
                 self.all_entries = entries;
                 self.read_error = None;
+                let filter_started = Instant::now();
                 self.apply_search_filter_preserving_selection(&selected_paths);
+                crate::debug_options::log_nav_timing(
+                    filter_started.elapsed(),
+                    format_args!(
+                        "reload.search_filter path={:?} query={:?} visible={} selected={}",
+                        self.path,
+                        self.search_query(),
+                        self.entries.len(),
+                        self.selected_paths().len()
+                    ),
+                );
             }
             Err(error) => {
+                crate::debug_options::log_nav_timing(
+                    load_started.elapsed(),
+                    format_args!(
+                        "reload.load_entries path={:?} ok=false error={error}",
+                        self.path
+                    ),
+                );
                 self.all_entries.clear();
                 self.entries.clear();
                 self.clear_selection();
                 self.read_error = Some(error.to_string());
             }
         }
+        crate::debug_options::log_nav_timing(
+            total_started.elapsed(),
+            format_args!(
+                "reload.total path={:?} entries={} all_entries={} read_error={}",
+                self.path,
+                self.entries.len(),
+                self.all_entries.len(),
+                self.read_error.is_some()
+            ),
+        );
     }
 
     pub(super) fn emit_filesystem_changed(&self, cx: &mut Context<Self>) {
@@ -232,8 +285,15 @@ impl ExplorerView {
         &self.path
     }
 
-    pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) -> bool {
+        let started = Instant::now();
         self.directory_watcher = DirectoryWatcher::start(self.path.clone(), cx);
+        let ok = self.directory_watcher.is_some();
+        crate::debug_options::log_nav_timing(
+            started.elapsed(),
+            format_args!("watcher.restart path={:?} ok={ok}", self.path),
+        );
+        ok
     }
 
     pub(super) fn tab_label(&self) -> String {
