@@ -2792,7 +2792,7 @@ fn render_context_menu_item(
 fn context_menu_action_row(
     id: &'static str,
     icon: Option<ContextMenuIcon>,
-    label: &'static str,
+    label: &str,
     command: ContextMenuCommand,
     enabled: bool,
     path: Vec<usize>,
@@ -2891,14 +2891,14 @@ fn context_menu_row_base(
         })
 }
 
-fn context_menu_label(label: &'static str, flexible: bool) -> Div {
+fn context_menu_label(label: &str, flexible: bool) -> Div {
     div()
         .when(flexible, |this| this.flex_1().min_w(px(0.0)))
         .when(!flexible, |this| this.flex_shrink_0())
         .truncate()
         .text_size(px(CONTEXT_MENU_TEXT_SIZE))
         .text_color(rgb(0x1f1f1f))
-        .child(label)
+        .child(SharedString::from(label.to_owned()))
 }
 
 fn context_menu_width(items: &[ContextMenuItem], window: &Window) -> f32 {
@@ -2918,7 +2918,10 @@ fn context_menu_width_for_natural_width(natural_width: f32) -> f32 {
 
 fn context_menu_item_width(item: &ContextMenuItem, window: &Window) -> f32 {
     match item {
-        ContextMenuItem::Action { label, .. } | ContextMenuItem::Submenu { label, .. } => {
+        ContextMenuItem::Action { label, .. } => {
+            context_menu_action_width_for_text_width(context_menu_text_width(label, window))
+        }
+        ContextMenuItem::Submenu { label, .. } => {
             context_menu_action_width_for_text_width(context_menu_text_width(label, window))
         }
         ContextMenuItem::Detail {
@@ -4046,7 +4049,7 @@ mod tests {
         let child_items = vec![ContextMenuItem::Action {
             id: "context-menu-child",
             icon: None,
-            label: "A significantly wider submenu action",
+            label: "A significantly wider submenu action".to_owned(),
             command: crate::explorer::context_menu::ContextMenuCommand::Paste,
             enabled: true,
         }];

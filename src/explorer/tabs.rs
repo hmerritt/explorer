@@ -1060,6 +1060,31 @@ mod tests {
         (temp, tabs, cx)
     }
 
+    fn test_tabs_with_directories_and_files<'a>(
+        cx: &'a mut TestAppContext,
+        directory_names: &[&str],
+        file_names: &[&str],
+    ) -> (
+        TempDir,
+        Entity<ExplorerTabs>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        for name in directory_names {
+            fs::create_dir(temp.path().join(name)).expect("create test directory");
+        }
+        for name in file_names {
+            fs::write(temp.path().join(name), b"file").expect("write test file");
+        }
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new_for_test(path, focus_handle, cx)
+        });
+        (temp, tabs, cx)
+    }
+
     fn active_test_view(
         tabs: &Entity<ExplorerTabs>,
         cx: &gpui::VisualTestContext,
@@ -1206,7 +1231,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_selected_folder_preserves_multi_selection_and_disables_rename(
+    fn right_click_selected_folder_preserves_multi_selection_and_omits_open_and_rename(
         cx: &mut TestAppContext,
     ) {
         let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
@@ -1225,14 +1250,31 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["a", "b"]);
             let menu = view.context_menu.as_ref().expect("entry context menu");
-            assert!(matches!(
-                menu.items.last(),
-                Some(crate::explorer::context_menu::ContextMenuItem::Action {
-                    command: crate::explorer::context_menu::ContextMenuCommand::RenameSelected,
-                    enabled: false,
+            assert!(!menu.items.iter().any(|item| matches!(
+                item,
+                crate::explorer::context_menu::ContextMenuItem::Action {
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenDirectory {
+                        ..
+                    },
                     ..
-                })
+                }
+            )));
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                    ..
+                }) if label == "Open new tabs (2)"
             ));
+            assert!(!menu.items.iter().any(|item| matches!(
+                item,
+                crate::explorer::context_menu::ContextMenuItem::Action {
+                    command: crate::explorer::context_menu::ContextMenuCommand::RenameSelected,
+                    ..
+                }
+            )));
         });
     }
 
@@ -1335,7 +1377,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn folder_context_menu_open_in_new_tab_uses_existing_tab_event(cx: &mut TestAppContext) {
+    fn folder_context_menu_open_in_new_tab_opens_single_selected_folder(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
         let target = temp.path().join("a");
@@ -1345,17 +1387,28 @@ mod tests {
         });
 
         right_click_selector(cx, "explorer-entry-0");
-        cx.update(|window, app| {
-            view.update(app, |view, cx| {
-                view.execute_context_menu_command(
-                    crate::explorer::context_menu::ContextMenuCommand::OpenDirectoryInNewTab {
-                        path: target.clone(),
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenDirectory {
+                        ..
                     },
-                    window,
-                    cx,
-                );
-            });
+                    ..
+                })
+            ));
+            assert!(matches!(
+                menu.items.get(1),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                    ..
+                }) if label == "Open in new tab"
+            ));
         });
+        click_selector(cx, "context-menu-entry-open-new-tab");
         cx.run_until_parked();
 
         let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
@@ -1364,6 +1417,94 @@ mod tests {
         });
         cx.read_entity(&new_tab_view, |view, _| {
             assert_eq!(view.path, target);
+        });
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_open_in_new_tabs_ignores_files_and_preserves_folder_display_order(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &["a", "b"], &["file.txt"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+            view.update(app, |view, cx| {
+                view.select_all_entries();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        right_click_selector(cx, "explorer-entry-1");
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                    ..
+                }) if label == "Open new tabs (2)"
+            ));
+        });
+        click_selector(cx, "context-menu-entry-open-new-tab");
+        cx.run_until_parked();
+
+        let new_tab_views = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 3);
+            tabs.tabs[1..]
+                .iter()
+                .map(|tab| tab.view.clone())
+                .collect::<Vec<_>>()
+        });
+        let new_tab_paths = new_tab_views
+            .iter()
+            .map(|view| cx.read_entity(view, |view, _| view.path.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            new_tab_paths,
+            vec![temp.path().join("a"), temp.path().join("b")]
+        );
+    }
+
+    #[gpui::test]
+    fn folder_context_menu_open_in_new_tab_ignores_selected_files(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &["folder"], &["file.txt"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+            view.update(app, |view, cx| {
+                view.select_all_entries();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                    ..
+                }) if label == "Open in new tab"
+            ));
+        });
+        click_selector(cx, "context-menu-entry-open-new-tab");
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, temp.path().join("folder"));
         });
     }
 
