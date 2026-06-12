@@ -1028,19 +1028,29 @@ impl ExplorerView {
                         });
 
                         window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
-                            if event.button != MouseButton::Left {
-                                return;
+                            match event.button {
+                                MouseButton::Left => {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        let Some(width) = this.finish_sidebar_resize() else {
+                                            return;
+                                        };
+
+                                        crate::settings::set_sidebar_width(width, cx);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    });
+                                }
+                                MouseButton::Right if bounds.contains(&event.position) => {
+                                    let _ = entity.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        let width = this.reset_sidebar_width();
+                                        crate::settings::set_sidebar_width(width, cx);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    });
+                                }
+                                _ => {}
                             }
-
-                            let _ = entity.update(cx, |this, cx| {
-                                let Some(width) = this.finish_sidebar_resize() else {
-                                    return;
-                                };
-
-                                crate::settings::set_sidebar_width(width, cx);
-                                cx.stop_propagation();
-                                cx.notify();
-                            });
                         });
                     },
                 )
@@ -4494,6 +4504,58 @@ mod tests {
         );
         assert_eq!(sidebar_width, 312.0);
         assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+    }
+
+    #[gpui::test]
+    fn right_clicking_sidebar_resizer_restores_and_persists_default_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings {
+                sidebar_width: 312,
+                ..crate::settings::ExplorerSettings::default()
+            },
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 312.0;
+            view.begin_sidebar_resize(312.0);
+            view
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-sidebar-resizer")
+            .expect("sidebar resizer bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+
+        let sidebar_width = f32::from(
+            cx.debug_bounds("explorer-sidebar")
+                .expect("sidebar bounds")
+                .size
+                .width,
+        );
+        assert_eq!(sidebar_width, crate::settings::SIDEBAR_DEFAULT_WIDTH as f32);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.sidebar_width,
+                crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
+            );
+            assert_eq!(view.sidebar_resize_drag, None);
+        });
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .sidebar_width),
+            crate::settings::SIDEBAR_DEFAULT_WIDTH
+        );
     }
 
     #[test]

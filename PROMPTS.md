@@ -1,12 +1,15 @@
 ## New
 
+There is a double-click bug when selecting / opening folders/files. When I double-click into a folder, if I then rapidly click on another item it will select and open it instantly. This should not be the behaviour. A new double-click should be required to open files/folders, a single click should just select it.
+
+---
+
 Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 
 Set a default value to: 1000
 
 ## Specific / for-later
 
-- Right-click side-bar drag border to reset to default width
 - Alt-double-click opens a "Details" window, for both files/folders.
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
@@ -19,6 +22,8 @@ Set a default value to: 1000
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
 - File icons
+    - Initially implement static file extension mapping to bundled icons, text,word,powerpoint,excel,photo,video,music,etc..
+    - [Windows-only] Implement file icon loader to get actual program icon (same as Windows explorer). Also cache each icon + cache mappings per session (store cache mapping to disk, and show even stale cache while refreshing)
 - Large icons grid view (alternate to the current Details view)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
 

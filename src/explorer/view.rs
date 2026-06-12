@@ -460,6 +460,12 @@ impl ExplorerView {
         Some(normalized_sidebar_width_f32(self.sidebar_width).round() as u32)
     }
 
+    pub(super) fn reset_sidebar_width(&mut self) -> u32 {
+        self.sidebar_resize_drag = None;
+        self.sidebar_width = crate::settings::SIDEBAR_DEFAULT_WIDTH as f32;
+        crate::settings::SIDEBAR_DEFAULT_WIDTH
+    }
+
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
@@ -644,6 +650,23 @@ mod tests {
             sidebar_width_for_drag(225.0, -200.0),
             crate::settings::SIDEBAR_MIN_WIDTH as f32
         );
+    }
+
+    #[test]
+    fn reset_sidebar_width_restores_default_and_clears_drag() {
+        let mut view = ExplorerView::new(PathBuf::from("reset-sidebar"));
+        view.sidebar_width = 320.0;
+        view.begin_sidebar_resize(320.0);
+
+        assert_eq!(
+            view.reset_sidebar_width(),
+            crate::settings::SIDEBAR_DEFAULT_WIDTH
+        );
+        assert_eq!(
+            view.sidebar_width,
+            crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
+        );
+        assert_eq!(view.sidebar_resize_drag, None);
     }
 
     #[test]
