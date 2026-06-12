@@ -1,15 +1,5 @@
 ## New
 
-Plan to implement: Context menus
-
-There is no full right-click model yet:
-
-- Open with
-- Properties
-- Copy as path
-- Send to
-- Share
-
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.
@@ -18,13 +8,6 @@ There is no full right-click model yet:
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - When navigating to a directory, load in a non-blocking way. Keep the view the same initially, but if after 100ms it is still loading, preload the UI in the directory and display a loading spinner until completion. Since this is happening in a non-blocking thread, a user can choose to navigate away, in which case when the thread returns the result is simpily discarded
 - Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
-
-## Didn't work first try
-
-- Signed app bundle for macOS
-- Previously — Native outbound OS dragging is explicitly staged later, per the final scope choice, because GPUI 0.2.2 does not expose the needed cross-platform drag-source/effect APIs without a GPUI patch.
-  Drag-and-drop — Should the plan include a local GPUI patch/vendor to expose native file drag/drop effects?
-  Vendor GPUI for native OS behaviour
 
 ## Ideas
 

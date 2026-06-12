@@ -1457,7 +1457,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_selected_folder_preserves_multi_selection_and_omits_open_and_rename(
+    fn right_click_selected_folder_preserves_multi_selection_and_omits_primary_open_and_rename(
         cx: &mut TestAppContext,
     ) {
         let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
@@ -1479,9 +1479,9 @@ mod tests {
             assert!(!menu.items.iter().any(|item| matches!(
                 item,
                 crate::explorer::context_menu::ContextMenuItem::Action {
-                    command: crate::explorer::context_menu::ContextMenuCommand::OpenDirectory {
-                        ..
-                    },
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenDirectory { .. }
+                            | crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
                     ..
                 }
             )));
@@ -1669,6 +1669,14 @@ mod tests {
                 menu.items.first(),
                 Some(crate::explorer::context_menu::ContextMenuItem::Action {
                     label,
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                }) if label == "Open files (1)"
+            ));
+            assert!(matches!(
+                menu.items.get(1),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
                     command:
                         crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
                     ..
@@ -1714,6 +1722,14 @@ mod tests {
             let menu = view.context_menu.as_ref().expect("entry context menu");
             assert!(matches!(
                 menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                }) if label == "Open files (1)"
+            ));
+            assert!(matches!(
+                menu.items.get(1),
                 Some(crate::explorer::context_menu::ContextMenuItem::Action {
                     label,
                     command:
