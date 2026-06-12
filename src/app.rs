@@ -9,8 +9,8 @@ use std::{
 use std::{env, ffi::OsString};
 
 use gpui::{
-    App, Application, Bounds, Context, KeyBinding, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowOptions, prelude::*, px, size,
+    App, Application, Bounds, Context, KeyBinding, Pixels, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,14 +56,18 @@ enum StoredWindowMode {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 struct StoredWindowState {
+    x: f32,
+    y: f32,
     width: f32,
     height: f32,
     state: StoredWindowMode,
 }
 
 impl StoredWindowState {
-    fn new(width: f32, height: f32, state: StoredWindowMode) -> Self {
+    fn new(x: f32, y: f32, width: f32, height: f32, state: StoredWindowMode) -> Self {
         Self {
+            x,
+            y,
             width,
             height,
             state,
@@ -71,7 +75,9 @@ impl StoredWindowState {
     }
 
     fn is_valid(&self) -> bool {
-        self.width.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
             && self.height.is_finite()
             && self.width >= MIN_WINDOW_WIDTH
             && self.height >= MIN_WINDOW_HEIGHT
@@ -85,6 +91,8 @@ impl StoredWindowState {
         };
 
         let state = Self::new(
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
             state,
@@ -92,17 +100,33 @@ impl StoredWindowState {
         state.is_valid().then_some(state)
     }
 
-    fn to_window_bounds(self, cx: &App) -> Option<WindowBounds> {
+    fn to_window_bounds(self, display_bounds: &[Bounds<Pixels>]) -> Option<WindowBounds> {
         if !self.is_valid() {
             return None;
         }
 
-        let bounds = Bounds::centered(None, size(px(self.width), px(self.height)), cx);
+        let bounds = Bounds::new(
+            point(px(self.x), px(self.y)),
+            size(px(self.width), px(self.height)),
+        );
+        if !bounds_fit_current_display(bounds, display_bounds) {
+            return None;
+        }
+
         Some(match self.state {
             StoredWindowMode::Windowed => WindowBounds::Windowed(bounds),
             StoredWindowMode::Maximized => WindowBounds::Maximized(bounds),
         })
     }
+}
+
+fn bounds_fit_current_display(
+    window_bounds: Bounds<Pixels>,
+    display_bounds: &[Bounds<Pixels>],
+) -> bool {
+    display_bounds
+        .iter()
+        .any(|display_bounds| window_bounds.is_contained_within(display_bounds))
 }
 
 struct Explorer {
@@ -292,10 +316,28 @@ fn default_window_bounds(cx: &App) -> WindowBounds {
     ))
 }
 
+fn startup_window_bounds_from_state(
+    state: Option<StoredWindowState>,
+    display_bounds: &[Bounds<Pixels>],
+    default_bounds: WindowBounds,
+) -> WindowBounds {
+    state
+        .and_then(|state| state.to_window_bounds(display_bounds))
+        .unwrap_or(default_bounds)
+}
+
 fn startup_window_bounds(cx: &App) -> WindowBounds {
-    load_window_state()
-        .and_then(|state| state.to_window_bounds(cx))
-        .unwrap_or_else(|| default_window_bounds(cx))
+    let display_bounds = cx
+        .displays()
+        .into_iter()
+        .map(|display| display.bounds())
+        .collect::<Vec<_>>();
+
+    startup_window_bounds_from_state(
+        load_window_state(),
+        &display_bounds,
+        default_window_bounds(cx),
+    )
 }
 
 fn load_window_state() -> Option<StoredWindowState> {
@@ -587,9 +629,11 @@ mod tests {
 
     #[test]
     fn window_state_serializes_with_lowercase_state() {
-        let state = StoredWindowState::new(800.0, 600.0, StoredWindowMode::Maximized);
+        let state = StoredWindowState::new(10.0, 20.0, 800.0, 600.0, StoredWindowMode::Maximized);
         let json = serde_json::to_string(&state).expect("serialize state");
 
+        assert!(json.contains("\"x\":10.0"));
+        assert!(json.contains("\"y\":20.0"));
         assert!(json.contains("\"state\":\"maximized\""));
         assert_eq!(
             serde_json::from_str::<StoredWindowState>(&json).expect("deserialize state"),
@@ -600,16 +644,41 @@ mod tests {
     #[test]
     fn window_state_rejects_invalid_dimensions() {
         assert!(
-            !StoredWindowState::new(MIN_WINDOW_WIDTH - 1.0, 600.0, StoredWindowMode::Windowed)
+            !StoredWindowState::new(
+                0.0,
+                0.0,
+                MIN_WINDOW_WIDTH - 1.0,
+                600.0,
+                StoredWindowMode::Windowed
+            )
+            .is_valid()
+        );
+        assert!(
+            !StoredWindowState::new(
+                0.0,
+                0.0,
+                800.0,
+                MIN_WINDOW_HEIGHT - 1.0,
+                StoredWindowMode::Windowed
+            )
+            .is_valid()
+        );
+        assert!(
+            !StoredWindowState::new(f32::NAN, 0.0, 800.0, 600.0, StoredWindowMode::Windowed)
                 .is_valid()
         );
         assert!(
-            !StoredWindowState::new(800.0, MIN_WINDOW_HEIGHT - 1.0, StoredWindowMode::Windowed)
+            !StoredWindowState::new(0.0, f32::NAN, 800.0, 600.0, StoredWindowMode::Windowed)
                 .is_valid()
         );
-        assert!(!StoredWindowState::new(f32::NAN, 600.0, StoredWindowMode::Windowed).is_valid());
+        assert!(
+            !StoredWindowState::new(0.0, 0.0, f32::NAN, 600.0, StoredWindowMode::Windowed)
+                .is_valid()
+        );
         assert!(
             StoredWindowState::new(
+                0.0,
+                0.0,
                 MIN_WINDOW_WIDTH,
                 MIN_WINDOW_HEIGHT,
                 StoredWindowMode::Windowed
@@ -620,11 +689,13 @@ mod tests {
 
     #[test]
     fn window_bounds_state_preserves_windowed_and_maximized_but_skips_fullscreen() {
-        let bounds = Bounds::new(gpui::point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
 
         assert_eq!(
             StoredWindowState::from_window_bounds(WindowBounds::Windowed(bounds)),
             Some(StoredWindowState::new(
+                10.0,
+                20.0,
                 900.0,
                 700.0,
                 StoredWindowMode::Windowed
@@ -633,6 +704,8 @@ mod tests {
         assert_eq!(
             StoredWindowState::from_window_bounds(WindowBounds::Maximized(bounds)),
             Some(StoredWindowState::new(
+                10.0,
+                20.0,
                 900.0,
                 700.0,
                 StoredWindowMode::Maximized
@@ -641,6 +714,74 @@ mod tests {
         assert_eq!(
             StoredWindowState::from_window_bounds(WindowBounds::Fullscreen(bounds)),
             None
+        );
+    }
+
+    #[test]
+    fn stored_window_state_restores_bounds_that_fit_a_current_display() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let state = StoredWindowState::new(10.0, 20.0, 900.0, 700.0, StoredWindowMode::Windowed);
+        let expected = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
+
+        assert_eq!(
+            state.to_window_bounds(&[display]),
+            Some(WindowBounds::Windowed(expected))
+        );
+    }
+
+    #[test]
+    fn stored_window_state_preserves_maximized_restore_bounds_when_safe() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let state = StoredWindowState::new(10.0, 20.0, 900.0, 700.0, StoredWindowMode::Maximized);
+        let expected = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
+
+        assert_eq!(
+            state.to_window_bounds(&[display]),
+            Some(WindowBounds::Maximized(expected))
+        );
+    }
+
+    #[test]
+    fn stored_window_state_rejects_bounds_outside_current_displays() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+
+        assert_eq!(
+            StoredWindowState::new(1700.0, 20.0, 900.0, 700.0, StoredWindowMode::Windowed)
+                .to_window_bounds(&[display]),
+            None
+        );
+        assert_eq!(
+            StoredWindowState::new(10.0, 20.0, 900.0, 700.0, StoredWindowMode::Windowed)
+                .to_window_bounds(&[]),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_window_bounds_falls_back_to_default_when_saved_bounds_are_not_safe() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let default_bounds = WindowBounds::Windowed(Bounds::new(
+            point(px(448.0), px(130.0)),
+            size(px(DEFAULT_WINDOW_WIDTH), px(DEFAULT_WINDOW_HEIGHT)),
+        ));
+
+        assert_eq!(
+            startup_window_bounds_from_state(None, &[display], default_bounds),
+            default_bounds
+        );
+        assert_eq!(
+            startup_window_bounds_from_state(
+                Some(StoredWindowState::new(
+                    1700.0,
+                    20.0,
+                    900.0,
+                    700.0,
+                    StoredWindowMode::Windowed,
+                )),
+                &[display],
+                default_bounds,
+            ),
+            default_bounds
         );
     }
 
@@ -714,6 +855,8 @@ mod tests {
         fs::write(
             &invalid,
             serde_json::to_string(&StoredWindowState::new(
+                0.0,
+                0.0,
                 MIN_WINDOW_WIDTH - 1.0,
                 600.0,
                 StoredWindowMode::Windowed,
@@ -723,6 +866,14 @@ mod tests {
         .expect("write invalid state");
         assert_eq!(load_window_state_from_path(&invalid), None);
 
+        let legacy = dir.join("legacy.json");
+        fs::write(
+            &legacy,
+            r#"{"width":900.0,"height":700.0,"state":"windowed"}"#,
+        )
+        .expect("write legacy state");
+        assert_eq!(load_window_state_from_path(&legacy), None);
+
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -731,7 +882,7 @@ mod tests {
         let path = unique_temp_dir("writer")
             .join("nested")
             .join(WINDOW_STATE_FILE_NAME);
-        let state = StoredWindowState::new(960.0, 540.0, StoredWindowMode::Windowed);
+        let state = StoredWindowState::new(12.0, 34.0, 960.0, 540.0, StoredWindowMode::Windowed);
 
         save_window_state_to_path(&path, &state).expect("save state");
         assert_eq!(load_window_state_from_path(&path), Some(state));
