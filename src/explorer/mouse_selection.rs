@@ -30,6 +30,12 @@ pub(super) enum PointerDragIntent {
     RubberBand,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MouseSelectionPointerDownOutcome {
+    pub(super) menu_closed: bool,
+    pub(super) selection_started: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SelectionBox {
     pub(super) left: f32,
@@ -99,6 +105,26 @@ impl ExplorerView {
                 false
             }
             None => false,
+        }
+    }
+
+    pub(super) fn begin_mouse_selection_drag_after_menu_dismissal(
+        &mut self,
+        button: MouseButton,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+        modifiers: SelectionModifiers,
+    ) -> MouseSelectionPointerDownOutcome {
+        let menu_closed = self.close_context_menu();
+        let selection_started = self.begin_mouse_selection_drag_for_intent(
+            button,
+            local_position,
+            viewport_size,
+            modifiers,
+        );
+        MouseSelectionPointerDownOutcome {
+            menu_closed,
+            selection_started,
         }
     }
 
@@ -403,6 +429,7 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 mod tests {
     use super::*;
     use crate::explorer::constants::ROW_HEIGHT;
+    use crate::explorer::context_menu::ContextMenuState;
     use crate::explorer::test_support::{selected_names, test_view_with_entries};
 
     #[test]
@@ -558,6 +585,92 @@ mod tests {
         );
 
         assert!(view.mouse_selection_drag.is_some());
+    }
+
+    #[test]
+    fn left_name_column_mouse_down_closes_context_menu_and_starts_rubber_band() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.context_menu = Some(ContextMenuState::new(
+            gpui::point(px(200.0), px(200.0)),
+            Vec::new(),
+        ));
+
+        let outcome = view.begin_mouse_selection_drag_after_menu_dismissal(
+            MouseButton::Left,
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            MouseSelectionPointerDownOutcome {
+                menu_closed: true,
+                selection_started: true,
+            }
+        );
+        assert!(view.context_menu.is_none());
+        let drag = view
+            .mouse_selection_drag
+            .as_ref()
+            .expect("rubber-band drag");
+        assert_eq!(drag.button, MouseButton::Left);
+    }
+
+    #[test]
+    fn left_non_name_column_mouse_down_closes_context_menu_without_rubber_band() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.context_menu = Some(ContextMenuState::new(
+            gpui::point(px(200.0), px(200.0)),
+            Vec::new(),
+        ));
+
+        let outcome = view.begin_mouse_selection_drag_after_menu_dismissal(
+            MouseButton::Left,
+            gpui::point(px(500.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            MouseSelectionPointerDownOutcome {
+                menu_closed: true,
+                selection_started: false,
+            }
+        );
+        assert!(view.context_menu.is_none());
+        assert!(view.mouse_selection_drag.is_none());
+    }
+
+    #[test]
+    fn right_name_column_mouse_down_still_closes_context_menu_and_starts_rubber_band() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.context_menu = Some(ContextMenuState::new(
+            gpui::point(px(200.0), px(200.0)),
+            Vec::new(),
+        ));
+
+        let outcome = view.begin_mouse_selection_drag_after_menu_dismissal(
+            MouseButton::Right,
+            gpui::point(px(1.0), px(ROW_HEIGHT + 1.0)),
+            size(px(800.0), px(100.0)),
+            SelectionModifiers::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            MouseSelectionPointerDownOutcome {
+                menu_closed: true,
+                selection_started: true,
+            }
+        );
+        assert!(view.context_menu.is_none());
+        let drag = view
+            .mouse_selection_drag
+            .as_ref()
+            .expect("rubber-band drag");
+        assert_eq!(drag.button, MouseButton::Right);
     }
 
     #[test]

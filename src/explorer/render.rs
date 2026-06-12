@@ -1922,19 +1922,13 @@ impl ExplorerView {
                                 return;
                             }
 
-                            if this.context_menu.is_some() && event.button != MouseButton::Right {
-                                return;
-                            }
-
-                            let menu_closed =
-                                event.button == MouseButton::Right && this.close_context_menu();
-                            let selection_started = this.begin_mouse_selection_drag_for_intent(
+                            let outcome = this.begin_mouse_selection_drag_after_menu_dismissal(
                                 event.button,
                                 local_position,
                                 viewport_size,
                                 modifiers,
                             );
-                            if menu_closed || selection_started {
+                            if outcome.menu_closed || outcome.selection_started {
                                 cx.notify();
                             }
                         });

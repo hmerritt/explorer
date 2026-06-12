@@ -7,11 +7,10 @@ Set a default value to: 1000
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.
-- Left side-bar drag re-sizable
+- Left side-bar drag re-sizable (save width in settings), min-width 100
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
-- When navigating to a directory, load in a non-blocking way. Keep the view the same initially, but if after 100ms it is still loading, preload the UI in the directory and display a loading spinner until completion. Since this is happening in a non-blocking thread, a user can choose to navigate away, in which case when the thread returns the result is simpily discarded
-- Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
+- (maybe) Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
 
 ## Ideas
 
