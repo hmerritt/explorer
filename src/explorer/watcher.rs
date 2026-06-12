@@ -65,6 +65,7 @@ fn spawn_watcher_task(
                 .update(cx, |explorer, cx| {
                     if explorer.path() == watched_path {
                         explorer.reload();
+                        explorer.schedule_pending_shell_shortcut_resolution(cx);
                         cx.notify();
                     }
                 })

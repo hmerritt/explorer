@@ -1,30 +1,5 @@
 ## New
 
-Debug relative timings - implement a time-since-last-log so each print you can print, +30ms, before the total time.
-
-Like the existing total time, also pad out to prevent layout shifts.
-
-Refactor how the padding works for both, by putting the measurment as the final chars in the padding "34.098 ms"
-
-```
-[nav] 2.000µs    navigate.start from="C:\\Users\\hrmer\\Downloads" to="C:\\Users\\hrmer\\Downloads\\archives" history=Record same_path=false
-[nav] 61.300µs   navigate.pre_reload from="C:\\Users\\hrmer\\Downloads" to="C:\\Users\\hrmer\\Downloads\\archives" history=Record
-[nav] 1.100µs    reload.selected_paths path="C:\\Users\\hrmer\\Downloads\\archives" selected=0
-[nav] 296.900µs  reload.sidebar_sections path="C:\\Users\\hrmer\\Downloads\\archives"
-[nav] 43.300µs   load_entries.read_dir path="C:\\Users\\hrmer\\Downloads\\archives" ok=true
-[nav] 68.200µs   load_entries.filter path="C:\\Users\\hrmer\\Downloads\\archives" scanned=3 hidden=0 entry_errors=0
-[nav] 1.629s     load_entries.materialize path="C:\\Users\\hrmer\\Downloads\\archives" entries=3 skipped=0
-[nav] 1.634s     load_entries.scan path="C:\\Users\\hrmer\\Downloads\\archives" scanned=3 entries=3
-[nav] 16.100µs   load_entries.sort path="C:\\Users\\hrmer\\Downloads\\archives" entries=3
-[nav] 1.640s     load_entries.total path="C:\\Users\\hrmer\\Downloads\\archives" entries=3 show_hidden=false
-[nav] 1.643s     reload.load_entries path="C:\\Users\\hrmer\\Downloads\\archives" ok=true entries=3
-[nav] 21.000µs   reload.search_filter path="C:\\Users\\hrmer\\Downloads\\archives" query="" visible=3 selected=0
-[nav] 1.652s     reload.total path="C:\\Users\\hrmer\\Downloads\\archives" entries=3 all_entries=3 read_error=false
-[nav] 1.654s     navigate.reload same_path=false path="C:\\Users\\hrmer\\Downloads\\archives"
-[nav] 531.300µs  watcher.restart path="C:\\Users\\hrmer\\Downloads\\archives" ok=true
-[nav] 1.669s     navigate.total from="C:\\Users\\hrmer\\Downloads" to="C:\\Users\\hrmer\\Downloads\\archives" same_path=false entries=3 read_error=false
-```
-
 ## Specific / for-later
 
 - Alt-double-click opens a "Details" window, for both files/folders.

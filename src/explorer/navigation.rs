@@ -57,6 +57,9 @@ impl ExplorerView {
         if path == self.path {
             let reload_started = Instant::now();
             self.reload();
+            if let Some(cx) = cx.as_deref_mut() {
+                self.schedule_pending_shell_shortcut_resolution(cx);
+            }
             crate::debug_options::log_nav_timing(
                 reload_started.elapsed(),
                 format_args!("navigate.reload same_path=true path={:?}", self.path),
@@ -108,6 +111,9 @@ impl ExplorerView {
 
         let reload_started = Instant::now();
         self.reload();
+        if let Some(cx) = cx.as_deref_mut() {
+            self.schedule_pending_shell_shortcut_resolution(cx);
+        }
         crate::debug_options::log_nav_timing(
             reload_started.elapsed(),
             format_args!("navigate.reload same_path=false path={:?}", self.path),
@@ -364,7 +370,7 @@ mod tests {
 
     use super::*;
     use crate::explorer::{
-        entry::{DirectoryLinkKind, EntryKind, FileEntry},
+        entry::{DirectoryLinkKind, EntryKind, FileEntry, ShellShortcutTargetKind},
         test_support::TempDir,
         view::ExplorerView,
     };
@@ -524,6 +530,7 @@ mod tests {
             "shortcut.lnk",
             DirectoryLinkKind::ShellShortcut {
                 target: PathBuf::from("target"),
+                target_kind: ShellShortcutTargetKind::Directory,
             },
         );
 
@@ -531,6 +538,27 @@ mod tests {
             directory_new_tab_target(&entry),
             Some(PathBuf::from("target"))
         );
+    }
+
+    #[test]
+    fn middle_click_target_ignores_unresolved_shell_shortcuts() {
+        let pending = FileEntry::test_directory_link(
+            "pending.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target"),
+                target_kind: ShellShortcutTargetKind::Pending,
+            },
+        );
+        let non_directory = FileEntry::test_directory_link(
+            "file.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target.txt"),
+                target_kind: ShellShortcutTargetKind::NonDirectory,
+            },
+        );
+
+        assert_eq!(directory_new_tab_target(&pending), None);
+        assert_eq!(directory_new_tab_target(&non_directory), None);
     }
 
     #[test]
@@ -703,6 +731,7 @@ mod tests {
             "shortcut.lnk",
             DirectoryLinkKind::ShellShortcut {
                 target: PathBuf::from("target"),
+                target_kind: ShellShortcutTargetKind::Directory,
             },
         )];
 
@@ -710,6 +739,46 @@ mod tests {
 
         assert_eq!(view.activate_focused_entry(true), None);
         assert_eq!(view.path, PathBuf::from("target"));
+    }
+
+    #[test]
+    fn pending_shell_shortcut_activation_opens_shortcut_file() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test_directory_link(
+            "shortcut.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target"),
+                target_kind: ShellShortcutTargetKind::Pending,
+            },
+        )];
+
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry(true),
+            Some(EntryAction::OpenFile(PathBuf::from("shortcut.lnk")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn non_directory_shell_shortcut_activation_opens_shortcut_file() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test_directory_link(
+            "shortcut.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target.txt"),
+                target_kind: ShellShortcutTargetKind::NonDirectory,
+            },
+        )];
+
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry(true),
+            Some(EntryAction::OpenFile(PathBuf::from("shortcut.lnk")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
     }
 
     #[test]

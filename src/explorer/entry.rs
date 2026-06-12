@@ -24,7 +24,17 @@ pub(super) enum EntryKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DirectoryLinkKind {
     FilesystemLink,
-    ShellShortcut { target: PathBuf },
+    ShellShortcut {
+        target: PathBuf,
+        target_kind: ShellShortcutTargetKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ShellShortcutTargetKind {
+    Pending,
+    Directory,
+    NonDirectory,
 }
 
 impl FileEntry {
@@ -89,7 +99,12 @@ impl FileEntry {
     pub(super) fn is_directory_like(&self) -> bool {
         matches!(
             self.kind,
-            EntryKind::Directory | EntryKind::DirectoryLink(_)
+            EntryKind::Directory
+                | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink)
+                | EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                    target_kind: ShellShortcutTargetKind::Directory,
+                    ..
+                })
         )
     }
 
@@ -101,7 +116,14 @@ impl FileEntry {
     }
 
     pub(super) fn uses_directory_shortcut_icon(&self) -> bool {
-        matches!(self.kind, EntryKind::DirectoryLink(_))
+        matches!(
+            self.kind,
+            EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink)
+                | EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                    target_kind: ShellShortcutTargetKind::Directory,
+                    ..
+                })
+        )
     }
 
     pub(super) fn is_app_bundle(&self) -> bool {
@@ -161,7 +183,10 @@ impl FileEntry {
 
     pub(super) fn navigation_path(&self) -> &Path {
         match &self.kind {
-            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target }) => target,
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target,
+                target_kind: ShellShortcutTargetKind::Directory,
+            }) => target,
             EntryKind::Directory | EntryKind::DirectoryLink(_) | EntryKind::File => &self.path,
         }
     }
@@ -179,10 +204,14 @@ impl FileEntry {
             EntryKind::Directory | EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink) => {
                 return "File folder".to_owned();
             }
-            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { .. }) => {
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target_kind: ShellShortcutTargetKind::Directory,
+                ..
+            }) => {
                 return "Shortcut".to_owned();
             }
-            EntryKind::File => {}
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { .. }) | EntryKind::File => {
+            }
         }
 
         let Some(extension) = self.path.extension().and_then(OsStr::to_str) else {
@@ -190,6 +219,29 @@ impl FileEntry {
         };
 
         format!("{} File", extension.to_uppercase())
+    }
+
+    pub(super) fn pending_shell_shortcut_target(&self) -> Option<(PathBuf, PathBuf)> {
+        match &self.kind {
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target,
+                target_kind: ShellShortcutTargetKind::Pending,
+            }) => Some((self.path.clone(), target.clone())),
+            _ => None,
+        }
+    }
+
+    pub(super) fn resolve_shell_shortcut_target_kind(
+        &mut self,
+        target_kind: ShellShortcutTargetKind,
+    ) {
+        if let EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+            target_kind: current,
+            ..
+        }) = &mut self.kind
+        {
+            *current = target_kind;
+        }
     }
 }
 
@@ -200,8 +252,11 @@ fn entry_kind(path: &Path, link_metadata: &Metadata, metadata: &Metadata) -> Ent
         } else {
             EntryKind::Directory
         }
-    } else if let Some(target) = shell_shortcut_directory_target(path) {
-        EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target })
+    } else if let Some(target) = shell_shortcut_target(path) {
+        EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+            target,
+            target_kind: ShellShortcutTargetKind::Pending,
+        })
     } else {
         EntryKind::File
     }
@@ -230,12 +285,12 @@ fn is_filesystem_directory_link(link_metadata: &Metadata) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell_shortcut_directory_target(_: &Path) -> Option<PathBuf> {
+fn shell_shortcut_target(_: &Path) -> Option<PathBuf> {
     None
 }
 
 #[cfg(target_os = "windows")]
-fn shell_shortcut_directory_target(path: &Path) -> Option<PathBuf> {
+fn shell_shortcut_target(path: &Path) -> Option<PathBuf> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
     if !path
@@ -252,7 +307,15 @@ fn shell_shortcut_directory_target(path: &Path) -> Option<PathBuf> {
         if initialized_com {
             CoUninitialize();
         }
-        target.filter(|target| target.is_dir())
+        target
+    }
+}
+
+pub(super) fn resolve_shell_shortcut_target_kind(target: &Path) -> ShellShortcutTargetKind {
+    if target.is_dir() {
+        ShellShortcutTargetKind::Directory
+    } else {
+        ShellShortcutTargetKind::NonDirectory
     }
 }
 
@@ -318,6 +381,7 @@ mod tests {
             "target.lnk",
             DirectoryLinkKind::ShellShortcut {
                 target: target.clone(),
+                target_kind: ShellShortcutTargetKind::Directory,
             },
         );
 
@@ -500,7 +564,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn directory_shortcut_is_classified_as_shell_directory_link() {
+    fn directory_shortcut_materializes_as_pending_shell_shortcut() {
         let temp = TempDir::new();
         let target = temp.path().join("target");
         let shortcut = temp.path().join("target.lnk");
@@ -511,11 +575,16 @@ mod tests {
 
         assert!(matches!(
             entry.kind,
-            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut { target: ref actual_target })
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target: ref actual_target,
+                target_kind: ShellShortcutTargetKind::Pending
+            })
                 if actual_target == &target
         ));
-        assert_eq!(entry.type_label(), "Shortcut");
-        assert_eq!(entry.navigation_path(), target.as_path());
+        assert_eq!(entry.type_label(), "LNK File");
+        assert!(!entry.is_directory_like());
+        assert!(!entry.uses_directory_shortcut_icon());
+        assert_eq!(entry.navigation_path(), shortcut.as_path());
         assert_eq!(
             entry.size,
             fs::metadata(shortcut).ok().map(|metadata| metadata.len())
@@ -524,7 +593,46 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn non_directory_shortcuts_remain_files() {
+    fn shell_shortcut_target_resolution_updates_directory_state() {
+        let target = PathBuf::from("target");
+        let mut entry = FileEntry::test_directory_link(
+            "target.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: target.clone(),
+                target_kind: ShellShortcutTargetKind::Pending,
+            },
+        );
+
+        entry.resolve_shell_shortcut_target_kind(ShellShortcutTargetKind::Directory);
+
+        assert_eq!(entry.type_label(), "Shortcut");
+        assert!(entry.is_directory_like());
+        assert_eq!(entry.navigation_path(), target.as_path());
+        assert!(entry.uses_directory_shortcut_icon());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shell_shortcut_non_directory_resolution_remains_file_like() {
+        let mut entry = FileEntry::test_directory_link(
+            "target.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target.txt"),
+                target_kind: ShellShortcutTargetKind::Pending,
+            },
+        );
+
+        entry.resolve_shell_shortcut_target_kind(ShellShortcutTargetKind::NonDirectory);
+
+        assert_eq!(entry.type_label(), "LNK File");
+        assert!(!entry.is_directory_like());
+        assert_eq!(entry.navigation_path(), Path::new("target.lnk"));
+        assert!(!entry.uses_directory_shortcut_icon());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn non_directory_shortcuts_materialize_as_pending_shell_shortcuts() {
         let temp = TempDir::new();
         let target_file = temp.path().join("target.txt");
         let file_shortcut = temp.path().join("target-file.lnk");
@@ -537,8 +645,20 @@ mod tests {
         let file_entry = FileEntry::from_path(file_shortcut).expect("file shortcut");
         let broken_entry = FileEntry::from_path(broken_shortcut).expect("broken shortcut");
 
-        assert!(matches!(file_entry.kind, EntryKind::File));
-        assert!(matches!(broken_entry.kind, EntryKind::File));
+        assert!(matches!(
+            file_entry.kind,
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target_kind: ShellShortcutTargetKind::Pending,
+                ..
+            })
+        ));
+        assert!(matches!(
+            broken_entry.kind,
+            EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target_kind: ShellShortcutTargetKind::Pending,
+                ..
+            })
+        ));
         assert_eq!(file_entry.type_label(), "LNK File");
         assert_eq!(broken_entry.type_label(), "LNK File");
     }

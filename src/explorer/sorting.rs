@@ -81,7 +81,7 @@ fn natural_key(value: &str) -> Vec<NaturalPart> {
 mod tests {
 
     use super::*;
-    use crate::explorer::entry::{DirectoryLinkKind, FileEntry};
+    use crate::explorer::entry::{DirectoryLinkKind, FileEntry, ShellShortcutTargetKind};
     use std::path::PathBuf;
 
     #[test]
@@ -128,6 +128,7 @@ mod tests {
                 "a shortcut.lnk",
                 DirectoryLinkKind::ShellShortcut {
                     target: PathBuf::from("target"),
+                    target_kind: ShellShortcutTargetKind::Directory,
                 },
             ),
         ];

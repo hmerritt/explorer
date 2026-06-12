@@ -16,7 +16,7 @@ use crate::explorer::{
     app_icons::AppIconCache,
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
-    entry::FileEntry,
+    entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
@@ -65,12 +65,20 @@ pub struct ExplorerView {
     pub(super) directory_watcher: Option<DirectoryWatcher>,
     pub(super) sidebar_items: Vec<SidebarLocation>,
     pub(super) sidebar_sections: SidebarSections,
+    pub(super) shell_shortcut_resolution_generation: u64,
+    pub(super) shell_shortcut_resolution_task: Option<Task<()>>,
 }
 
 pub(super) struct FileOperationState {
     pub(super) progress: FileOperationProgress,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ShellShortcutResolution {
+    pub(super) path: PathBuf,
+    pub(super) target_kind: ShellShortcutTargetKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +130,7 @@ impl ExplorerView {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
         let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
         view.restart_directory_watcher(cx);
+        view.schedule_pending_shell_shortcut_resolution(cx);
         view
     }
 
@@ -181,6 +190,8 @@ impl ExplorerView {
             directory_watcher: None,
             sidebar_items: settings.sidebar_items.clone(),
             sidebar_sections: SidebarSections::default(),
+            shell_shortcut_resolution_generation: 0,
+            shell_shortcut_resolution_task: None,
         };
         view.reload();
         view
@@ -196,6 +207,7 @@ impl ExplorerView {
         if hidden_changed {
             self.invalidate_recursive_search_cache();
             self.reload();
+            self.schedule_pending_shell_shortcut_resolution(cx);
             self.refresh_search_after_external_change(cx);
         } else {
             self.sidebar_sections = sidebar_sections(&self.sidebar_items);
@@ -275,6 +287,76 @@ impl ExplorerView {
                 self.read_error.is_some()
             ),
         );
+    }
+
+    pub(super) fn reload_with_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
+        self.reload();
+        self.schedule_pending_shell_shortcut_resolution(cx);
+    }
+
+    pub(super) fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
+        self.shell_shortcut_resolution_generation =
+            self.shell_shortcut_resolution_generation.wrapping_add(1);
+        let generation = self.shell_shortcut_resolution_generation;
+        let path = self.path.clone();
+        let pending_targets = self.pending_shell_shortcut_targets();
+
+        if pending_targets.is_empty() {
+            self.shell_shortcut_resolution_task = None;
+            return;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let output_task = cx.background_executor().spawn(async move {
+                pending_targets
+                    .into_iter()
+                    .map(|(path, target)| ShellShortcutResolution {
+                        path,
+                        target_kind: resolve_shell_shortcut_target_kind(&target),
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let resolutions = output_task.await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.apply_shell_shortcut_resolutions(&path, generation, resolutions) {
+                    cx.notify();
+                }
+            });
+        });
+        self.shell_shortcut_resolution_task = Some(task);
+    }
+
+    fn pending_shell_shortcut_targets(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.all_entries
+            .iter()
+            .filter_map(FileEntry::pending_shell_shortcut_target)
+            .collect()
+    }
+
+    pub(super) fn apply_shell_shortcut_resolutions(
+        &mut self,
+        path: &Path,
+        generation: u64,
+        resolutions: Vec<ShellShortcutResolution>,
+    ) -> bool {
+        if self.path != path || self.shell_shortcut_resolution_generation != generation {
+            return false;
+        }
+
+        let selected_paths = self.selected_paths();
+        let mut changed = false;
+        for resolution in resolutions {
+            changed |=
+                apply_shell_shortcut_resolution_to_entries(&mut self.all_entries, &resolution);
+            changed |= apply_shell_shortcut_resolution_to_entries(&mut self.entries, &resolution);
+        }
+
+        if changed {
+            self.restore_selection_from_paths(&selected_paths);
+        }
+
+        changed
     }
 
     pub(super) fn emit_filesystem_changed(&self, cx: &mut Context<Self>) {
@@ -364,12 +446,40 @@ impl ExplorerView {
     }
 }
 
+fn apply_shell_shortcut_resolution_to_entries(
+    entries: &mut [FileEntry],
+    resolution: &ShellShortcutResolution,
+) -> bool {
+    let mut changed = false;
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.path == resolution.path)
+    {
+        entry.resolve_shell_shortcut_target_kind(resolution.target_kind);
+        changed = true;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use crate::explorer::entry::FileEntry;
+    use crate::explorer::entry::{DirectoryLinkKind, EntryKind, FileEntry};
     use std::path::PathBuf;
+
+    fn test_pending_shell_shortcut(path: &str, target: &str) -> FileEntry {
+        FileEntry {
+            path: PathBuf::from(path),
+            name: path.to_owned(),
+            kind: EntryKind::DirectoryLink(DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from(target),
+                target_kind: ShellShortcutTargetKind::Pending,
+            }),
+            modified: None,
+            size: Some(1),
+        }
+    }
 
     #[test]
     fn empty_directory_without_error_shows_empty_folder_message() {
@@ -429,5 +539,58 @@ mod tests {
             view.content_branch(),
             ExplorerContentBranch::NoSearchMatches
         );
+    }
+
+    #[test]
+    fn shell_shortcut_resolution_updates_entries_and_preserves_selection() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.path = PathBuf::from("root");
+        view.shell_shortcut_resolution_generation = 7;
+        view.all_entries = vec![test_pending_shell_shortcut("shortcut.lnk", "target")];
+        view.entries = view.all_entries.clone();
+        view.select_single_path(Path::new("shortcut.lnk"));
+
+        assert!(view.apply_shell_shortcut_resolutions(
+            Path::new("root"),
+            7,
+            vec![ShellShortcutResolution {
+                path: PathBuf::from("shortcut.lnk"),
+                target_kind: ShellShortcutTargetKind::Directory,
+            }],
+        ));
+
+        assert!(view.all_entries[0].is_directory_like());
+        assert!(view.entries[0].is_directory_like());
+        assert_eq!(view.entries[0].navigation_path(), Path::new("target"));
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("shortcut.lnk")]);
+    }
+
+    #[test]
+    fn stale_shell_shortcut_resolution_is_ignored() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.path = PathBuf::from("root");
+        view.shell_shortcut_resolution_generation = 2;
+        view.all_entries = vec![test_pending_shell_shortcut("shortcut.lnk", "target")];
+        view.entries = view.all_entries.clone();
+
+        assert!(!view.apply_shell_shortcut_resolutions(
+            Path::new("root"),
+            1,
+            vec![ShellShortcutResolution {
+                path: PathBuf::from("shortcut.lnk"),
+                target_kind: ShellShortcutTargetKind::Directory,
+            }],
+        ));
+        assert!(!view.entries[0].is_directory_like());
+
+        assert!(!view.apply_shell_shortcut_resolutions(
+            Path::new("other"),
+            2,
+            vec![ShellShortcutResolution {
+                path: PathBuf::from("shortcut.lnk"),
+                target_kind: ShellShortcutTargetKind::Directory,
+            }],
+        ));
+        assert!(!view.entries[0].is_directory_like());
     }
 }

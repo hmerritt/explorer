@@ -743,7 +743,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         constants::ROW_HEIGHT,
-        entry::{DirectoryLinkKind, FileEntry},
+        entry::{DirectoryLinkKind, FileEntry, ShellShortcutTargetKind},
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
@@ -891,6 +891,7 @@ mod tests {
             "shortcut",
             DirectoryLinkKind::ShellShortcut {
                 target: target.clone(),
+                target_kind: ShellShortcutTargetKind::Directory,
             },
         );
 

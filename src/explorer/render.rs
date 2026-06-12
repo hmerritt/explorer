@@ -216,7 +216,7 @@ impl ExplorerView {
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
-                    this.reload();
+                    this.reload_with_shell_shortcut_resolution(cx);
                     this.refresh_search_after_external_change(cx);
                     cx.notify();
                 }),

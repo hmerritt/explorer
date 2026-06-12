@@ -91,7 +91,7 @@ pub(crate) fn log_recursive_search_marker(generation: u64, message: fmt::Argumen
 }
 
 fn format_timing_duration(elapsed: Duration) -> String {
-    format!("{:<9.2}ms", elapsed.as_secs_f64() * 1000.0)
+    format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
 
 pub(crate) fn parse_debug_options(

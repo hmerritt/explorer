@@ -326,7 +326,7 @@ impl ExplorerTabs {
     fn reload_all_tabs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             let _ = tab.view.update(cx, |view, cx| {
-                view.reload();
+                view.reload_with_shell_shortcut_resolution(cx);
                 cx.notify();
             });
         }
