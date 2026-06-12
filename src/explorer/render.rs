@@ -1416,9 +1416,11 @@ impl ExplorerView {
                     return;
                 }
 
+                let click_count =
+                    this.normalize_entry_click_count(&clicked_entry, event.click_count());
                 if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click_with_watcher(
                     &clicked_entry,
-                    event.click_count(),
+                    click_count,
                     selection_modifiers_for_click(event),
                     cx,
                 ) {
@@ -1645,9 +1647,11 @@ impl ExplorerView {
                     return;
                 }
 
+                let click_count =
+                    this.normalize_entry_click_count(&name_click_entry, event.click_count());
                 if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
                     &name_click_entry,
-                    event.click_count(),
+                    click_count,
                     selection_modifiers_for_click(event),
                     window,
                     cx,

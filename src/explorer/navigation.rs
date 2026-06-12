@@ -9,7 +9,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{format_open_error, open_path_with_default_app},
     selection::SelectionModifiers,
-    view::ExplorerView,
+    view::{EntryClickSequence, ExplorerView},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,6 +214,29 @@ impl ExplorerView {
         self.path.parent().is_some()
     }
 
+    pub(super) fn normalize_entry_click_count(
+        &mut self,
+        entry: &FileEntry,
+        raw_click_count: usize,
+    ) -> usize {
+        let effective_click_count = self
+            .entry_click_sequence
+            .as_ref()
+            .filter(|sequence| {
+                sequence.path == entry.path
+                    && raw_click_count == sequence.last_raw_click_count.saturating_add(1)
+            })
+            .map_or(1, |sequence| sequence.effective_click_count + 1);
+
+        self.entry_click_sequence = Some(EntryClickSequence {
+            path: entry.path.clone(),
+            last_raw_click_count: raw_click_count,
+            effective_click_count,
+        });
+
+        effective_click_count
+    }
+
     #[cfg(test)]
     pub(super) fn handle_entry_click(
         &mut self,
@@ -250,9 +273,11 @@ impl ExplorerView {
         }
         self.open_error = None;
 
-        if click_count < 2 {
+        if click_count != 2 {
             return None;
         }
+
+        self.entry_click_sequence = None;
 
         if entry.is_app_bundle() {
             Some(EntryAction::OpenFile(entry.path.clone()))
@@ -479,6 +504,68 @@ mod tests {
         assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn entry_click_sequence_requires_consecutive_clicks_on_the_same_entry() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let first = FileEntry::test("first.txt", false, Some(1), None);
+        let second = FileEntry::test("second.txt", false, Some(1), None);
+
+        assert_eq!(view.normalize_entry_click_count(&first, 1), 1);
+        assert_eq!(view.normalize_entry_click_count(&first, 2), 2);
+        assert_eq!(view.normalize_entry_click_count(&second, 3), 1);
+        assert_eq!(view.normalize_entry_click_count(&second, 5), 1);
+        assert_eq!(view.normalize_entry_click_count(&second, 1), 1);
+        assert_eq!(view.normalize_entry_click_count(&second, 2), 2);
+    }
+
+    #[test]
+    fn click_after_double_click_navigation_selects_without_opening() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        let file = child.join("inside.txt");
+        fs::create_dir_all(&child).expect("create child directory");
+        fs::write(&file, b"data").expect("create file");
+
+        let child_entry = FileEntry {
+            path: child.clone(),
+            name: "child".to_owned(),
+            kind: EntryKind::Directory,
+            modified: None,
+            size: None,
+        };
+        let file_entry = FileEntry {
+            path: file.clone(),
+            name: "inside.txt".to_owned(),
+            kind: EntryKind::File,
+            modified: None,
+            size: Some(4),
+        };
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        let click_count = view.normalize_entry_click_count(&child_entry, 1);
+        assert_eq!(
+            view.handle_entry_click(&child_entry, click_count, SelectionModifiers::default()),
+            None
+        );
+        let click_count = view.normalize_entry_click_count(&child_entry, 2);
+        assert_eq!(
+            view.handle_entry_click(&child_entry, click_count, SelectionModifiers::default()),
+            None
+        );
+        assert_eq!(view.path, child);
+
+        let click_count = view.normalize_entry_click_count(&file_entry, 3);
+        let action =
+            view.handle_entry_click(&file_entry, click_count, SelectionModifiers::default());
+        assert_eq!(action, None);
+        assert_eq!(view.selected_paths(), vec![file.clone()]);
+
+        let click_count = view.normalize_entry_click_count(&file_entry, 4);
+        let action =
+            view.handle_entry_click(&file_entry, click_count, SelectionModifiers::default());
+        assert_eq!(action, Some(EntryAction::OpenFile(file)));
     }
 
     #[test]

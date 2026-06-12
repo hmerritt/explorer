@@ -42,6 +42,7 @@ pub struct ExplorerView {
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
     pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
     pub(super) suppress_next_click: bool,
+    pub(super) entry_click_sequence: Option<EntryClickSequence>,
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) dragging_sidebar_item: Option<usize>,
@@ -75,6 +76,13 @@ pub(super) struct FileOperationState {
     pub(super) progress: FileOperationProgress,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct EntryClickSequence {
+    pub(super) path: PathBuf,
+    pub(super) last_raw_click_count: usize,
+    pub(super) effective_click_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -175,6 +183,7 @@ impl ExplorerView {
             scrollbar_drag: None,
             mouse_selection_drag: None,
             suppress_next_click: false,
+            entry_click_sequence: None,
             cut_paths: BTreeSet::new(),
             active_drop_indicator: None,
             dragging_sidebar_item: None,

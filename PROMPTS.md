@@ -1,20 +1,5 @@
 ## New
 
-There is a double-click bug when selecting / opening folders/files. When I double-click into a folder, if I then rapidly click on another item it will select and open it instantly. This should not be the behaviour. A new double-click should be required to open files/folders, a single click should just select it.
-
----
-
-Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
-
-Set a default value to: 1000
-
-## Specific / for-later
-
-- Alt-double-click opens a "Details" window, for both files/folders.
-- Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
-  Alt-drag should create a shortcut or simlink of the selected file/directory
-- (maybe) Progress dialogue when moving files around. Perform async, only show dialogue if operation takes longer than 500ms
-
 ## Ideas
 
 ## 1
@@ -34,6 +19,7 @@ Set a default value to: 1000
 - OS Window navigation within app (see Zed)
 - [Windows-only] detext WSL Linux install, show drive for it
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
+- Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
 
@@ -45,7 +31,10 @@ Set a default value to: 1000
 - Network drives (rclone https://rclone.org/ builtin)
 - rclone hook for drive, B2, S3, etc...
 - rclone https://rclone.org/ builtin, adding support for
-- Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
+- Alt-double-click opens a "Details" window, for both files/folders.
+- Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
+  Alt-drag should create a shortcut or simlink of the selected file/directory
+- (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 
 ## File move/copy/sync engine
 
