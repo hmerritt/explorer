@@ -57,7 +57,7 @@ use crate::explorer::{
         file_icon, file_icon_sized, folder_icon, folder_icon_sized, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
-    navigation::{EntryAction, HistoryMode, directory_new_tab_target},
+    navigation::{EntryAction, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
     scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
@@ -1334,17 +1334,13 @@ impl ExplorerView {
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseUpEvent, window, cx| {
-                    if directory_new_tab_target(&context_clicked_entry).is_some() {
-                        open_entry_context_menu_from_event(
-                            this,
-                            event,
-                            &context_clicked_entry,
-                            window,
-                            cx,
-                        );
-                    } else {
-                        open_current_folder_context_menu_from_event(this, event, window, cx);
-                    }
+                    open_entry_context_menu_from_event(
+                        this,
+                        event,
+                        &context_clicked_entry,
+                        window,
+                        cx,
+                    );
                 }),
             )
             .on_mouse_down(
@@ -1528,6 +1524,7 @@ impl ExplorerView {
                 .into_any_element()
         } else {
             let name_click_entry = entry.clone();
+            let name_context_clicked_entry = entry.clone();
             let name_middle_clicked_entry = entry.clone();
             name_cell(
                 &entry,
@@ -1563,6 +1560,23 @@ impl ExplorerView {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
+                    let clicked_index = this.entry_index_by_path(&name_context_clicked_entry.path);
+                    if clicked_index.is_some_and(|ix| this.entry_is_selected(ix)) {
+                        open_entry_context_menu_from_event(
+                            this,
+                            event,
+                            &name_context_clicked_entry,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        open_current_folder_context_menu_from_event(this, event, window, cx);
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

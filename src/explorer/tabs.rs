@@ -1099,9 +1099,38 @@ mod tests {
 
     fn right_click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
-        let position = bounds.center();
+        right_click_position(cx, bounds.center());
+    }
+
+    fn right_click_entry_name(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let position = entry_name_position(cx, selector);
+        right_click_position(cx, position);
+    }
+
+    fn right_click_entry_other_column(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let position = entry_other_column_position(cx, selector);
+        right_click_position(cx, position);
+    }
+
+    fn right_click_position(cx: &mut gpui::VisualTestContext, position: gpui::Point<gpui::Pixels>) {
         cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
         cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+    }
+
+    fn entry_name_position(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        let bounds = cx.debug_bounds(selector).expect("entry bounds");
+        gpui::point(bounds.left() + gpui::px(10.0), bounds.center().y)
+    }
+
+    fn entry_other_column_position(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        let bounds = cx.debug_bounds(selector).expect("entry bounds");
+        gpui::point(bounds.right() - gpui::px(10.0), bounds.center().y)
     }
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
@@ -1164,19 +1193,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_file_opens_current_folder_context_menu_and_clears_selection(
+    fn right_click_unselected_name_cell_opens_current_folder_context_menu_and_clears_selection(
         cx: &mut TestAppContext,
     ) {
         let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);
-        let first_position = cx
-            .debug_bounds("explorer-entry-0")
-            .expect("first entry bounds")
-            .center();
-        let second_position = cx
-            .debug_bounds("explorer-entry-1")
-            .expect("second entry bounds")
-            .center();
+        let first_position = entry_name_position(cx, "explorer-entry-0");
+        let second_position = entry_name_position(cx, "explorer-entry-1");
 
         cx.simulate_click(second_position, Modifiers::default());
         cx.simulate_mouse_down(first_position, MouseButton::Right, Modifiers::default());
@@ -1226,6 +1249,23 @@ mod tests {
             assert_eq!(second_menu_origin, second_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
         });
+    }
+
+    #[gpui::test]
+    fn right_click_unselected_other_column_selects_file_and_opens_entry_menu(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_entry_other_column(cx, "explorer-entry-1");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.context_menu.is_some());
+        });
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
+        assert!(cx.debug_bounds("context-menu-paste").is_none());
     }
 
     #[gpui::test]
@@ -1393,11 +1433,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_unselected_folder_selects_it_and_opens_entry_menu(cx: &mut TestAppContext) {
+    fn right_click_unselected_folder_other_column_selects_it_and_opens_entry_menu(
+        cx: &mut TestAppContext,
+    ) {
         let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
         let view = active_test_view(&tabs, cx);
 
-        right_click_selector(cx, "explorer-entry-1");
+        right_click_entry_other_column(cx, "explorer-entry-1");
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["b"]);
@@ -1429,7 +1471,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        right_click_selector(cx, "explorer-entry-1");
+        right_click_entry_name(cx, "explorer-entry-1");
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["a", "b"]);
@@ -1468,7 +1510,7 @@ mod tests {
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a");
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-cut");
 
         cx.read_entity(&view, |view, _| {
@@ -1484,7 +1526,7 @@ mod tests {
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a");
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-copy");
 
         cx.read_entity(&view, |view, _| {
@@ -1509,7 +1551,7 @@ mod tests {
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a");
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-delete");
 
         assert!(!path.exists());
@@ -1525,7 +1567,7 @@ mod tests {
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a");
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-rename");
 
         cx.read_entity(&view, |view, _| {
@@ -1541,7 +1583,7 @@ mod tests {
         let view = active_test_view(&tabs, cx);
         let target = temp.path().join("a");
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         cx.update(|window, app| {
             view.update(app, |view, cx| {
                 view.execute_context_menu_command(
@@ -1570,7 +1612,7 @@ mod tests {
             tabs.update(app, |_, cx| observe_tab_view(&view, cx));
         });
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         cx.read_entity(&view, |view, _| {
             let menu = view.context_menu.as_ref().expect("entry context menu");
             assert!(matches!(
