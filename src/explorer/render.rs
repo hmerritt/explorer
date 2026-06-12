@@ -1893,7 +1893,7 @@ impl ExplorerView {
             move |bounds, _, window, _| {
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
+                    move |event: &MouseDownEvent, _, window, cx| {
                         if !matches!(event.button, MouseButton::Left | MouseButton::Right)
                             || !bounds.contains(&event.position)
                         {
@@ -1904,16 +1904,23 @@ impl ExplorerView {
                         let viewport_size = viewport_size(&bounds);
                         let modifiers = SelectionModifiers::from_gpui(event.modifiers);
                         let _ = entity.update(cx, |this, cx| {
-                            if this.context_menu.is_some() {
+                            if context_menu_contains_window_position(this, event.position, window) {
                                 return;
                             }
 
-                            if this.begin_mouse_selection_drag_for_intent(
+                            if this.context_menu.is_some() && event.button != MouseButton::Right {
+                                return;
+                            }
+
+                            let menu_closed =
+                                event.button == MouseButton::Right && this.close_context_menu();
+                            let selection_started = this.begin_mouse_selection_drag_for_intent(
                                 event.button,
                                 local_position,
                                 viewport_size,
                                 modifiers,
-                            ) {
+                            );
+                            if menu_closed || selection_started {
                                 cx.notify();
                             }
                         });
@@ -2493,6 +2500,119 @@ fn local_context_menu_origin(
     window_position - view_origin
 }
 
+fn context_menu_contains_window_position(
+    this: &ExplorerView,
+    window_position: Point<Pixels>,
+    window: &Window,
+) -> bool {
+    let Some(menu) = this.context_menu.as_ref() else {
+        return false;
+    };
+
+    let window_size = (
+        f32::from(window.bounds().size.width),
+        f32::from(window.bounds().size.height),
+    );
+    let root_width = context_menu_width(&menu.items, window);
+    let root_height = context_menu_height(
+        &menu.items,
+        CONTEXT_MENU_ROW_HEIGHT,
+        CONTEXT_MENU_ITEM_VERTICAL_GAP,
+        CONTEXT_MENU_SEPARATOR_HEIGHT,
+    );
+    let (left, top) = context_menu_pointer_tip_origin(
+        (f32::from(menu.origin.x), f32::from(menu.origin.y)),
+        (root_width, root_height),
+        window_size,
+    );
+    let position = local_context_menu_origin(window_position, this.view_origin);
+
+    context_menu_level_contains_position(
+        &menu.items,
+        &menu.hovered_path,
+        &[],
+        (left, top),
+        window_size,
+        (f32::from(position.x), f32::from(position.y)),
+        window,
+    )
+}
+
+fn context_menu_level_contains_position(
+    items: &[ContextMenuItem],
+    hovered_path: &[usize],
+    path_prefix: &[usize],
+    origin: (f32, f32),
+    window_size: (f32, f32),
+    position: (f32, f32),
+    window: &Window,
+) -> bool {
+    let menu_width = context_menu_width(items, window);
+    let menu_height = context_menu_height(
+        items,
+        CONTEXT_MENU_ROW_HEIGHT,
+        CONTEXT_MENU_ITEM_VERTICAL_GAP,
+        CONTEXT_MENU_SEPARATOR_HEIGHT,
+    );
+    let (left, top) = clamped_context_menu_origin(origin, (menu_width, menu_height), window_size);
+    if position.0 >= left
+        && position.0 <= left + menu_width
+        && position.1 >= top
+        && position.1 <= top + menu_height
+    {
+        return true;
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        let mut path = path_prefix.to_vec();
+        path.push(index);
+        let ContextMenuItem::Submenu { children, .. } = item else {
+            continue;
+        };
+        if !context_menu_path_is_active(hovered_path, &path) {
+            continue;
+        }
+
+        let child_width = context_menu_width(children, window);
+        let child_height = context_menu_height(
+            children,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let child_left = context_submenu_left(
+            left,
+            menu_width,
+            child_width,
+            CONTEXT_MENU_SUBMENU_OVERLAP,
+            window_size.0,
+        );
+        let row_top = context_menu_item_top(
+            items,
+            index,
+            CONTEXT_MENU_ROW_HEIGHT,
+            CONTEXT_MENU_ITEM_VERTICAL_GAP,
+            CONTEXT_MENU_SEPARATOR_HEIGHT,
+        );
+        let (_, child_top) = clamped_context_menu_origin(
+            (child_left, top + row_top - 10.0),
+            (child_width, child_height),
+            window_size,
+        );
+        return context_menu_level_contains_position(
+            children,
+            hovered_path,
+            &path,
+            (child_left, child_top),
+            window_size,
+            position,
+            window,
+        );
+    }
+
+    false
+}
+
 impl ExplorerView {
     fn update_view_origin_from_child_bounds(&mut self, child_bounds: &[Bounds<Pixels>]) {
         if self.context_menu.is_some() {
@@ -2711,7 +2831,7 @@ fn context_menu_dropdown(width: f32) -> Div {
         .border_color(rgb(0xd8d8d8))
         .shadow_md()
         .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+        .on_any_mouse_down(|_, _, cx| {
             cx.stop_propagation();
         })
 }

@@ -1302,6 +1302,69 @@ mod tests {
     }
 
     #[gpui::test]
+    fn right_button_down_restarts_rubber_band_behind_active_context_menu(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let first = cx
+            .debug_bounds("explorer-entry-0")
+            .expect("first entry bounds");
+        let second = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        let start = gpui::point(
+            first.left() + gpui::px(10.0),
+            second.bottom() + gpui::px(20.0),
+        );
+        let end = gpui::point(first.left() + gpui::px(100.0), first.top() + gpui::px(2.0));
+
+        right_click_selector(cx, "explorer-entry-0");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+        });
+
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+
+        assert!(cx.debug_bounds("context-menu").is_none());
+        assert!(cx.debug_bounds("mouse-selection-box").is_some());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+            let drag = view.mouse_selection_drag.as_ref().expect("selection drag");
+            assert!(drag.visible);
+            assert!(!drag.active);
+        });
+
+        cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Right, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
+        });
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
+    }
+
+    #[gpui::test]
+    fn right_button_down_inside_context_menu_is_contained(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_selector(cx, "explorer-entry-0");
+        let menu_position = cx
+            .debug_bounds("context-menu")
+            .expect("context menu")
+            .center();
+
+        cx.simulate_mouse_down(menu_position, MouseButton::Right, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert!(view.mouse_selection_drag.is_none());
+        });
+        assert!(cx.debug_bounds("context-menu").is_some());
+        assert!(cx.debug_bounds("mouse-selection-box").is_none());
+    }
+
+    #[gpui::test]
     fn opening_sidebar_context_menu_clears_entry_selection(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);

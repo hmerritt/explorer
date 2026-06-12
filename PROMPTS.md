@@ -1,11 +1,11 @@
 ## New
 
-When name column is clicked, shows the current directory contextmenu, when the other columns are right-clicked, instantly selects and trigers context menus
-
 Folder context menu changes:
 
 - When no item is selected and a user right-clicks on a directory, no NOT focus on it or open that items contextmenu, instead open the current directory context menu (this is the behaviour of Windows explorer)
 - Only open folder/file context menu if/when there is an active selection for one or more of those items.
+
+When name column is clicked, shows the current directory contextmenu, when the other columns are right-clicked, instantly selects and trigers context menus
 
 ---
 
