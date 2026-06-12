@@ -22,7 +22,15 @@ use crate::explorer::{
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
 
-actions!(dialog, [DialogCancel]);
+actions!(
+    dialog,
+    [
+        DialogCancel,
+        DialogConfirm,
+        DialogFocusPrimary,
+        DialogFocusSecondary
+    ]
+);
 
 const SHELL_DIALOG_HORIZONTAL_PADDING: f32 = 20.0;
 const SHELL_DIALOG_TOP_PADDING: f32 = 14.0;
@@ -82,12 +90,27 @@ pub(super) struct ExplorerDialog {
     kind: ExplorerDialogKind,
     explorer: WeakEntity<ExplorerView>,
     focus_handle: FocusHandle,
+    focused_choice: Option<DialogChoice>,
     completed: bool,
     folder_size_state: FolderSizeState,
     folder_size_task: Option<Task<()>>,
     folder_size_cancel: Option<Arc<AtomicBool>>,
     file_operation_progress: Option<FileOperationProgress>,
     file_operation_task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DialogChoice {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DialogActivation {
+    ConfirmDelete,
+    ConfirmTrash,
+    ReplaceConflicts,
+    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,11 +236,13 @@ impl ExplorerDialog {
             ExplorerDialogKind::FileOperation(progress) => Some(progress.clone()),
             _ => None,
         };
+        let focused_choice = default_dialog_choice(&kind);
 
         let mut dialog = Self {
             kind,
             explorer,
             focus_handle,
+            focused_choice,
             completed: false,
             folder_size_state: FolderSizeState::NotNeeded,
             folder_size_task: None,
@@ -232,6 +257,55 @@ impl ExplorerDialog {
 
     fn handle_cancel(&mut self, _: &DialogCancel, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel(window, cx);
+    }
+
+    fn handle_confirm(&mut self, _: &DialogConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(activation) = dialog_activation(&self.kind, self.focused_choice) {
+            self.activate(activation, window, cx);
+        }
+        cx.stop_propagation();
+    }
+
+    fn handle_focus_primary(
+        &mut self,
+        _: &DialogFocusPrimary,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_choice(DialogChoice::Primary, cx);
+        cx.stop_propagation();
+    }
+
+    fn handle_focus_secondary(
+        &mut self,
+        _: &DialogFocusSecondary,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_choice(DialogChoice::Secondary, cx);
+        cx.stop_propagation();
+    }
+
+    fn focus_choice(&mut self, choice: DialogChoice, cx: &mut Context<Self>) {
+        let focused_choice = focused_dialog_choice(self.focused_choice, choice);
+        if self.focused_choice != focused_choice {
+            self.focused_choice = focused_choice;
+            cx.notify();
+        }
+    }
+
+    fn activate(
+        &mut self,
+        activation: DialogActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match activation {
+            DialogActivation::ConfirmDelete => self.confirm_delete(window, cx),
+            DialogActivation::ConfirmTrash => self.confirm_trash(window, cx),
+            DialogActivation::ReplaceConflicts => self.replace_conflicts(window, cx),
+            DialogActivation::Cancel => self.cancel(window, cx),
+        }
     }
 
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -465,6 +539,9 @@ impl Render for ExplorerDialog {
             .text_size(px(12.0))
             .text_color(rgb(SHELL_DIALOG_TEXT_COLOR))
             .on_action(cx.listener(Self::handle_cancel))
+            .on_action(cx.listener(Self::handle_confirm))
+            .on_action(cx.listener(Self::handle_focus_primary))
+            .on_action(cx.listener(Self::handle_focus_secondary))
             .child(match self.kind.clone() {
                 ExplorerDialogKind::PermanentDelete(pending) => {
                     self.render_permanent_delete(pending, window, cx)
@@ -519,7 +596,12 @@ impl ExplorerDialog {
                     .gap(px(8.0))
                     .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
                     .child(
-                        dialog_button("permanent-delete-yes", "Yes").on_click(cx.listener(
+                        dialog_button(
+                            "permanent-delete-yes",
+                            "Yes",
+                            self.focused_choice == Some(DialogChoice::Primary),
+                        )
+                        .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.confirm_delete(window, cx);
                                 cx.stop_propagation();
@@ -527,7 +609,12 @@ impl ExplorerDialog {
                         )),
                     )
                     .child(
-                        dialog_button("permanent-delete-no", "No").on_click(cx.listener(
+                        dialog_button(
+                            "permanent-delete-no",
+                            "No",
+                            self.focused_choice == Some(DialogChoice::Secondary),
+                        )
+                        .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.cancel(window, cx);
                                 cx.stop_propagation();
@@ -568,18 +655,32 @@ impl ExplorerDialog {
                     .justify_end()
                     .gap(px(8.0))
                     .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
-                    .child(dialog_button("trash-yes", "Yes").on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.confirm_trash(window, cx);
-                            cx.stop_propagation();
-                        },
-                    )))
-                    .child(dialog_button("trash-no", "No").on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.cancel(window, cx);
-                            cx.stop_propagation();
-                        },
-                    ))),
+                    .child(
+                        dialog_button(
+                            "trash-yes",
+                            "Yes",
+                            self.focused_choice == Some(DialogChoice::Primary),
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.confirm_trash(window, cx);
+                                cx.stop_propagation();
+                            },
+                        )),
+                    )
+                    .child(
+                        dialog_button(
+                            "trash-no",
+                            "No",
+                            self.focused_choice == Some(DialogChoice::Secondary),
+                        )
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.cancel(window, cx);
+                                cx.stop_propagation();
+                            },
+                        )),
+                    ),
             )
             .into_any_element()
     }
@@ -615,7 +716,7 @@ impl ExplorerDialog {
                             "✓",
                             EXPLORER_COPY_GREEN,
                             text.replace_label,
-                            true,
+                            self.focused_choice == Some(DialogChoice::Primary),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -630,7 +731,7 @@ impl ExplorerDialog {
                             "↶",
                             SHELL_DIALOG_LINK_BLUE,
                             text.skip_label,
-                            false,
+                            self.focused_choice == Some(DialogChoice::Secondary),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -688,12 +789,14 @@ impl ExplorerDialog {
                         .flex()
                         .justify_end()
                         .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
-                        .child(dialog_button("file-operation-cancel", "Cancel").on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.cancel(window, cx);
-                                cx.stop_propagation();
-                            }),
-                        )),
+                        .child(
+                            dialog_button("file-operation-cancel", "Cancel", false).on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.cancel(window, cx);
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                        ),
                 )
             })
             .into_any_element()
@@ -873,7 +976,11 @@ impl ExplorerDialogKind {
     }
 }
 
-fn dialog_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn dialog_button(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .min_w(px(76.0))
@@ -885,6 +992,9 @@ fn dialog_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::
         .border_1()
         .border_color(rgb(SHELL_DIALOG_BUTTON_BORDER))
         .bg(rgb(SHELL_DIALOG_BUTTON_BG))
+        .when(selected, |this| {
+            this.border_color(rgb(SHELL_DIALOG_BUTTON_HOVER_BORDER))
+        })
         .hover(|style| {
             style
                 .bg(rgb(SHELL_DIALOG_COMMAND_HOVER_BG))
@@ -892,6 +1002,46 @@ fn dialog_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::
         })
         .cursor_default()
         .child(label)
+}
+
+fn default_dialog_choice(kind: &ExplorerDialogKind) -> Option<DialogChoice> {
+    match kind {
+        ExplorerDialogKind::PermanentDelete(_)
+        | ExplorerDialogKind::Trash(_)
+        | ExplorerDialogKind::FileConflict(_) => Some(DialogChoice::Primary),
+        ExplorerDialogKind::FileOperation(_) => None,
+    }
+}
+
+fn focused_dialog_choice(
+    current_choice: Option<DialogChoice>,
+    requested_choice: DialogChoice,
+) -> Option<DialogChoice> {
+    current_choice.map(|_| requested_choice)
+}
+
+fn dialog_activation(
+    kind: &ExplorerDialogKind,
+    focused_choice: Option<DialogChoice>,
+) -> Option<DialogActivation> {
+    match (kind, focused_choice) {
+        (ExplorerDialogKind::PermanentDelete(_), Some(DialogChoice::Primary)) => {
+            Some(DialogActivation::ConfirmDelete)
+        }
+        (ExplorerDialogKind::Trash(_), Some(DialogChoice::Primary)) => {
+            Some(DialogActivation::ConfirmTrash)
+        }
+        (ExplorerDialogKind::FileConflict(_), Some(DialogChoice::Primary)) => {
+            Some(DialogActivation::ReplaceConflicts)
+        }
+        (
+            ExplorerDialogKind::PermanentDelete(_)
+            | ExplorerDialogKind::Trash(_)
+            | ExplorerDialogKind::FileConflict(_),
+            Some(DialogChoice::Secondary),
+        ) => Some(DialogActivation::Cancel),
+        _ => None,
+    }
 }
 
 fn render_permanent_delete_file_body(
@@ -1301,7 +1451,10 @@ pub(super) fn file_conflict_dialog_text(conflicts: &FileConflictBatch) -> FileCo
 mod tests {
     use super::*;
     use crate::explorer::{
-        filesystem::{FileOperationOutcome, copy_paths_to_directory, move_paths_to_directory},
+        filesystem::{
+            FileOperationKind, FileOperationOutcome, copy_paths_to_directory,
+            move_paths_to_directory,
+        },
         test_support::TempDir,
     };
     use std::{fs, path::PathBuf};
@@ -1436,6 +1589,94 @@ mod tests {
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
         assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn confirmation_dialogs_default_to_primary_choice() {
+        let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
+            paths: vec![PathBuf::from("a.txt")],
+            fallback_index: None,
+        });
+        let trash = ExplorerDialogKind::Trash(PendingTrash {
+            paths: vec![PathBuf::from("a.txt")],
+            fallback_index: None,
+        });
+        let conflict = ExplorerDialogKind::FileConflict(single_conflict_batch());
+
+        assert_eq!(default_dialog_choice(&delete), Some(DialogChoice::Primary));
+        assert_eq!(default_dialog_choice(&trash), Some(DialogChoice::Primary));
+        assert_eq!(
+            default_dialog_choice(&conflict),
+            Some(DialogChoice::Primary)
+        );
+    }
+
+    #[test]
+    fn progress_dialog_has_no_default_choice() {
+        assert_eq!(
+            default_dialog_choice(&ExplorerDialogKind::FileOperation(test_progress())),
+            None
+        );
+    }
+
+    #[test]
+    fn arrow_navigation_selects_requested_choice_and_stays_unfocused_for_progress() {
+        assert_eq!(
+            focused_dialog_choice(Some(DialogChoice::Primary), DialogChoice::Secondary),
+            Some(DialogChoice::Secondary)
+        );
+        assert_eq!(
+            focused_dialog_choice(Some(DialogChoice::Secondary), DialogChoice::Primary),
+            Some(DialogChoice::Primary)
+        );
+        assert_eq!(
+            focused_dialog_choice(None, DialogChoice::Primary),
+            None,
+            "progress dialogs must not gain an Enter-activated choice"
+        );
+    }
+
+    #[test]
+    fn focused_choice_maps_to_each_dialog_action() {
+        let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
+            paths: vec![PathBuf::from("a.txt")],
+            fallback_index: None,
+        });
+        let trash = ExplorerDialogKind::Trash(PendingTrash {
+            paths: vec![PathBuf::from("a.txt")],
+            fallback_index: None,
+        });
+        let conflict = ExplorerDialogKind::FileConflict(single_conflict_batch());
+
+        assert_eq!(
+            dialog_activation(&delete, Some(DialogChoice::Primary)),
+            Some(DialogActivation::ConfirmDelete)
+        );
+        assert_eq!(
+            dialog_activation(&trash, Some(DialogChoice::Primary)),
+            Some(DialogActivation::ConfirmTrash)
+        );
+        assert_eq!(
+            dialog_activation(&conflict, Some(DialogChoice::Primary)),
+            Some(DialogActivation::ReplaceConflicts)
+        );
+        for kind in [&delete, &trash, &conflict] {
+            assert_eq!(
+                dialog_activation(kind, Some(DialogChoice::Secondary)),
+                Some(DialogActivation::Cancel)
+            );
+        }
+    }
+
+    #[test]
+    fn progress_dialog_enter_does_not_activate_cancel() {
+        assert_eq!(
+            dialog_activation(
+                &ExplorerDialogKind::FileOperation(test_progress()),
+                default_dialog_choice(&ExplorerDialogKind::FileOperation(test_progress()))
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1590,6 +1831,19 @@ mod tests {
 
     fn single_conflict_batch() -> FileConflictBatch {
         conflict_batch(&["file.txt"], move_paths_to_directory)
+    }
+
+    fn test_progress() -> FileOperationProgress {
+        FileOperationProgress {
+            kind: FileOperationKind::Copy,
+            phase: FileOperationPhase::Copying,
+            total_bytes: 1,
+            copied_bytes: 0,
+            total_files: 1,
+            completed_files: 0,
+            current_item: None,
+            cancellable: true,
+        }
     }
 
     fn multi_conflict_batch() -> FileConflictBatch {

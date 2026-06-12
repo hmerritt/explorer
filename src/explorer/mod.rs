@@ -50,7 +50,7 @@ pub use actions::{
     SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft,
     SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
-pub use dialog::DialogCancel;
+pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
 pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]
 pub use entry::FileEntry;
