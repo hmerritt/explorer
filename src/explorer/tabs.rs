@@ -1071,7 +1071,6 @@ fn windows_caption_button(button: WindowCaptionButton) -> AnyElement {
         .window_control_area(button.control_area())
         .when(is_close, |this| {
             this.hover(|style| style.bg(rgb(0xe81123)).text_color(rgb(0xffffff)))
-                .active(|style| style.bg(rgb(0xc50f1f)).text_color(rgb(0xffffff)))
         })
         .when(!is_close, |this| {
             this.hover(|style| style.bg(rgb(0xd8d8d8)))
