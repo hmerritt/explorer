@@ -438,6 +438,7 @@ pub fn run() {
         register_embedded_fonts(cx);
         crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
+        crate::explorer::initialize_native_icon_cache(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),
             KeyBinding::new("down", MoveDown, None),

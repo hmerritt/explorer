@@ -1356,7 +1356,7 @@ impl ExplorerView {
 
     fn render_row(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
-        let app_icon = self.app_icon_for_entry(&entry, cx);
+        let app_icon = self.native_icon_for_entry(&entry, cx);
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);

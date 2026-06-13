@@ -143,6 +143,7 @@ impl FileEntry {
         }
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn uses_app_bundle_icon(&self) -> bool {
         self.is_app_bundle()
     }

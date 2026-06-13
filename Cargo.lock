@@ -1955,6 +1955,7 @@ dependencies = [
  "globset",
  "gpui",
  "icns",
+ "image",
  "jwalk",
  "notify",
  "objc",

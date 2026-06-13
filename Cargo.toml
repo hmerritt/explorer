@@ -28,13 +28,14 @@ open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 notify = "8.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "time"] }
 trash = "5.2.6"
 unrar = "0.4.4"
 sevenz-rust2 = "0.21.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61.3", features = ["Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-sys = { version = "0.59.0", features = ["Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

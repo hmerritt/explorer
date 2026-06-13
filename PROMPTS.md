@@ -1,5 +1,8 @@
 ## New
 
+- Window close button, on Windows, changes icon on press and renders a rectangle (it should not change icon)
+- Add "os_icons" true/false settings option to opt out of fetching actual icons, and just use the bundled icons instead
+
 ## Ideas
 
 ## 1
@@ -7,8 +10,7 @@
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
 - File icons
-    - Initially implement static file extension mapping to bundled icons, text,word,powerpoint,excel,photo,video,music,etc..
-    - [Windows-only] Implement file icon loader to get actual program icon (same as Windows explorer). Also cache each icon + cache mappings per session (store cache mapping to disk, and show even stale cache while refreshing)
+    - [macOS-only] Implement file icon loader to get actual program icon (same as Finder). Integrate with existing icon cache system
 - Large icons grid view (alternate to the current Details view)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
 

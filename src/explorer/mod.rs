@@ -50,6 +50,7 @@ pub use actions::{
     SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft,
     SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
+pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
 pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]

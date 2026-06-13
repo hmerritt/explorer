@@ -10,7 +10,8 @@ use gpui::{App, Global};
 
 const DEBUG_NAV: u8 = 1 << 0;
 const DEBUG_SEARCH: u8 = 1 << 1;
-const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH;
+const DEBUG_ICONS: u8 = 1 << 2;
+const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -91,12 +92,20 @@ impl DebugOptions {
         self.flags & DEBUG_SEARCH != 0
     }
 
+    pub(crate) fn icon_timings(self) -> bool {
+        self.flags & DEBUG_ICONS != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
 
     fn enable_search(&mut self) {
         self.flags |= DEBUG_SEARCH;
+    }
+
+    fn enable_icons(&mut self) {
+        self.flags |= DEBUG_ICONS;
     }
 
     fn enable_all(&mut self) {
@@ -125,6 +134,13 @@ pub(crate) fn search_timings_enabled() -> bool {
         flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
     }
     .search_timings()
+}
+
+pub(crate) fn icon_timings_enabled() -> bool {
+    DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .icon_timings()
 }
 
 pub(crate) fn log_nav_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
@@ -168,6 +184,12 @@ pub(crate) fn log_recursive_search_marker(generation: u64, message: fmt::Argumen
     }
 }
 
+pub(crate) fn log_icon_timing(message: fmt::Arguments<'_>) {
+    if icon_timings_enabled() {
+        eprintln!("[file-icons] {message}");
+    }
+}
+
 fn format_timing_duration(elapsed: Duration) -> String {
     format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
@@ -207,9 +229,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
         match item.to_ascii_lowercase().as_str() {
             "nav" => options.enable_nav(),
             "search" => options.enable_search(),
+            "icon" | "icons" => options.enable_icons(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, all, or *."
             )),
         }
     }
@@ -229,10 +252,12 @@ mod tests {
 
     #[test]
     fn parses_comma_separated_debug_items() {
-        let (options, warnings) = parse_debug_options(args(&["explorer", "--debug", "nav,search"]));
+        let (options, warnings) =
+            parse_debug_options(args(&["explorer", "--debug", "nav,search,icons"]));
 
         assert!(options.nav_timings());
         assert!(options.search_timings());
+        assert!(options.icon_timings());
         assert!(warnings.is_empty());
     }
 
@@ -246,6 +271,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_icon_debug_items() {
+        let (plural_options, plural_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=icons"]));
+        let (singular_options, singular_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=icon"]));
+
+        assert!(plural_options.icon_timings());
+        assert!(singular_options.icon_timings());
+        assert!(!plural_options.nav_timings());
+        assert!(!singular_options.search_timings());
+        assert!(plural_warnings.is_empty());
+        assert!(singular_warnings.is_empty());
+    }
+
+    #[test]
     fn parses_all_aliases() {
         let (all_options, all_warnings) =
             parse_debug_options(args(&["explorer", "--debug", "all"]));
@@ -253,8 +293,10 @@ mod tests {
 
         assert!(all_options.nav_timings());
         assert!(all_options.search_timings());
+        assert!(all_options.icon_timings());
         assert!(star_options.nav_timings());
         assert!(star_options.search_timings());
+        assert!(star_options.icon_timings());
         assert!(all_warnings.is_empty());
         assert!(star_warnings.is_empty());
     }
@@ -265,8 +307,10 @@ mod tests {
 
         assert!(options.nav_timings());
         assert!(!options.search_timings());
+        assert!(!options.icon_timings());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("paint"));
+        assert!(warnings[0].contains("icons"));
     }
 
     #[test]
@@ -275,6 +319,7 @@ mod tests {
 
         assert!(options.nav_timings());
         assert!(options.search_timings());
+        assert!(options.icon_timings());
         assert!(warnings.is_empty());
     }
 
@@ -284,6 +329,7 @@ mod tests {
 
         assert!(options.nav_timings());
         assert!(options.search_timings());
+        assert!(options.icon_timings());
         assert!(warnings.is_empty());
     }
 

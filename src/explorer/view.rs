@@ -13,7 +13,6 @@ use gpui::{
 use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
-    app_icons::AppIconCache,
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
@@ -48,7 +47,6 @@ pub struct ExplorerView {
     pub(super) dragging_sidebar_item: Option<usize>,
     pub(super) sidebar_width: f32,
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
-    pub(super) app_icon_cache: AppIconCache,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
@@ -147,6 +145,7 @@ impl ExplorerView {
         let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
         view.restart_directory_watcher(cx);
         view.schedule_pending_shell_shortcut_resolution(cx);
+        view.observe_native_icon_cache(cx);
         view
     }
 
@@ -189,7 +188,6 @@ impl ExplorerView {
             dragging_sidebar_item: None,
             sidebar_width: settings.sidebar_width as f32,
             sidebar_resize_drag: None,
-            app_icon_cache: AppIconCache::default(),
             pending_permanent_delete: None,
             pending_trash: None,
             pending_file_conflict: None,
