@@ -105,14 +105,6 @@ impl NativeIconCacheInner {
         }
     }
 
-    fn icon_for_entry(&mut self, entry: &FileEntry) -> (Option<Arc<Image>>, bool) {
-        let Some(request) = native_icon_request_for_entry(entry) else {
-            return (None, false);
-        };
-
-        self.icon_for_request(request)
-    }
-
     fn icon_for_request(&mut self, request: NativeIconRequest) -> (Option<Arc<Image>>, bool) {
         if let Some(state) = self.states.get(&request.key) {
             return (state.icon(), false);
@@ -227,9 +219,25 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<Arc<Image>> {
+        self.native_icon_for_request(native_icon_request_for_entry(entry), cx)
+    }
+
+    fn native_icon_for_request(
+        &mut self,
+        request: Option<NativeIconRequest>,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Image>> {
+        if !self.resolve_icons {
+            return None;
+        }
+
+        let Some(request) = request else {
+            return None;
+        };
+
         let (icon, should_start_loader) = cx
             .try_global::<NativeIconCache>()
-            .map(|cache| cache.inner.borrow_mut().icon_for_entry(entry))
+            .map(|cache| cache.inner.borrow_mut().icon_for_request(request))
             .unwrap_or((None, false));
 
         if should_start_loader {
@@ -1275,6 +1283,38 @@ mod tests {
 
     fn cache_with_dir(cache_dir: Option<PathBuf>) -> NativeIconCacheInner {
         NativeIconCacheInner::new(DiskIconStore::load(cache_dir))
+    }
+
+    #[gpui::test]
+    fn disabled_resolve_icons_skips_native_icon_cache(cx: &mut gpui::TestAppContext) {
+        cx.set_global(NativeIconCache::new());
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("icons"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &crate::settings::ExplorerSettings {
+                        resolve_icons: false,
+                        ..crate::settings::ExplorerSettings::default()
+                    },
+                    cx,
+                );
+
+                assert!(
+                    view.native_icon_for_request(Some(test_request("key")), cx)
+                        .is_none()
+                );
+            });
+
+            let cache = app.global::<NativeIconCache>();
+            let inner = cache.inner.borrow();
+            assert!(inner.pending.is_empty());
+            assert!(inner.states.is_empty());
+        });
     }
 
     #[test]

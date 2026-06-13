@@ -60,6 +60,7 @@ pub struct ExplorerView {
     pub(super) next_pending_click_rename_id: u64,
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
+    pub(super) resolve_icons: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
@@ -201,6 +202,7 @@ impl ExplorerView {
             next_pending_click_rename_id: 0,
             show_hidden_files: settings.show_hidden_files,
             show_file_name_extensions: settings.show_file_name_extensions,
+            resolve_icons: settings.resolve_icons,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
@@ -218,6 +220,7 @@ impl ExplorerView {
         let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
         self.show_hidden_files = settings.show_hidden_files;
         self.show_file_name_extensions = settings.show_file_name_extensions;
+        self.resolve_icons = settings.resolve_icons;
 
         self.sidebar_items = settings.sidebar_items.clone();
         if self.sidebar_resize_drag.is_none() {
@@ -599,6 +602,7 @@ mod tests {
 
         assert!(!view.show_hidden_files);
         assert!(view.show_file_name_extensions);
+        assert!(view.resolve_icons);
         assert_eq!(
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
@@ -619,6 +623,20 @@ mod tests {
         );
 
         assert_eq!(view.sidebar_width, 320.0);
+    }
+
+    #[test]
+    fn view_uses_configured_resolve_icons() {
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                resolve_icons: false,
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert!(!view.resolve_icons);
     }
 
     #[gpui::test]
@@ -643,6 +661,31 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.sidebar_width, 333.0);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_updates_resolve_icons(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        resolve_icons: false,
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.resolve_icons);
         });
     }
 

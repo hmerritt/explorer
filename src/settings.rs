@@ -61,6 +61,7 @@ pub struct ExplorerSettings {
     pub sidebar_items: Vec<SidebarLocation>,
     pub show_hidden_files: bool,
     pub show_file_name_extensions: bool,
+    pub resolve_icons: bool,
     pub startup_location: StartupLocation,
     #[serde(
         default = "default_sidebar_width",
@@ -80,6 +81,7 @@ impl Default for ExplorerSettings {
             ],
             show_hidden_files: false,
             show_file_name_extensions: true,
+            resolve_icons: true,
             startup_location: StartupLocation::Downloads,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
         }
@@ -563,6 +565,7 @@ mod tests {
         let settings = ExplorerSettings::default();
         assert!(!settings.show_hidden_files);
         assert!(settings.show_file_name_extensions);
+        assert!(settings.resolve_icons);
         assert_eq!(settings.startup_location, StartupLocation::Downloads);
         assert_eq!(settings.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar_items.len(), 4);
@@ -594,6 +597,7 @@ mod tests {
                 .expect("deserialize partial settings");
         assert!(settings.show_hidden_files);
         assert!(settings.show_file_name_extensions);
+        assert!(settings.resolve_icons);
         assert_eq!(settings.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar_items.len(), 4);
     }
@@ -641,6 +645,11 @@ mod tests {
             fs::read_to_string(&path)
                 .unwrap()
                 .contains("\n  \"sidebar_items\"")
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\n  \"resolve_icons\": true")
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
