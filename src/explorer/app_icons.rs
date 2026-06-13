@@ -56,10 +56,22 @@ struct NativeIconRequest {
 enum PlatformIconRequest {
     #[cfg(any(target_os = "windows", test))]
     Windows(WindowsIconRequest),
-    #[cfg(target_os = "macos")]
-    MacAppBundle { path: PathBuf },
+    #[cfg(any(target_os = "macos", test))]
+    Mac(MacIconRequest),
     #[cfg(test)]
     Test,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MacIconRequest {
+    AppBundle {
+        path: PathBuf,
+    },
+    FileType {
+        extension: String,
+        use_bundled_if_generic: bool,
+    },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -542,9 +554,7 @@ fn format_icon_timing_duration(elapsed: Duration) -> String {
 fn native_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
     #[cfg(target_os = "macos")]
     {
-        if entry.uses_app_bundle_icon() {
-            return Some(mac_app_bundle_icon_request(entry.path.clone()));
-        }
+        return mac_icon_request_for_entry(entry);
     }
 
     #[cfg(target_os = "windows")]
@@ -556,14 +566,41 @@ fn native_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest>
     None
 }
 
-#[cfg(target_os = "macos")]
-fn mac_app_bundle_icon_request(path: PathBuf) -> NativeIconRequest {
+#[cfg(any(target_os = "macos", test))]
+fn mac_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
+    if entry.uses_app_bundle_icon() {
+        return Some(mac_native_icon_request(MacIconRequest::AppBundle {
+            path: entry.path.clone(),
+        }));
+    }
+
+    if entry.is_directory_like() {
+        return None;
+    }
+
+    Some(mac_native_icon_request(MacIconRequest::FileType {
+        extension: lowercase_extension(&entry.path).unwrap_or_default(),
+        use_bundled_if_generic: crate::explorer::icons::path_has_specific_file_icon(&entry.path),
+    }))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_native_icon_request(request: MacIconRequest) -> NativeIconRequest {
+    let key = match &request {
+        MacIconRequest::AppBundle { path } => {
+            format!(
+                "{NATIVE_ICON_CACHE_VERSION}:macos:app:{}",
+                normalized_path_key(path)
+            )
+        }
+        MacIconRequest::FileType { extension, .. } => {
+            format!("{NATIVE_ICON_CACHE_VERSION}:macos:file-type:{extension}")
+        }
+    };
+
     NativeIconRequest {
-        key: format!(
-            "{NATIVE_ICON_CACHE_VERSION}:macos:app:{}",
-            normalized_path_key(&path)
-        ),
-        source: PlatformIconRequest::MacAppBundle { path },
+        key,
+        source: PlatformIconRequest::Mac(request),
     }
 }
 
@@ -659,7 +696,9 @@ fn normalized_path_key(path: &Path) -> String {
 fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> {
     match &request.source {
         #[cfg(target_os = "macos")]
-        PlatformIconRequest::MacAppBundle { path } => load_app_bundle_icon_png_bytes(path),
+        PlatformIconRequest::Mac(request) => load_macos_icon_png_bytes(request),
+        #[cfg(all(test, not(target_os = "macos")))]
+        PlatformIconRequest::Mac(_) => None,
         #[cfg(target_os = "windows")]
         PlatformIconRequest::Windows(request) => load_windows_shell_icon_png_bytes(request),
         #[cfg(all(test, not(target_os = "windows")))]
@@ -861,13 +900,43 @@ fn rgba_to_png_bytes(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> 
 }
 
 #[cfg(target_os = "macos")]
-fn load_app_bundle_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
-    let icon_path = resolve_bundle_icon_path(path);
+fn load_macos_icon_png_bytes(request: &MacIconRequest) -> Option<Vec<u8>> {
+    match request {
+        MacIconRequest::AppBundle { path } => load_app_bundle_icon_png_bytes(path),
+        MacIconRequest::FileType {
+            extension,
+            use_bundled_if_generic,
+        } => load_file_type_icon_png_bytes(extension, *use_bundled_if_generic),
+    }
+}
 
-    icon_path
+#[cfg(target_os = "macos")]
+fn load_app_bundle_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
+    load_icon_from_workspace(path).or_else(|| {
+        resolve_bundle_icon_path(path)
+            .as_deref()
+            .and_then(load_icon_from_icns)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn load_file_type_icon_png_bytes(extension: &str, use_bundled_if_generic: bool) -> Option<Vec<u8>> {
+    let bytes = load_icon_from_file_type(extension)?;
+    if use_bundled_if_generic && file_type_icon_is_generic(&bytes) {
+        return None;
+    }
+
+    Some(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn file_type_icon_is_generic(bytes: &[u8]) -> bool {
+    static GENERIC_FILE_ICON: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+
+    GENERIC_FILE_ICON
+        .get_or_init(|| load_icon_from_file_type("explorer-generic-file-icon-probe"))
         .as_deref()
-        .and_then(load_icon_from_icns)
-        .or_else(|| load_icon_from_workspace(path))
+        .is_some_and(|generic| generic == bytes)
 }
 
 #[cfg(target_os = "macos")]
@@ -972,6 +1041,38 @@ fn load_icon_from_workspace(path: &Path) -> Option<Vec<u8>> {
             }
 
             let icon: id = msg_send![workspace, iconForFile: ns_path];
+            if icon == nil {
+                return None;
+            }
+
+            small_png_from_ns_image(icon)
+        })();
+        let _: () = msg_send![pool, drain];
+        result
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn load_icon_from_file_type(file_type: &str) -> Option<Vec<u8>> {
+    use cocoa::{
+        appkit::NSImage,
+        base::{id, nil},
+        foundation::NSString,
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let result = (|| {
+            let ns_file_type = NSString::alloc(nil).init_str(file_type);
+            let _: id = msg_send![ns_file_type, autorelease];
+
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace == nil {
+                return None;
+            }
+
+            let icon: id = msg_send![workspace, iconForFileType: ns_file_type];
             if icon == nil {
                 return None;
             }
@@ -1687,6 +1788,62 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn mac_file_type_requests_are_shared_case_insensitively() {
+        let first = FileEntry::test("Report.TXT", false, Some(1), None);
+        let second = FileEntry::test("notes.txt", false, Some(1), None);
+
+        let first = mac_icon_request_for_entry(&first).expect("first icon request");
+        let second = mac_icon_request_for_entry(&second).expect("second icon request");
+
+        assert_eq!(first.key, second.key);
+        assert!(matches!(
+            first.source,
+            PlatformIconRequest::Mac(MacIconRequest::FileType {
+                ref extension,
+                use_bundled_if_generic: true,
+            }) if extension == "txt"
+        ));
+    }
+
+    #[test]
+    fn mac_unknown_file_type_requests_keep_system_generic_icon() {
+        let entry = FileEntry::test("document.custom", false, Some(1), None);
+        let request = mac_icon_request_for_entry(&entry).expect("icon request");
+
+        assert!(matches!(
+            request.source,
+            PlatformIconRequest::Mac(MacIconRequest::FileType {
+                ref extension,
+                use_bundled_if_generic: false,
+            }) if extension == "custom"
+        ));
+    }
+
+    #[test]
+    fn mac_plain_directories_do_not_request_native_icons() {
+        let folder = FileEntry::test("folder", true, None, None);
+
+        assert!(mac_icon_request_for_entry(&folder).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_app_bundle_requests_use_path_specific_cache_key() {
+        let entry = FileEntry::test("Preview.app", true, None, None);
+        let request = mac_icon_request_for_entry(&entry).expect("icon request");
+
+        assert!(
+            request
+                .key
+                .starts_with(&format!("{NATIVE_ICON_CACHE_VERSION}:macos:app:"))
+        );
+        assert!(matches!(
+            request.source,
+            PlatformIconRequest::Mac(MacIconRequest::AppBundle { .. })
+        ));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_shell_icon_loader_extracts_valid_png_for_current_exe() {
@@ -1694,6 +1851,14 @@ mod tests {
             path: std::env::current_exe().expect("current exe"),
         };
         let bytes = load_windows_shell_icon_png_bytes(&request).expect("icon png");
+
+        assert!(valid_png_bytes(bytes).is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_file_type_icon_loader_extracts_valid_png_for_text_files() {
+        let bytes = load_file_type_icon_png_bytes("txt", false).expect("icon png");
 
         assert!(valid_png_bytes(bytes).is_some());
     }

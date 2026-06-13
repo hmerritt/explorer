@@ -1,7 +1,6 @@
 ## New
 
 - Window close button, on Windows, changes icon on press and renders a rectangle (it should not change icon)
-- Add "os_icons" true/false settings option to opt out of fetching actual icons, and just use the bundled icons instead
 
 ## Ideas
 
