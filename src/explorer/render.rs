@@ -1601,7 +1601,7 @@ impl ExplorerView {
         }
 
         let date_cell = text_cell(
-            format_timestamp(entry.modified),
+            format_timestamp(entry.modified, &self.date_format),
             COLUMN_DATE_WIDTH,
             false,
             window,

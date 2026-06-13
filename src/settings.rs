@@ -12,6 +12,7 @@ use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
+pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
@@ -59,6 +60,8 @@ pub enum StartupLocation {
 #[serde(default)]
 pub struct ExplorerSettings {
     pub sidebar_items: Vec<SidebarLocation>,
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
     pub show_hidden_files: bool,
     pub show_file_name_extensions: bool,
     pub resolve_icons: bool,
@@ -79,6 +82,7 @@ impl Default for ExplorerSettings {
                 SidebarLocation::Documents,
                 SidebarLocation::Downloads,
             ],
+            date_format: default_date_format(),
             show_hidden_files: false,
             show_file_name_extensions: true,
             resolve_icons: true,
@@ -443,6 +447,14 @@ fn load_settings_from_path(path: &Path) -> io::Result<ExplorerSettings> {
 }
 
 fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
+    chrono::format::StrftimeItems::new(&settings.date_format)
+        .parse()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid date_format: {error}"),
+            )
+        })?;
     for location in &settings.sidebar_items {
         if let SidebarLocation::Custom { path, .. } = location {
             validate_configured_path(path)?;
@@ -498,6 +510,10 @@ fn save_settings_to_path(path: &Path, settings: &ExplorerSettings) -> io::Result
 
 fn default_sidebar_width() -> u32 {
     SIDEBAR_DEFAULT_WIDTH
+}
+
+fn default_date_format() -> String {
+    DEFAULT_DATE_FORMAT.to_owned()
 }
 
 fn deserialize_sidebar_width<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -564,6 +580,7 @@ mod tests {
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
         assert!(!settings.show_hidden_files);
+        assert_eq!(settings.date_format, DEFAULT_DATE_FORMAT);
         assert!(settings.show_file_name_extensions);
         assert!(settings.resolve_icons);
         assert_eq!(settings.startup_location, StartupLocation::Downloads);
@@ -596,6 +613,7 @@ mod tests {
             serde_json::from_str(r#"{"show_hidden_files":true,"future_option":42}"#)
                 .expect("deserialize partial settings");
         assert!(settings.show_hidden_files);
+        assert_eq!(settings.date_format, DEFAULT_DATE_FORMAT);
         assert!(settings.show_file_name_extensions);
         assert!(settings.resolve_icons);
         assert_eq!(settings.sidebar_width, SIDEBAR_DEFAULT_WIDTH);
@@ -651,7 +669,34 @@ mod tests {
                 .unwrap()
                 .contains("\n  \"resolve_icons\": true")
         );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\n  \"date_format\": \"%Y/%m/%d %H:%M\"")
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn invalid_date_format_is_rejected() {
+        let dir = unique_temp_dir("invalid-date-format");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE_NAME);
+        fs::write(&path, r#"{"date_format":"%Q"}"#).unwrap();
+
+        assert!(load_settings_from_path(&path).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_and_literal_date_formats_are_valid() {
+        for date_format in ["", "Modified today"] {
+            let settings = ExplorerSettings {
+                date_format: date_format.to_owned(),
+                ..ExplorerSettings::default()
+            };
+            assert!(validate_settings(&settings).is_ok());
+        }
     }
 
     #[test]

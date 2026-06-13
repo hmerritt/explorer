@@ -92,6 +92,7 @@ pub(super) enum ExplorerDialogKind {
 pub(super) struct ExplorerDialog {
     kind: ExplorerDialogKind,
     explorer: WeakEntity<ExplorerView>,
+    date_format: String,
     focus_handle: FocusHandle,
     focused_choice: Option<DialogChoice>,
     completed: bool,
@@ -240,6 +241,7 @@ impl ExplorerDialog {
     fn new(
         kind: ExplorerDialogKind,
         explorer: WeakEntity<ExplorerView>,
+        date_format: String,
         focus_handle: FocusHandle,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -252,6 +254,7 @@ impl ExplorerDialog {
         let mut dialog = Self {
             kind,
             explorer,
+            date_format,
             focus_handle,
             focused_choice,
             completed: false,
@@ -580,7 +583,7 @@ impl ExplorerDialog {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let icon_kind = delete_dialog_icon_kind(&pending.paths);
-        let mut text = permanent_delete_dialog_text(&pending);
+        let mut text = permanent_delete_dialog_text_with_format(&pending, &self.date_format);
         if let Some(path) = text.folder_size_path.as_deref() {
             text.size_label = Some(self.folder_size_label(path));
         }
@@ -821,7 +824,8 @@ fn open_dialog_window(
     explorer: Entity<ExplorerView>,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let options = dialog_window_options(&kind, cx);
+    let date_format = cx.entity().read(cx).date_format.clone();
+    let options = dialog_window_options(&kind, &date_format, cx);
     let handle = cx
         .open_window(options, |window, cx| {
             let focus_handle = cx.focus_handle();
@@ -830,7 +834,7 @@ fn open_dialog_window(
             cx.new(|cx| {
                 cx.on_release(|dialog: &mut ExplorerDialog, cx| dialog.release(cx))
                     .detach();
-                ExplorerDialog::new(kind, explorer.downgrade(), focus_handle, cx)
+                ExplorerDialog::new(kind, explorer.downgrade(), date_format, focus_handle, cx)
             })
         })
         .map_err(|error| error.to_string())?;
@@ -838,8 +842,8 @@ fn open_dialog_window(
     Ok(handle.into())
 }
 
-fn dialog_window_options(kind: &ExplorerDialogKind, cx: &App) -> WindowOptions {
-    let (width, height) = dialog_window_size(kind, cx);
+fn dialog_window_options(kind: &ExplorerDialogKind, date_format: &str, cx: &App) -> WindowOptions {
+    let (width, height) = dialog_window_size(kind, date_format, cx);
 
     WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
@@ -857,10 +861,10 @@ fn dialog_window_options(kind: &ExplorerDialogKind, cx: &App) -> WindowOptions {
     }
 }
 
-fn dialog_window_size(kind: &ExplorerDialogKind, cx: &App) -> (f32, f32) {
+fn dialog_window_size(kind: &ExplorerDialogKind, date_format: &str, cx: &App) -> (f32, f32) {
     match kind {
         ExplorerDialogKind::PermanentDelete(pending) => {
-            let text = permanent_delete_dialog_text(pending);
+            let text = permanent_delete_dialog_text_with_format(pending, date_format);
             let height = permanent_delete_dialog_height(&text, cx);
             (DELETE_DIALOG_WIDTH, height)
         }
@@ -1292,12 +1296,20 @@ fn dialog_command_row(
         )
 }
 
+#[cfg(test)]
 pub(super) fn permanent_delete_dialog_text(
     pending: &PendingPermanentDelete,
 ) -> PermanentDeleteDialogText {
+    permanent_delete_dialog_text_with_format(pending, crate::settings::DEFAULT_DATE_FORMAT)
+}
+
+fn permanent_delete_dialog_text_with_format(
+    pending: &PendingPermanentDelete,
+    date_format: &str,
+) -> PermanentDeleteDialogText {
     let (item_name, item_kind, size_label, date_modified_label, folder_size_path) =
         if let [path] = pending.paths.as_slice() {
-            let detail = permanent_delete_file_detail(path);
+            let detail = permanent_delete_file_detail(path, date_format);
             (
                 Some(detail.item_name),
                 Some(detail.item_kind),
@@ -1334,7 +1346,7 @@ pub(super) fn permanent_delete_dialog_text(
 
 pub(super) fn trash_dialog_text(pending: &PendingTrash) -> PermanentDeleteDialogText {
     let (item_name, item_kind) = if let [path] = pending.paths.as_slice() {
-        let detail = permanent_delete_file_detail(path);
+        let detail = permanent_delete_file_detail(path, crate::settings::DEFAULT_DATE_FORMAT);
         (Some(detail.item_name), Some(detail.item_kind))
     } else {
         (None, None)
@@ -1382,7 +1394,7 @@ struct PermanentDeleteFileDetail {
     folder_size_path: Option<PathBuf>,
 }
 
-fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
+fn permanent_delete_file_detail(path: &Path, date_format: &str) -> PermanentDeleteFileDetail {
     if let Some(entry) = FileEntry::from_path(path.to_path_buf()) {
         let is_folder = entry.is_directory_like();
         return PermanentDeleteFileDetail {
@@ -1397,7 +1409,10 @@ fn permanent_delete_file_detail(path: &Path) -> PermanentDeleteFileDetail {
             } else {
                 format!("Size: {}", format_size(entry.size))
             },
-            date_modified_label: format!("Date Modified: {}", format_timestamp(entry.modified)),
+            date_modified_label: format!(
+                "Date Modified: {}",
+                format_timestamp(entry.modified, date_format)
+            ),
             folder_size_path: is_folder.then(|| path.to_path_buf()),
         };
     }
@@ -1533,9 +1548,39 @@ mod tests {
         assert_eq!(text.size_label, Some("Size: 0 bytes".to_owned()));
         assert_eq!(
             text.date_modified_label,
-            Some(format!("Date Modified: {}", format_timestamp(modified)))
+            Some(format!(
+                "Date Modified: {}",
+                format_timestamp(modified, crate::settings::DEFAULT_DATE_FORMAT)
+            ))
         );
         assert_eq!(text.folder_size_path, None);
+    }
+
+    #[test]
+    fn permanent_delete_text_uses_configured_date_format() {
+        let temp = TempDir::new();
+        let path = temp.path().join("a.txt");
+        fs::write(&path, []).expect("create selected file");
+        let modified = fs::metadata(&path)
+            .expect("read selected file metadata")
+            .modified()
+            .ok();
+
+        let text = permanent_delete_dialog_text_with_format(
+            &PendingPermanentDelete {
+                paths: vec![path],
+                fallback_index: None,
+            },
+            "%d %B %Y",
+        );
+
+        assert_eq!(
+            text.date_modified_label,
+            Some(format!(
+                "Date Modified: {}",
+                format_timestamp(modified, "%d %B %Y")
+            ))
+        );
     }
 
     #[test]
@@ -1562,7 +1607,10 @@ mod tests {
         assert_eq!(text.size_label, Some("Size: calculating...".to_owned()));
         assert_eq!(
             text.date_modified_label,
-            Some(format!("Date Modified: {}", format_timestamp(modified)))
+            Some(format!(
+                "Date Modified: {}",
+                format_timestamp(modified, crate::settings::DEFAULT_DATE_FORMAT)
+            ))
         );
         assert_eq!(text.folder_size_path, Some(folder));
     }

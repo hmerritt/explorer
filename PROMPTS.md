@@ -4,8 +4,8 @@
 
 ## 1
 
+- Fix tab horizontal scroll - it no longer works after adding OS window controls inline.
 - Settings options for:
-    - "date_format" - Date Modified date format in settings file (inc human readable format, e.g. 05 February 2026)
     - "focus_new_tab_immediately" - Switch focus to newly created tabs (default is false, which is current behaviour)
     - "font" - change main app font used
     - "show_folder_size" - default: false - calc all folder sizes in current directory (cache for current session in-memory + expire after 10m)

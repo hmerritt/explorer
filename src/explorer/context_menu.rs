@@ -130,7 +130,7 @@ impl ExplorerView {
         self.open_utility_menu = None;
         self.context_menu = Some(ContextMenuState::new(
             origin,
-            folder_context_menu_items(&self.path, can_paste),
+            folder_context_menu_items(&self.path, can_paste, &self.date_format),
         ));
         true
     }
@@ -471,18 +471,37 @@ fn entry_is_file_open_target(entry: &FileEntry) -> bool {
     !entry.is_directory_like() || entry.is_app_bundle()
 }
 
-pub(super) fn folder_context_menu_items(path: &Path, can_paste: bool) -> Vec<ContextMenuItem> {
+pub(super) fn folder_context_menu_items(
+    path: &Path,
+    can_paste: bool,
+    date_format: &str,
+) -> Vec<ContextMenuItem> {
     let (created, modified) = fs::metadata(path)
         .map(|metadata| (metadata.created().ok(), metadata.modified().ok()))
         .unwrap_or((None, None));
 
-    folder_context_menu_items_from_times(can_paste, created, modified)
+    folder_context_menu_items_from_times_with_format(can_paste, created, modified, date_format)
 }
 
+#[cfg(test)]
 pub(super) fn folder_context_menu_items_from_times(
     can_paste: bool,
     created: Option<SystemTime>,
     modified: Option<SystemTime>,
+) -> Vec<ContextMenuItem> {
+    folder_context_menu_items_from_times_with_format(
+        can_paste,
+        created,
+        modified,
+        crate::settings::DEFAULT_DATE_FORMAT,
+    )
+}
+
+fn folder_context_menu_items_from_times_with_format(
+    can_paste: bool,
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+    date_format: &str,
 ) -> Vec<ContextMenuItem> {
     vec![
         ContextMenuItem::Action {
@@ -516,12 +535,12 @@ pub(super) fn folder_context_menu_items_from_times(
         ContextMenuItem::Separator,
         ContextMenuItem::Detail {
             label: "Created",
-            value: format_timestamp(created),
+            value: format_timestamp(created, date_format),
             icon_slot: ContextMenuIconSlot::Collapse,
         },
         ContextMenuItem::Detail {
             label: "Modified",
-            value: format_timestamp(modified),
+            value: format_timestamp(modified, date_format),
             icon_slot: ContextMenuIconSlot::Collapse,
         },
     ]
@@ -1184,5 +1203,23 @@ mod tests {
                 icon_slot: ContextMenuIconSlot::Collapse,
             }
         );
+    }
+
+    #[test]
+    fn detail_rows_use_configured_date_format() {
+        let timestamp = Local.with_ymd_and_hms(2026, 2, 5, 9, 15, 0).unwrap();
+        let items = folder_context_menu_items_from_times_with_format(
+            true,
+            Some(timestamp.into()),
+            Some(timestamp.into()),
+            "%d %B %Y",
+        );
+
+        for item in &items[3..=4] {
+            assert!(matches!(
+                item,
+                ContextMenuItem::Detail { value, .. } if value == "05 February 2026"
+            ));
+        }
     }
 }

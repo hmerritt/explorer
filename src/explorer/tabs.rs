@@ -1599,6 +1599,7 @@ mod tests {
             tabs.add_background_tab(temp.path().to_path_buf(), cx);
         });
         cx.update_global::<SettingsState, _>(|state, _| {
+            state.value.date_format = "%d %B %Y".to_owned();
             state.value.show_hidden_files = true;
             state.value.show_file_name_extensions = false;
         });
@@ -1614,6 +1615,7 @@ mod tests {
             cx.read_entity(&view, |view, _| {
                 assert!(view.show_hidden_files);
                 assert!(!view.show_file_name_extensions);
+                assert_eq!(view.date_format, "%d %B %Y");
             });
         }
 
@@ -1624,6 +1626,7 @@ mod tests {
         cx.read_entity(&future_view, |view, _| {
             assert!(view.show_hidden_files);
             assert!(!view.show_file_name_extensions);
+            assert_eq!(view.date_format, "%d %B %Y");
         });
     }
 

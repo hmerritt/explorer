@@ -60,6 +60,7 @@ pub struct ExplorerView {
     pub(super) search: SearchState,
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
+    pub(super) date_format: String,
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
     pub(super) resolve_icons: bool,
@@ -204,6 +205,7 @@ impl ExplorerView {
             search: SearchState::default(),
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
+            date_format: settings.date_format.clone(),
             show_hidden_files: settings.show_hidden_files,
             show_file_name_extensions: settings.show_file_name_extensions,
             resolve_icons: settings.resolve_icons,
@@ -222,6 +224,7 @@ impl ExplorerView {
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
         let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
+        self.date_format.clone_from(&settings.date_format);
         self.show_hidden_files = settings.show_hidden_files;
         self.show_file_name_extensions = settings.show_file_name_extensions;
         self.resolve_icons = settings.resolve_icons;
@@ -609,6 +612,7 @@ mod tests {
         let view = ExplorerView::new(PathBuf::from("defaults"));
 
         assert!(!view.show_hidden_files);
+        assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
         assert!(view.show_file_name_extensions);
         assert!(view.resolve_icons);
         assert_eq!(
@@ -645,6 +649,20 @@ mod tests {
         );
 
         assert!(!view.resolve_icons);
+    }
+
+    #[test]
+    fn view_uses_configured_date_format() {
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                date_format: "%d %B %Y".to_owned(),
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert_eq!(view.date_format, "%d %B %Y");
     }
 
     #[gpui::test]
