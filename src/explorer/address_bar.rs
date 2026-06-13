@@ -851,7 +851,44 @@ pub(super) fn resolve_address_input(input: &str, current_path: &Path) -> Result<
         return Err(format!("{} is not a folder.", candidate.display()));
     }
 
-    Ok(fs::canonicalize(&candidate).unwrap_or(candidate))
+    Ok(fs::canonicalize(&candidate)
+        .map(explorer_visible_address_path)
+        .unwrap_or(candidate))
+}
+
+#[cfg(windows)]
+fn explorer_visible_address_path(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+
+    let mut visible = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => {
+            PathBuf::from(format!("{}:\\", char::from(letter).to_ascii_uppercase()))
+        }
+        Prefix::VerbatimUNC(server, share) => PathBuf::from(format!(
+            r"\\{}\{}\",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        )),
+        _ => return path,
+    };
+
+    for component in components {
+        if !matches!(component, Component::RootDir) {
+            visible.push(component.as_os_str());
+        }
+    }
+
+    visible
+}
+
+#[cfg(not(windows))]
+fn explorer_visible_address_path(path: PathBuf) -> PathBuf {
+    path
 }
 
 pub(super) fn folder_suggestions_for_input(
@@ -1184,11 +1221,11 @@ mod tests {
 
         assert_eq!(
             resolve_address_input(&child.display().to_string(), temp.path()).unwrap(),
-            fs::canonicalize(&child).unwrap()
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
         );
         assert_eq!(
             resolve_address_input("child", temp.path()).unwrap(),
-            fs::canonicalize(&child).unwrap()
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
         );
     }
 
@@ -1200,15 +1237,15 @@ mod tests {
 
         assert_eq!(
             resolve_address_input(".", &child).unwrap(),
-            fs::canonicalize(&child).unwrap()
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
         );
         assert_eq!(
             resolve_address_input("..", &child).unwrap(),
-            fs::canonicalize(temp.path()).unwrap()
+            explorer_visible_address_path(fs::canonicalize(temp.path()).unwrap())
         );
         assert_eq!(
             resolve_address_input(&format!(" \"{}\" ", child.display()), temp.path()).unwrap(),
-            fs::canonicalize(&child).unwrap()
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
         );
     }
 
@@ -1220,6 +1257,26 @@ mod tests {
         assert!(resolve_address_input("missing", temp.path()).is_err());
         assert!(resolve_address_input("file.txt", temp.path()).is_err());
         assert!(resolve_address_input("", temp.path()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_visible_address_path_strips_verbatim_disk_prefix() {
+        assert_eq!(
+            explorer_visible_address_path(PathBuf::from(r"\\?\C:\Users\Ada\Documents")),
+            PathBuf::from(r"C:\Users\Ada\Documents")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_visible_address_path_strips_verbatim_unc_prefix() {
+        assert_eq!(
+            explorer_visible_address_path(PathBuf::from(
+                r"\\?\UNC\server\share\Users\Ada\Documents"
+            )),
+            PathBuf::from(r"\\server\share\Users\Ada\Documents")
+        );
     }
 
     #[test]

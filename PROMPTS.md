@@ -4,23 +4,33 @@
 
 ## 1
 
+- Settings options for:
+    - "date_format" - Date Modified date format in settings file (inc human readable format, e.g. 05 February 2026)
+    - "focus_new_tab_immediately" - Switch focus to newly created tabs (default is false, which is current behaviour)
+    - "font" - change main app font used
+    - "show_folder_size" - default: false - calc all folder sizes in current directory (cache for current session in-memory + expire after 10m)
+- Horizontal scrollbar in file view when column headings are clippped
+
+- “Open with” picker
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
-- Large icons grid view (alternate to the current Details view)
-- Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
+- File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
+- Debug and speed up archive extraction
+- Context menu for files needs to inherit the os native icon (multiselect can use the generic one)
 
 ## 2
 
-- UI refinement and improvements (tighten everything up, make it look nice)
-- Split-screen (see Zed)
 - Customizable context menus (add items to settings)
 - [Windows-only] detext WSL Linux install, show drive for it
-- File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
+- Large icons grid view (alternate to the current Details view)
+- UI refinement and improvements (tighten everything up, make it look nice)
+- Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
 
-- “Open with” picker
+- Settings UI
+- Split-screen (see Zed)
 - rsync copy/sync builtin
 - Shell-extension system
 - SSH drive support
