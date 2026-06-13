@@ -436,7 +436,7 @@ impl ExplorerTabs {
     fn reload_all_tabs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             let _ = tab.view.update(cx, |view, cx| {
-                view.reload_with_shell_shortcut_resolution(cx);
+                view.reload_with_entry_metadata_resolution(cx);
                 cx.notify();
             });
         }
@@ -1633,6 +1633,7 @@ mod tests {
             state.value.date_format = "%d %B %Y".to_owned();
             state.value.show_hidden_files = true;
             state.value.show_file_name_extensions = false;
+            state.value.show_folder_size = true;
         });
         cx.run_until_parked();
 
@@ -1646,6 +1647,7 @@ mod tests {
             cx.read_entity(&view, |view, _| {
                 assert!(view.show_hidden_files);
                 assert!(!view.show_file_name_extensions);
+                assert!(view.show_folder_size);
                 assert_eq!(view.date_format, "%d %B %Y");
             });
         }
@@ -1659,6 +1661,7 @@ mod tests {
         cx.read_entity(&future_view, |view, _| {
             assert!(view.show_hidden_files);
             assert!(!view.show_file_name_extensions);
+            assert!(view.show_folder_size);
             assert_eq!(view.date_format, "%d %B %Y");
         });
     }

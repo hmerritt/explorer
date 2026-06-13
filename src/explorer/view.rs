@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -17,6 +20,7 @@ use crate::explorer::{
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
+    folder_size::{FolderSizeCache, FolderSizeError, calculate_folder_size},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
     scrollbar::{HorizontalScrollbarDrag, ScrollbarDrag},
@@ -63,6 +67,7 @@ pub struct ExplorerView {
     pub(super) date_format: String,
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
+    pub(super) show_folder_size: bool,
     pub(super) resolve_icons: bool,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
@@ -72,6 +77,9 @@ pub struct ExplorerView {
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
     pub(super) shell_shortcut_resolution_task: Option<Task<()>>,
+    pub(super) folder_size_generation: u64,
+    pub(super) folder_size_task: Option<Task<()>>,
+    pub(super) folder_size_cancel: Option<Arc<AtomicBool>>,
 }
 
 pub(super) struct FileOperationState {
@@ -148,7 +156,7 @@ impl ExplorerView {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
         let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
         view.restart_directory_watcher(cx);
-        view.schedule_pending_shell_shortcut_resolution(cx);
+        view.schedule_entry_metadata_resolution(cx);
         view.observe_native_icon_cache(cx);
         view
     }
@@ -208,6 +216,7 @@ impl ExplorerView {
             date_format: settings.date_format.clone(),
             show_hidden_files: settings.show_hidden_files,
             show_file_name_extensions: settings.show_file_name_extensions,
+            show_folder_size: settings.show_folder_size,
             resolve_icons: settings.resolve_icons,
             open_utility_menu: None,
             context_menu: None,
@@ -217,6 +226,9 @@ impl ExplorerView {
             sidebar_sections: SidebarSections::default(),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
+            folder_size_generation: 0,
+            folder_size_task: None,
+            folder_size_cancel: None,
         };
         view.reload();
         view
@@ -224,9 +236,11 @@ impl ExplorerView {
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
         let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
+        let folder_size_changed = self.show_folder_size != settings.show_folder_size;
         self.date_format.clone_from(&settings.date_format);
         self.show_hidden_files = settings.show_hidden_files;
         self.show_file_name_extensions = settings.show_file_name_extensions;
+        self.show_folder_size = settings.show_folder_size;
         self.resolve_icons = settings.resolve_icons;
 
         self.sidebar_items = settings.sidebar_items.clone();
@@ -237,8 +251,15 @@ impl ExplorerView {
         if hidden_changed {
             self.invalidate_recursive_search_cache();
             self.reload();
-            self.schedule_pending_shell_shortcut_resolution(cx);
+            self.schedule_entry_metadata_resolution(cx);
             self.refresh_search_after_external_change(cx);
+        } else if folder_size_changed {
+            if self.show_folder_size {
+                self.schedule_folder_sizes(cx);
+            } else {
+                self.cancel_folder_size_task();
+                self.clear_folder_sizes();
+            }
         } else {
             self.sidebar_sections = sidebar_sections(&self.sidebar_items);
         }
@@ -262,6 +283,7 @@ impl ExplorerView {
 
     fn reload_inner(&mut self, mode: ReloadMode) {
         let total_started = Instant::now();
+        self.cancel_folder_size_task();
         self.context_menu = None;
         self.open_error = None;
         let selected_paths_started = Instant::now();
@@ -354,12 +376,23 @@ impl ExplorerView {
         );
     }
 
-    pub(super) fn reload_with_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reload_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
         self.reload();
-        self.schedule_pending_shell_shortcut_resolution(cx);
+        self.schedule_entry_metadata_resolution(cx);
     }
 
-    pub(super) fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
+        self.reload();
+        self.invalidate_current_folder_size_cache(cx);
+        self.schedule_entry_metadata_resolution(cx);
+    }
+
+    pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
+        self.schedule_pending_shell_shortcut_resolution(cx);
+        self.schedule_folder_sizes(cx);
+    }
+
+    fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
         self.shell_shortcut_resolution_generation =
             self.shell_shortcut_resolution_generation.wrapping_add(1);
         let generation = self.shell_shortcut_resolution_generation;
@@ -390,6 +423,133 @@ impl ExplorerView {
             });
         });
         self.shell_shortcut_resolution_task = Some(task);
+    }
+
+    pub(super) fn schedule_folder_sizes(&mut self, cx: &mut Context<Self>) {
+        self.cancel_folder_size_task();
+        if !self.show_folder_size {
+            return;
+        }
+
+        let root = self.path.clone();
+        let generation = self.folder_size_generation;
+        let targets = self
+            .all_entries
+            .iter()
+            .filter(|entry| entry.is_real_directory())
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let mut missing = Vec::new();
+        let mut cached = Vec::new();
+        if let Some(cache) = cx.try_global::<FolderSizeCache>() {
+            for path in targets {
+                if let Some(size) = cache.get(&path) {
+                    cached.push((path, size));
+                } else {
+                    missing.push(path);
+                }
+            }
+        } else {
+            missing = targets;
+        }
+
+        for (path, size) in cached {
+            self.apply_folder_size(&path, size);
+        }
+        if missing.is_empty() {
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.folder_size_cancel = Some(cancel.clone());
+        let task = cx.spawn(async move |this, cx| {
+            for path in missing {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let calculation_path = path.clone();
+                let calculation_cancel = cancel.clone();
+                let result =
+                    cx.background_executor()
+                        .spawn(async move {
+                            calculate_folder_size(&calculation_path, &calculation_cancel)
+                        })
+                        .await;
+
+                let should_continue = this
+                    .update(cx, |explorer, cx| {
+                        if explorer.path != root
+                            || explorer.folder_size_generation != generation
+                            || !explorer.show_folder_size
+                        {
+                            return false;
+                        }
+
+                        match result {
+                            Ok(size) => {
+                                if let Some(cache) = cx.try_global::<FolderSizeCache>() {
+                                    cache.insert(path.clone(), size);
+                                }
+                                if explorer.apply_folder_size(&path, size) {
+                                    cx.notify();
+                                }
+                                true
+                            }
+                            Err(FolderSizeError::Cancelled) => false,
+                            Err(FolderSizeError::Unavailable) => true,
+                        }
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+
+            let _ = this.update(cx, |explorer, _| {
+                if explorer.folder_size_generation == generation {
+                    explorer.folder_size_cancel = None;
+                    explorer.folder_size_task = None;
+                }
+            });
+        });
+        self.folder_size_task = Some(task);
+    }
+
+    fn cancel_folder_size_task(&mut self) {
+        self.folder_size_generation = self.folder_size_generation.wrapping_add(1);
+        if let Some(cancel) = self.folder_size_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.folder_size_task = None;
+    }
+
+    fn invalidate_current_folder_size_cache(&self, cx: &mut Context<Self>) {
+        let paths = self
+            .all_entries
+            .iter()
+            .filter(|entry| entry.is_real_directory())
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        if let Some(cache) = cx.try_global::<FolderSizeCache>() {
+            cache.invalidate(paths.iter());
+        }
+    }
+
+    fn apply_folder_size(&mut self, path: &Path, size: u64) -> bool {
+        let mut changed = apply_folder_size_to_entries(&mut self.all_entries, path, Some(size));
+        if !self.search.recursive_results_active {
+            changed |= apply_folder_size_to_entries(&mut self.entries, path, Some(size));
+        }
+        changed
+    }
+
+    fn clear_folder_sizes(&mut self) -> bool {
+        let mut changed = clear_folder_sizes_in_entries(&mut self.all_entries);
+        if !self.search.recursive_results_active {
+            changed |= clear_folder_sizes_in_entries(&mut self.entries);
+        }
+        changed
     }
 
     fn pending_shell_shortcut_targets(&self) -> Vec<(PathBuf, PathBuf)> {
@@ -577,6 +737,21 @@ fn apply_shell_shortcut_resolution_to_entries(
     changed
 }
 
+fn apply_folder_size_to_entries(entries: &mut [FileEntry], path: &Path, size: Option<u64>) -> bool {
+    entries
+        .iter_mut()
+        .filter(|entry| entry.path == path)
+        .fold(false, |changed, entry| {
+            entry.set_folder_size(size) || changed
+        })
+}
+
+fn clear_folder_sizes_in_entries(entries: &mut [FileEntry]) -> bool {
+    entries.iter_mut().fold(false, |changed, entry| {
+        entry.set_folder_size(None) || changed
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -614,6 +789,7 @@ mod tests {
         assert!(!view.show_hidden_files);
         assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
         assert!(view.show_file_name_extensions);
+        assert!(!view.show_folder_size);
         assert!(view.resolve_icons);
         assert_eq!(
             view.sidebar_width,
@@ -713,6 +889,132 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(!view.resolve_icons);
         });
+    }
+
+    #[gpui::test]
+    fn enabling_folder_sizes_calculates_and_disabling_clears_real_directories(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(FolderSizeCache::new());
+        let temp = crate::explorer::test_support::TempDir::new();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("file.txt"), b"abc").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        show_folder_size: true,
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.all_entries[0].size, Some(3));
+            assert_eq!(view.entries[0].size, Some(3));
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(&ExplorerSettings::default(), cx);
+            });
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.all_entries[0].size, None);
+            assert_eq!(view.entries[0].size, None);
+        });
+        assert_eq!(
+            cx.read_global::<FolderSizeCache, _>(|cache, _| cache.get(&folder)),
+            Some(3)
+        );
+    }
+
+    #[gpui::test]
+    fn folder_sizes_reuse_cache_until_explicit_refresh(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FolderSizeCache::new());
+        let temp = crate::explorer::test_support::TempDir::new();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("file.txt"), b"abc").unwrap();
+        cx.read_global::<FolderSizeCache, _>(|cache, _| cache.insert(folder.clone(), 99));
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        show_folder_size: true,
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| assert_eq!(view.entries[0].size, Some(99)));
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.refresh_with_entry_metadata_resolution(cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| assert_eq!(view.entries[0].size, Some(3)));
+        assert_eq!(
+            cx.read_global::<FolderSizeCache, _>(|cache, _| cache.get(&folder)),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn folder_size_updates_only_real_directories_and_skip_recursive_results() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let folder = FileEntry::test("folder", true, None, None);
+        let link = FileEntry::test_directory_link("link", DirectoryLinkKind::FilesystemLink);
+        view.all_entries = vec![folder.clone(), link.clone()];
+        view.entries = vec![folder, link];
+
+        assert!(view.apply_folder_size(Path::new("folder"), 12));
+        assert!(!view.apply_folder_size(Path::new("link"), 34));
+        assert_eq!(view.all_entries[0].size, Some(12));
+        assert_eq!(view.all_entries[1].size, None);
+
+        view.search.recursive_results_active = true;
+        view.entries = vec![FileEntry::test("folder", true, None, None)];
+        assert!(view.apply_folder_size(Path::new("folder"), 56));
+        assert_eq!(view.all_entries[0].size, Some(56));
+        assert_eq!(view.entries[0].size, None);
+    }
+
+    #[test]
+    fn cancelling_folder_sizes_invalidates_generation_and_signals_work() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let cancel = Arc::new(AtomicBool::new(false));
+        view.folder_size_generation = 7;
+        view.folder_size_cancel = Some(cancel.clone());
+
+        view.cancel_folder_size_task();
+
+        assert_eq!(view.folder_size_generation, 8);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(view.folder_size_cancel.is_none());
+        assert!(view.folder_size_task.is_none());
     }
 
     #[test]

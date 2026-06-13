@@ -59,7 +59,7 @@ impl ExplorerView {
             let reload_started = Instant::now();
             self.reload();
             if let Some(cx) = cx.as_deref_mut() {
-                self.schedule_pending_shell_shortcut_resolution(cx);
+                self.schedule_entry_metadata_resolution(cx);
             }
             crate::debug_options::log_nav_timing(
                 reload_started.elapsed(),
@@ -113,7 +113,7 @@ impl ExplorerView {
         let reload_started = Instant::now();
         self.reload_for_navigation();
         if let Some(cx) = cx.as_deref_mut() {
-            self.schedule_pending_shell_shortcut_resolution(cx);
+            self.schedule_entry_metadata_resolution(cx);
         }
         crate::debug_options::log_nav_timing(
             reload_started.elapsed(),

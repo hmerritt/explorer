@@ -270,7 +270,7 @@ impl ExplorerView {
     }
 
     pub(super) fn handle_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        self.reload_with_shell_shortcut_resolution(cx);
+        self.refresh_with_entry_metadata_resolution(cx);
         self.refresh_search_after_external_change(cx);
         cx.notify();
     }

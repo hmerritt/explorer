@@ -6,7 +6,6 @@
 
 - Settings options for:
     - "font" - change main app font used
-    - "show_folder_size" - default: false - calc all folder sizes in current directory (cache for current session in-memory + expire after 10m)
 
 - “Open with” picker
 - Dialog button improvements
@@ -14,6 +13,7 @@
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Debug and speed up archive extraction
 - Context menu for files needs to inherit the os native icon (multiselect can use the generic one)
+- Improve readme - add screenshots / branding
 
 ## 2
 
@@ -40,6 +40,7 @@
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
+- Add UI button to calc folder sizes (button disapears once pressed, it's a one-time button that must be pressed per-directory as-and-when it is needed) Only show when "show_folder_size: false"
 
 ## File move/copy/sync engine
 

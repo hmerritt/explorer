@@ -115,6 +115,19 @@ impl FileEntry {
         )
     }
 
+    pub(super) fn is_real_directory(&self) -> bool {
+        matches!(self.kind, EntryKind::Directory)
+    }
+
+    pub(super) fn set_folder_size(&mut self, size: Option<u64>) -> bool {
+        if !self.is_real_directory() || self.size == size {
+            return false;
+        }
+
+        self.size = size;
+        true
+    }
+
     pub(super) fn uses_directory_shortcut_icon(&self) -> bool {
         matches!(
             self.kind,

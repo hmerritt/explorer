@@ -77,14 +77,14 @@ impl ExplorerView {
         match create_new_item_in_directory(&self.path, kind) {
             Ok(path) => {
                 self.open_error = None;
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
                 self.select_single_path(&path);
                 self.start_rename_for_path(&path, window, cx);
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
-                self.reload();
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -163,14 +163,14 @@ impl ExplorerView {
         match trash_paths(&paths) {
             Ok(()) => {
                 self.remove_cut_paths(&paths);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
                 self.select_fallback_index(fallback_index);
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
-                self.reload();
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -200,14 +200,14 @@ impl ExplorerView {
         match trash_paths(&pending.paths) {
             Ok(()) => {
                 self.remove_cut_paths(&pending.paths);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
                 self.select_fallback_index(pending.fallback_index);
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -238,14 +238,14 @@ impl ExplorerView {
         match remove_paths_permanently(&pending.paths) {
             Ok(()) => {
                 self.remove_cut_paths(&pending.paths);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
                 self.select_fallback_index(pending.fallback_index);
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.open_error = Some(error);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -329,7 +329,7 @@ impl ExplorerView {
             }
             Err(error) => {
                 self.open_error = Some(error);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -450,16 +450,16 @@ impl ExplorerView {
         match result {
             Ok(summary) => {
                 self.finish_file_operation(summary);
-                self.schedule_pending_shell_shortcut_resolution(cx);
+                self.schedule_entry_metadata_resolution(cx);
                 self.emit_filesystem_changed(cx);
             }
             Err(FileOperationError::Cancelled) => {
                 self.open_error = None;
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
             }
             Err(FileOperationError::Failed(error)) => {
                 self.open_error = Some(error);
-                self.reload_with_shell_shortcut_resolution(cx);
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }

@@ -60,6 +60,7 @@ pub(crate) use filesystem::{
     macos_bin_dir, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
     user_music_dir, user_pictures_dir, user_videos_dir,
 };
+pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
     pub use super::filesystem::benchmark_support::load_entries;
