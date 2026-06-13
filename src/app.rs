@@ -378,9 +378,16 @@ fn open_explorer_window(cx: &mut App) {
             window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
             titlebar: Some(TitlebarOptions {
                 title: Some(SharedString::from(APP_TITLE)),
+                appears_transparent: true,
+                traffic_light_position: cfg!(target_os = "macos")
+                    .then_some(point(px(12.0), px(11.0))),
                 ..Default::default()
             }),
-            window_decorations: Some(WindowDecorations::Server),
+            window_decorations: Some(if cfg!(target_os = "linux") {
+                WindowDecorations::Client
+            } else {
+                WindowDecorations::Server
+            }),
             app_id: Some(APP_ID.to_owned()),
             ..Default::default()
         },
