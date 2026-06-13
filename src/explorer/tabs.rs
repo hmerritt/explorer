@@ -620,7 +620,6 @@ impl ExplorerTabs {
             )
             .child(
                 div()
-                    .id("explorer-tab-scroll")
                     .flex()
                     .flex_row()
                     .items_end()
@@ -628,9 +627,19 @@ impl ExplorerTabs {
                     .flex_shrink()
                     .min_w(px(0.0))
                     .h_full()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.tab_scroll_handle)
-                    .children(tab_children),
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("explorer-tab-scroll")
+                            .flex()
+                            .flex_row()
+                            .items_end()
+                            .w_full()
+                            .h_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll_handle)
+                            .children(tab_children),
+                    ),
             )
             .child(self.render_titlebar_drag_region(decorations, cx))
             .children(self.render_window_controls(window, cx))
@@ -667,7 +676,7 @@ impl ExplorerTabs {
             .flex_shrink()
             .overflow_hidden()
             .cursor_default()
-            .occlude()
+            .block_mouse_except_scroll()
             .bg(if is_active {
                 rgb(TAB_ACTIVE_BG)
             } else {
@@ -1022,7 +1031,7 @@ fn new_tab_button(cx: &mut Context<ExplorerTabs>) -> AnyElement {
         .w(px(TAB_BAR_HEIGHT))
         .h_full()
         .flex_shrink_0()
-        .occlude()
+        .block_mouse_except_scroll()
         .font(tab_icon_font())
         .text_size(px(13.0))
         .text_color(rgb(0x404040))
@@ -1452,7 +1461,7 @@ mod tests {
         view::tab_label_for_path,
     };
     use crate::settings::{ExplorerSettings, SettingsState};
-    use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
+    use gpui::{AppContext, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext};
     use std::fs;
 
     fn test_tabs_with_files<'a>(
@@ -2695,6 +2704,72 @@ mod tests {
         assert_eq!(tab_strip_width(0), TAB_BAR_HEIGHT);
         assert_eq!(tab_strip_width(1), TAB_WIDTH + TAB_BAR_HEIGHT);
         assert_eq!(tab_strip_width(3), (3.0 * TAB_WIDTH) + TAB_BAR_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn overflowing_tab_strip_scrolls_active_tab_into_view(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        cx.simulate_resize(gpui::size(px(700.0), px(600.0)));
+
+        cx.update(|_, app| {
+            tabs.update(app, |tabs, cx| {
+                let path = tabs
+                    .active_tab()
+                    .unwrap()
+                    .view
+                    .read(cx)
+                    .path()
+                    .to_path_buf();
+                for _ in 0..8 {
+                    tabs.add_background_tab(path.clone(), cx);
+                }
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let initial_offset = cx.read_entity(&tabs, |tabs, _| {
+            assert!(tabs.tab_scroll_handle.max_offset().width > px(0.0));
+            tabs.tab_scroll_handle.offset().x
+        });
+
+        let first_tab_position = cx.read_entity(&tabs, |tabs, _| {
+            tabs.tab_scroll_handle
+                .bounds_for_item(0)
+                .expect("first tab bounds")
+                .center()
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: first_tab_position,
+            delta: ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+            ..Default::default()
+        });
+
+        cx.read_entity(&tabs, |tabs, _| {
+            assert!(tabs.tab_scroll_handle.offset().x < initial_offset);
+        });
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let last_index = tabs.tabs.len() - 1;
+                assert!(tabs.select_tab_by_index(last_index, window, cx));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, _| {
+            let handle = &tabs.tab_scroll_handle;
+            let viewport = handle.bounds();
+            let last_tab = handle
+                .bounds_for_item(tabs.tabs.len() - 1)
+                .expect("last tab bounds");
+
+            assert!(handle.offset().x < initial_offset);
+            assert!(last_tab.left() + handle.offset().x >= viewport.left());
+            assert!(last_tab.right() + handle.offset().x <= viewport.right());
+        });
     }
 
     #[test]

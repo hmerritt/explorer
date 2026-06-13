@@ -4,7 +4,6 @@
 
 ## 1
 
-- Fix tab horizontal scroll - it no longer works after adding OS window controls inline.
 - Settings options for:
     - "focus_new_tab_immediately" - Switch focus to newly created tabs (default is false, which is current behaviour)
     - "font" - change main app font used
