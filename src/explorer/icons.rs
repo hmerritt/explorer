@@ -1,8 +1,11 @@
 use crate::explorer::constants::FILE_ICON_SIZE;
 use crate::explorer::constants::SIDEBAR_ICON_SIZE;
-use std::sync::{Arc, LazyLock};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+};
 
-use crate::explorer::directory_kind::DirectoryKind;
+use crate::explorer::{directory_kind::DirectoryKind, filesystem::archive_path_is_supported};
 use gpui::{
     AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, StyledImage, div, font, img,
     prelude::*, px,
@@ -14,6 +17,27 @@ pub(super) enum NavIcon {
     Forward,
     Up,
     Refresh,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileIconKind {
+    Archive,
+    Audio,
+    Configuration,
+    Disc,
+    Document,
+    Executable,
+    Font,
+    Generic,
+    Image,
+    MsAccess,
+    MsExcel,
+    MsPowerpoint,
+    MsProject,
+    MsWord,
+    Program,
+    Text,
+    Video,
 }
 
 // Helper to define SVG icons with consistent naming
@@ -45,12 +69,28 @@ macro_rules! png_icon {
     };
 }
 
-png_icon!(DOCUMENT_ICON, "files", "generic.png");
+png_icon!(AUDIO_FILE_ICON, "files", "audio.png");
+png_icon!(CONFIGURATION_FILE_ICON, "files", "configuration.png");
+png_icon!(DISC_FILE_ICON, "files", "disc.png");
+png_icon!(DOCUMENT_FILE_ICON, "files", "document.png");
+png_icon!(EXECUTABLE_FILE_ICON, "files", "executable.png");
+png_icon!(FONT_FILE_ICON, "files", "font.png");
+png_icon!(GENERIC_FILE_ICON, "files", "generic.png");
+png_icon!(IMAGE_FILE_ICON, "files", "image.png");
+png_icon!(MS_ACCESS_FILE_ICON, "files", "ms-access.png");
+png_icon!(MS_EXCEL_FILE_ICON, "files", "ms-excel.png");
+png_icon!(MS_POWERPOINT_FILE_ICON, "files", "ms-powerpoint.png");
+png_icon!(MS_PROJECT_FILE_ICON, "files", "ms-project.png");
+png_icon!(MS_WORD_FILE_ICON, "files", "ms-word.png");
+png_icon!(PROGRAM_FILE_ICON, "files", "program.png");
+png_icon!(TEXT_FILE_ICON, "files", "text.png");
+png_icon!(VIDEO_FILE_ICON, "files", "video.png");
 png_icon!(DELETE_FILE_DIALOG_ICON, "files/large", "delete.png");
 png_icon!(DELETE_FOLDER_DIALOG_ICON, "folders", "delete.png");
 png_icon!(DELETE_MIXED_DIALOG_ICON, "emblems", "alert.png");
 png_icon!(FOLDER_ICON, "folders", "folder.png");
 png_icon!(FOLDER_SHORTCUT_ICON, "folders", "shortcut.png");
+png_icon!(ARCHIVE_FILE_ICON, "folders", "zip.png");
 
 png_icon!(
     APPLICATIONS_SIDEBAR_ICON,
@@ -93,6 +133,78 @@ impl NavIcon {
     }
 }
 
+impl FileIconKind {
+    fn for_path(path: &Path) -> Self {
+        if archive_path_is_supported(path) {
+            return Self::Archive;
+        }
+
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            return Self::Generic;
+        };
+
+        Self::for_extension(&extension.to_ascii_lowercase())
+    }
+
+    fn for_extension(extension: &str) -> Self {
+        match extension {
+            "txt" | "text" | "md" | "markdown" | "log" | "nfo" | "csv" | "tsv" => Self::Text,
+            "cfg" | "conf" | "config" | "ini" | "properties" | "reg" | "toml" | "yaml" | "yml"
+            | "json" | "json5" | "xml" | "plist" => Self::Configuration,
+            "pdf" | "rtf" | "odt" | "ods" | "odp" | "odg" | "odf" | "epub" | "mobi" | "azw"
+            | "azw3" | "djvu" | "djv" => Self::Document,
+            "mp3" | "wav" | "wave" | "flac" | "aac" | "m4a" | "wma" | "opus" | "oga" | "mid"
+            | "midi" | "aif" | "aiff" | "aifc" | "ape" | "amr" | "au" | "snd" | "ac3" | "dts"
+            | "ra" => Self::Audio,
+            "bmp" | "gif" | "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "apng" | "webp" | "tif"
+            | "tiff" | "svg" | "svgz" | "heic" | "heif" | "avif" | "dng" | "cr2" | "cr3"
+            | "nef" | "arw" | "orf" | "rw2" | "psd" | "xcf" => Self::Image,
+            "webm" | "mkv" | "flv" | "vob" | "ogv" | "ogg" | "rrc" | "gifv" | "mng" | "mov"
+            | "avi" | "qt" | "wmv" | "yuv" | "rm" | "asf" | "amv" | "m2ts" | "mp4" | "m4p"
+            | "m4v" | "mpg" | "mp2" | "mpeg" | "mpe" | "mpv" | "svi" | "3gp" | "3g2" | "mxf"
+            | "roq" | "nsv" | "f4v" | "f4p" | "f4a" | "f4b" => Self::Video,
+            "ttf" | "otf" | "woff" | "woff2" | "eot" | "fon" => Self::Font,
+            "ico" | "iso" | "img" | "dmg" | "cue" | "nrg" | "toast" | "vhd" | "vhdx" | "vdi"
+            | "qcow" | "qcow2" => Self::Disc,
+            "msi" | "msix" | "msixbundle" | "appx" | "appxbundle" | "appimage" | "deb" | "rpm"
+            | "apk" | "ipa" | "pkg" | "flatpak" | "snap" | "jar" => Self::Program,
+            "exe" | "com" | "bat" | "cmd" | "ps1" | "sh" | "bash" | "zsh" | "fish" | "run"
+            | "elf" | "scr" | "cpl" | "dll" | "so" | "dylib" | "sys" => Self::Executable,
+            "accdb" | "accde" | "accdr" | "accdt" | "accda" | "accdc" | "mdb" | "mde" | "mdw"
+            | "adp" | "ade" => Self::MsAccess,
+            "xls" | "xlsx" | "xlsm" | "xlsb" | "xlt" | "xltx" | "xltm" | "xla" | "xlam" | "xlw"
+            | "xll" => Self::MsExcel,
+            "ppt" | "pptx" | "pptm" | "pot" | "potx" | "potm" | "pps" | "ppsx" | "ppsm" | "ppa"
+            | "ppam" | "sldx" | "sldm" => Self::MsPowerpoint,
+            "mpp" | "mpt" | "mpd" | "mpx" => Self::MsProject,
+            "doc" | "docx" | "docm" | "dot" | "dotx" | "dotm" | "wbk" => Self::MsWord,
+            _ => Self::Generic,
+        }
+    }
+
+    fn image(self) -> Arc<Image> {
+        match self {
+            Self::Archive => ARCHIVE_FILE_ICON.clone(),
+            Self::Audio => AUDIO_FILE_ICON.clone(),
+            Self::Configuration => CONFIGURATION_FILE_ICON.clone(),
+            Self::Disc => DISC_FILE_ICON.clone(),
+            Self::Document => DOCUMENT_FILE_ICON.clone(),
+            Self::Executable => EXECUTABLE_FILE_ICON.clone(),
+            Self::Font => FONT_FILE_ICON.clone(),
+            Self::Generic => GENERIC_FILE_ICON.clone(),
+            Self::Image => IMAGE_FILE_ICON.clone(),
+            Self::MsAccess => MS_ACCESS_FILE_ICON.clone(),
+            Self::MsExcel => MS_EXCEL_FILE_ICON.clone(),
+            Self::MsPowerpoint => MS_POWERPOINT_FILE_ICON.clone(),
+            Self::MsProject => MS_PROJECT_FILE_ICON.clone(),
+            Self::MsWord => MS_WORD_FILE_ICON.clone(),
+            Self::Program => PROGRAM_FILE_ICON.clone(),
+            Self::Text => TEXT_FILE_ICON.clone(),
+            Self::Video => VIDEO_FILE_ICON.clone(),
+        }
+    }
+}
+
 pub(super) fn nav_icon_font() -> gpui::Font {
     let mut font = font("Segoe Fluent Icons");
     font.fallbacks = Some(FontFallbacks::from_fonts(vec![
@@ -130,11 +242,19 @@ pub(super) fn file_icon() -> Div {
 }
 
 pub(super) fn file_icon_sized(size: f32) -> Div {
+    sized_file_icon(FileIconKind::Generic, size)
+}
+
+pub(super) fn file_icon_for_path(path: &Path) -> Div {
+    sized_file_icon(FileIconKind::for_path(path), FILE_ICON_SIZE)
+}
+
+fn sized_file_icon(kind: FileIconKind, size: f32) -> Div {
     div()
         .w(px(size))
         .h(px(size))
         .flex_shrink_0()
-        .child(image_icon(DOCUMENT_ICON.clone(), size, size))
+        .child(image_icon(kind.image(), size, size))
 }
 
 pub(super) fn folder_sidebar_icon() -> AnyElement {
@@ -265,5 +385,160 @@ mod tests {
         assert!(!DELETE_FILE_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_FOLDER_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_MIXED_DIALOG_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn file_icon_extensions_map_to_expected_kinds() {
+        let mappings = [
+            (FileIconKind::Text, "txt text md markdown log nfo csv tsv"),
+            (
+                FileIconKind::Configuration,
+                "cfg conf config ini properties reg toml yaml yml json json5 xml plist",
+            ),
+            (
+                FileIconKind::Document,
+                "pdf rtf odt ods odp odg odf epub mobi azw azw3 djvu djv",
+            ),
+            (
+                FileIconKind::Audio,
+                "mp3 wav wave flac aac m4a wma opus oga mid midi aif aiff aifc ape amr au snd ac3 dts ra",
+            ),
+            (
+                FileIconKind::Image,
+                "bmp gif jpg jpeg jpe jfif png apng webp tif tiff svg svgz heic heif avif dng cr2 cr3 nef arw orf rw2 psd xcf",
+            ),
+            (
+                FileIconKind::Video,
+                "webm mkv flv vob ogv ogg rrc gifv mng mov avi qt wmv yuv rm asf amv m2ts mp4 m4p m4v mpg mp2 mpeg mpe mpv svi 3gp 3g2 mxf roq nsv f4v f4p f4a f4b",
+            ),
+            (FileIconKind::Font, "ttf otf woff woff2 eot fon"),
+            (
+                FileIconKind::Disc,
+                "ico iso img dmg cue nrg toast vhd vhdx vdi qcow qcow2",
+            ),
+            (
+                FileIconKind::Program,
+                "msi msix msixbundle appx appxbundle appimage deb rpm apk ipa pkg flatpak snap jar",
+            ),
+            (
+                FileIconKind::Executable,
+                "exe com bat cmd ps1 sh bash zsh fish run elf scr cpl dll so dylib sys",
+            ),
+            (
+                FileIconKind::MsAccess,
+                "accdb accde accdr accdt accda accdc mdb mde mdw adp ade",
+            ),
+            (
+                FileIconKind::MsExcel,
+                "xls xlsx xlsm xlsb xlt xltx xltm xla xlam xlw xll",
+            ),
+            (
+                FileIconKind::MsPowerpoint,
+                "ppt pptx pptm pot potx potm pps ppsx ppsm ppa ppam sldx sldm",
+            ),
+            (FileIconKind::MsProject, "mpp mpt mpd mpx"),
+            (FileIconKind::MsWord, "doc docx docm dot dotx dotm wbk"),
+        ];
+
+        for (expected, extensions) in mappings {
+            for extension in extensions.split_ascii_whitespace() {
+                assert_eq!(
+                    FileIconKind::for_extension(extension),
+                    expected,
+                    "unexpected icon for .{extension}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supported_archives_use_archive_icon() {
+        let archives = [
+            "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar",
+            "7z", "tar.gz", "tar.bz2", "tar.xz", "tar.zst",
+        ];
+
+        for extension in archives {
+            let path = format!("archive.{extension}");
+            assert_eq!(
+                FileIconKind::for_path(Path::new(&path)),
+                FileIconKind::Archive,
+                "unexpected icon for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_icon_mapping_is_case_insensitive() {
+        assert_eq!(
+            FileIconKind::for_path(Path::new("ARCHIVE.ZIP")),
+            FileIconKind::Archive
+        );
+        assert_eq!(
+            FileIconKind::for_path(Path::new("ARCHIVE.TAR.GZ")),
+            FileIconKind::Archive
+        );
+    }
+
+    #[test]
+    fn package_formats_remain_program_icons() {
+        for extension in ["jar", "deb", "rpm", "apk", "ipa", "pkg", "flatpak", "snap"] {
+            let path = format!("package.{extension}");
+            assert_eq!(
+                FileIconKind::for_path(Path::new(&path)),
+                FileIconKind::Program,
+                "unexpected icon for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_like_names_without_supported_suffix_remain_generic() {
+        for path in ["zip", ".zip", "archive.zip.backup", "archive.tar.gz.backup"] {
+            assert_eq!(
+                FileIconKind::for_path(Path::new(path)),
+                FileIconKind::Generic,
+                "expected generic icon for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_icon_mapping_is_case_insensitive() {
+        assert_eq!(
+            FileIconKind::for_path(Path::new("Quarterly Report.XLSX")),
+            FileIconKind::MsExcel
+        );
+        assert_eq!(
+            FileIconKind::for_path(Path::new("MOVIE.MP4")),
+            FileIconKind::Video
+        );
+    }
+
+    #[test]
+    fn file_icon_mapping_keeps_intentional_conflicts() {
+        assert_eq!(
+            FileIconKind::for_path(Path::new("sound.ogg")),
+            FileIconKind::Video
+        );
+        assert_eq!(
+            FileIconKind::for_path(Path::new("favicon.ico")),
+            FileIconKind::Disc
+        );
+        assert_eq!(
+            FileIconKind::for_path(Path::new("data.csv")),
+            FileIconKind::Text
+        );
+    }
+
+    #[test]
+    fn file_icon_mapping_falls_back_to_generic() {
+        for path in ["source.rs", "unknown.thing", "README", ".env"] {
+            assert_eq!(
+                FileIconKind::for_path(Path::new(path)),
+                FileIconKind::Generic,
+                "expected generic icon for {path}"
+            );
+        }
     }
 }

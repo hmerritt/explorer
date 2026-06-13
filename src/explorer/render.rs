@@ -54,7 +54,8 @@ use crate::explorer::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
         NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, PASTE_ICON, RENAME_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, drive_icon, drive_windows_icon,
-        file_icon, file_icon_sized, folder_icon, folder_icon_sized, image_icon, nav_icon_font,
+        file_icon, file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
+        nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -3978,7 +3979,7 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     } else if entry.is_directory_like() {
         folder_icon().into_any_element()
     } else {
-        file_icon().into_any_element()
+        file_icon_for_path(&entry.path).into_any_element()
     }
 }
 
