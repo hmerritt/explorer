@@ -249,11 +249,6 @@ pub(super) fn file_icon_for_path(path: &Path) -> Div {
     sized_file_icon(FileIconKind::for_path(path), FILE_ICON_SIZE)
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn path_has_specific_file_icon(path: &Path) -> bool {
-    FileIconKind::for_path(path) != FileIconKind::Generic
-}
-
 fn sized_file_icon(kind: FileIconKind, size: f32) -> Div {
     div()
         .w(px(size))
@@ -545,12 +540,5 @@ mod tests {
                 "expected generic icon for {path}"
             );
         }
-    }
-
-    #[test]
-    fn path_specific_file_icon_detection_matches_bundled_mapping() {
-        assert!(path_has_specific_file_icon(Path::new("readme.txt")));
-        assert!(path_has_specific_file_icon(Path::new("archive.tar.gz")));
-        assert!(!path_has_specific_file_icon(Path::new("unknown.custom")));
     }
 }

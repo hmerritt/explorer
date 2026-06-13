@@ -65,13 +65,8 @@ enum PlatformIconRequest {
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum MacIconRequest {
-    AppBundle {
-        path: PathBuf,
-    },
-    FileType {
-        extension: String,
-        use_bundled_if_generic: bool,
-    },
+    AppBundle { path: PathBuf },
+    FileType { extension: String },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -580,7 +575,6 @@ fn mac_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
 
     Some(mac_native_icon_request(MacIconRequest::FileType {
         extension: lowercase_extension(&entry.path).unwrap_or_default(),
-        use_bundled_if_generic: crate::explorer::icons::path_has_specific_file_icon(&entry.path),
     }))
 }
 
@@ -903,10 +897,7 @@ fn rgba_to_png_bytes(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> 
 fn load_macos_icon_png_bytes(request: &MacIconRequest) -> Option<Vec<u8>> {
     match request {
         MacIconRequest::AppBundle { path } => load_app_bundle_icon_png_bytes(path),
-        MacIconRequest::FileType {
-            extension,
-            use_bundled_if_generic,
-        } => load_file_type_icon_png_bytes(extension, *use_bundled_if_generic),
+        MacIconRequest::FileType { extension } => load_file_type_icon_png_bytes(extension),
     }
 }
 
@@ -920,23 +911,8 @@ fn load_app_bundle_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn load_file_type_icon_png_bytes(extension: &str, use_bundled_if_generic: bool) -> Option<Vec<u8>> {
-    let bytes = load_icon_from_file_type(extension)?;
-    if use_bundled_if_generic && file_type_icon_is_generic(&bytes) {
-        return None;
-    }
-
-    Some(bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn file_type_icon_is_generic(bytes: &[u8]) -> bool {
-    static GENERIC_FILE_ICON: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-
-    GENERIC_FILE_ICON
-        .get_or_init(|| load_icon_from_file_type("explorer-generic-file-icon-probe"))
-        .as_deref()
-        .is_some_and(|generic| generic == bytes)
+fn load_file_type_icon_png_bytes(extension: &str) -> Option<Vec<u8>> {
+    load_icon_from_file_type(extension)
 }
 
 #[cfg(target_os = "macos")]
@@ -1799,24 +1775,20 @@ mod tests {
         assert_eq!(first.key, second.key);
         assert!(matches!(
             first.source,
-            PlatformIconRequest::Mac(MacIconRequest::FileType {
-                ref extension,
-                use_bundled_if_generic: true,
-            }) if extension == "txt"
+            PlatformIconRequest::Mac(MacIconRequest::FileType { ref extension })
+                if extension == "txt"
         ));
     }
 
     #[test]
-    fn mac_unknown_file_type_requests_keep_system_generic_icon() {
+    fn mac_unknown_file_type_requests_use_extension_key() {
         let entry = FileEntry::test("document.custom", false, Some(1), None);
         let request = mac_icon_request_for_entry(&entry).expect("icon request");
 
         assert!(matches!(
             request.source,
-            PlatformIconRequest::Mac(MacIconRequest::FileType {
-                ref extension,
-                use_bundled_if_generic: false,
-            }) if extension == "custom"
+            PlatformIconRequest::Mac(MacIconRequest::FileType { ref extension })
+                if extension == "custom"
         ));
     }
 
@@ -1858,7 +1830,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_file_type_icon_loader_extracts_valid_png_for_text_files() {
-        let bytes = load_file_type_icon_png_bytes("txt", false).expect("icon png");
+        let bytes = load_file_type_icon_png_bytes("txt").expect("icon png");
 
         assert!(valid_png_bytes(bytes).is_some());
     }
