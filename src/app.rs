@@ -398,6 +398,7 @@ fn open_explorer_window(cx: &mut App) {
                 ExplorerTabs::new(
                     cx.global::<SettingsState>().startup_path(),
                     focus_handle,
+                    window,
                     cx,
                 )
             });

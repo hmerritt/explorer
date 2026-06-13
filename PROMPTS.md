@@ -4,8 +4,8 @@
 
 ## 1
 
+- If settings file is missing items, write the missing items with their default values. Also sort the JSON keys alphabetically
 - Settings options for:
-    - "focus_new_tab_immediately" - Switch focus to newly created tabs (default is false, which is current behaviour)
     - "font" - change main app font used
     - "show_folder_size" - default: false - calc all folder sizes in current directory (cache for current session in-memory + expire after 10m)
 

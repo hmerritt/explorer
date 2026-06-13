@@ -161,11 +161,16 @@ fn linux_caption_buttons(
 }
 
 impl ExplorerTabs {
-    pub fn new(initial_path: PathBuf, focus_handle: FocusHandle, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        initial_path: PathBuf,
+        focus_handle: FocusHandle,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let first_id = TabId(1);
         let view = cx
             .new(|cx| ExplorerView::new_watched_with_focus_handle(initial_path, focus_handle, cx));
-        observe_tab_view(&view, cx);
+        observe_tab_view(&view, window, cx);
         observe_settings(cx);
 
         Self {
@@ -227,22 +232,30 @@ impl ExplorerTabs {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
         let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
-        observe_tab_view(&view, cx);
+        observe_tab_view(&view, window, cx);
 
         self.tabs.push(ExplorerTab { id, view });
         self.active_tab = id;
         self.scroll_active_tab_into_view();
     }
 
-    fn add_background_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn add_background_tab(&mut self, path: PathBuf, window: &Window, cx: &mut Context<Self>) {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
         let focus_handle = cx.focus_handle();
         let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
-        observe_tab_view(&view, cx);
+        observe_tab_view(&view, window, cx);
 
         self.tabs.push(ExplorerTab { id, view });
+    }
+
+    fn add_configured_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.global::<SettingsState>().value.focus_new_tab_immediately {
+            self.add_foreground_tab(path, window, cx);
+        } else {
+            self.add_background_tab(path, window, cx);
+        }
     }
 
     fn activate_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -973,20 +986,20 @@ fn close_tab_glyph_visual() -> gpui::Div {
         .child(CLOSE_GLYPH)
 }
 
-fn observe_tab_view(view: &Entity<ExplorerView>, cx: &mut Context<ExplorerTabs>) {
+fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Context<ExplorerTabs>) {
     cx.observe(view, |this, _, cx| {
         this.cleanup_completed_background_operations(cx);
         cx.notify();
     })
     .detach();
 
-    cx.subscribe(view, |this, _, event, cx| match event {
+    cx.subscribe_in(view, window, |this, _, event, window, cx| match event {
         ExplorerViewEvent::FilesystemChanged => {
             this.reload_all_tabs(cx);
             cx.notify();
         }
         ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
-            this.add_background_tab(path.clone(), cx);
+            this.add_configured_tab(path.clone(), window, cx);
             cx.notify();
         }
     })
@@ -1548,6 +1561,13 @@ mod tests {
         cx.read_entity(tabs, |tabs, _| tabs.active_tab().unwrap().view.clone())
     }
 
+    fn assert_active_tab_focused(tabs: &Entity<ExplorerTabs>, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, app| {
+            let active_view = tabs.read(app).active_tab().unwrap().view.clone();
+            assert!(active_view.read(app).focus_handle(app).is_focused(window));
+        });
+    }
+
     fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
         cx.simulate_click(bounds.center(), Modifiers::default());
@@ -1601,11 +1621,13 @@ mod tests {
         let (tabs, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
-            ExplorerTabs::new(path, focus_handle, cx)
+            ExplorerTabs::new(path, focus_handle, window, cx)
         });
 
-        tabs.update(cx, |tabs, cx| {
-            tabs.add_background_tab(temp.path().to_path_buf(), cx);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+            });
         });
         cx.update_global::<SettingsState, _>(|state, _| {
             state.value.date_format = "%d %B %Y".to_owned();
@@ -1628,8 +1650,10 @@ mod tests {
             });
         }
 
-        tabs.update(cx, |tabs, cx| {
-            tabs.add_background_tab(temp.path().to_path_buf(), cx);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+            });
         });
         let future_view = cx.read_entity(&tabs, |tabs, _| tabs.tabs.last().unwrap().view.clone());
         cx.read_entity(&future_view, |view, _| {
@@ -1637,6 +1661,86 @@ mod tests {
             assert!(!view.show_file_name_extensions);
             assert_eq!(view.date_format, "%d %B %Y");
         });
+    }
+
+    #[gpui::test]
+    fn explicit_new_tab_method_and_action_focus_with_default_settings(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| tabs.add_new_tab(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[1].id);
+        });
+        assert_active_tab_focused(&tabs, cx);
+
+        cx.dispatch_action(NewTab);
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 3);
+            assert_eq!(tabs.active_tab, tabs.tabs[2].id);
+        });
+        assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn open_directory_in_new_tab_stays_in_background_by_default(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+            view.update(app, |_, cx| {
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(
+                    temp.path().join("a"),
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+        });
+        assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn configured_new_tab_focus_activates_and_focuses_last_created_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update_global::<SettingsState, _>(|state, _| {
+            state.value.focus_new_tab_immediately = true;
+        });
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+            view.update(app, |_, cx| {
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(
+                    temp.path().join("a"),
+                ));
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(
+                    temp.path().join("b"),
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        let active_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 3);
+            assert_eq!(tabs.active_tab, tabs.tabs[2].id);
+            tabs.active_tab().unwrap().view.clone()
+        });
+        cx.read_entity(&active_view, |view, _| {
+            assert_eq!(view.path, temp.path().join("b"));
+        });
+        assert_active_tab_focused(&tabs, cx);
     }
 
     #[gpui::test]
@@ -2067,8 +2171,8 @@ mod tests {
         let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
         let target = temp.path().join("a");
         let view = active_test_view(&tabs, cx);
-        cx.update(|_, app| {
-            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
         });
 
         right_click_entry_other_column(cx, "explorer-entry-0");
@@ -2112,8 +2216,8 @@ mod tests {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &["a", "b"], &["file.txt"]);
         let view = active_test_view(&tabs, cx);
-        cx.update(|_, app| {
-            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
             view.update(app, |view, cx| {
                 view.select_all_entries();
                 cx.notify();
@@ -2167,8 +2271,8 @@ mod tests {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &["folder"], &["file.txt"]);
         let view = active_test_view(&tabs, cx);
-        cx.update(|_, app| {
-            tabs.update(app, |_, cx| observe_tab_view(&view, cx));
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
             view.update(app, |view, cx| {
                 view.select_all_entries();
                 cx.notify();
@@ -2712,7 +2816,7 @@ mod tests {
         let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
         cx.simulate_resize(gpui::size(px(700.0), px(600.0)));
 
-        cx.update(|_, app| {
+        cx.update(|window, app| {
             tabs.update(app, |tabs, cx| {
                 let path = tabs
                     .active_tab()
@@ -2722,7 +2826,7 @@ mod tests {
                     .path()
                     .to_path_buf();
                 for _ in 0..8 {
-                    tabs.add_background_tab(path.clone(), cx);
+                    tabs.add_background_tab(path.clone(), window, cx);
                 }
                 cx.notify();
             });
