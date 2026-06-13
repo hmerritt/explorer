@@ -74,10 +74,11 @@ impl ExplorerView {
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
-        pointer_drag_intent_at_with_row_height(
+        pointer_drag_intent_at_with_offsets(
             f32::from(local_position.x),
             f32::from(local_position.y),
             scroll_top,
+            self.visible_horizontal_scroll_offset(),
             f32::from(viewport_size.width),
             self.entries.len(),
             &self.selection.selected_indices,
@@ -357,10 +358,33 @@ pub(super) fn pointer_drag_intent_at(
     )
 }
 
+#[cfg(test)]
 pub(super) fn pointer_drag_intent_at_with_row_height(
     local_x: f32,
     local_y: f32,
     scroll_top: f32,
+    viewport_width: f32,
+    entry_count: usize,
+    selected_indices: &BTreeSet<usize>,
+    row_height: f32,
+) -> Option<PointerDragIntent> {
+    pointer_drag_intent_at_with_offsets(
+        local_x,
+        local_y,
+        scroll_top,
+        0.0,
+        viewport_width,
+        entry_count,
+        selected_indices,
+        row_height,
+    )
+}
+
+pub(super) fn pointer_drag_intent_at_with_offsets(
+    local_x: f32,
+    local_y: f32,
+    scroll_top: f32,
+    scroll_left: f32,
     viewport_width: f32,
     entry_count: usize,
     selected_indices: &BTreeSet<usize>,
@@ -376,7 +400,9 @@ pub(super) fn pointer_drag_intent_at_with_row_height(
 
     if selected_indices.contains(&ix) {
         Some(PointerDragIntent::ItemDrag)
-    } else if local_x < effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH) {
+    } else if local_x + scroll_left
+        < effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH)
+    {
         Some(PointerDragIntent::RubberBand)
     } else {
         Some(PointerDragIntent::ItemDrag)
@@ -521,6 +547,56 @@ mod tests {
                 5,
                 &BTreeSet::new()
             ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn unselected_row_name_column_boundary_accounts_for_horizontal_scroll() {
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets(
+                220.0,
+                1.0,
+                0.0,
+                40.0,
+                400.0,
+                5,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets(
+                200.0,
+                1.0,
+                0.0,
+                40.0,
+                400.0,
+                5,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn pointer_drag_intent_uses_clamped_visible_horizontal_scroll() {
+        let view = test_view_with_entries(&["a.txt"]);
+        {
+            let mut scroll_state = view.scroll_handle.0.borrow_mut();
+            scroll_state.last_item_size = Some(gpui::ItemSize {
+                item: size(px(400.0), px(100.0)),
+                contents: size(px(670.0), px(100.0)),
+            });
+            scroll_state
+                .base_handle
+                .set_offset(gpui::point(px(-500.0), px(0.0)));
+        }
+
+        assert_eq!(
+            view.pointer_drag_intent(gpui::point(px(1.0), px(1.0)), size(px(400.0), px(100.0))),
             Some(PointerDragIntent::ItemDrag)
         );
     }

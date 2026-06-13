@@ -63,6 +63,7 @@ pub(super) const SCROLLBAR_THUMB_HOVER_BG: u32 = 0x707070;
 pub(super) const SCROLLBAR_THUMB_ACTIVE_BG: u32 = 0x5f5f5f;
 pub(super) const SCROLLBAR_ARROW_COLOR: u32 = 0x606060;
 pub(super) const SCROLLBAR_ARROW_HOVER_BG: u32 = 0xe8e8e8;
+pub(super) const HORIZONTAL_SCROLLBAR_LINE_DELTA: f32 = 40.0;
 pub(super) const KB_BYTES: u64 = 1024;
 pub(super) const MB_BYTES: u64 = KB_BYTES * 1024;
 pub(super) const GB_BYTES: u64 = MB_BYTES * 1024;
@@ -73,4 +74,8 @@ pub(super) fn effective_name_column_width(viewport_width: f32) -> f32 {
         COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH + SCROLLBAR_GUTTER_WIDTH;
 
     (viewport_width - fixed_columns_width).max(COLUMN_NAME_MIN_WIDTH)
+}
+
+pub(super) fn minimum_file_columns_width() -> f32 {
+    COLUMN_NAME_MIN_WIDTH + COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH
 }

@@ -19,7 +19,7 @@ use crate::explorer::{
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
-    scrollbar::ScrollbarDrag,
+    scrollbar::{HorizontalScrollbarDrag, ScrollbarDrag},
     search::SearchState,
     selection::SelectionState,
     watcher::DirectoryWatcher,
@@ -39,6 +39,8 @@ pub struct ExplorerView {
     pub(super) focus_handle: Option<FocusHandle>,
     pub(super) scrollbar_hovered: bool,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
+    pub(super) horizontal_scrollbar_hovered: bool,
+    pub(super) horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
     pub(super) suppress_next_click: bool,
     pub(super) entry_click_sequence: Option<EntryClickSequence>,
@@ -181,6 +183,8 @@ impl ExplorerView {
             focus_handle,
             scrollbar_hovered: false,
             scrollbar_drag: None,
+            horizontal_scrollbar_hovered: false,
+            horizontal_scrollbar_drag: None,
             mouse_selection_drag: None,
             suppress_next_click: false,
             entry_click_sequence: None,
@@ -330,6 +334,10 @@ impl ExplorerView {
                 self.clear_selection();
                 self.read_error = Some(error.to_string());
             }
+        }
+        if self.entries.is_empty() {
+            self.set_horizontal_scroll_offset(0.0);
+            self.horizontal_scrollbar_drag = None;
         }
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
@@ -726,6 +734,16 @@ mod tests {
         view.read_error = Some("missing".to_owned());
 
         assert!(!view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn reload_without_visible_rows_resets_horizontal_scroll() {
+        let mut view = ExplorerView::new(PathBuf::from("missing"));
+        view.set_horizontal_scroll_offset(80.0);
+
+        view.reload();
+
+        assert_eq!(view.visible_horizontal_scroll_offset(), 0.0);
     }
 
     #[test]

@@ -2,10 +2,11 @@ use std::{any::Any, collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc}
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point,
-    Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement,
+    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, TextAlign, TextRun, Window, canvas, div, font, prelude::*, px, rgb,
+    transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -36,7 +37,7 @@ use crate::explorer::{
         STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
         UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
         UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
-        UTILITY_MENU_WIDTH, effective_name_column_width,
+        UTILITY_MENU_WIDTH, effective_name_column_width, minimum_file_columns_width,
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
@@ -61,7 +62,9 @@ use crate::explorer::{
     navigation::{EntryAction, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
-    scrollbar::{ScrollbarArrow, scrollbar_arrow_button, scrollbar_header_spacer},
+    scrollbar::{
+        ScrollbarArrow, scrollbar_arrow_button, scrollbar_corner, scrollbar_header_spacer,
+    },
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
@@ -879,6 +882,12 @@ impl ExplorerView {
     }
 
     fn render_header(&self) -> Div {
+        let scroll_left = if self.content_branch() == ExplorerContentBranch::List {
+            self.visible_horizontal_scroll_offset()
+        } else {
+            0.0
+        };
+
         div()
             .flex()
             .flex_row()
@@ -889,10 +898,22 @@ impl ExplorerView {
             .border_color(rgb(0xf2f2f2))
             .text_size(px(12.0))
             .text_color(rgb(0x1f4e79))
-            .child(name_header_cell())
-            .child(header_cell("Date modified", COLUMN_DATE_WIDTH, false))
-            .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
-            .child(header_cell("Size", COLUMN_SIZE_WIDTH, false))
+            .child(
+                div().relative().flex_1().h_full().overflow_hidden().child(
+                    div()
+                        .relative()
+                        .left(px(-scroll_left))
+                        .flex()
+                        .flex_row()
+                        .h_full()
+                        .w_full()
+                        .min_w(px(minimum_file_columns_width()))
+                        .child(name_header_cell())
+                        .child(header_cell("Date modified", COLUMN_DATE_WIDTH, false))
+                        .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
+                        .child(header_cell("Size", COLUMN_SIZE_WIDTH, false)),
+                ),
+            )
             .child(scrollbar_header_spacer())
     }
 
@@ -1711,142 +1732,166 @@ impl ExplorerView {
     fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
         let entity = cx.entity();
         let current_directory = DropDestination::CurrentDirectory;
+        let has_horizontal_scrollbar = self.horizontal_scrollbar_metrics().is_some();
 
         div()
             .flex()
-            .flex_row()
+            .flex_col()
             .size_full()
             .overflow_hidden()
             .child(
                 div()
-                    .id("explorer-list-background")
-                    .relative()
+                    .flex()
+                    .flex_row()
                     .flex_1()
-                    .h_full()
                     .overflow_hidden()
-                    .can_drop({
-                        let current_directory = current_directory.clone();
-                        let entity = entity.clone();
-                        move |dragged_value, window, cx| {
-                            entity.update(cx, |this, _| {
-                                this.can_drop_value(
-                                    dragged_value,
-                                    &current_directory,
-                                    window.modifiers(),
-                                )
-                            })
-                        }
-                    })
-                    .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                    .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                    .on_drag_move::<DraggedEntries>({
-                        let current_directory = current_directory.clone();
-                        let entity = entity.clone();
-                        move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                            update_drag_cursor_if_hovered(
-                                &entity,
-                                event,
-                                &current_directory,
-                                window,
-                                cx,
-                            );
-                        }
-                    })
-                    .on_drag_move::<ExternalPaths>({
-                        let current_directory = current_directory.clone();
-                        let entity = entity.clone();
-                        move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                            update_drag_cursor_if_hovered(
-                                &entity,
-                                event,
-                                &current_directory,
-                                window,
-                                cx,
-                            );
-                        }
-                    })
-                    .on_drop(cx.listener({
-                        let current_directory = current_directory.clone();
-                        move |this, dragged: &DraggedEntries, window, cx| {
-                            this.clear_drop_indicator();
-                            this.drop_internal_entries_and_open_dialog(
-                                dragged,
-                                current_directory.clone(),
-                                window.modifiers(),
-                                cx,
-                            );
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    .on_drop(cx.listener({
-                        let current_directory = current_directory.clone();
-                        move |this, paths: &ExternalPaths, window, cx| {
-                            this.clear_drop_indicator();
-                            this.drop_external_paths_and_open_dialog(
-                                paths.paths(),
-                                current_directory.clone(),
-                                window.modifiers(),
-                                cx,
-                            );
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Right,
-                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                            open_current_folder_context_menu_from_event(this, event, window, cx);
-                        }),
-                    )
-                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                        if !event.standard_click() {
-                            cx.stop_propagation();
-                            return;
-                        }
-
-                        this.close_context_menu();
-                        if this.suppress_next_click() {
-                            this.cancel_pending_click_rename();
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-
-                        if !this.commit_active_rename_before_interaction(window, cx) {
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-
-                        this.clear_selection();
-                        this.close_context_menu();
-                        cx.notify();
-                    }))
-                    .child(self.render_mouse_selection_hit_layer(cx))
                     .child(
-                        uniform_list(
-                            "explorer-entries",
-                            self.entries.len(),
-                            cx.processor(|this, range: Range<usize>, window, cx| {
-                                let mut rows = Vec::with_capacity(range.end - range.start);
-                                for ix in range {
-                                    rows.push(this.render_row(ix, window, cx));
+                        div()
+                            .id("explorer-list-background")
+                            .relative()
+                            .flex_1()
+                            .h_full()
+                            .overflow_hidden()
+                            .can_drop({
+                                let current_directory = current_directory.clone();
+                                let entity = entity.clone();
+                                move |dragged_value, window, cx| {
+                                    entity.update(cx, |this, _| {
+                                        this.can_drop_value(
+                                            dragged_value,
+                                            &current_directory,
+                                            window.modifiers(),
+                                        )
+                                    })
                                 }
-                                rows
-                            }),
-                        )
-                        .size_full()
-                        .track_scroll(self.scroll_handle.clone())
-                        .on_scroll_wheel(cx.listener(
-                            |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                            })
+                            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+                            .on_drag_move::<DraggedEntries>({
+                                let current_directory = current_directory.clone();
+                                let entity = entity.clone();
+                                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                                    update_drag_cursor_if_hovered(
+                                        &entity,
+                                        event,
+                                        &current_directory,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })
+                            .on_drag_move::<ExternalPaths>({
+                                let current_directory = current_directory.clone();
+                                let entity = entity.clone();
+                                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                                    update_drag_cursor_if_hovered(
+                                        &entity,
+                                        event,
+                                        &current_directory,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })
+                            .on_drop(cx.listener({
+                                let current_directory = current_directory.clone();
+                                move |this, dragged: &DraggedEntries, window, cx| {
+                                    this.clear_drop_indicator();
+                                    this.drop_internal_entries_and_open_dialog(
+                                        dragged,
+                                        current_directory.clone(),
+                                        window.modifiers(),
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }))
+                            .on_drop(cx.listener({
+                                let current_directory = current_directory.clone();
+                                move |this, paths: &ExternalPaths, window, cx| {
+                                    this.clear_drop_indicator();
+                                    this.drop_external_paths_and_open_dialog(
+                                        paths.paths(),
+                                        current_directory.clone(),
+                                        window.modifiers(),
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }))
+                            .on_mouse_up(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                                    open_current_folder_context_menu_from_event(
+                                        this, event, window, cx,
+                                    );
+                                }),
+                            )
+                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                if !event.standard_click() {
+                                    cx.stop_propagation();
+                                    return;
+                                }
+
+                                this.close_context_menu();
+                                if this.suppress_next_click() {
+                                    this.cancel_pending_click_rename();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                    return;
+                                }
+
+                                if !this.commit_active_rename_before_interaction(window, cx) {
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                    return;
+                                }
+
+                                this.clear_selection();
+                                this.close_context_menu();
                                 cx.notify();
-                            },
-                        )),
+                            }))
+                            .child(self.render_mouse_selection_hit_layer(cx))
+                            .child(
+                                uniform_list(
+                                    "explorer-entries",
+                                    self.entries.len(),
+                                    cx.processor(|this, range: Range<usize>, window, cx| {
+                                        let mut rows = Vec::with_capacity(range.end - range.start);
+                                        for ix in range {
+                                            rows.push(this.render_row(ix, window, cx));
+                                        }
+                                        rows
+                                    }),
+                                )
+                                .with_horizontal_sizing_behavior(
+                                    ListHorizontalSizingBehavior::Unconstrained,
+                                )
+                                .size_full()
+                                .track_scroll(self.scroll_handle.clone())
+                                .on_scroll_wheel(cx.listener(
+                                    |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(self.render_mouse_selection_box()),
                     )
-                    .child(self.render_mouse_selection_box()),
+                    .child(self.render_scrollbar(cx)),
             )
-            .child(self.render_scrollbar(cx))
+            .when(has_horizontal_scrollbar, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .h(px(SCROLLBAR_GUTTER_WIDTH))
+                        .child(self.render_horizontal_scrollbar(cx))
+                        .child(scrollbar_corner()),
+                )
+            })
     }
 
     fn render_empty_folder(&self, message: &'static str, cx: &mut Context<Self>) -> AnyElement {
