@@ -17,7 +17,6 @@
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Split-screen (see Zed)
 - Customizable context menus (add items to settings)
-- OS navigation buttons (close,maximize,minimise) within app inline with tabs, instead of using OS shell. (see Zed implementation)
 - [Windows-only] detext WSL Linux install, show drive for it
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
