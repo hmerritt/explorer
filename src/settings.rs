@@ -10,6 +10,7 @@ use std::{
 use gpui::{App, BorrowAppContext, Global};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
 pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
@@ -96,6 +97,7 @@ impl Default for ExplorerSettings {
 
 pub(crate) struct SettingsState {
     pub(crate) value: ExplorerSettings,
+    document: Value,
     path: PathBuf,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -117,8 +119,10 @@ impl SettingsState {
 
     #[cfg(test)]
     pub(crate) fn for_test(value: ExplorerSettings) -> Self {
+        let document = settings_document(&value);
         Self {
             value,
+            document,
             path: PathBuf::new(),
             _watcher: None,
         }
@@ -196,16 +200,18 @@ pub(crate) fn initialize(cx: &mut App) {
         eprintln!("Unable to determine Explorer settings directory; using defaults.");
         cx.set_global(SettingsState {
             value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
             path: PathBuf::new(),
             _watcher: None,
         });
         return;
     };
 
-    let value = load_or_create_settings(&path);
+    let loaded = load_or_create_settings(&path);
     let (watcher, rx) = settings_watcher(&path);
     cx.set_global(SettingsState {
-        value,
+        value: loaded.value,
+        document: loaded.document,
         path: path.clone(),
         _watcher: watcher,
     });
@@ -278,8 +284,9 @@ fn update_settings<R>(
 ) -> R {
     cx.update_global::<SettingsState, _>(|state, _| {
         let result = update(&mut state.value);
+        sync_settings_document(&mut state.document, &state.value);
         if !state.path.as_os_str().is_empty()
-            && let Err(error) = save_settings_to_path(&state.path, &state.value)
+            && let Err(error) = save_document_to_path(&state.path, &mut state.document)
         {
             eprintln!("Unable to save Explorer settings: {error}");
         }
@@ -400,11 +407,12 @@ fn spawn_settings_watcher(path: PathBuf, rx: Receiver<Vec<PathBuf>>, cx: &App) {
             }
 
             match load_settings_after_change(&path) {
-                Ok(settings) => {
+                Ok(loaded) => {
                     let _ = cx.update(|cx| {
-                        if cx.global::<SettingsState>().value != settings {
-                            cx.global_mut::<SettingsState>().value = settings;
+                        if cx.global::<SettingsState>().value != loaded.value {
+                            cx.global_mut::<SettingsState>().value = loaded.value;
                         }
+                        cx.global_mut::<SettingsState>().document = loaded.document;
                     });
                 }
                 Err(error) => {
@@ -416,36 +424,80 @@ fn spawn_settings_watcher(path: PathBuf, rx: Receiver<Vec<PathBuf>>, cx: &App) {
     .detach();
 }
 
-fn load_settings_after_change(path: &Path) -> io::Result<ExplorerSettings> {
+struct LoadedSettings {
+    value: ExplorerSettings,
+    document: Value,
+}
+
+fn load_settings_after_change(path: &Path) -> io::Result<LoadedSettings> {
     if path.exists() {
-        return load_settings_from_path(path);
+        return load_settings_document_from_path(path);
     }
 
     let defaults = ExplorerSettings::default();
-    save_settings_to_path(path, &defaults)?;
-    Ok(defaults)
-}
-
-fn load_or_create_settings(path: &Path) -> ExplorerSettings {
-    if !path.exists() {
-        let defaults = ExplorerSettings::default();
-        if let Err(error) = save_settings_to_path(path, &defaults) {
-            eprintln!("Unable to create Explorer settings: {error}");
-        }
-        return defaults;
-    }
-
-    load_settings_from_path(path).unwrap_or_else(|error| {
-        eprintln!("Unable to load Explorer settings: {error}");
-        ExplorerSettings::default()
+    let mut document = settings_document(&defaults);
+    save_document_to_path(path, &mut document)?;
+    Ok(LoadedSettings {
+        value: defaults,
+        document,
     })
 }
 
+fn load_or_create_settings(path: &Path) -> LoadedSettings {
+    if !path.exists() {
+        let defaults = ExplorerSettings::default();
+        let mut document = settings_document(&defaults);
+        if let Err(error) = save_document_to_path(path, &mut document) {
+            eprintln!("Unable to create Explorer settings: {error}");
+        }
+        return LoadedSettings {
+            value: defaults,
+            document,
+        };
+    }
+
+    load_settings_document_from_path(path).unwrap_or_else(|error| {
+        eprintln!("Unable to load Explorer settings: {error}");
+        let value = ExplorerSettings::default();
+        LoadedSettings {
+            document: settings_document(&value),
+            value,
+        }
+    })
+}
+
+#[cfg(test)]
 fn load_settings_from_path(path: &Path) -> io::Result<ExplorerSettings> {
-    let settings = serde_json::from_str::<ExplorerSettings>(&fs::read_to_string(path)?)
-        .map_err(io::Error::other)?;
-    validate_settings(&settings)?;
-    Ok(settings)
+    load_settings_document_from_path(path).map(|loaded| loaded.value)
+}
+
+fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
+    let source = fs::read_to_string(path)?;
+    let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
+    let value =
+        serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
+    validate_settings(&value)?;
+
+    let known = settings_document(&value);
+    let object = document.as_object_mut().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "settings must be a JSON object")
+    })?;
+    for (key, value) in known
+        .as_object()
+        .expect("serialized settings are an object")
+    {
+        object.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+
+    sort_json_objects(&mut document);
+    let normalized = serde_json::to_string_pretty(&document).map_err(io::Error::other)?;
+    if source != normalized
+        && let Err(error) = fs::write(path, normalized)
+    {
+        eprintln!("Unable to normalize Explorer settings: {error}");
+    }
+
+    Ok(LoadedSettings { value, document })
 }
 
 fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
@@ -502,12 +554,98 @@ fn is_tilde_path(path: &Path) -> bool {
             .is_some_and(|text| text.starts_with("~/") && text.len() > 2)
 }
 
+#[cfg(test)]
 fn save_settings_to_path(path: &Path, settings: &ExplorerSettings) -> io::Result<()> {
+    let mut document = settings_document(settings);
+    save_document_to_path(path, &mut document)
+}
+
+fn save_document_to_path(path: &Path, document: &mut Value) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
+    sort_json_objects(document);
+    let json = serde_json::to_string_pretty(document).map_err(io::Error::other)?;
     fs::write(path, json)
+}
+
+fn settings_document(settings: &ExplorerSettings) -> Value {
+    serde_json::to_value(settings).expect("ExplorerSettings serialization cannot fail")
+}
+
+fn sync_settings_document(document: &mut Value, settings: &ExplorerSettings) {
+    let known = settings_document(settings);
+    let Some(document) = document.as_object_mut() else {
+        *document = known;
+        return;
+    };
+    let known = known
+        .as_object()
+        .expect("serialized ExplorerSettings is an object");
+
+    for (key, value) in known {
+        if key == "sidebar_items" {
+            sync_sidebar_items(document.entry(key.clone()).or_insert(Value::Null), settings);
+        } else {
+            merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    }
+}
+
+fn sync_sidebar_items(document: &mut Value, settings: &ExplorerSettings) {
+    let existing = document.as_array().cloned().unwrap_or_default();
+    let mut used = vec![false; existing.len()];
+    let mut items = Vec::with_capacity(settings.sidebar_items.len());
+
+    for item in &settings.sidebar_items {
+        let known = serde_json::to_value(item).expect("SidebarLocation serialization cannot fail");
+        let matching = existing.iter().enumerate().find_map(|(index, value)| {
+            (!used[index]
+                && serde_json::from_value::<SidebarLocation>(value.clone())
+                    .ok()
+                    .as_ref()
+                    == Some(item))
+            .then_some(index)
+        });
+        if let Some(index) = matching {
+            used[index] = true;
+            let mut value = existing[index].clone();
+            merge_known_value(&mut value, &known);
+            items.push(value);
+        } else {
+            items.push(known);
+        }
+    }
+
+    *document = Value::Array(items);
+}
+
+fn merge_known_value(document: &mut Value, known: &Value) {
+    match (document, known) {
+        (Value::Object(document), Value::Object(known)) => {
+            for (key, value) in known {
+                merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        (document, known) => *document = known.clone(),
+    }
+}
+
+fn sort_json_objects(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                sort_json_objects(value);
+            }
+            object.sort_keys();
+        }
+        Value::Array(values) => {
+            for value in values {
+                sort_json_objects(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn default_sidebar_width() -> u32 {
@@ -596,6 +734,7 @@ mod tests {
         let path = PathBuf::from("configured").join(SETTINGS_FILE_NAME);
         let state = SettingsState {
             value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
             path: path.clone(),
             _watcher: None,
         };
@@ -640,6 +779,7 @@ mod tests {
         let path = unique_temp_dir("sidebar-width").join(SETTINGS_FILE_NAME);
         cx.set_global(SettingsState {
             value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
             path: path.clone(),
             _watcher: None,
         });
@@ -711,8 +851,8 @@ mod tests {
     #[test]
     fn missing_settings_are_created_with_defaults() {
         let path = unique_temp_dir("create").join(SETTINGS_FILE_NAME);
-        let settings = load_or_create_settings(&path);
-        assert_eq!(settings, ExplorerSettings::default());
+        let loaded = load_or_create_settings(&path);
+        assert_eq!(loaded.value, ExplorerSettings::default());
         assert_eq!(
             load_settings_from_path(&path).unwrap(),
             ExplorerSettings::default()
@@ -726,7 +866,10 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{ invalid").unwrap();
 
-        assert_eq!(load_or_create_settings(&path), ExplorerSettings::default());
+        assert_eq!(
+            load_or_create_settings(&path).value,
+            ExplorerSettings::default()
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ invalid");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -735,13 +878,98 @@ mod tests {
     fn live_reload_recreates_deleted_file_and_rejects_malformed_edits() {
         let path = unique_temp_dir("live-reload").join(SETTINGS_FILE_NAME);
         let defaults = load_settings_after_change(&path).expect("recreate deleted settings");
-        assert_eq!(defaults, ExplorerSettings::default());
-        assert_eq!(load_settings_from_path(&path).unwrap(), defaults);
+        assert_eq!(defaults.value, ExplorerSettings::default());
+        assert_eq!(load_settings_from_path(&path).unwrap(), defaults.value);
 
         fs::write(&path, "{ malformed").unwrap();
         assert!(load_settings_after_change(&path).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ malformed");
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn valid_partial_settings_are_completed_sorted_and_preserve_unknown_fields() {
+        let path = unique_temp_dir("normalize").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"show_hidden_files":true,"future_option":{"z":1,"a":2}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        assert!(loaded.value.show_hidden_files);
+
+        let normalized = fs::read_to_string(&path).unwrap();
+        let document: Value = serde_json::from_str(&normalized).unwrap();
+        let object = document.as_object().unwrap();
+        assert_eq!(
+            object.len(),
+            settings_document(&loaded.value).as_object().unwrap().len() + 1
+        );
+        assert_eq!(object["future_option"]["a"], 2);
+        assert_eq!(object["future_option"]["z"], 1);
+        assert!(
+            normalized.find("\"date_format\"").unwrap()
+                < normalized.find("\"future_option\"").unwrap()
+        );
+        assert!(normalized.find("\"a\"").unwrap() < normalized.find("\"z\"").unwrap());
+        assert!(
+            normalized.find("\"sidebar_items\"").unwrap()
+                < normalized.find("\"startup_location\"").unwrap()
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn app_setting_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("preserve-unknown").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"future_option":{"z":1,"a":2},"show_hidden_files":false}"#,
+        )
+        .unwrap();
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        cx.set_global(SettingsState {
+            value: loaded.value,
+            document: loaded.document,
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| set_show_hidden_files(true, cx));
+
+        let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["future_option"]["a"], 2);
+        assert_eq!(document["future_option"]["z"], 1);
+        assert_eq!(document["show_hidden_files"], true);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sidebar_edits_keep_unknown_fields_attached_to_remaining_items() {
+        let mut document: Value = serde_json::from_str(
+            r#"{"sidebar_items":[{"kind":"home","note":"home"},{"kind":"downloads","note":"downloads"}]}"#,
+        )
+        .unwrap();
+        let mut settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
+
+        assert_eq!(
+            reorder_sidebar_item_in_settings(1, 0, true, &mut settings),
+            Some(0)
+        );
+        sync_settings_document(&mut document, &settings);
+        assert_eq!(document["sidebar_items"][0]["note"], "downloads");
+        assert_eq!(document["sidebar_items"][1]["note"], "home");
+
+        assert_eq!(
+            unpin_sidebar_item_in_settings(1, &mut settings),
+            Some(SidebarLocation::Home)
+        );
+        sync_settings_document(&mut document, &settings);
+        assert_eq!(document["sidebar_items"].as_array().unwrap().len(), 1);
+        assert_eq!(document["sidebar_items"][0]["note"], "downloads");
     }
 
     #[test]

@@ -4,7 +4,6 @@
 
 ## 1
 
-- If settings file is missing items, write the missing items with their default values. Also sort the JSON keys alphabetically
 - Settings options for:
     - "font" - change main app font used
     - "show_folder_size" - default: false - calc all folder sizes in current directory (cache for current session in-memory + expire after 10m)
@@ -18,6 +17,7 @@
 
 ## 2
 
+- Organise the settings file (group related items)
 - Customizable context menus (add items to settings)
 - [Windows-only] detext WSL Linux install, show drive for it
 - Large icons grid view (alternate to the current Details view)
