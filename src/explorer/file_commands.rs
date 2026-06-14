@@ -8,7 +8,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::{Context, Window};
@@ -323,6 +323,9 @@ impl ExplorerView {
                 self.start_file_operation(job, ConflictChoice::Replace, cx);
             }
             Ok(PreparedFileOperation::Conflicts(conflicts)) => {
+                if let Some(diagnostics) = conflicts.archive_diagnostics() {
+                    diagnostics.mark_conflict_wait_started();
+                }
                 self.pending_file_conflict = Some(conflicts);
                 self.open_error = None;
                 self.open_pending_dialog_window(cx);
@@ -342,11 +345,17 @@ impl ExplorerView {
         let Some(conflicts) = self.pending_file_conflict.take() else {
             return;
         };
+        if let Some(diagnostics) = conflicts.archive_diagnostics() {
+            diagnostics.mark_conflict_wait_finished();
+        }
         self.start_file_operation(conflicts.into_job(), choice, cx);
     }
 
     pub(super) fn cancel_active_file_operation(&mut self) {
         if let Some(operation) = self.active_file_operation.as_ref() {
+            if let Some(diagnostics) = &operation.archive_diagnostics {
+                diagnostics.mark_cancel_requested();
+            }
             operation.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -364,13 +373,18 @@ impl ExplorerView {
 
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = job.initial_progress();
+        let archive_diagnostics = job.archive_diagnostics();
         self.active_file_operation = Some(FileOperationState {
             progress: progress.clone(),
             cancel: cancel.clone(),
             task: None,
+            archive_diagnostics: archive_diagnostics.clone(),
         });
         self.open_error = None;
         self.open_file_operation_window(cx);
+        if let Some(diagnostics) = &archive_diagnostics {
+            diagnostics.mark_progress_dialog_visible();
+        }
 
         let (progress_tx, progress_rx) = mpsc::channel();
         let finished = Arc::new(AtomicBool::new(false));
@@ -449,8 +463,14 @@ impl ExplorerView {
 
         match result {
             Ok(summary) => {
+                let diagnostics = summary.archive_diagnostics.clone();
                 self.finish_file_operation(summary);
+                let metadata_started = Instant::now();
                 self.schedule_entry_metadata_resolution(cx);
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.add_metadata_resolution(metadata_started.elapsed());
+                    diagnostics.finish("ok");
+                }
                 self.emit_filesystem_changed(cx);
             }
             Err(FileOperationError::Cancelled) => {
@@ -465,10 +485,14 @@ impl ExplorerView {
     }
 
     fn finish_file_operation(&mut self, summary: FileOperationSummary) {
+        let reload_started = Instant::now();
         self.open_error = None;
         self.remove_cut_paths(&summary.moved_source_paths);
         self.reload();
         self.restore_selection_from_paths(&summary.destination_paths);
+        if let Some(diagnostics) = summary.archive_diagnostics {
+            diagnostics.add_reload(reload_started.elapsed());
+        }
     }
 
     fn selection_fallback_index_for_delete(&self) -> Option<usize> {

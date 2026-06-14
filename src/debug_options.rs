@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fmt,
     sync::atomic::{AtomicU8, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use gpui::{App, Global};
@@ -12,6 +12,7 @@ const DEBUG_NAV: u8 = 1 << 0;
 const DEBUG_SEARCH: u8 = 1 << 1;
 const DEBUG_ICONS: u8 = 1 << 2;
 const DEBUG_ARCHIVE: u8 = 1 << 3;
+const DEBUG_ARCHIVE_VERBOSE: u8 = 1 << 4;
 const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
@@ -30,51 +31,25 @@ pub(crate) struct NavTimingBatch {
 }
 
 pub(crate) struct ArchiveTiming {
-    started: Option<Instant>,
-    stage: &'static str,
-    details: Option<String>,
-    outcome: &'static str,
+    _private: (),
 }
 
 impl ArchiveTiming {
-    pub(crate) fn start(stage: &'static str, details: fmt::Arguments<'_>) -> Self {
-        if archive_timings_enabled() {
-            Self {
-                started: Some(Instant::now()),
-                stage,
-                details: Some(details.to_string()),
-                outcome: "error",
-            }
-        } else {
-            Self {
-                started: None,
-                stage,
-                details: None,
-                outcome: "error",
-            }
-        }
+    pub(crate) fn start(_stage: &'static str, _details: fmt::Arguments<'_>) -> Self {
+        Self { _private: () }
     }
 
     pub(crate) fn ok(&mut self) {
-        self.outcome = "ok";
+        // Detailed archive summaries replace the legacy stage timer.
     }
 
     pub(crate) fn cancelled(&mut self) {
-        self.outcome = "cancelled";
+        // Detailed archive summaries replace the legacy stage timer.
     }
 }
 
 impl Drop for ArchiveTiming {
-    fn drop(&mut self) {
-        let Some(started) = self.started else {
-            return;
-        };
-        let details = self.details.as_deref().unwrap_or_default();
-        log_archive_timing(
-            started.elapsed(),
-            format_args!("{} {details} outcome={}", self.stage, self.outcome),
-        );
-    }
+    fn drop(&mut self) {}
 }
 
 impl NavTimingBatch {
@@ -149,6 +124,10 @@ impl DebugOptions {
         self.flags & DEBUG_ARCHIVE != 0
     }
 
+    pub(crate) fn archive_verbose(self) -> bool {
+        self.flags & DEBUG_ARCHIVE_VERBOSE != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
@@ -163,6 +142,10 @@ impl DebugOptions {
 
     fn enable_archive(&mut self) {
         self.flags |= DEBUG_ARCHIVE;
+    }
+
+    fn enable_archive_verbose(&mut self) {
+        self.flags |= DEBUG_ARCHIVE | DEBUG_ARCHIVE_VERBOSE;
     }
 
     fn enable_all(&mut self) {
@@ -205,6 +188,25 @@ pub(crate) fn archive_timings_enabled() -> bool {
         flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
     }
     .archive_timings()
+}
+
+pub(crate) fn archive_verbose_enabled() -> bool {
+    DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .archive_verbose()
+}
+
+#[cfg(feature = "benchmarks")]
+pub(crate) fn set_archive_debug_for_benchmark(enabled: bool, verbose: bool) {
+    let flags = if verbose {
+        DEBUG_ARCHIVE | DEBUG_ARCHIVE_VERBOSE
+    } else if enabled {
+        DEBUG_ARCHIVE
+    } else {
+        0
+    };
+    PROCESS_DEBUG_FLAGS.store(flags, Ordering::Relaxed);
 }
 
 pub(crate) fn log_nav_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
@@ -254,16 +256,6 @@ pub(crate) fn log_icon_timing(message: fmt::Arguments<'_>) {
     }
 }
 
-pub(crate) fn log_archive_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
-    if archive_timings_enabled() {
-        eprintln!("{}", format_archive_timing_line(elapsed, message));
-    }
-}
-
-fn format_archive_timing_line(elapsed: Duration, message: fmt::Arguments<'_>) -> String {
-    format!("[archive] {} {message}", format_timing_duration(elapsed))
-}
-
 fn format_timing_duration(elapsed: Duration) -> String {
     format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
@@ -305,9 +297,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
             "search" => options.enable_search(),
             "icon" | "icons" => options.enable_icons(),
             "archive" | "extract" => options.enable_archive(),
+            "archive-verbose" | "extract-verbose" => options.enable_archive_verbose(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, extract, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, all, or *."
             )),
         }
     }
@@ -374,6 +367,16 @@ mod tests {
         assert!(!archive_options.nav_timings());
         assert!(archive_warnings.is_empty());
         assert!(extract_warnings.is_empty());
+    }
+
+    #[test]
+    fn archive_verbose_enables_archive_and_verbose_events() {
+        let (options, warnings) =
+            parse_debug_options(args(&["explorer", "--debug=archive-verbose"]));
+
+        assert!(options.archive_timings());
+        assert!(options.archive_verbose());
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -451,17 +454,6 @@ mod tests {
         assert_eq!(
             format_timing_duration(Duration::from_millis(12_345)),
             "12345.000  ms"
-        );
-    }
-
-    #[test]
-    fn archive_timing_line_includes_prefix_stage_details_and_outcome() {
-        assert_eq!(
-            format_archive_timing_line(
-                Duration::from_micros(12_345),
-                format_args!("prepare.list archive={:?} outcome=ok", "example.zip")
-            ),
-            "[archive] 12.345     ms prepare.list archive=\"example.zip\" outcome=ok"
         );
     }
 }

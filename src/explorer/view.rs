@@ -16,6 +16,7 @@ use gpui::{
 use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
+    archive_diagnostics::ArchiveDiagnostics,
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
@@ -87,6 +88,7 @@ pub(super) struct FileOperationState {
     pub(super) progress: FileOperationProgress,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
+    pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

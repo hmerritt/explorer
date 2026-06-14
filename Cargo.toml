@@ -24,6 +24,7 @@ filetime = "0.2.29"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
 globset = "0.4.18"
 jwalk = "0.8.1"
+libc = "0.2.177"
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 notify = "8.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -36,7 +37,7 @@ sevenz-rust2 = "0.21.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
-windows-sys = { version = "0.59.0", features = ["Win32_UI_Shell"] }
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "=0.26.0"
@@ -61,8 +62,14 @@ name = "navigation_pipeline"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "archive_extraction"
+harness = false
+required-features = ["benchmarks"]
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
+decompress = { path = "vendor/decompress" }
 
 [profile.dev]
 opt-level = 0

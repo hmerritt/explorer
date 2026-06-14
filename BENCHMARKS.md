@@ -23,3 +23,25 @@ cargo bench --features benchmarks --bench recursive_search -- --baseline before
 
 The navigation benchmark creates its fixture under
 `target/navigation-pipeline-benchmark-v1`.
+
+## Archive extraction
+
+The archive-extraction suite measures one large file, many small files, and
+many medium files through the same planning and execution pipeline used by the
+application. Fixtures live under `target/archive-extraction-benchmark-v1`.
+
+```sh
+cargo bench --features benchmarks --bench archive_extraction
+cargo bench --features benchmarks --bench archive_extraction -- --save-baseline before
+cargo bench --features benchmarks --bench archive_extraction -- --baseline before
+```
+
+Runtime diagnostics are JSONL on stderr:
+
+```sh
+cargo run -- --debug=archive
+cargo run -- --debug=archive-verbose
+```
+
+Summary mode redacts archive and entry paths. Verbose mode additionally emits
+path-bearing `slow_entry` records.

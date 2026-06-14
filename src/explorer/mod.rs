@@ -1,6 +1,7 @@
 mod actions;
 mod address_bar;
 mod app_icons;
+mod archive_diagnostics;
 mod breadcrumb;
 mod clipboard;
 pub(crate) mod constants;
@@ -63,8 +64,12 @@ pub(crate) use filesystem::{
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
-    pub use super::filesystem::benchmark_support::load_entries;
+    pub use super::filesystem::benchmark_support::{extract_archives, load_entries};
     pub use super::recursive_search::benchmark_support::*;
+
+    pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {
+        crate::debug_options::set_archive_debug_for_benchmark(enabled, verbose);
+    }
 }
 pub use tabs::ExplorerTabs;
 #[allow(unused_imports)]

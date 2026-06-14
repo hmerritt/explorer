@@ -2052,6 +2052,7 @@ mod tests {
                     progress: test_progress(),
                     cancel: Arc::new(AtomicBool::new(false)),
                     task: None,
+                    archive_diagnostics: None,
                 });
                 view.open_file_operation_window(cx);
                 assert!(view.active_dialog_window.is_some());

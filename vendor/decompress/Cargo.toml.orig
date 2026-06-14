@@ -1,0 +1,76 @@
+[package]
+name = "decompress"
+version = "0.6.0"
+edition = "2021"
+
+description = "Extracting archives made easy"
+authors = ["Dotan Nahum <dotan@rng0.io>"]
+documentation = "https://docs.rs/decompress/"
+repository = "https://github.com/rusty-ferris-club/decompress"
+keywords = ["compression", "archive", "unpack", "tar", "zip"]
+license = "Apache-2.0"
+readme = "../README.md"
+
+[features]
+default = ["all"]
+all = [
+  "tarball",
+  "tarxz",
+  "targz",
+  "tarbz",
+  "tarzst",
+  "zip",
+  "ar",
+  "gz",
+  "bz2",
+  "xz",
+  "zstd",
+  "rar",
+]
+
+tarball = ["dep:tar"]
+tarzst = ["tarball", "dep:zstd"]
+targz = ["tarball", "dep:flate2"]
+tarbz = ["tarball", "dep:bzip2"]
+bz2 = ["dep:bzip2"]
+tarxz = ["tarball", "dep:xz"]
+zip = ["dep:zip"]
+gz = ["dep:flate2"]
+ar = ["dep:ar"]
+xz = ["dep:xz"]
+zstd = ["dep:zstd"]
+rar = ["dep:unrar"]
+
+[dependencies]
+
+regex = "1.7.0"
+lazy_static = "1.4.0"
+thiserror = "1.0.37"
+derive_builder = "0.12.0"
+ar = { version = "0.9.0", optional = true }
+tar = { version = "0.4.38", optional = true }
+zip = { version = "0.6.3", optional = true }
+bzip2 = { version = "0.4.3", optional = true }
+flate2 = { version = "1.0.25", optional = true }
+xz = { version = "0.1.0", optional = true }
+zstd = { version = "0.12.0", optional = true }
+unrar = { version = "0.4.4", optional = true }
+infer = "0.12.0"
+
+[dev-dependencies]
+dircmp = "0.2.0"
+rstest = "0.16.0"
+clap = { version = "4.0.27", features = ["cargo"] }
+insta = "1.24.1"
+
+[[test]]
+name = "archives_test"
+required-features = ["all"]
+
+[[example]]
+name = "unpack"
+required-features = ["default"]
+
+[[example]]
+name = "unzip"
+required-features = ["zip"]

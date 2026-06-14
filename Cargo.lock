@@ -1562,8 +1562,6 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "decompress"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67605f4868a37e8a9c50003a866a6896104602d5d7ddf7e8a7f398ec97e44ab3"
 dependencies = [
  "ar",
  "bzip2 0.4.4",
@@ -1957,6 +1955,7 @@ dependencies = [
  "icns",
  "image",
  "jwalk",
+ "libc",
  "notify",
  "objc",
  "open",
