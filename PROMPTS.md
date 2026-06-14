@@ -8,7 +8,6 @@
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
-- Speed up archive extraction
 - Improve readme - add screenshots / branding
 
 ## 2

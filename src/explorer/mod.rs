@@ -64,7 +64,10 @@ pub(crate) use filesystem::{
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
-    pub use super::filesystem::benchmark_support::{extract_archives, load_entries};
+    pub use super::filesystem::benchmark_support::{
+        execute_prepared_archive_extraction, extract_archives, extract_archives_with_progress,
+        list_archive, load_entries, plan_archives, prepare_archive_extraction,
+    };
     pub use super::recursive_search::benchmark_support::*;
 
     pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {

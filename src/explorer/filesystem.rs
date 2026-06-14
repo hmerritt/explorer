@@ -23,6 +23,7 @@ const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
     "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar", "7z",
 ];
 const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
+const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_start_path() -> PathBuf {
@@ -770,6 +771,8 @@ pub mod benchmark_support {
 
     use crate::explorer::FileEntry;
 
+    pub struct PreparedArchiveExtraction(super::FileOperationJob);
+
     pub fn load_entries(path: &Path, show_hidden_files: bool) -> Vec<FileEntry> {
         super::load_entries(path, show_hidden_files).expect("load benchmark entries")
     }
@@ -788,6 +791,58 @@ pub mod benchmark_support {
             |_| {},
         )
         .expect("execute archive benchmark extraction");
+    }
+
+    pub fn list_archive(archive: &Path) -> usize {
+        super::archive_listing(archive)
+            .expect("list benchmark archive")
+            .entries
+            .len()
+    }
+
+    pub fn plan_archives(archives: &[PathBuf], destination: &Path) -> usize {
+        super::prepare_extract_archive_operation(archives, destination)
+            .expect("plan benchmark archive extraction")
+            .stats
+            .total_files
+    }
+
+    pub fn prepare_archive_extraction(
+        archives: &[PathBuf],
+        destination: &Path,
+    ) -> PreparedArchiveExtraction {
+        PreparedArchiveExtraction(
+            super::prepare_extract_archive_operation(archives, destination)
+                .expect("prepare benchmark archive extraction"),
+        )
+    }
+
+    pub fn execute_prepared_archive_extraction(prepared: PreparedArchiveExtraction) {
+        super::execute_file_operation_with_progress(
+            prepared.0,
+            super::ConflictChoice::Replace,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |_| {},
+        )
+        .expect("execute prepared benchmark archive extraction");
+    }
+
+    pub fn extract_archives_with_progress(archives: &[PathBuf], destination: &Path) -> usize {
+        let prepared = super::prepare_extract_archives_to_directory(archives, destination)
+            .expect("prepare archive progress benchmark");
+        let job = match prepared {
+            super::PreparedFileOperation::Ready(job) => job,
+            super::PreparedFileOperation::Conflicts(conflicts) => conflicts.into_job(),
+        };
+        let mut callbacks = 0;
+        super::execute_file_operation_with_progress(
+            job,
+            super::ConflictChoice::Replace,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |_| callbacks += 1,
+        )
+        .expect("execute archive progress benchmark");
+        callbacks
     }
 }
 
@@ -1117,6 +1172,35 @@ struct ArchiveExtractEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ArchiveExtractPlan {
+    entries: Vec<ArchiveExtractEntry>,
+    by_display_path: HashMap<PathBuf, usize>,
+    by_destination: HashMap<PathBuf, usize>,
+}
+
+impl ArchiveExtractPlan {
+    fn new(entries: Vec<ArchiveExtractEntry>) -> Self {
+        let mut by_display_path = HashMap::with_capacity(entries.len());
+        let mut by_destination = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            by_display_path.insert(entry.display_path.clone(), index);
+            by_destination.insert(entry.destination.clone(), index);
+        }
+        Self {
+            entries,
+            by_display_path,
+            by_destination,
+        }
+    }
+
+    fn entry_by_display_path(&self, path: &Path) -> Option<&ArchiveExtractEntry> {
+        self.by_display_path
+            .get(path)
+            .and_then(|index| self.entries.get(*index))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum FileOperationStep {
     CreateDirectory(PathBuf),
     CopyFile {
@@ -1132,7 +1216,7 @@ enum FileOperationStep {
     ExtractArchive {
         archive: PathBuf,
         destination: PathBuf,
-        entries: Vec<ArchiveExtractEntry>,
+        plan: ArchiveExtractPlan,
         diagnostics: Option<ArchiveHandle>,
     },
     RemoveEmptyDirectory(PathBuf),
@@ -1389,7 +1473,11 @@ fn prepare_extract_archive_operation(
             format_args!("archive={archive:?}"),
         );
         let plan_started = Instant::now();
-        let top_level_entries = top_level_entries_from_listing(&listing.entries);
+        let archive_size = fs::metadata(archive)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let sanitized_entries = sanitized_entries_from_listing(&listing.entries);
+        let top_level_entries = top_level_entries_from_sanitized(&sanitized_entries);
         if top_level_entries.is_empty() {
             return Err(format!(
                 "{} does not contain any files.",
@@ -1399,10 +1487,7 @@ fn prepare_extract_archive_operation(
 
         let extract_to = archive_extract_destination(archive, destination, &top_level_entries)?;
         let output_roots = archive_output_roots(&extract_to, &top_level_entries);
-        let archive_size = fs::metadata(archive)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let mut entries = planned_extract_entries_from_listing(&listing.entries, &extract_to);
+        let mut entries = planned_extract_entries_from_sanitized(&sanitized_entries, &extract_to);
         assign_archive_entry_byte_weights(&mut entries, archive_size);
 
         for entry in &mut entries {
@@ -1427,14 +1512,15 @@ fn prepare_extract_archive_operation(
             handle.phase("planning", plan_started.elapsed());
             handle
         });
+        let entry_count = entries.len();
         steps.push(FileOperationStep::ExtractArchive {
             archive: archive.clone(),
             destination: extract_to,
-            entries: entries.clone(),
+            plan: ArchiveExtractPlan::new(entries),
             diagnostics,
         });
 
-        stats.total_files = stats.total_files.saturating_add(entries.len().max(1));
+        stats.total_files = stats.total_files.saturating_add(entry_count.max(1));
         stats.total_bytes = stats.total_bytes.saturating_add(archive_size);
 
         for output in output_roots {
@@ -1475,10 +1561,8 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source: source.clone(),
                 destination: destination.clone(),
             }),
-            FileOperationStep::ExtractArchive {
-                archive, entries, ..
-            } => {
-                file_conflicts.extend(entries.iter().filter_map(|entry| {
+            FileOperationStep::ExtractArchive { archive, plan, .. } => {
+                file_conflicts.extend(plan.entries.iter().filter_map(|entry| {
                     entry.conflict.then(|| FileConflict {
                         source: archive.clone(),
                         destination: entry.destination.clone(),
@@ -1616,7 +1700,7 @@ pub(super) fn execute_file_operation_with_progress(
             FileOperationStep::ExtractArchive {
                 archive,
                 destination,
-                entries,
+                plan,
                 diagnostics,
             } => {
                 progress.phase = FileOperationPhase::Extracting;
@@ -1630,7 +1714,8 @@ pub(super) fn execute_file_operation_with_progress(
                 );
                 let sampler = diagnostics.as_ref().map(ArchiveHandle::sampler);
                 if let Some(diagnostics) = diagnostics {
-                    let conflicts = entries.iter().filter(|entry| entry.conflict).count() as u64;
+                    let conflicts =
+                        plan.entries.iter().filter(|entry| entry.conflict).count() as u64;
                     match conflict_choice {
                         ConflictChoice::Replace => {
                             diagnostics
@@ -1648,22 +1733,44 @@ pub(super) fn execute_file_operation_with_progress(
                 }
                 let diagnostic_metrics =
                     diagnostics.as_ref().map(|handle| handle.metrics().clone());
-                let mut diagnostic_progress = |progress| {
+                let mut last_progress_publish = Instant::now();
+                let mut last_published_completed = progress.completed_files;
+                let mut last_published_bytes = progress.copied_bytes;
+                let mut diagnostic_progress = |progress: FileOperationProgress| {
+                    let skipped_item_completed = progress.completed_files
+                        > last_published_completed
+                        && progress.copied_bytes == last_published_bytes;
+                    if !skipped_item_completed
+                        && last_progress_publish.elapsed() < ARCHIVE_PROGRESS_PUBLISH_INTERVAL
+                    {
+                        return;
+                    }
+                    let publish_started = Instant::now();
+                    last_published_completed = progress.completed_files;
+                    last_published_bytes = progress.copied_bytes;
+                    on_progress(progress);
+                    last_progress_publish = Instant::now();
                     if let Some(metrics) = &diagnostic_metrics {
                         metrics.progress_callbacks.fetch_add(1, Ordering::Relaxed);
                     }
-                    on_progress(progress);
+                    if let Some(diagnostics) = diagnostics {
+                        diagnostics.phase("progress_publication", publish_started.elapsed());
+                    }
                 };
                 let result = extract_archive_with_entry_progress(
                     archive,
                     destination,
-                    entries,
+                    plan,
                     conflict_choice,
                     &cancel,
                     &mut progress,
                     &mut diagnostic_progress,
                     diagnostics.as_ref(),
                 );
+                on_progress(progress.clone());
+                if let Some(metrics) = &diagnostic_metrics {
+                    metrics.progress_callbacks.fetch_add(1, Ordering::Relaxed);
+                }
                 let outcome = match &result {
                     Ok(()) => "ok",
                     Err(FileOperationError::Cancelled) => "cancelled",
@@ -1812,8 +1919,7 @@ impl decompress::Observer for DecompressDiagnosticsObserver {
                         metrics.zero_byte_files.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                self.diagnostics
-                    .record_entry(path.to_path_buf(), bytes, elapsed, "ok");
+                self.diagnostics.record_entry(path, bytes, elapsed, "ok");
             }
             decompress::ObserveEvent::DirectoryCreate => {
                 metrics.directory_creates.fetch_add(1, Ordering::Relaxed);
@@ -1828,8 +1934,7 @@ impl decompress::Observer for DecompressDiagnosticsObserver {
                 metrics
                     .output_bytes_written
                     .fetch_add(bytes, Ordering::Relaxed);
-                self.diagnostics.phase("output_write", elapsed);
-                self.diagnostics.phase("decode", elapsed);
+                self.diagnostics.phase("entry_copy", elapsed);
             }
             decompress::ObserveEvent::Flush => {
                 metrics.flushes.fetch_add(1, Ordering::Relaxed);
@@ -1866,9 +1971,7 @@ fn record_completed_entry(
     if bytes == 0 {
         metrics.zero_byte_files.fetch_add(1, Ordering::Relaxed);
     }
-    diagnostics.phase("output_write", elapsed);
-    diagnostics.phase("decode", elapsed);
-    diagnostics.record_entry(entry.display_path.clone(), bytes, elapsed, outcome);
+    diagnostics.record_entry_with_phase("entry_copy", &entry.display_path, bytes, elapsed, outcome);
     metrics.diagnostics_nanos.fetch_add(
         diagnostics_started
             .elapsed()
@@ -1881,7 +1984,7 @@ fn record_completed_entry(
 fn extract_archive_with_entry_progress(
     archive: &Path,
     destination: &Path,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -1892,7 +1995,7 @@ fn extract_archive_with_entry_progress(
         extract_rar_archive_with_entry_progress(
             archive,
             destination,
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -1903,7 +2006,7 @@ fn extract_archive_with_entry_progress(
         extract_7z_archive_with_entry_progress(
             archive,
             destination,
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -1914,7 +2017,7 @@ fn extract_archive_with_entry_progress(
         extract_ar_archive_with_entry_progress(
             archive,
             destination,
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -1924,20 +2027,22 @@ fn extract_archive_with_entry_progress(
     } else if archive_supports_filtered_extract(archive)
         || archive_is_single_file_compression(archive)
     {
-        let entry_weights: HashMap<PathBuf, u64> = entries
+        let entry_details = plan
+            .by_destination
             .iter()
-            .map(|entry| (entry.destination.clone(), entry.byte_weight))
-            .collect();
-        let conflict_destinations: HashSet<PathBuf> = entries
-            .iter()
-            .filter(|entry| entry.conflict)
-            .map(|entry| entry.destination.clone())
-            .collect();
+            .map(|(destination, index)| {
+                let entry = &plan.entries[*index];
+                (
+                    destination.clone(),
+                    (*index, entry.byte_weight, entry.conflict),
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
         let cancel_filter = cancel.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        if let Some(entry) = entries.first() {
+        if let Some(entry) = plan.entries.first() {
             progress.current_item = Some(entry.display_path.clone());
             on_progress(progress.clone());
         }
@@ -1956,20 +2061,19 @@ fn extract_archive_with_entry_progress(
                     return false;
                 }
 
-                let is_planned_entry = entry_weights.contains_key(path);
-                let is_conflict = conflict_destinations.contains(path);
-                let is_allowed = is_planned_entry
-                    && (!is_conflict || conflict_choice == ConflictChoice::Replace);
-                if is_allowed {
-                    if let Some(weight) = entry_weights.get(path) {
-                        let _ = tx.send((path.to_path_buf(), *weight));
-                    }
+                let Some((index, _weight, conflict)) = entry_details.get(path) else {
+                    return false;
+                };
+                let allowed = !conflict || conflict_choice == ConflictChoice::Replace;
+                if allowed {
+                    let _ = tx.send(*index);
                 }
-                is_allowed
+                allowed
             });
             if let Some(observer) = observer {
                 builder = builder.observer(observer);
             }
+            builder = builder.collect_output_paths(false);
             let opts = builder.build().map_err(|error| {
                 FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
             })?;
@@ -1985,9 +2089,10 @@ fn extract_archive_with_entry_progress(
             Ok::<(), FileOperationError>(())
         });
 
-        while let Ok((path, weight)) = rx.recv() {
-            progress.current_item = Some(path);
-            progress.copied_bytes = progress.copied_bytes.saturating_add(weight);
+        while let Ok(index) = rx.recv() {
+            let entry = &plan.entries[index];
+            progress.current_item = Some(entry.display_path.clone());
+            progress.copied_bytes = progress.copied_bytes.saturating_add(entry.byte_weight);
             progress.completed_files = progress.completed_files.saturating_add(1);
             on_progress(progress.clone());
         }
@@ -1996,33 +2101,31 @@ fn extract_archive_with_entry_progress(
             .join()
             .map_err(|_| FileOperationError::Failed("Extraction thread panicked".to_owned()))??;
     } else {
-        if let Some(entry) = entries.first() {
+        if let Some(entry) = plan.entries.first() {
             progress.current_item = Some(entry.display_path.clone());
             on_progress(progress.clone());
         }
 
-        let planned_paths = entries
+        let entry_details = plan
+            .by_destination
             .iter()
-            .map(|entry| entry.destination.clone())
-            .collect::<HashSet<_>>();
-        let conflict_paths = entries
-            .iter()
-            .filter(|entry| entry.conflict)
-            .map(|entry| entry.destination.clone())
-            .collect::<HashSet<_>>();
+            .map(|(destination, index)| (destination.clone(), plan.entries[*index].conflict))
+            .collect::<HashMap<_, _>>();
         let cancel_filter = cancel.clone();
         let mut builder = decompress::ExtractOptsBuilder::default().filter(move |path| {
             if cancel_filter.load(Ordering::Relaxed) {
                 return false;
             }
-            planned_paths.contains(path)
-                && (conflict_choice == ConflictChoice::Replace || !conflict_paths.contains(path))
+            entry_details
+                .get(path)
+                .is_some_and(|conflict| conflict_choice == ConflictChoice::Replace || !conflict)
         });
         if let Some(diagnostics) = diagnostics {
             builder = builder.observer(Arc::new(DecompressDiagnosticsObserver::new(
                 diagnostics.clone(),
             )));
         }
+        builder = builder.collect_output_paths(false);
         let opts = builder.build().map_err(|error| {
             FileOperationError::Failed(format!("Could not prepare extraction: {error}"))
         })?;
@@ -2037,10 +2140,10 @@ fn extract_archive_with_entry_progress(
 
         progress.completed_files = progress
             .completed_files
-            .saturating_add(entries.len().max(1));
+            .saturating_add(plan.entries.len().max(1));
         progress.copied_bytes = progress
             .copied_bytes
-            .saturating_add(archive_entry_byte_total(entries));
+            .saturating_add(archive_entry_byte_total(&plan.entries));
         on_progress(progress.clone());
     }
 
@@ -2050,7 +2153,7 @@ fn extract_archive_with_entry_progress(
 fn extract_7z_archive_with_entry_progress(
     archive: &Path,
     _destination: &Path,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2062,7 +2165,7 @@ fn extract_7z_archive_with_entry_progress(
         extract_7z_archive_from_reader(
             archive,
             CountingReader::new(file, Some(diagnostics)),
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -2073,7 +2176,7 @@ fn extract_7z_archive_with_entry_progress(
         extract_7z_archive_from_reader(
             archive,
             file,
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -2086,7 +2189,7 @@ fn extract_7z_archive_with_entry_progress(
 fn extract_7z_archive_from_reader(
     archive: &Path,
     file: impl Read + std::io::Seek,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2098,6 +2201,7 @@ fn extract_7z_archive_from_reader(
             operation_error("extract", archive, io::Error::other(error.to_string()))
         })?;
 
+    let mut prepared_parents = HashSet::new();
     reader
         .for_each_entries(|entry, reader| {
             if cancel.load(Ordering::Relaxed) {
@@ -2105,10 +2209,13 @@ fn extract_7z_archive_from_reader(
             }
 
             let display_path = sanitized_archive_entry_path(Path::new(entry.name()));
-            let Some(planned_entry) = entries.iter().find(|e| e.display_path == display_path)
-            else {
+            let lookup_started = Instant::now();
+            let Some(planned_entry) = plan.entry_by_display_path(&display_path) else {
                 return Ok(true);
             };
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.phase("lookup", lookup_started.elapsed());
+            }
 
             progress.current_item = Some(planned_entry.display_path.clone());
             on_progress(progress.clone());
@@ -2120,16 +2227,34 @@ fn extract_7z_archive_from_reader(
             }
 
             if let Some(parent) = planned_entry.destination.parent() {
-                fs::create_dir_all(parent).map_err(|error| {
-                    sevenz_rust2::Error::Io(error, "Could not create directory".into())
-                })?;
+                if prepared_parents.insert(parent.to_path_buf()) {
+                    let directory_started = Instant::now();
+                    fs::create_dir_all(parent).map_err(|error| {
+                        sevenz_rust2::Error::Io(error, "Could not create directory".into())
+                    })?;
+                    if let Some(diagnostics) = diagnostics {
+                        diagnostics
+                            .metrics()
+                            .directory_creates
+                            .fetch_add(1, Ordering::Relaxed);
+                        diagnostics.phase("directory_create", directory_started.elapsed());
+                    }
+                }
             }
 
             if !entry.is_directory() {
                 let entry_started = Instant::now();
+                let file_create_started = Instant::now();
                 let mut output = File::create(&planned_entry.destination).map_err(|error| {
                     sevenz_rust2::Error::Io(error, "Could not create file".into())
                 })?;
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics
+                        .metrics()
+                        .file_creates
+                        .fetch_add(1, Ordering::Relaxed);
+                    diagnostics.phase("file_create", file_create_started.elapsed());
+                }
                 let bytes = io::copy(reader, &mut output).map_err(|error| {
                     sevenz_rust2::Error::Io(error, "Could not extract file".into())
                 })?;
@@ -2166,7 +2291,7 @@ fn extract_7z_archive_from_reader(
 fn extract_ar_archive_with_entry_progress(
     archive: &Path,
     _destination: &Path,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2178,7 +2303,7 @@ fn extract_ar_archive_with_entry_progress(
         extract_ar_archive_from_reader(
             archive,
             CountingReader::new(file, Some(diagnostics)),
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -2189,7 +2314,7 @@ fn extract_ar_archive_with_entry_progress(
         extract_ar_archive_from_reader(
             archive,
             file,
-            entries,
+            plan,
             conflict_choice,
             cancel,
             progress,
@@ -2202,7 +2327,7 @@ fn extract_ar_archive_with_entry_progress(
 fn extract_ar_archive_from_reader(
     archive: &Path,
     file: impl Read,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2210,6 +2335,7 @@ fn extract_ar_archive_from_reader(
     diagnostics: Option<&ArchiveHandle>,
 ) -> Result<(), FileOperationError> {
     let mut reader = ar::Archive::new(file);
+    let mut prepared_parents = HashSet::new();
 
     while let Some(entry) = reader.next_entry() {
         if cancel.load(Ordering::Relaxed) {
@@ -2219,12 +2345,13 @@ fn extract_ar_archive_from_reader(
             entry.map_err(|error| operation_error("extract", archive, error))?;
         let entry_name = String::from_utf8_lossy(archive_entry.header().identifier());
         let display_path = sanitized_archive_entry_path(Path::new(entry_name.as_ref()));
-        let Some(planned_entry) = entries
-            .iter()
-            .find(|entry| entry.display_path == display_path)
-        else {
+        let lookup_started = Instant::now();
+        let Some(planned_entry) = plan.entry_by_display_path(&display_path) else {
             continue;
         };
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.phase("lookup", lookup_started.elapsed());
+        }
 
         progress.current_item = Some(planned_entry.display_path.clone());
         on_progress(progress.clone());
@@ -2236,10 +2363,29 @@ fn extract_ar_archive_from_reader(
         }
 
         if let Some(parent) = planned_entry.destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| operation_error("create", parent, error))?;
+            if prepared_parents.insert(parent.to_path_buf()) {
+                let directory_started = Instant::now();
+                fs::create_dir_all(parent)
+                    .map_err(|error| operation_error("create", parent, error))?;
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics
+                        .metrics()
+                        .directory_creates
+                        .fetch_add(1, Ordering::Relaxed);
+                    diagnostics.phase("directory_create", directory_started.elapsed());
+                }
+            }
         }
+        let file_create_started = Instant::now();
         let mut output = File::create(&planned_entry.destination)
             .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
+        if let Some(diagnostics) = diagnostics {
+            diagnostics
+                .metrics()
+                .file_creates
+                .fetch_add(1, Ordering::Relaxed);
+            diagnostics.phase("file_create", file_create_started.elapsed());
+        }
         let entry_started = Instant::now();
         let bytes = io::copy(&mut archive_entry, &mut output)
             .map_err(|error| operation_error("extract", &planned_entry.destination, error))?;
@@ -2265,7 +2411,7 @@ fn extract_ar_archive_from_reader(
 fn extract_rar_archive_with_entry_progress(
     archive: &Path,
     destination: &Path,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2280,7 +2426,7 @@ fn extract_rar_archive_with_entry_progress(
     let result = extract_rar_archive_to_temp(
         archive,
         &temp_directory,
-        entries,
+        plan,
         conflict_choice,
         cancel,
         progress,
@@ -2303,7 +2449,7 @@ fn extract_rar_archive_with_entry_progress(
 fn extract_rar_archive_to_temp(
     archive: &Path,
     temp_directory: &Path,
-    entries: &[ArchiveExtractEntry],
+    plan: &ArchiveExtractPlan,
     conflict_choice: ConflictChoice,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -2335,7 +2481,7 @@ fn extract_rar_archive_to_temp(
         if cancel.load(Ordering::Relaxed) {
             return Err(FileOperationError::Cancelled);
         }
-        if let Some(entry) = entries.get(index) {
+        if let Some(entry) = plan.entries.get(index) {
             progress.current_item = Some(entry.display_path.clone());
             on_progress(progress.clone());
         }
@@ -2353,10 +2499,9 @@ fn extract_rar_archive_to_temp(
                 .map_err(|error| operation_error("remove", &output, error))?;
             continue;
         }
-        let planned_entry = entries
-            .iter()
-            .find(|entry| entry.display_path == display_path)
-            .or_else(|| entries.get(index));
+        let planned_entry = plan
+            .entry_by_display_path(&display_path)
+            .or_else(|| plan.entries.get(index));
         index += 1;
 
         let Some(planned_entry) = planned_entry else {
@@ -2415,7 +2560,7 @@ fn archive_listing(archive: &Path) -> Result<decompress::Listing, String> {
         let mut entries = Vec::new();
         reader
             .for_each_entries(|entry, _| {
-                entries.push(entry.name().to_owned());
+                entries.push(PathBuf::from(entry.name()));
                 Ok(true)
             })
             .map_err(|error| {
@@ -2448,15 +2593,23 @@ fn default_extract_opts() -> Result<decompress::ExtractOpts, String> {
         .map_err(|error| format!("Could not prepare extraction: {error}"))
 }
 
-fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
-    let mut top_level_entries = Vec::new();
+fn sanitized_entries_from_listing(entries: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sanitized_entries = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        let relative = sanitized_archive_entry_path(entry);
+        if archive_sanitized_entry_should_extract(&relative) && seen.insert(relative.clone()) {
+            sanitized_entries.push(relative);
+        }
+    }
+    sanitized_entries
+}
+
+fn top_level_entries_from_sanitized(entries: &[PathBuf]) -> Vec<PathBuf> {
+    let mut top_level_entries = Vec::with_capacity(entries.len().min(16));
     let mut seen = HashSet::new();
     for entry in entries {
-        let relative = sanitized_archive_entry_path(Path::new(entry));
-        if !archive_sanitized_entry_should_extract(&relative) {
-            continue;
-        }
-        let Some(top_level) = top_level_archive_component_from_sanitized(&relative) else {
+        let Some(top_level) = top_level_archive_component_from_sanitized(entry) else {
             continue;
         };
         if seen.insert(top_level.clone()) {
@@ -2469,34 +2622,32 @@ fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 fn planned_output_paths_from_listing(entries: &[String], destination: &Path) -> Vec<PathBuf> {
-    planned_extract_entries_from_listing(entries, destination)
+    let entries = entries.iter().map(PathBuf::from).collect::<Vec<_>>();
+    planned_extract_entries_from_sanitized(&sanitized_entries_from_listing(&entries), destination)
         .into_iter()
         .map(|entry| entry.destination)
         .collect()
 }
 
-fn planned_extract_entries_from_listing(
-    entries: &[String],
+#[cfg(test)]
+fn top_level_entries_from_listing(entries: &[String]) -> Vec<PathBuf> {
+    let entries = entries.iter().map(PathBuf::from).collect::<Vec<_>>();
+    top_level_entries_from_sanitized(&sanitized_entries_from_listing(&entries))
+}
+
+fn planned_extract_entries_from_sanitized(
+    entries: &[PathBuf],
     destination: &Path,
 ) -> Vec<ArchiveExtractEntry> {
-    let mut planned_entries = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in entries {
-        let relative = sanitized_archive_entry_path(Path::new(entry));
-        if !archive_sanitized_entry_should_extract(&relative) {
-            continue;
-        }
-        let output = destination.join(&relative);
-        if seen.insert(output.clone()) {
-            planned_entries.push(ArchiveExtractEntry {
-                display_path: relative,
-                destination: output,
-                conflict: false,
-                byte_weight: 0,
-            });
-        }
-    }
-    planned_entries
+    entries
+        .iter()
+        .map(|relative| ArchiveExtractEntry {
+            display_path: relative.clone(),
+            destination: destination.join(relative),
+            conflict: false,
+            byte_weight: 0,
+        })
+        .collect()
 }
 
 fn assign_archive_entry_byte_weights(entries: &mut [ArchiveExtractEntry], archive_size: u64) {
@@ -3137,6 +3288,36 @@ mod tests {
     }
 
     #[test]
+    fn archive_extract_plan_indexes_entries_by_sanitized_display_path() {
+        let entry = ArchiveExtractEntry {
+            display_path: PathBuf::from("folder/file.txt"),
+            destination: PathBuf::from("dest/folder/file.txt"),
+            conflict: false,
+            byte_weight: 10,
+        };
+        let plan = ArchiveExtractPlan::new(vec![entry.clone()]);
+        assert_eq!(
+            plan.entry_by_display_path(Path::new("folder/file.txt")),
+            Some(&entry)
+        );
+        assert_eq!(
+            plan.by_destination.get(Path::new("dest/folder/file.txt")),
+            Some(&0)
+        );
+    }
+
+    #[test]
+    fn archive_planning_deduplicates_sanitized_paths() {
+        let entries = vec![
+            PathBuf::from("folder/file.txt"),
+            PathBuf::from("./folder/file.txt"),
+            PathBuf::from("../folder/file.txt"),
+        ];
+        let sanitized = sanitized_entries_from_listing(&entries);
+        assert_eq!(sanitized, vec![PathBuf::from("folder/file.txt")]);
+    }
+
+    #[test]
     fn extract_progress_reports_archive_bytes_per_entry() {
         let temp = TempDir::new();
         let archive = temp.path().join("archive.ar");
@@ -3169,6 +3350,39 @@ mod tests {
             progress_events.last().map(|progress| progress.copied_bytes),
             Some(archive_size)
         );
+    }
+
+    #[test]
+    fn archive_extract_progress_publication_is_throttled_and_forces_completion() {
+        let temp = TempDir::new();
+        let archive = temp.path().join("archive.ar");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let entries = (0..100)
+            .map(|index| (format!("f{index:03}.txt"), vec![b'x'; 16]))
+            .collect::<Vec<_>>();
+        let refs = entries
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>();
+        create_ar_archive(&archive, &refs);
+        let job = ready_job(prepare_extract_archives_to_directory(
+            std::slice::from_ref(&archive),
+            &destination,
+        ));
+        let mut updates = Vec::new();
+        execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| updates.push(progress),
+        )
+        .expect("extract with progress");
+
+        assert!(updates.len() < 20);
+        let final_progress = updates.last().expect("final progress");
+        assert_eq!(final_progress.completed_files, 100);
+        assert_eq!(final_progress.phase, FileOperationPhase::Finished);
     }
 
     #[test]

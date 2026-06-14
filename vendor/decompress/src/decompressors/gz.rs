@@ -42,8 +42,7 @@ impl Decompressor for Gz {
             entries: vec![archive
                 .file_stem()
                 .ok_or_else(|| DecompressError::Error("cannot compose a file name".into()))?
-                .to_string_lossy()
-                .to_string()],
+                .into()],
         })
     }
 
@@ -73,7 +72,11 @@ impl Decompressor for Gz {
         )?;
         Ok(Decompression {
             id: "gz",
-            files: vec![target.to_string_lossy().to_string()],
+            files: opts
+                .collect_output_paths
+                .then(|| target.to_string_lossy().to_string())
+                .into_iter()
+                .collect(),
         })
     }
 }

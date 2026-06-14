@@ -44,8 +44,7 @@ impl Decompressor for Bz2 {
             entries: vec![archive
                 .file_stem()
                 .ok_or_else(|| DecompressError::Error("cannot compose a file name".into()))?
-                .to_string_lossy()
-                .to_string()],
+                .into()],
         })
     }
 
@@ -77,7 +76,11 @@ impl Decompressor for Bz2 {
         )?;
         Ok(Decompression {
             id: "bz2",
-            files: vec![target.to_string_lossy().to_string()],
+            files: opts
+                .collect_output_paths
+                .then(|| target.to_string_lossy().to_string())
+                .into_iter()
+                .collect(),
         })
     }
 }

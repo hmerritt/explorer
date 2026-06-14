@@ -144,7 +144,7 @@ pub(super) struct CounterSample {
 #[derive(Clone, Debug)]
 struct EntryMetric {
     index: usize,
-    path: PathBuf,
+    path: Option<PathBuf>,
     size: u64,
     elapsed: Duration,
     outcome: &'static str,
@@ -410,7 +410,7 @@ impl ArchiveHandle {
 
     pub(super) fn record_entry(
         &self,
-        path: PathBuf,
+        path: &Path,
         size: u64,
         elapsed: Duration,
         outcome: &'static str,
@@ -419,7 +419,27 @@ impl ArchiveHandle {
         let archive = &mut state.archives[self.archive_id - 1];
         archive.entries.push(EntryMetric {
             index: archive.entries.len(),
-            path,
+            path: crate::debug_options::archive_verbose_enabled().then(|| path.to_path_buf()),
+            size,
+            elapsed,
+            outcome,
+        });
+    }
+
+    pub(super) fn record_entry_with_phase(
+        &self,
+        phase: &'static str,
+        path: &Path,
+        size: u64,
+        elapsed: Duration,
+        outcome: &'static str,
+    ) {
+        let mut state = self.operation.inner.lock().expect("archive diagnostics");
+        let archive = &mut state.archives[self.archive_id - 1];
+        *archive.phases.entry(phase).or_default() += elapsed;
+        archive.entries.push(EntryMetric {
+            index: archive.entries.len(),
+            path: crate::debug_options::archive_verbose_enabled().then(|| path.to_path_buf()),
             size,
             elapsed,
             outcome,
@@ -464,7 +484,7 @@ impl ArchiveHandle {
                     measurement_quality: "entry-completion",
                     fields: SlowEntryVerbose {
                         index: entry.index,
-                        path: &entry.path,
+                        path: entry.path.as_deref().unwrap_or_else(|| Path::new("")),
                         size_bytes: entry.size,
                         elapsed_ms: ms(entry.elapsed),
                     },
@@ -687,7 +707,25 @@ fn bottleneck(
 ) -> &'static str {
     let mut candidates = [
         ("stall", stalled),
-        ("decode", *phases.get("decode").unwrap_or(&Duration::ZERO)),
+        (
+            "entry_copy",
+            *phases.get("entry_copy").unwrap_or(&Duration::ZERO),
+        ),
+        ("lookup", *phases.get("lookup").unwrap_or(&Duration::ZERO)),
+        (
+            "directory_create",
+            *phases.get("directory_create").unwrap_or(&Duration::ZERO),
+        ),
+        (
+            "file_create",
+            *phases.get("file_create").unwrap_or(&Duration::ZERO),
+        ),
+        (
+            "progress_publication",
+            *phases
+                .get("progress_publication")
+                .unwrap_or(&Duration::ZERO),
+        ),
         (
             "input_read",
             *phases.get("input_read").unwrap_or(&Duration::ZERO),
@@ -846,7 +884,7 @@ mod tests {
             .enumerate()
             .map(|(index, size)| EntryMetric {
                 index,
-                path: PathBuf::new(),
+                path: None,
                 size,
                 elapsed: Duration::ZERO,
                 outcome: "ok",
@@ -864,12 +902,12 @@ mod tests {
     #[test]
     fn bottleneck_requires_dominant_phase() {
         let phases = BTreeMap::from([
-            ("decode", Duration::from_millis(700)),
+            ("entry_copy", Duration::from_millis(700)),
             ("output_write", Duration::from_millis(100)),
         ]);
         assert_eq!(
             bottleneck(&phases, Duration::ZERO, Duration::from_secs(1)),
-            "decode"
+            "entry_copy"
         );
         assert_eq!(
             bottleneck(&phases, Duration::ZERO, Duration::from_secs(3)),

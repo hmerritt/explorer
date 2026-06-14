@@ -50,7 +50,10 @@ embed-resource = "3.0.9"
 
 [dev-dependencies]
 criterion = "0.8.2"
+flate2 = "1.1.9"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "test-support", "wayland", "windows-manifest", "x11"] }
+tar = "0.4.46"
+zip = "0.6.6"
 
 [[bench]]
 name = "recursive_search"

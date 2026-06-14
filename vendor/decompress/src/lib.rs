@@ -23,7 +23,7 @@ pub mod decompressors;
 
 use derive_builder::Builder;
 use std::borrow::Cow;
-use std::{convert::Infallible, io, path::Path, sync::Arc, time::Duration};
+use std::{convert::Infallible, io, path::{Path, PathBuf}, sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -76,6 +76,9 @@ pub struct ExtractOpts {
     #[builder(default)]
     pub strip: usize,
 
+    #[builder(default = "true")]
+    pub collect_output_paths: bool,
+
     #[builder(setter(custom), default = "Box::new(|_| true)")]
     pub filter: Box<FilterFn>,
 
@@ -116,7 +119,7 @@ pub struct Decompression {
 #[derive(Debug)]
 pub struct Listing {
     pub id: &'static str,
-    pub entries: Vec<String>,
+    pub entries: Vec<PathBuf>,
 }
 
 ///
@@ -348,5 +351,20 @@ mod tests {
         opts.observer.observe(ObserveEvent::BackendInit);
         assert_eq!(observer.0.load(Ordering::Relaxed), 1);
         assert!(ExtractOptsBuilder::default().build().is_ok());
+    }
+
+    #[test]
+    fn extract_options_can_disable_output_path_collection() {
+        let opts = ExtractOptsBuilder::default()
+            .collect_output_paths(false)
+            .build()
+            .unwrap();
+        assert!(!opts.collect_output_paths);
+        assert!(
+            ExtractOptsBuilder::default()
+                .build()
+                .unwrap()
+                .collect_output_paths
+        );
     }
 }

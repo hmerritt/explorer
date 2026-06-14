@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{DecompressError, Decompression, Decompressor, ExtractOpts, Listing};
 
@@ -46,7 +46,7 @@ impl Decompressor for Unrar {
             id: "rar",
             entries: res
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(|entry| PathBuf::from(entry.to_string()))
                 .collect::<Vec<_>>(),
         })
     }

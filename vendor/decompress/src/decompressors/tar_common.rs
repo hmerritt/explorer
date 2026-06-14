@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::{
+    collections::HashSet,
     fs::{self},
     io::{self, BufReader, Read},
     path::{Path, PathBuf},
@@ -10,16 +11,11 @@ use crate::decompressors::utils::normalize_mode;
 use crate::{DecompressError, ExtractOpts, ObserveEvent};
 use tar::Archive;
 
-pub fn tar_list(out: &mut Archive<Box<dyn Read>>) -> Result<Vec<String>, DecompressError> {
-    Ok(out
-        .entries()?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .map(tar::Entry::path)
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>())
+pub fn tar_list(out: &mut Archive<Box<dyn Read>>) -> Result<Vec<PathBuf>, DecompressError> {
+    out.entries()?
+        .map(|entry| entry.and_then(|entry| entry.path().map(Cow::into_owned)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DecompressError::from)
 }
 
 pub fn tar_extract(
@@ -28,6 +24,7 @@ pub fn tar_extract(
     opts: &ExtractOpts,
 ) -> Result<Vec<String>, DecompressError> {
     let mut files = vec![];
+    let mut prepared_parents = HashSet::new();
     if !to.exists() {
         fs::create_dir_all(to)?;
         opts.observer.observe(ObserveEvent::DirectoryCreate);
@@ -63,7 +60,7 @@ pub fn tar_extract(
 
         if !is_directory {
             if let Some(p) = outpath.parent() {
-                if !p.exists() {
+                if prepared_parents.insert(p.to_path_buf()) {
                     fs::create_dir_all(p)?;
                     opts.observer.observe(ObserveEvent::DirectoryCreate);
                 }
@@ -86,7 +83,9 @@ pub fn tar_extract(
                 bytes,
                 is_directory: false,
             });
-            files.push(outpath.to_string_lossy().to_string());
+            if opts.collect_output_paths {
+                files.push(outpath.to_string_lossy().to_string());
+            }
 
             #[cfg(unix)]
             {

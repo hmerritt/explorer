@@ -68,7 +68,7 @@ impl Decompressor for Ar {
                     PathBuf::from(OsStr::from_bytes(header.identifier()))
                 }
             };
-            entries.push(filepath.to_string_lossy().to_string());
+            entries.push(filepath);
         }
         Ok(Listing { id: "ar", entries })
     }
@@ -77,7 +77,7 @@ impl Decompressor for Ar {
         &self,
         archive: &Path,
         to: &Path,
-        _opts: &ExtractOpts,
+        opts: &ExtractOpts,
     ) -> Result<Decompression, DecompressError> {
         let mut out = build_archive(archive)?;
         let mut files = vec![];
@@ -127,7 +127,9 @@ impl Decompressor for Ar {
 
             let mut outfile = fs::File::create(&outpath)?;
             io::copy(&mut BufReader::new(entry), &mut outfile)?;
-            files.push(outpath.to_string_lossy().to_string());
+            if opts.collect_output_paths {
+                files.push(outpath.to_string_lossy().to_string());
+            }
 
             #[cfg(unix)]
             {

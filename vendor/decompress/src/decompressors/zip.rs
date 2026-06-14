@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::File,
     io::{self, BufReader},
     path::{Path, PathBuf},
@@ -59,7 +60,7 @@ impl Decompressor for Zip {
             let filepath = file
                 .enclosed_name()
                 .ok_or_else(|| DecompressError::Error("Invalid file path".to_string()))?;
-            entries.push(filepath.to_string_lossy().to_string());
+            entries.push(filepath.to_path_buf());
         }
         Ok(Listing { id: "zip", entries })
     }
@@ -72,8 +73,8 @@ impl Decompressor for Zip {
     ) -> Result<Decompression, DecompressError> {
         use std::fs;
 
-        opts.observer.observe(ObserveEvent::BackendInit);
         let mut files = vec![];
+        let mut prepared_parents = HashSet::new();
         let mut rdr = build_archive(archive)?;
         if !to.exists() {
             fs::create_dir_all(to)?;
@@ -119,7 +120,7 @@ impl Decompressor for Zip {
                 });
             } else {
                 if let Some(p) = outpath.parent() {
-                    if !p.exists() {
+                    if prepared_parents.insert(p.to_path_buf()) {
                         fs::create_dir_all(p)?;
                         opts.observer.observe(ObserveEvent::DirectoryCreate);
                     }
@@ -137,7 +138,9 @@ impl Decompressor for Zip {
                     bytes,
                     is_directory: false,
                 });
-                files.push(outpath.to_string_lossy().to_string());
+                if opts.collect_output_paths {
+                    files.push(outpath.to_string_lossy().to_string());
+                }
             }
             // Get and Set permissions
             #[cfg(unix)]

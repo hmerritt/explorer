@@ -28,7 +28,9 @@ The navigation benchmark creates its fixture under
 
 The archive-extraction suite measures one large file, many small files, and
 many medium files through the same planning and execution pipeline used by the
-application. Fixtures live under `target/archive-extraction-benchmark-v1`.
+application. It also compares AR, ZIP, and compressed TAR extraction and
+isolates listing, planning, and progress-publication stages. Fixtures live
+under `target/archive-extraction-benchmark-v2`.
 
 ```sh
 cargo bench --features benchmarks --bench archive_extraction

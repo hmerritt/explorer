@@ -1950,6 +1950,7 @@ dependencies = [
  "decompress",
  "embed-resource",
  "filetime",
+ "flate2",
  "globset",
  "gpui",
  "icns",
@@ -1964,12 +1965,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sevenz-rust2",
+ "tar",
  "thousands",
  "tokio",
  "trash",
  "unrar",
  "windows 0.61.3",
  "windows-sys 0.59.0",
+ "zip",
 ]
 
 [[package]]
