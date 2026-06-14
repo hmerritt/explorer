@@ -69,11 +69,53 @@ pub struct ExplorerSettings {
     pub view: ViewSettings,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextMenuSettings {
-    pub directory: Vec<CustomContextMenuItem>,
-    pub file_folder: Vec<CustomContextMenuItem>,
+    pub items: Vec<CustomContextMenuItem>,
+}
+
+impl Serialize for ContextMenuSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.items.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextMenuSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Array(_) => Ok(Self {
+                items: serde_json::from_value(value).map_err(de::Error::custom)?,
+            }),
+            Value::Object(mut object) => {
+                let mut items: Vec<CustomContextMenuItem> = object
+                    .remove("file_folder")
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(de::Error::custom)?
+                    .unwrap_or_default();
+                let mut directory_items = object
+                    .remove("directory")
+                    .map(serde_json::from_value::<Vec<CustomContextMenuItem>>)
+                    .transpose()
+                    .map_err(de::Error::custom)?
+                    .unwrap_or_default();
+                add_directory_only_to_context_menu_items(&mut directory_items);
+                items.extend(directory_items);
+                Ok(Self { items })
+            }
+            Value::Null => Ok(Self::default()),
+            _ => Err(de::Error::custom(
+                "contextmenu must be an array of items or a legacy object",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -394,6 +436,30 @@ impl CustomContextMenuItem {
             Self::Item { .. } => context_menu_executable_icon_path(executable),
             Self::Submenu { .. } => executable.to_path_buf(),
         }
+    }
+}
+
+fn add_directory_only_to_context_menu_items(items: &mut [CustomContextMenuItem]) {
+    for item in items {
+        add_directory_only_to_context_menu_item(item);
+    }
+}
+
+fn add_directory_only_to_context_menu_item(item: &mut CustomContextMenuItem) {
+    match item {
+        CustomContextMenuItem::Item { only, .. } => add_directory_only_filter(only),
+        CustomContextMenuItem::Submenu { items, .. } => {
+            add_directory_only_to_context_menu_items(items);
+        }
+    }
+}
+
+fn add_directory_only_filter(only: &mut Vec<String>) {
+    if !only
+        .iter()
+        .any(|value| value.trim().eq_ignore_ascii_case("*directory"))
+    {
+        only.push("*directory".to_owned());
     }
 }
 
@@ -723,8 +789,7 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
     if let StartLocation::Custom { path } = &settings.app.start {
         validate_configured_path(path)?;
     }
-    validate_custom_context_menu_items(&settings.contextmenu.file_folder)?;
-    validate_custom_context_menu_items(&settings.contextmenu.directory)?;
+    validate_custom_context_menu_items(&settings.contextmenu.items)?;
     Ok(())
 }
 
@@ -796,16 +861,18 @@ fn validate_context_menu_only_extensions(extensions: &[String]) -> io::Result<()
 pub(crate) enum ContextMenuOnlyFilter {
     Extension(String),
     Alias(&'static [&'static str]),
-    Files,
-    Folders,
+    Directory,
+    File,
+    Folder,
 }
 
 pub(crate) fn resolve_context_menu_only_filter(extension: &str) -> Option<ContextMenuOnlyFilter> {
     let extension = extension.trim();
     if let Some(alias) = extension.strip_prefix('*') {
         match alias.to_ascii_lowercase().as_str() {
-            "files" => return Some(ContextMenuOnlyFilter::Files),
-            "folders" => return Some(ContextMenuOnlyFilter::Folders),
+            "directory" => return Some(ContextMenuOnlyFilter::Directory),
+            "file" | "files" => return Some(ContextMenuOnlyFilter::File),
+            "folder" | "folders" => return Some(ContextMenuOnlyFilter::Folder),
             _ => {}
         }
 
@@ -1027,28 +1094,55 @@ fn sync_settings_document(document: &mut Value, settings: &ExplorerSettings) {
 fn sync_context_menu(document: &mut Value, settings: &ExplorerSettings) {
     let known = serde_json::to_value(&settings.contextmenu)
         .expect("ContextMenuSettings serialization cannot fail");
-    let Some(document) = document.as_object_mut() else {
-        *document = known;
+    match document {
+        Value::Array(_) => {
+            sync_custom_context_menu_items(document, &settings.contextmenu.items);
+        }
+        Value::Object(object) => {
+            let mut existing = Vec::new();
+            if let Some(file_folder) = object.get("file_folder").and_then(Value::as_array) {
+                existing.extend(file_folder.iter().cloned());
+            }
+            if let Some(directory) = object.get("directory").and_then(Value::as_array) {
+                existing.extend(directory.iter().cloned().map(add_directory_only_to_value));
+            }
+            *document = Value::Array(existing);
+            sync_custom_context_menu_items(document, &settings.contextmenu.items);
+        }
+        _ => {
+            *document = known;
+        }
+    }
+}
+
+fn add_directory_only_to_value(mut value: Value) -> Value {
+    add_directory_only_to_value_item(&mut value);
+    value
+}
+
+fn add_directory_only_to_value_item(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
         return;
     };
-    let known = known
-        .as_object()
-        .expect("serialized ContextMenuSettings is an object");
-
-    for (key, value) in known {
-        let configured_items = match key.as_str() {
-            "directory" => Some(settings.contextmenu.directory.as_slice()),
-            "file_folder" => Some(settings.contextmenu.file_folder.as_slice()),
-            _ => None,
-        };
-        if let Some(configured_items) = configured_items {
-            sync_custom_context_menu_items(
-                document.entry(key.clone()).or_insert(Value::Null),
-                configured_items,
-            );
-        } else {
-            merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
+    if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items {
+            add_directory_only_to_value_item(item);
         }
+        return;
+    }
+
+    let only = object
+        .entry("only".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(only) = only.as_array_mut() else {
+        return;
+    };
+    if !only
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|value| value.trim().eq_ignore_ascii_case("*directory"))
+    {
+        only.push(Value::String("*directory".to_owned()));
     }
 }
 
@@ -1268,8 +1362,7 @@ mod tests {
     #[test]
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
-        assert!(settings.contextmenu.directory.is_empty());
-        assert!(settings.contextmenu.file_folder.is_empty());
+        assert!(settings.contextmenu.items.is_empty());
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
@@ -1314,8 +1407,7 @@ mod tests {
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
         assert!(settings.view.native_icons);
-        assert!(settings.contextmenu.directory.is_empty());
-        assert!(settings.contextmenu.file_folder.is_empty());
+        assert!(settings.contextmenu.items.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
     }
@@ -1386,6 +1478,11 @@ mod tests {
                 .unwrap()
                 .contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\"")
         );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\n  \"contextmenu\": []")
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1404,28 +1501,26 @@ mod tests {
     fn contextmenu_items_support_recursive_submenus_and_tilde_executables() {
         let settings: ExplorerSettings = serde_json::from_str(
             r#"{
-                "contextmenu": {
-                    "file_folder": [
-                        {
-                            "label": "Tools",
-                            "items": [
-                                {
-                                    "label": "Inspect",
-                                    "exe": "~/bin/inspect",
-                                    "args": ["--mode", "deep"],
-                                    "only": ["txt", ".MD"]
-                                }
-                            ]
-                        }
-                    ]
-                }
+                "contextmenu": [
+                    {
+                        "label": "Tools",
+                        "items": [
+                            {
+                                "label": "Inspect",
+                                "exe": "~/bin/inspect",
+                                "args": ["--mode", "deep"],
+                                "only": ["txt", ".MD"]
+                            }
+                        ]
+                    }
+                ]
             }"#,
         )
         .expect("deserialize recursive context menu");
 
         assert!(validate_settings(&settings).is_ok());
         assert!(matches!(
-            &settings.contextmenu.file_folder[0],
+            &settings.contextmenu.items[0],
             CustomContextMenuItem::Submenu { items, .. }
                 if matches!(
                     &items[0],
@@ -1441,26 +1536,24 @@ mod tests {
     fn contextmenu_items_accept_array_and_string_args() {
         let settings: ExplorerSettings = serde_json::from_str(
             r#"{
-                "contextmenu": {
-                    "directory": [
-                        {
-                            "label": "Array args",
-                            "exe": "~/bin/inspect",
-                            "args": ["--line", "two words", "{path}"]
-                        },
-                        {
-                            "label": "String args",
-                            "exe": "~/bin/inspect",
-                            "args": "--line 'two words' {paths}"
-                        }
-                    ]
-                }
+                "contextmenu": [
+                    {
+                        "label": "Array args",
+                        "exe": "~/bin/inspect",
+                        "args": ["--line", "two words", "{path}"]
+                    },
+                    {
+                        "label": "String args",
+                        "exe": "~/bin/inspect",
+                        "args": "--line 'two words' {paths}"
+                    }
+                ]
             }"#,
         )
         .expect("deserialize context menu args");
 
         assert!(matches!(
-            &settings.contextmenu.directory[0],
+            &settings.contextmenu.items[0],
             CustomContextMenuItem::Item { args, .. }
                 if args == &vec![
                     "--line".to_owned(),
@@ -1469,7 +1562,7 @@ mod tests {
                 ]
         ));
         assert!(matches!(
-            &settings.contextmenu.directory[1],
+            &settings.contextmenu.items[1],
             CustomContextMenuItem::Item { args, .. }
                 if args == &vec![
                     "--line".to_owned(),
@@ -1482,8 +1575,8 @@ mod tests {
     #[test]
     fn contextmenu_rejects_invalid_args_values() {
         for json in [
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","args":"--bad 'quote"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","args":42}]}}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","args":"--bad 'quote"}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","args":42}]}"#,
         ] {
             assert!(serde_json::from_str::<ExplorerSettings>(json).is_err());
         }
@@ -1493,26 +1586,24 @@ mod tests {
     fn contextmenu_items_accept_recursive_submenus_and_path_executables() {
         let settings: ExplorerSettings = serde_json::from_str(
             r#"{
-                "contextmenu": {
-                    "file_folder": [
-                        {
-                            "label": "Tools",
-                            "items": [
-                                {
-                                    "label": "Inspect",
-                                    "executable": "rustc"
-                                }
-                            ]
-                        }
-                    ]
-                }
+                "contextmenu": [
+                    {
+                        "label": "Tools",
+                        "items": [
+                            {
+                                "label": "Inspect",
+                                "executable": "rustc"
+                            }
+                        ]
+                    }
+                ]
             }"#,
         )
         .expect("deserialize recursive context menu");
 
-        assert!(settings.contextmenu.file_folder[0].label() == "Tools");
+        assert!(settings.contextmenu.items[0].label() == "Tools");
         assert!(matches!(
-            &settings.contextmenu.file_folder[0],
+            &settings.contextmenu.items[0],
             CustomContextMenuItem::Submenu { items, .. }
                 if matches!(
                     &items[0],
@@ -1546,9 +1637,61 @@ mod tests {
         .expect("deserialize legacy context menu");
 
         assert!(matches!(
-            &settings.contextmenu.directory[0],
+            &settings.contextmenu.items[0],
             CustomContextMenuItem::Submenu { items, .. }
-                if matches!(&items[0], CustomContextMenuItem::Item { exe, .. } if exe == Path::new("~/bin/inspect"))
+                if matches!(
+                    &items[0],
+                    CustomContextMenuItem::Item { exe, only, .. }
+                        if exe == Path::new("~/bin/inspect")
+                            && only == &vec!["*directory".to_owned()]
+                )
+        ));
+    }
+
+    #[test]
+    fn contextmenu_legacy_sections_migrate_to_flat_items() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "file_folder": [
+                        {
+                            "label": "Inspect file",
+                            "exe": "~/bin/file-tool",
+                            "only": ["txt"]
+                        }
+                    ],
+                    "directory": [
+                        {
+                            "label": "Inspect directory",
+                            "exe": "~/bin/directory-tool"
+                        },
+                        {
+                            "label": "Inspect png or directory",
+                            "exe": "~/bin/png-tool",
+                            "only": [".png"]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize legacy context menu sections");
+
+        assert_eq!(settings.contextmenu.items.len(), 3);
+        assert!(matches!(
+            &settings.contextmenu.items[0],
+            CustomContextMenuItem::Item { label, only, .. }
+                if label == "Inspect file" && only == &vec!["txt".to_owned()]
+        ));
+        assert!(matches!(
+            &settings.contextmenu.items[1],
+            CustomContextMenuItem::Item { label, only, .. }
+                if label == "Inspect directory" && only == &vec!["*directory".to_owned()]
+        ));
+        assert!(matches!(
+            &settings.contextmenu.items[2],
+            CustomContextMenuItem::Item { label, only, .. }
+                if label == "Inspect png or directory"
+                    && only == &vec![".png".to_owned(), "*directory".to_owned()]
         ));
     }
 
@@ -1571,7 +1714,7 @@ mod tests {
         .expect("deserialize inferred submenu");
 
         assert!(matches!(
-            &settings.contextmenu.directory[0],
+            &settings.contextmenu.items[0],
             CustomContextMenuItem::Submenu { items, .. } if items.is_empty()
         ));
     }
@@ -1579,7 +1722,7 @@ mod tests {
     #[test]
     fn contextmenu_items_without_items_require_executable() {
         let error = serde_json::from_str::<ExplorerSettings>(
-            r#"{"contextmenu":{"directory":[{"label":"Missing command"}]}}"#,
+            r#"{"contextmenu":[{"label":"Missing command"}]}"#,
         )
         .expect_err("missing executable should fail");
 
@@ -1592,7 +1735,7 @@ mod tests {
             unique_temp_dir("missing-contextmenu-executable").join("missing-tool");
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
-                directory: vec![
+                items: vec![
                     CustomContextMenuItem::Item {
                         label: "Missing absolute".to_owned(),
                         exe: missing_absolute.clone(),
@@ -1606,19 +1749,18 @@ mod tests {
                         only: Vec::new(),
                     },
                 ],
-                file_folder: Vec::new(),
             },
             ..ExplorerSettings::default()
         };
 
         assert!(validate_settings(&settings).is_ok());
         assert!(
-            settings.contextmenu.directory[0]
+            settings.contextmenu.items[0]
                 .resolved_executable()
                 .is_none()
         );
         assert!(
-            settings.contextmenu.directory[1]
+            settings.contextmenu.items[1]
                 .resolved_executable()
                 .is_none()
         );
@@ -1650,9 +1792,9 @@ mod tests {
         let settings = load_settings_from_path(&path).unwrap();
 
         assert!(settings.view.show_hidden);
-        assert_eq!(settings.contextmenu.directory.len(), 1);
+        assert_eq!(settings.contextmenu.items.len(), 1);
         assert!(
-            settings.contextmenu.directory[0]
+            settings.contextmenu.items[0]
                 .resolved_executable()
                 .is_none()
         );
@@ -1663,8 +1805,7 @@ mod tests {
     fn contextmenu_only_accepts_known_aliases() {
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
-                directory: Vec::new(),
-                file_folder: vec![CustomContextMenuItem::Item {
+                items: vec![CustomContextMenuItem::Item {
                     label: "Known tool".to_owned(),
                     exe: PathBuf::from("~/bin/known-tool"),
                     args: Vec::new(),
@@ -1678,6 +1819,9 @@ mod tests {
                         "*folders".to_owned(),
                         "*Files".to_owned(),
                         "*Folders".to_owned(),
+                        "*directory".to_owned(),
+                        "*file".to_owned(),
+                        "*folder".to_owned(),
                     ],
                 }],
             },
@@ -1690,15 +1834,15 @@ mod tests {
     #[test]
     fn contextmenu_rejects_empty_labels_relative_subpaths_and_invalid_only_extensions() {
         for json in [
-            r#"{"contextmenu":{"directory":[{"label":"","exe":"~/tool"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"tools/relative"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":[""]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["."]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["folder/txt"]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["*media"]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["*"]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["txt*"]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"label":" ","items":[]}]}}"#,
+            r#"{"contextmenu":[{"label":"","exe":"~/tool"}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"tools/relative"}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":[""]}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":["."]}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":["folder/txt"]}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":["*media"]}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":["*"]}]}"#,
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","only":["txt*"]}]}"#,
+            r#"{"contextmenu":[{"label":" ","items":[]}]}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
             assert!(validate_settings(&settings).is_err());
@@ -1734,31 +1878,26 @@ mod tests {
 
         sync_settings_document(&mut document, &settings);
 
-        assert_eq!(document["contextmenu"]["directory"][0]["note"], "parent");
+        assert!(document["contextmenu"].is_array());
+        assert_eq!(document["contextmenu"][0]["note"], "parent");
+        assert_eq!(document["contextmenu"][0]["items"][0]["note"], "child");
         assert_eq!(
-            document["contextmenu"]["directory"][0]["items"][0]["note"],
-            "child"
-        );
-        assert_eq!(
-            document["contextmenu"]["directory"][0]["items"][0]["exe"],
+            document["contextmenu"][0]["items"][0]["exe"],
             "~/bin/inspect"
         );
         assert_eq!(
-            document["contextmenu"]["directory"][0]["items"][0]["args"],
+            document["contextmenu"][0]["items"][0]["args"],
             serde_json::json!(["--line", "two words"])
         );
-        assert!(
-            document["contextmenu"]["directory"][0]
-                .get("kind")
-                .is_none()
+        assert_eq!(
+            document["contextmenu"][0]["items"][0]["only"],
+            serde_json::json!(["*directory"])
         );
+        assert!(document["contextmenu"].get("directory").is_none());
+        assert!(document["contextmenu"][0].get("kind").is_none());
+        assert!(document["contextmenu"][0]["items"][0].get("kind").is_none());
         assert!(
-            document["contextmenu"]["directory"][0]["items"][0]
-                .get("kind")
-                .is_none()
-        );
-        assert!(
-            document["contextmenu"]["directory"][0]["items"][0]
+            document["contextmenu"][0]["items"][0]
                 .get("executable")
                 .is_none()
         );
@@ -1767,48 +1906,30 @@ mod tests {
     #[test]
     fn contextmenu_sync_writes_exe_and_only_for_items() {
         let mut document: Value = serde_json::json!({
-            "contextmenu": {
-                "directory": []
-            }
+            "contextmenu": []
         });
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
-                directory: vec![CustomContextMenuItem::Item {
+                items: vec![CustomContextMenuItem::Item {
                     label: "Inspect".to_owned(),
                     exe: PathBuf::from("~/bin/inspect"),
                     args: Vec::new(),
                     only: vec!["rs".to_owned(), ".toml".to_owned()],
                 }],
-                file_folder: Vec::new(),
             },
             ..ExplorerSettings::default()
         };
 
         sync_settings_document(&mut document, &settings);
 
+        assert_eq!(document["contextmenu"][0]["exe"], "~/bin/inspect");
         assert_eq!(
-            document["contextmenu"]["directory"][0]["exe"],
-            "~/bin/inspect"
-        );
-        assert_eq!(
-            document["contextmenu"]["directory"][0]["only"],
+            document["contextmenu"][0]["only"],
             serde_json::json!(["rs", ".toml"])
         );
-        assert!(
-            document["contextmenu"]["directory"][0]
-                .get("args")
-                .is_none()
-        );
-        assert!(
-            document["contextmenu"]["directory"][0]
-                .get("executable")
-                .is_none()
-        );
-        assert!(
-            document["contextmenu"]["directory"][0]
-                .get("kind")
-                .is_none()
-        );
+        assert!(document["contextmenu"][0].get("args").is_none());
+        assert!(document["contextmenu"][0].get("executable").is_none());
+        assert!(document["contextmenu"][0].get("kind").is_none());
     }
 
     #[test]
@@ -1844,25 +1965,25 @@ mod tests {
         let document: Value = serde_json::from_str(&normalized).unwrap();
 
         assert!(matches!(
-            &loaded.value.contextmenu.directory[0],
+            &loaded.value.contextmenu.items[0],
             CustomContextMenuItem::Submenu { items, .. }
-                if matches!(&items[0], CustomContextMenuItem::Item { exe, .. } if exe == Path::new("~/bin/inspect"))
+                if matches!(
+                    &items[0],
+                    CustomContextMenuItem::Item { exe, only, .. }
+                        if exe == Path::new("~/bin/inspect")
+                            && only == &vec!["*directory".to_owned()]
+                )
         ));
-        assert_eq!(document["contextmenu"]["directory"][0]["note"], "parent");
+        assert!(document["contextmenu"].is_array());
+        assert_eq!(document["contextmenu"][0]["note"], "parent");
+        assert_eq!(document["contextmenu"][0]["items"][0]["note"], "child");
         assert_eq!(
-            document["contextmenu"]["directory"][0]["items"][0]["note"],
-            "child"
+            document["contextmenu"][0]["items"][0]["only"],
+            serde_json::json!(["*directory"])
         );
-        assert!(
-            document["contextmenu"]["directory"][0]
-                .get("kind")
-                .is_none()
-        );
-        assert!(
-            document["contextmenu"]["directory"][0]["items"][0]
-                .get("kind")
-                .is_none()
-        );
+        assert!(document["contextmenu"].get("directory").is_none());
+        assert!(document["contextmenu"][0].get("kind").is_none());
+        assert!(document["contextmenu"][0]["items"][0].get("kind").is_none());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

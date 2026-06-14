@@ -165,7 +165,7 @@ impl ExplorerView {
         self.open_utility_menu = None;
         let custom_items = cx
             .try_global::<crate::settings::SettingsState>()
-            .map(|settings| settings.value.contextmenu.directory.clone())
+            .map(|settings| settings.value.contextmenu.items.clone())
             .unwrap_or_default();
         self.context_menu = Some(ContextMenuState::new(
             origin,
@@ -231,7 +231,7 @@ impl ExplorerView {
         let selected_context = self.selected_entry_context();
         let custom_items = cx
             .try_global::<crate::settings::SettingsState>()
-            .map(|settings| settings.value.contextmenu.file_folder.clone())
+            .map(|settings| settings.value.contextmenu.items.clone())
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
@@ -274,7 +274,7 @@ impl ExplorerView {
         let selected_context = self.selected_entry_context();
         let custom_items = cx
             .try_global::<crate::settings::SettingsState>()
-            .map(|settings| settings.value.contextmenu.file_folder.clone())
+            .map(|settings| settings.value.contextmenu.items.clone())
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
@@ -631,7 +631,7 @@ fn entry_context_menu_items_with_custom(
         &mut items,
         custom_items,
         targets,
-        Some(selected_entries),
+        CustomContextMenuTarget::Entries(selected_entries),
     );
 
     items.extend([
@@ -690,7 +690,7 @@ fn folder_context_menu_items_with_custom(
         &mut items,
         custom_items,
         &[path.to_path_buf()],
-        None,
+        CustomContextMenuTarget::Directory,
     );
     items
 }
@@ -762,13 +762,13 @@ fn insert_custom_items_after_first_separator(
     items: &mut Vec<ContextMenuItem>,
     configured: &[CustomContextMenuItem],
     targets: &[PathBuf],
-    selected_entries: Option<&[FileEntry]>,
+    target: CustomContextMenuTarget<'_>,
 ) {
     let custom = configured
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            configured_context_menu_item(item, targets, selected_entries, &index.to_string())
+            configured_context_menu_item(item, targets, target, &index.to_string())
         })
         .collect::<Vec<_>>();
     if custom.is_empty() {
@@ -790,14 +790,14 @@ fn insert_custom_items_after_first_separator(
 fn configured_context_menu_item(
     item: &CustomContextMenuItem,
     targets: &[PathBuf],
-    selected_entries: Option<&[FileEntry]>,
+    target: CustomContextMenuTarget<'_>,
     id_suffix: &str,
 ) -> Option<ContextMenuItem> {
     match item {
         CustomContextMenuItem::Item {
             label, args, only, ..
         } => {
-            if !context_menu_item_matches_only(only, selected_entries) {
+            if !context_menu_item_matches_only(only, target) {
                 return None;
             }
             let executable = item.resolved_executable()?;
@@ -822,7 +822,7 @@ fn configured_context_menu_item(
                     configured_context_menu_item(
                         item,
                         targets,
-                        selected_entries,
+                        target,
                         &format!("{id_suffix}-{index}"),
                     )
                 })
@@ -837,54 +837,66 @@ fn configured_context_menu_item(
     }
 }
 
-fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[FileEntry]>) -> bool {
-    if only.is_empty() {
-        return true;
-    }
+#[derive(Clone, Copy)]
+enum CustomContextMenuTarget<'a> {
+    Directory,
+    Entries(&'a [FileEntry]),
+}
 
-    let Some(selected_entries) = selected_entries.filter(|entries| !entries.is_empty()) else {
-        return false;
-    };
+fn context_menu_item_matches_only(only: &[String], target: CustomContextMenuTarget<'_>) -> bool {
     let filters = only
         .iter()
         .filter_map(|extension| resolve_context_menu_only_filter(extension))
         .collect::<Vec<_>>();
-    if filters.is_empty() {
-        return false;
-    }
 
-    let matches_files = filters
-        .iter()
-        .any(|filter| matches!(filter, ContextMenuOnlyFilter::Files));
-    let matches_folders = filters
-        .iter()
-        .any(|filter| matches!(filter, ContextMenuOnlyFilter::Folders));
-    if matches_files || matches_folders {
-        return (matches_files && selected_entries.iter().all(entry_is_file_open_target))
-            || (matches_folders
-                && selected_entries
-                    .iter()
-                    .all(|entry| directory_new_tab_target(entry).is_some()));
+    match target {
+        CustomContextMenuTarget::Directory => filters
+            .iter()
+            .any(|filter| matches!(filter, ContextMenuOnlyFilter::Directory)),
+        CustomContextMenuTarget::Entries(selected_entries) => {
+            if only.is_empty() {
+                return true;
+            }
+            if selected_entries.is_empty() || filters.is_empty() {
+                return false;
+            }
+            selected_entries
+                .iter()
+                .all(|entry| context_menu_entry_matches_any_filter(entry, &filters))
+        }
     }
+}
 
-    selected_entries.iter().all(|entry| {
-        entry_is_file_open_target(entry)
-            && entry
-                .path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .map(|extension| {
-                    let extension = extension.to_ascii_lowercase();
-                    filters.iter().any(|filter| match filter {
-                        ContextMenuOnlyFilter::Extension(candidate) => candidate == &extension,
-                        ContextMenuOnlyFilter::Alias(candidates) => {
-                            candidates.contains(&extension.as_str())
-                        }
-                        ContextMenuOnlyFilter::Files | ContextMenuOnlyFilter::Folders => false,
-                    })
-                })
-                .unwrap_or(false)
-    })
+fn context_menu_entry_matches_any_filter(
+    entry: &FileEntry,
+    filters: &[ContextMenuOnlyFilter],
+) -> bool {
+    filters
+        .iter()
+        .any(|filter| context_menu_entry_matches_filter(entry, filter))
+}
+
+fn context_menu_entry_matches_filter(entry: &FileEntry, filter: &ContextMenuOnlyFilter) -> bool {
+    match filter {
+        ContextMenuOnlyFilter::Directory => false,
+        ContextMenuOnlyFilter::File => entry_is_file_open_target(entry),
+        ContextMenuOnlyFilter::Folder => directory_new_tab_target(entry).is_some(),
+        ContextMenuOnlyFilter::Extension(candidate) => {
+            entry_file_extension(entry).is_some_and(|extension| candidate == &extension)
+        }
+        ContextMenuOnlyFilter::Alias(candidates) => entry_file_extension(entry)
+            .is_some_and(|extension| candidates.contains(&extension.as_str())),
+    }
+}
+
+fn entry_file_extension(entry: &FileEntry) -> Option<String> {
+    entry_is_file_open_target(entry).then(|| {
+        entry
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+    })?
 }
 
 pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]) -> bool {
@@ -1802,6 +1814,30 @@ mod tests {
     }
 
     #[test]
+    fn configured_entry_items_ignore_directory_only_filter_and_match_additive_extensions() {
+        let directory_only = custom_menu_for_entries(
+            "Directory only",
+            &["*directory"],
+            vec![FileEntry::test("photo.png", false, Some(1), None)],
+        );
+        assert!(!menu_has_label(&directory_only, "Directory only"));
+
+        let png_or_directory = custom_menu_for_entries(
+            "Png or directory",
+            &[".png", "*directory"],
+            vec![FileEntry::test("photo.PNG", false, Some(1), None)],
+        );
+        assert!(menu_has_label(&png_or_directory, "Png or directory"));
+
+        let non_png = custom_menu_for_entries(
+            "Png or directory",
+            &[".png", "*directory"],
+            vec![FileEntry::test("report.txt", false, Some(1), None)],
+        );
+        assert!(!menu_has_label(&non_png, "Png or directory"));
+    }
+
+    #[test]
     fn configured_entry_items_filter_by_only_media_aliases() {
         let image_items = custom_menu_for_entries(
             "Image tool",
@@ -1865,10 +1901,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_entry_items_filter_by_only_file_and_folder_aliases() {
+    fn configured_entry_items_filter_by_only_file_and_folder_aliases_additively() {
         let file_items = custom_menu_for_entries(
             "Files tool",
-            &["*files"],
+            &["*file"],
             vec![
                 FileEntry::test("readme.txt", false, Some(1), None),
                 FileEntry::test("archive", false, Some(1), None),
@@ -1888,7 +1924,7 @@ mod tests {
 
         let folder_items = custom_menu_for_entries(
             "Folders tool",
-            &["*folders"],
+            &["*folder"],
             vec![
                 FileEntry::test("src", true, None, None),
                 FileEntry::test("target", true, None, None),
@@ -1908,21 +1944,21 @@ mod tests {
 
         let file_for_folders = custom_menu_for_entries(
             "Folders tool",
-            &["*folders"],
+            &["*folder"],
             vec![FileEntry::test("readme.txt", false, Some(1), None)],
         );
         assert!(!menu_has_label(&file_for_folders, "Folders tool"));
 
         let folder_for_files = custom_menu_for_entries(
             "Files tool",
-            &["*files"],
+            &["*file"],
             vec![FileEntry::test("src", true, None, None)],
         );
         assert!(!menu_has_label(&folder_for_files, "Files tool"));
 
         let mixed_for_files = custom_menu_for_entries(
             "Files tool",
-            &["*files"],
+            &["*file"],
             vec![
                 FileEntry::test("readme.txt", false, Some(1), None),
                 FileEntry::test("src", true, None, None),
@@ -1932,7 +1968,7 @@ mod tests {
 
         let mixed_for_folders = custom_menu_for_entries(
             "Folders tool",
-            &["*folders"],
+            &["*folder"],
             vec![
                 FileEntry::test("readme.txt", false, Some(1), None),
                 FileEntry::test("src", true, None, None),
@@ -1941,28 +1977,28 @@ mod tests {
         assert!(!menu_has_label(&mixed_for_folders, "Folders tool"));
 
         let both_for_files = custom_menu_for_entries(
-            "Any homogeneous kind",
-            &["*files", "*folders"],
+            "Any item kind",
+            &["*file", "*folder"],
             vec![FileEntry::test("readme.txt", false, Some(1), None)],
         );
-        assert!(menu_has_label(&both_for_files, "Any homogeneous kind"));
+        assert!(menu_has_label(&both_for_files, "Any item kind"));
 
         let both_for_folders = custom_menu_for_entries(
-            "Any homogeneous kind",
-            &["*files", "*folders"],
+            "Any item kind",
+            &["*file", "*folder"],
             vec![FileEntry::test("src", true, None, None)],
         );
-        assert!(menu_has_label(&both_for_folders, "Any homogeneous kind"));
+        assert!(menu_has_label(&both_for_folders, "Any item kind"));
 
         let both_for_mixed = custom_menu_for_entries(
-            "Any homogeneous kind",
-            &["*files", "*folders"],
+            "Any item kind",
+            &["*file", "*folder"],
             vec![
                 FileEntry::test("readme.txt", false, Some(1), None),
                 FileEntry::test("src", true, None, None),
             ],
         );
-        assert!(!menu_has_label(&both_for_mixed, "Any homogeneous kind"));
+        assert!(menu_has_label(&both_for_mixed, "Any item kind"));
     }
 
     #[test]
@@ -2059,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_directory_items_receive_current_directory_and_empty_submenus_are_omitted() {
+    fn configured_directory_items_require_directory_only_filter_and_receive_current_directory() {
         let directory = PathBuf::from("current");
         let executable = configured_executable_path();
         let configured = vec![
@@ -2068,10 +2104,22 @@ mod tests {
                 items: Vec::new(),
             },
             CustomContextMenuItem::Item {
-                label: "Inspect directory".to_owned(),
+                label: "Implicit entry-only".to_owned(),
                 exe: executable.clone(),
                 args: Vec::new(),
                 only: Vec::new(),
+            },
+            CustomContextMenuItem::Item {
+                label: "Inspect directory".to_owned(),
+                exe: executable.clone(),
+                args: Vec::new(),
+                only: vec!["*directory".to_owned()],
+            },
+            CustomContextMenuItem::Item {
+                label: "Png or directory".to_owned(),
+                exe: executable.clone(),
+                args: Vec::new(),
+                only: vec![".png".to_owned(), "*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Text-only directory".to_owned(),
@@ -2083,7 +2131,7 @@ mod tests {
                 label: "Folder-only directory".to_owned(),
                 exe: executable,
                 args: Vec::new(),
-                only: vec!["*folders".to_owned()],
+                only: vec!["*folder".to_owned()],
             },
         ];
 
@@ -2102,7 +2150,9 @@ mod tests {
                 ..
             } if targets == &[directory]
         ));
-        assert!(matches!(items[4], ContextMenuItem::Separator));
+        assert!(menu_has_label(&items, "Png or directory"));
+        assert!(matches!(items[5], ContextMenuItem::Separator));
+        assert!(!menu_has_label(&items, "Implicit entry-only"));
         assert!(!menu_has_label(&items, "Text-only directory"));
         assert!(!menu_has_label(&items, "Folder-only directory"));
         assert!(!items.iter().any(
