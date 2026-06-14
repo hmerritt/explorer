@@ -9,7 +9,7 @@ use std::{
 
 use gpui::{App, BorrowAppContext, Font, Global, SharedString, font};
 use notify::{RecursiveMode, Watcher};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeMap};
 use serde_json::Value;
 
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
@@ -76,20 +76,78 @@ pub struct ContextMenuSettings {
     pub file_folder: Vec<CustomContextMenuItem>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CustomContextMenuItem {
     Item {
         label: String,
-        #[serde(rename = "exe", alias = "executable")]
         exe: PathBuf,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         only: Vec<String>,
     },
     Submenu {
         label: String,
         items: Vec<CustomContextMenuItem>,
     },
+}
+
+impl Serialize for CustomContextMenuItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Item { label, exe, only } => {
+                let mut map =
+                    serializer.serialize_map(Some(if only.is_empty() { 2 } else { 3 }))?;
+                map.serialize_entry("label", label)?;
+                map.serialize_entry("exe", exe)?;
+                if !only.is_empty() {
+                    map.serialize_entry("only", only)?;
+                }
+                map.end()
+            }
+            Self::Submenu { label, items } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("label", label)?;
+                map.serialize_entry("items", items)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CustomContextMenuItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| de::Error::custom("contextmenu items must be objects"))?;
+        let label = object
+            .remove("label")
+            .ok_or_else(|| de::Error::missing_field("label"))
+            .and_then(|value| serde_json::from_value(value).map_err(de::Error::custom))?;
+
+        if let Some(items) = object.remove("items") {
+            let items = serde_json::from_value(items).map_err(de::Error::custom)?;
+            return Ok(Self::Submenu { label, items });
+        }
+
+        let exe = object
+            .remove("exe")
+            .or_else(|| object.remove("executable"))
+            .ok_or_else(|| de::Error::missing_field("exe"))
+            .and_then(|value| serde_json::from_value(value).map_err(de::Error::custom))?;
+        let only = object
+            .remove("only")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(de::Error::custom)?
+            .unwrap_or_default();
+
+        Ok(Self::Item { label, exe, only })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -935,10 +993,11 @@ fn sync_custom_context_menu_items(document: &mut Value, configured: &[CustomCont
             .unwrap_or(Value::Null);
         let existing_children = value.get("items").cloned();
         merge_known_value(&mut value, &known);
-        if matches!(item, CustomContextMenuItem::Item { .. })
-            && let Some(object) = value.as_object_mut()
-        {
-            object.remove("executable");
+        if let Some(object) = value.as_object_mut() {
+            object.remove("kind");
+            if matches!(item, CustomContextMenuItem::Item { .. }) {
+                object.remove("executable");
+            }
         }
 
         if let CustomContextMenuItem::Submenu {
@@ -1265,11 +1324,9 @@ mod tests {
                 "contextmenu": {
                     "file_folder": [
                         {
-                            "kind": "submenu",
                             "label": "Tools",
                             "items": [
                                 {
-                                    "kind": "item",
                                     "label": "Inspect",
                                     "exe": "~/bin/inspect",
                                     "only": ["txt", ".MD"]
@@ -1302,11 +1359,9 @@ mod tests {
                 "contextmenu": {
                     "file_folder": [
                         {
-                            "kind": "submenu",
                             "label": "Tools",
                             "items": [
                                 {
-                                    "kind": "item",
                                     "label": "Inspect",
                                     "executable": "rustc"
                                 }
@@ -1328,6 +1383,70 @@ mod tests {
                         if exe == Path::new("rustc") && only.is_empty()
                 )
         ));
+    }
+
+    #[test]
+    fn contextmenu_items_accept_legacy_kind_fields() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "kind": "submenu",
+                            "label": "Tools",
+                            "items": [
+                                {
+                                    "kind": "item",
+                                    "label": "Inspect",
+                                    "exe": "~/bin/inspect"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize legacy context menu");
+
+        assert!(matches!(
+            &settings.contextmenu.directory[0],
+            CustomContextMenuItem::Submenu { items, .. }
+                if matches!(&items[0], CustomContextMenuItem::Item { exe, .. } if exe == Path::new("~/bin/inspect"))
+        ));
+    }
+
+    #[test]
+    fn contextmenu_items_infer_submenu_when_items_exists() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "kind": "item",
+                            "label": "Tools",
+                            "exe": "~/bin/ignored",
+                            "items": []
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize inferred submenu");
+
+        assert!(matches!(
+            &settings.contextmenu.directory[0],
+            CustomContextMenuItem::Submenu { items, .. } if items.is_empty()
+        ));
+    }
+
+    #[test]
+    fn contextmenu_items_without_items_require_executable() {
+        let error = serde_json::from_str::<ExplorerSettings>(
+            r#"{"contextmenu":{"directory":[{"label":"Missing command"}]}}"#,
+        )
+        .expect_err("missing executable should fail");
+
+        assert!(error.to_string().contains("exe"));
     }
 
     #[test]
@@ -1404,12 +1523,12 @@ mod tests {
     #[test]
     fn contextmenu_rejects_empty_labels_relative_subpaths_and_invalid_only_extensions() {
         for json in [
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"","exe":"~/tool"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"tools/relative"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":[""]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":["."]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":["folder/txt"]}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"submenu","label":" ","items":[]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"","exe":"~/tool"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"tools/relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":[""]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["."]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["folder/txt"]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":" ","items":[]}]}}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
             assert!(validate_settings(&settings).is_err());
@@ -1454,6 +1573,16 @@ mod tests {
             "~/bin/inspect"
         );
         assert!(
+            document["contextmenu"]["directory"][0]
+                .get("kind")
+                .is_none()
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]["items"][0]
+                .get("kind")
+                .is_none()
+        );
+        assert!(
             document["contextmenu"]["directory"][0]["items"][0]
                 .get("executable")
                 .is_none()
@@ -1494,6 +1623,66 @@ mod tests {
                 .get("executable")
                 .is_none()
         );
+        assert!(
+            document["contextmenu"]["directory"][0]
+                .get("kind")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn contextmenu_load_normalizes_away_legacy_kind_fields() {
+        let path = unique_temp_dir("normalize-contextmenu-kind").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "kind": "submenu",
+                            "label": "Tools",
+                            "note": "parent",
+                            "items": [
+                                {
+                                    "kind": "item",
+                                    "label": "Inspect",
+                                    "exe": "~/bin/inspect",
+                                    "note": "child"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        let normalized = fs::read_to_string(&path).unwrap();
+        let document: Value = serde_json::from_str(&normalized).unwrap();
+
+        assert!(matches!(
+            &loaded.value.contextmenu.directory[0],
+            CustomContextMenuItem::Submenu { items, .. }
+                if matches!(&items[0], CustomContextMenuItem::Item { exe, .. } if exe == Path::new("~/bin/inspect"))
+        ));
+        assert_eq!(document["contextmenu"]["directory"][0]["note"], "parent");
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["items"][0]["note"],
+            "child"
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]
+                .get("kind")
+                .is_none()
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]["items"][0]
+                .get("kind")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
