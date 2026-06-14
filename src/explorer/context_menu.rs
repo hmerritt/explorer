@@ -806,6 +806,20 @@ fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[Fi
         return false;
     }
 
+    let matches_files = filters
+        .iter()
+        .any(|filter| matches!(filter, ContextMenuOnlyFilter::Files));
+    let matches_folders = filters
+        .iter()
+        .any(|filter| matches!(filter, ContextMenuOnlyFilter::Folders));
+    if matches_files || matches_folders {
+        return (matches_files && selected_entries.iter().all(entry_is_file_open_target))
+            || (matches_folders
+                && selected_entries
+                    .iter()
+                    .all(|entry| directory_new_tab_target(entry).is_some()));
+    }
+
     selected_entries.iter().all(|entry| {
         entry_is_file_open_target(entry)
             && entry
@@ -819,6 +833,7 @@ fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[Fi
                         ContextMenuOnlyFilter::Alias(candidates) => {
                             candidates.contains(&extension.as_str())
                         }
+                        ContextMenuOnlyFilter::Files | ContextMenuOnlyFilter::Folders => false,
                     })
                 })
                 .unwrap_or(false)
@@ -954,6 +969,17 @@ mod tests {
             .iter()
             .map(|entry| entry.path.clone())
             .collect::<Vec<_>>();
+        let selected_file_count = selected_entries
+            .iter()
+            .filter(|entry| entry_is_file_open_target(entry))
+            .count();
+        let selected_directory_count = selected_entries
+            .iter()
+            .filter(|entry| directory_new_tab_target(entry).is_some())
+            .count();
+        let single_directory_open_target = (selected_entries.len() == 1)
+            .then(|| directory_new_tab_target(&selected_entries[0]))
+            .flatten();
         let configured = vec![CustomContextMenuItem::Item {
             label: label.to_owned(),
             exe: executable,
@@ -961,10 +987,10 @@ mod tests {
         }];
 
         entry_context_menu_items_with_custom(
-            None,
+            single_directory_open_target,
             selected_entries.len(),
-            selected_entries.len(),
-            0,
+            selected_file_count,
+            selected_directory_count,
             false,
             false,
             &configured,
@@ -1779,6 +1805,107 @@ mod tests {
     }
 
     #[test]
+    fn configured_entry_items_filter_by_only_file_and_folder_aliases() {
+        let file_items = custom_menu_for_entries(
+            "Files tool",
+            &["*files"],
+            vec![
+                FileEntry::test("readme.txt", false, Some(1), None),
+                FileEntry::test("archive", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&file_items, "Files tool"));
+
+        let files_with_extension_override = custom_menu_for_entries(
+            "Files override",
+            &["*files", "png"],
+            vec![FileEntry::test("readme.txt", false, Some(1), None)],
+        );
+        assert!(menu_has_label(
+            &files_with_extension_override,
+            "Files override"
+        ));
+
+        let folder_items = custom_menu_for_entries(
+            "Folders tool",
+            &["*folders"],
+            vec![
+                FileEntry::test("src", true, None, None),
+                FileEntry::test("target", true, None, None),
+            ],
+        );
+        assert!(menu_has_label(&folder_items, "Folders tool"));
+
+        let folders_with_extension_override = custom_menu_for_entries(
+            "Folders override",
+            &["*folders", "txt"],
+            vec![FileEntry::test("src", true, None, None)],
+        );
+        assert!(menu_has_label(
+            &folders_with_extension_override,
+            "Folders override"
+        ));
+
+        let file_for_folders = custom_menu_for_entries(
+            "Folders tool",
+            &["*folders"],
+            vec![FileEntry::test("readme.txt", false, Some(1), None)],
+        );
+        assert!(!menu_has_label(&file_for_folders, "Folders tool"));
+
+        let folder_for_files = custom_menu_for_entries(
+            "Files tool",
+            &["*files"],
+            vec![FileEntry::test("src", true, None, None)],
+        );
+        assert!(!menu_has_label(&folder_for_files, "Files tool"));
+
+        let mixed_for_files = custom_menu_for_entries(
+            "Files tool",
+            &["*files"],
+            vec![
+                FileEntry::test("readme.txt", false, Some(1), None),
+                FileEntry::test("src", true, None, None),
+            ],
+        );
+        assert!(!menu_has_label(&mixed_for_files, "Files tool"));
+
+        let mixed_for_folders = custom_menu_for_entries(
+            "Folders tool",
+            &["*folders"],
+            vec![
+                FileEntry::test("readme.txt", false, Some(1), None),
+                FileEntry::test("src", true, None, None),
+            ],
+        );
+        assert!(!menu_has_label(&mixed_for_folders, "Folders tool"));
+
+        let both_for_files = custom_menu_for_entries(
+            "Any homogeneous kind",
+            &["*files", "*folders"],
+            vec![FileEntry::test("readme.txt", false, Some(1), None)],
+        );
+        assert!(menu_has_label(&both_for_files, "Any homogeneous kind"));
+
+        let both_for_folders = custom_menu_for_entries(
+            "Any homogeneous kind",
+            &["*files", "*folders"],
+            vec![FileEntry::test("src", true, None, None)],
+        );
+        assert!(menu_has_label(&both_for_folders, "Any homogeneous kind"));
+
+        let both_for_mixed = custom_menu_for_entries(
+            "Any homogeneous kind",
+            &["*files", "*folders"],
+            vec![
+                FileEntry::test("readme.txt", false, Some(1), None),
+                FileEntry::test("src", true, None, None),
+            ],
+        );
+        assert!(!menu_has_label(&both_for_mixed, "Any homogeneous kind"));
+    }
+
+    #[test]
     fn configured_entry_only_filters_require_every_selected_file_to_match() {
         let executable = configured_executable_path();
         let configured = vec![CustomContextMenuItem::Item {
@@ -1885,8 +2012,13 @@ mod tests {
             },
             CustomContextMenuItem::Item {
                 label: "Text-only directory".to_owned(),
-                exe: executable,
+                exe: executable.clone(),
                 only: vec!["txt".to_owned()],
+            },
+            CustomContextMenuItem::Item {
+                label: "Folder-only directory".to_owned(),
+                exe: executable,
+                only: vec!["*folders".to_owned()],
             },
         ];
 
@@ -1907,6 +2039,7 @@ mod tests {
         ));
         assert!(matches!(items[4], ContextMenuItem::Separator));
         assert!(!menu_has_label(&items, "Text-only directory"));
+        assert!(!menu_has_label(&items, "Folder-only directory"));
         assert!(!items.iter().any(
             |item| matches!(item, ContextMenuItem::Submenu { label, .. } if label == "Empty")
         ));

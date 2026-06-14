@@ -761,11 +761,19 @@ fn validate_context_menu_only_extensions(extensions: &[String]) -> io::Result<()
 pub(crate) enum ContextMenuOnlyFilter {
     Extension(String),
     Alias(&'static [&'static str]),
+    Files,
+    Folders,
 }
 
 pub(crate) fn resolve_context_menu_only_filter(extension: &str) -> Option<ContextMenuOnlyFilter> {
     let extension = extension.trim();
     if let Some(alias) = extension.strip_prefix('*') {
+        match alias.to_ascii_lowercase().as_str() {
+            "files" => return Some(ContextMenuOnlyFilter::Files),
+            "folders" => return Some(ContextMenuOnlyFilter::Folders),
+            _ => {}
+        }
+
         return context_menu_only_alias_extensions(alias).map(ContextMenuOnlyFilter::Alias);
     }
 
@@ -1561,19 +1569,23 @@ mod tests {
     }
 
     #[test]
-    fn contextmenu_only_accepts_media_aliases() {
+    fn contextmenu_only_accepts_known_aliases() {
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
                 directory: Vec::new(),
                 file_folder: vec![CustomContextMenuItem::Item {
-                    label: "Media tool".to_owned(),
-                    exe: PathBuf::from("~/bin/media-tool"),
+                    label: "Known tool".to_owned(),
+                    exe: PathBuf::from("~/bin/known-tool"),
                     only: vec![
                         "*video".to_owned(),
                         "*photo".to_owned(),
                         "*image".to_owned(),
                         "*audio".to_owned(),
                         "*Video".to_owned(),
+                        "*files".to_owned(),
+                        "*folders".to_owned(),
+                        "*Files".to_owned(),
+                        "*Folders".to_owned(),
                     ],
                 }],
             },
