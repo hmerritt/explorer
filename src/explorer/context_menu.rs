@@ -20,6 +20,7 @@ pub(super) struct ContextMenuState {
     pub(super) items: Vec<ContextMenuItem>,
     pub(super) hovered_path: Vec<usize>,
     pub(super) source: Option<ContextMenuSource>,
+    pub(super) native_icon_entry: Option<FileEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,7 @@ pub(super) enum ContextMenuIcon {
     Rename,
     New,
     File,
+    NativeFile,
     Folder,
     FolderKind(Option<DirectoryKind>),
     NewTab,
@@ -94,6 +96,21 @@ impl ContextMenuState {
             items,
             hovered_path: Vec::new(),
             source: None,
+            native_icon_entry: None,
+        }
+    }
+
+    pub(super) fn new_with_native_icon_entry(
+        origin: Point<Pixels>,
+        items: Vec<ContextMenuItem>,
+        native_icon_entry: Option<FileEntry>,
+    ) -> Self {
+        Self {
+            origin,
+            items,
+            hovered_path: Vec::new(),
+            source: None,
+            native_icon_entry,
         }
     }
 
@@ -107,6 +124,7 @@ impl ContextMenuState {
             items,
             hovered_path: Vec::new(),
             source: Some(source),
+            native_icon_entry: None,
         }
     }
 }
@@ -185,7 +203,7 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
-        self.context_menu = Some(ContextMenuState::new(
+        self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items(
                 selected_context.single_directory_open_target,
@@ -193,7 +211,9 @@ impl ExplorerView {
                 selected_context.file_open_count,
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
+                selected_context.native_icon_entry.is_some(),
             ),
+            selected_context.native_icon_entry,
         ));
         true
     }
@@ -217,7 +237,7 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
-        self.context_menu = Some(ContextMenuState::new(
+        self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items(
                 selected_context.single_directory_open_target,
@@ -225,7 +245,9 @@ impl ExplorerView {
                 selected_context.file_open_count,
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
+                selected_context.native_icon_entry.is_some(),
             ),
+            selected_context.native_icon_entry,
         ));
         true
     }
@@ -292,12 +314,24 @@ impl ExplorerView {
         } else {
             None
         };
+        let native_icon_entry = if selected_count == 1 {
+            self.selection
+                .selected_indices
+                .iter()
+                .next()
+                .and_then(|ix| self.entries.get(*ix))
+                .filter(|entry| entry_is_file_open_target(entry))
+                .cloned()
+        } else {
+            None
+        };
 
         SelectedEntryContext {
             selected_count,
             file_open_count: file_open_targets.len(),
             directory_new_tab_count: directory_new_tab_targets.len(),
             single_directory_open_target,
+            native_icon_entry,
         }
     }
 
@@ -340,6 +374,7 @@ struct SelectedEntryContext {
     file_open_count: usize,
     directory_new_tab_count: usize,
     single_directory_open_target: Option<PathBuf>,
+    native_icon_entry: Option<FileEntry>,
 }
 
 pub(super) fn sidebar_context_menu_items(
@@ -382,6 +417,7 @@ pub(super) fn entry_context_menu_items(
     selected_file_count: usize,
     selected_directory_count: usize,
     can_rename: bool,
+    use_native_file_icon: bool,
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     if selected_count == 1 {
@@ -390,7 +426,11 @@ pub(super) fn entry_context_menu_items(
             None => ContextMenuCommand::OpenSelectedFiles,
         };
         let icon = if selected_file_count > 0 {
-            ContextMenuIcon::File
+            if use_native_file_icon {
+                ContextMenuIcon::NativeFile
+            } else {
+                ContextMenuIcon::File
+            }
         } else {
             ContextMenuIcon::FolderKind(None)
         };
@@ -789,6 +829,23 @@ mod tests {
         assert_ne!(first.origin, second.origin);
         assert_eq!(second.hovered_path, Vec::<usize>::new());
         assert_eq!(second.source, None);
+        assert_eq!(second.native_icon_entry, None);
+    }
+
+    #[test]
+    fn native_icon_state_retains_single_file_entry() {
+        let entry = FileEntry::test("report.txt", false, Some(1), None);
+        let state = ContextMenuState::new_with_native_icon_entry(
+            Point {
+                x: gpui::px(10.0),
+                y: gpui::px(20.0),
+            },
+            Vec::new(),
+            Some(entry.clone()),
+        );
+
+        assert_eq!(state.native_icon_entry, Some(entry));
+        assert_eq!(state.source, None);
     }
 
     #[test]
@@ -924,7 +981,7 @@ mod tests {
     #[test]
     fn entry_menu_for_single_folder_contains_open_actions_and_rename_state() {
         let path = PathBuf::from("/tmp/folder-target");
-        let items = entry_context_menu_items(Some(path.clone()), 1, 0, 1, false);
+        let items = entry_context_menu_items(Some(path.clone()), 1, 0, 1, false, false);
 
         assert_eq!(
             items,
@@ -977,7 +1034,7 @@ mod tests {
         );
 
         let enabled_items =
-            entry_context_menu_items(Some(PathBuf::from("/tmp/folder")), 1, 0, 1, true);
+            entry_context_menu_items(Some(PathBuf::from("/tmp/folder")), 1, 0, 1, true, false);
         assert!(matches!(
             enabled_items.last(),
             Some(ContextMenuItem::Action {
@@ -990,13 +1047,13 @@ mod tests {
 
     #[test]
     fn entry_menu_for_single_file_opens_selected_file_and_can_rename() {
-        let items = entry_context_menu_items(None, 1, 1, 0, true);
+        let items = entry_context_menu_items(None, 1, 1, 0, true, true);
 
         assert_eq!(
             items.first(),
             Some(&ContextMenuItem::Action {
                 id: "context-menu-entry-open",
-                icon: Some(ContextMenuIcon::File),
+                icon: Some(ContextMenuIcon::NativeFile),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenSelectedFiles,
                 enabled: true,
@@ -1014,7 +1071,7 @@ mod tests {
 
     #[test]
     fn entry_menu_for_files_only_multi_selection_opens_files_and_omits_rename() {
-        let items = entry_context_menu_items(None, 2, 2, 0, false);
+        let items = entry_context_menu_items(None, 2, 2, 0, false, false);
 
         assert_eq!(
             items,
@@ -1055,7 +1112,7 @@ mod tests {
 
     #[test]
     fn entry_menu_for_folders_only_multi_selection_opens_new_tabs_and_omits_rename() {
-        let items = entry_context_menu_items(None, 2, 0, 2, false);
+        let items = entry_context_menu_items(None, 2, 0, 2, false, false);
 
         assert_eq!(
             items,
@@ -1096,7 +1153,7 @@ mod tests {
 
     #[test]
     fn entry_menu_for_mixed_multi_selection_keeps_file_and_folder_open_actions() {
-        let items = entry_context_menu_items(None, 3, 1, 2, false);
+        let items = entry_context_menu_items(None, 3, 1, 2, false, false);
 
         assert!(matches!(
             items.first(),
@@ -1127,7 +1184,7 @@ mod tests {
 
     #[test]
     fn entry_menu_for_mixed_selection_uses_singular_new_tab_label() {
-        let items = entry_context_menu_items(None, 3, 2, 1, false);
+        let items = entry_context_menu_items(None, 3, 2, 1, false, false);
 
         assert!(matches!(
             items.get(1),
@@ -1137,6 +1194,21 @@ mod tests {
                 ..
             }) if label == "Open in new tab"
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn single_app_bundle_uses_native_file_icon_context() {
+        let entry = FileEntry::test("Preview.app", true, None, None);
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![entry.clone()];
+        view.select_single_index(0);
+
+        let context = view.selected_entry_context();
+
+        assert_eq!(context.file_open_count, 1);
+        assert_eq!(context.native_icon_entry, Some(entry));
+        assert_eq!(context.single_directory_open_target, None);
     }
 
     #[test]

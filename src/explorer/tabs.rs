@@ -1852,7 +1852,21 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["b.txt"]);
-            assert!(view.context_menu.is_some());
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert_eq!(
+                menu.native_icon_entry
+                    .as_ref()
+                    .map(|entry| entry.name.as_str()),
+                Some("b.txt")
+            );
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    icon: Some(crate::explorer::context_menu::ContextMenuIcon::NativeFile),
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                })
+            ));
         });
         assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
         assert!(cx.debug_bounds("context-menu-paste").is_none());
