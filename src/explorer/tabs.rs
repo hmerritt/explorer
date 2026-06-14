@@ -1484,7 +1484,7 @@ fn reorder_tab_ids(
 mod tests {
     use super::*;
     use crate::explorer::{
-        actions::{RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
+        actions::{MoveDown, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
@@ -2493,6 +2493,34 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(view.search_is_editing());
             assert_eq!(view.search_query(), "b");
+        });
+    }
+
+    #[gpui::test]
+    fn search_commit_opens_focused_entry_after_arrow_navigation(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) =
+            test_tabs_with_directories_and_files(cx, &["target-folder"], &["other.txt"]);
+        let view = active_test_view(&tabs, cx);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_search_edit(window, cx));
+                view.set_search_query("target".to_owned());
+                cx.notify();
+            });
+        });
+        cx.dispatch_action(MoveDown);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.search_is_editing());
+            assert_eq!(selected_names(view), vec!["target-folder"]);
+        });
+
+        cx.dispatch_action(SearchCommit);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.search_is_editing());
+            assert_eq!(view.path, temp.path().join("target-folder"));
         });
     }
 

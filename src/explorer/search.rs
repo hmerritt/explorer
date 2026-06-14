@@ -36,6 +36,7 @@ use crate::explorer::{
         SearchWordLeft, SearchWordRight,
     },
     entry::FileEntry,
+    navigation::EntryAction,
     recursive_search::{
         RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
         RecursiveSearchProgressSnapshot, recursive_search_entries,
@@ -364,6 +365,11 @@ impl ExplorerView {
     ) {
         self.finish_search_edit();
         self.focus_explorer(window);
+        if let Some(EntryAction::OpenFile(path)) =
+            self.activate_focused_entry_with_watcher(true, cx)
+        {
+            self.open_file_with_default_app(&path);
+        }
         cx.stop_propagation();
         cx.notify();
     }

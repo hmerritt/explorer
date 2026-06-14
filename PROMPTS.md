@@ -2,8 +2,6 @@
 
 ## 1
 
-- Fix search bug where after searching (while the input is focused) a user then navigates via arrow keys (down) to a file, and then press enter. Currently this enter first de-focuses the input and then enters the file/folder. My expectation would be that it should both de-focus the input and open the item
-
 - “Open with” picker
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
