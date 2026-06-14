@@ -14,7 +14,7 @@ use crate::explorer::{
     navigation::{HistoryMode, directory_new_tab_target},
     view::ExplorerView,
 };
-use crate::settings::CustomContextMenuItem;
+use crate::settings::{CustomContextMenuItem, normalized_context_menu_only_extension};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
@@ -230,6 +230,7 @@ impl ExplorerView {
             .map(|settings| settings.value.contextmenu.file_folder.clone())
             .unwrap_or_default();
         let targets = self.selected_paths();
+        let selected_entries = self.selected_entries();
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items_with_custom(
@@ -241,6 +242,7 @@ impl ExplorerView {
                 selected_context.native_icon_entry.is_some(),
                 &custom_items,
                 &targets,
+                &selected_entries,
             ),
             selected_context.native_icon_entry,
         ));
@@ -271,6 +273,7 @@ impl ExplorerView {
             .map(|settings| settings.value.contextmenu.file_folder.clone())
             .unwrap_or_default();
         let targets = self.selected_paths();
+        let selected_entries = self.selected_entries();
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items_with_custom(
@@ -282,6 +285,7 @@ impl ExplorerView {
                 selected_context.native_icon_entry.is_some(),
                 &custom_items,
                 &targets,
+                &selected_entries,
             ),
             selected_context.native_icon_entry,
         ));
@@ -414,6 +418,14 @@ impl ExplorerView {
             .collect()
     }
 
+    fn selected_entries(&self) -> Vec<FileEntry> {
+        self.selection
+            .selected_indices
+            .iter()
+            .filter_map(|ix| self.entries.get(*ix).cloned())
+            .collect()
+    }
+
     fn open_selected_files_with_default_app(&mut self) {
         for path in self.selected_file_open_targets() {
             self.open_file_with_default_app(&path);
@@ -503,6 +515,7 @@ pub(super) fn entry_context_menu_items(
         use_native_file_icon,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -515,6 +528,7 @@ fn entry_context_menu_items_with_custom(
     use_native_file_icon: bool,
     custom_items: &[CustomContextMenuItem],
     targets: &[PathBuf],
+    selected_entries: &[FileEntry],
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     if selected_count == 1 {
@@ -567,7 +581,12 @@ fn entry_context_menu_items_with_custom(
     if !items.is_empty() {
         items.push(ContextMenuItem::Separator);
     }
-    insert_custom_items_after_first_separator(&mut items, custom_items, targets);
+    insert_custom_items_after_first_separator(
+        &mut items,
+        custom_items,
+        targets,
+        Some(selected_entries),
+    );
 
     items.extend([
         ContextMenuItem::Action {
@@ -621,7 +640,12 @@ fn folder_context_menu_items_with_custom(
 
     let mut items =
         folder_context_menu_items_from_times_with_format(can_paste, created, modified, date_format);
-    insert_custom_items_after_first_separator(&mut items, custom_items, &[path.to_path_buf()]);
+    insert_custom_items_after_first_separator(
+        &mut items,
+        custom_items,
+        &[path.to_path_buf()],
+        None,
+    );
     items
 }
 
@@ -692,11 +716,14 @@ fn insert_custom_items_after_first_separator(
     items: &mut Vec<ContextMenuItem>,
     configured: &[CustomContextMenuItem],
     targets: &[PathBuf],
+    selected_entries: Option<&[FileEntry]>,
 ) {
     let custom = configured
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| configured_context_menu_item(item, targets, &index.to_string()))
+        .filter_map(|(index, item)| {
+            configured_context_menu_item(item, targets, selected_entries, &index.to_string())
+        })
         .collect::<Vec<_>>();
     if custom.is_empty() {
         return;
@@ -717,10 +744,14 @@ fn insert_custom_items_after_first_separator(
 fn configured_context_menu_item(
     item: &CustomContextMenuItem,
     targets: &[PathBuf],
+    selected_entries: Option<&[FileEntry]>,
     id_suffix: &str,
 ) -> Option<ContextMenuItem> {
     match item {
-        CustomContextMenuItem::Item { label, .. } => {
+        CustomContextMenuItem::Item { label, only, .. } => {
+            if !context_menu_item_matches_only(only, selected_entries) {
+                return None;
+            }
             let executable = item.resolved_executable()?;
             let icon_path = item.resolved_icon_path(&executable);
             Some(ContextMenuItem::Action {
@@ -739,7 +770,12 @@ fn configured_context_menu_item(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
-                    configured_context_menu_item(item, targets, &format!("{id_suffix}-{index}"))
+                    configured_context_menu_item(
+                        item,
+                        targets,
+                        selected_entries,
+                        &format!("{id_suffix}-{index}"),
+                    )
                 })
                 .collect::<Vec<_>>();
             (!children.is_empty()).then(|| ContextMenuItem::Submenu {
@@ -750,6 +786,36 @@ fn configured_context_menu_item(
             })
         }
     }
+}
+
+fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[FileEntry]>) -> bool {
+    if only.is_empty() {
+        return true;
+    }
+
+    let Some(selected_entries) = selected_entries.filter(|entries| !entries.is_empty()) else {
+        return false;
+    };
+    let normalized = only
+        .iter()
+        .filter_map(|extension| normalized_context_menu_only_extension(extension))
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    selected_entries.iter().all(|entry| {
+        entry_is_file_open_target(entry)
+            && entry
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| {
+                    let extension = extension.to_ascii_lowercase();
+                    normalized.iter().any(|candidate| candidate == &extension)
+                })
+                .unwrap_or(false)
+    })
 }
 
 pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]) -> bool {
@@ -860,6 +926,15 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("explorer-context-menu-{name}-{nanos}"))
+    }
+
+    fn menu_has_label(items: &[ContextMenuItem], expected: &str) -> bool {
+        items.iter().any(|item| match item {
+            ContextMenuItem::Action { label, .. } | ContextMenuItem::Submenu { label, .. } => {
+                label == expected
+            }
+            ContextMenuItem::Separator | ContextMenuItem::Detail { .. } => false,
+        })
     }
 
     use chrono::{Local, TimeZone};
@@ -1426,13 +1501,15 @@ mod tests {
         let configured = vec![
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
-                executable: executable.clone(),
+                exe: executable.clone(),
+                only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
                 label: "Tools".to_owned(),
                 items: vec![CustomContextMenuItem::Item {
                     label: "Deep inspect".to_owned(),
-                    executable: executable.clone(),
+                    exe: executable.clone(),
+                    only: Vec::new(),
                 }],
             },
         ];
@@ -1446,6 +1523,7 @@ mod tests {
             false,
             &configured,
             &targets,
+            &[],
         );
 
         assert!(matches!(items[2], ContextMenuItem::Separator));
@@ -1493,22 +1571,26 @@ mod tests {
         let configured = vec![
             CustomContextMenuItem::Item {
                 label: "Missing".to_owned(),
-                executable: missing.clone(),
+                exe: missing.clone(),
+                only: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
-                executable: executable.clone(),
+                exe: executable.clone(),
+                only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
                 label: "Tools".to_owned(),
                 items: vec![
                     CustomContextMenuItem::Item {
                         label: "Missing child".to_owned(),
-                        executable: missing.clone(),
+                        exe: missing.clone(),
+                        only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Deep inspect".to_owned(),
-                        executable: executable.clone(),
+                        exe: executable.clone(),
+                        only: Vec::new(),
                     },
                 ],
             },
@@ -1516,7 +1598,8 @@ mod tests {
                 label: "Empty".to_owned(),
                 items: vec![CustomContextMenuItem::Item {
                     label: "Only missing".to_owned(),
-                    executable: missing,
+                    exe: missing,
+                    only: Vec::new(),
                 }],
             },
         ];
@@ -1530,6 +1613,7 @@ mod tests {
             false,
             &configured,
             &targets,
+            &[],
         );
 
         assert!(matches!(
@@ -1556,6 +1640,137 @@ mod tests {
     }
 
     #[test]
+    fn configured_entry_items_filter_by_only_extensions() {
+        let executable = configured_executable_path();
+        let targets = vec![PathBuf::from("README.TXT")];
+        let selected_entries = vec![FileEntry::test("README.TXT", false, Some(1), None)];
+        let configured = vec![
+            CustomContextMenuItem::Item {
+                label: "Text tool".to_owned(),
+                exe: executable.clone(),
+                only: vec!["txt".to_owned(), ".MD".to_owned()],
+            },
+            CustomContextMenuItem::Item {
+                label: "Image tool".to_owned(),
+                exe: executable.clone(),
+                only: vec!["png".to_owned()],
+            },
+            CustomContextMenuItem::Item {
+                label: "Any tool".to_owned(),
+                exe: executable,
+                only: Vec::new(),
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+            &selected_entries,
+        );
+
+        assert!(menu_has_label(&items, "Text tool"));
+        assert!(menu_has_label(&items, "Any tool"));
+        assert!(!menu_has_label(&items, "Image tool"));
+    }
+
+    #[test]
+    fn configured_entry_only_filters_require_every_selected_file_to_match() {
+        let executable = configured_executable_path();
+        let configured = vec![CustomContextMenuItem::Item {
+            label: "Code tool".to_owned(),
+            exe: executable,
+            only: vec!["rs".to_owned(), ".toml".to_owned()],
+        }];
+        let matching_targets = vec![PathBuf::from("main.rs"), PathBuf::from("Cargo.TOML")];
+        let matching_entries = vec![
+            FileEntry::test("main.rs", false, Some(1), None),
+            FileEntry::test("Cargo.TOML", false, Some(1), None),
+        ];
+        let mixed_entries = vec![
+            FileEntry::test("main.rs", false, Some(1), None),
+            FileEntry::test("README.md", false, Some(1), None),
+        ];
+        let file_and_folder_entries = vec![
+            FileEntry::test("main.rs", false, Some(1), None),
+            FileEntry::test("src", true, None, None),
+        ];
+
+        let matching_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            2,
+            0,
+            false,
+            false,
+            &configured,
+            &matching_targets,
+            &matching_entries,
+        );
+        assert!(menu_has_label(&matching_items, "Code tool"));
+
+        let mixed_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            2,
+            0,
+            false,
+            false,
+            &configured,
+            &matching_targets,
+            &mixed_entries,
+        );
+        assert!(!menu_has_label(&mixed_items, "Code tool"));
+
+        let file_and_folder_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            1,
+            1,
+            false,
+            false,
+            &configured,
+            &matching_targets,
+            &file_and_folder_entries,
+        );
+        assert!(!menu_has_label(&file_and_folder_items, "Code tool"));
+    }
+
+    #[test]
+    fn configured_entry_only_filters_omit_empty_submenus() {
+        let executable = configured_executable_path();
+        let targets = vec![PathBuf::from("README.txt")];
+        let selected_entries = vec![FileEntry::test("README.txt", false, Some(1), None)];
+        let configured = vec![CustomContextMenuItem::Submenu {
+            label: "Tools".to_owned(),
+            items: vec![CustomContextMenuItem::Item {
+                label: "Image tool".to_owned(),
+                exe: executable,
+                only: vec!["png".to_owned()],
+            }],
+        }];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+            &selected_entries,
+        );
+
+        assert!(!menu_has_label(&items, "Tools"));
+    }
+
+    #[test]
     fn configured_directory_items_receive_current_directory_and_empty_submenus_are_omitted() {
         let directory = PathBuf::from("current");
         let executable = configured_executable_path();
@@ -1566,7 +1781,13 @@ mod tests {
             },
             CustomContextMenuItem::Item {
                 label: "Inspect directory".to_owned(),
-                executable: executable.clone(),
+                exe: executable.clone(),
+                only: Vec::new(),
+            },
+            CustomContextMenuItem::Item {
+                label: "Text-only directory".to_owned(),
+                exe: executable,
+                only: vec!["txt".to_owned()],
             },
         ];
 
@@ -1586,6 +1807,7 @@ mod tests {
             } if targets == &[directory]
         ));
         assert!(matches!(items[4], ContextMenuItem::Separator));
+        assert!(!menu_has_label(&items, "Text-only directory"));
         assert!(!items.iter().any(
             |item| matches!(item, ContextMenuItem::Submenu { label, .. } if label == "Empty")
         ));
@@ -1611,7 +1833,8 @@ mod tests {
         let targets = vec![PathBuf::from("a.txt")];
         let configured = vec![CustomContextMenuItem::Item {
             label: "Open in Zed".to_owned(),
-            executable: executable.clone(),
+            exe: executable.clone(),
+            only: Vec::new(),
         }];
 
         let items = entry_context_menu_items_with_custom(
@@ -1623,6 +1846,7 @@ mod tests {
             false,
             &configured,
             &targets,
+            &[],
         );
 
         assert!(matches!(

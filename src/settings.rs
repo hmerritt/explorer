@@ -81,7 +81,10 @@ pub struct ContextMenuSettings {
 pub enum CustomContextMenuItem {
     Item {
         label: String,
-        executable: PathBuf,
+        #[serde(rename = "exe", alias = "executable")]
+        exe: PathBuf,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        only: Vec<String>,
     },
     Submenu {
         label: String,
@@ -288,7 +291,7 @@ impl CustomContextMenuItem {
 
     pub(crate) fn resolved_executable(&self) -> Option<PathBuf> {
         match self {
-            Self::Item { executable, .. } => resolve_context_menu_executable(executable),
+            Self::Item { exe, .. } => resolve_context_menu_executable(exe),
             Self::Submenu { .. } => None,
         }
     }
@@ -642,8 +645,9 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
         }
 
         match item {
-            CustomContextMenuItem::Item { executable, .. } => {
-                validate_context_menu_executable(executable)?;
+            CustomContextMenuItem::Item { exe, only, .. } => {
+                validate_context_menu_executable(exe)?;
+                validate_context_menu_only_extensions(only)?;
             }
             CustomContextMenuItem::Submenu { items, .. } => {
                 validate_custom_context_menu_items(items)?;
@@ -679,6 +683,25 @@ fn validate_context_menu_executable(path: &Path) -> io::Result<()> {
             ),
         ))
     }
+}
+
+fn validate_context_menu_only_extensions(extensions: &[String]) -> io::Result<()> {
+    for extension in extensions {
+        normalized_context_menu_only_extension(extension).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("contextmenu only extensions must be file extensions: {extension}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn normalized_context_menu_only_extension(extension: &str) -> Option<String> {
+    let extension = extension.trim();
+    let extension = extension.strip_prefix('.').unwrap_or(extension);
+    (!extension.is_empty() && !extension.contains('/') && !extension.contains('\\'))
+        .then(|| extension.to_ascii_lowercase())
 }
 
 fn expand_configured_path(path: &Path) -> Option<PathBuf> {
@@ -912,6 +935,11 @@ fn sync_custom_context_menu_items(document: &mut Value, configured: &[CustomCont
             .unwrap_or(Value::Null);
         let existing_children = value.get("items").cloned();
         merge_known_value(&mut value, &known);
+        if matches!(item, CustomContextMenuItem::Item { .. })
+            && let Some(object) = value.as_object_mut()
+        {
+            object.remove("executable");
+        }
 
         if let CustomContextMenuItem::Submenu {
             items: child_items, ..
@@ -1243,7 +1271,8 @@ mod tests {
                                 {
                                     "kind": "item",
                                     "label": "Inspect",
-                                    "executable": "~/bin/inspect"
+                                    "exe": "~/bin/inspect",
+                                    "only": ["txt", ".MD"]
                                 }
                             ]
                         }
@@ -1259,8 +1288,9 @@ mod tests {
             CustomContextMenuItem::Submenu { items, .. }
                 if matches!(
                     &items[0],
-                    CustomContextMenuItem::Item { executable, .. }
-                        if executable == Path::new("~/bin/inspect")
+                    CustomContextMenuItem::Item { exe, only, .. }
+                        if exe == Path::new("~/bin/inspect")
+                            && only == &vec!["txt".to_owned(), ".MD".to_owned()]
                 )
         ));
     }
@@ -1294,8 +1324,8 @@ mod tests {
             CustomContextMenuItem::Submenu { items, .. }
                 if matches!(
                     &items[0],
-                    CustomContextMenuItem::Item { executable, .. }
-                        if executable == Path::new("rustc")
+                    CustomContextMenuItem::Item { exe, only, .. }
+                        if exe == Path::new("rustc") && only.is_empty()
                 )
         ));
     }
@@ -1309,11 +1339,13 @@ mod tests {
                 directory: vec![
                     CustomContextMenuItem::Item {
                         label: "Missing absolute".to_owned(),
-                        executable: missing_absolute.clone(),
+                        exe: missing_absolute.clone(),
+                        only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Missing PATH command".to_owned(),
-                        executable: PathBuf::from("definitely-not-an-explorer-test-command"),
+                        exe: PathBuf::from("definitely-not-an-explorer-test-command"),
+                        only: Vec::new(),
                     },
                 ],
                 file_folder: Vec::new(),
@@ -1370,10 +1402,13 @@ mod tests {
     }
 
     #[test]
-    fn contextmenu_rejects_empty_labels_and_relative_subpaths() {
+    fn contextmenu_rejects_empty_labels_relative_subpaths_and_invalid_only_extensions() {
         for json in [
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"","executable":"~/tool"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"tools/relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"","exe":"~/tool"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"tools/relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":[""]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":["."]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","exe":"~/tool","only":["folder/txt"]}]}}"#,
             r#"{"contextmenu":{"directory":[{"kind":"submenu","label":" ","items":[]}]}}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
@@ -1413,6 +1448,51 @@ mod tests {
         assert_eq!(
             document["contextmenu"]["directory"][0]["items"][0]["note"],
             "child"
+        );
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["items"][0]["exe"],
+            "~/bin/inspect"
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]["items"][0]
+                .get("executable")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn contextmenu_sync_writes_exe_and_only_for_items() {
+        let mut document: Value = serde_json::json!({
+            "contextmenu": {
+                "directory": []
+            }
+        });
+        let settings = ExplorerSettings {
+            contextmenu: ContextMenuSettings {
+                directory: vec![CustomContextMenuItem::Item {
+                    label: "Inspect".to_owned(),
+                    exe: PathBuf::from("~/bin/inspect"),
+                    only: vec!["rs".to_owned(), ".toml".to_owned()],
+                }],
+                file_folder: Vec::new(),
+            },
+            ..ExplorerSettings::default()
+        };
+
+        sync_settings_document(&mut document, &settings);
+
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["exe"],
+            "~/bin/inspect"
+        );
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["only"],
+            serde_json::json!(["rs", ".toml"])
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]
+                .get("executable")
+                .is_none()
         );
     }
 
