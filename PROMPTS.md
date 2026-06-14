@@ -2,6 +2,9 @@
 
 ## 1
 
+- If custom contextmenu settings item executable does not exist, do not render that specific item in the menu. Currently it will skip all items if one fails to resolve, it should only skip the failed ones
+- I would like to remove the custom contextmenu settings "kind" key and instead infer this. If "items" exists then always infer "submenu"
+
 - “Open with” picker
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px

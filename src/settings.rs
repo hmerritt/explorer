@@ -288,8 +288,15 @@ impl CustomContextMenuItem {
 
     pub(crate) fn resolved_executable(&self) -> Option<PathBuf> {
         match self {
-            Self::Item { executable, .. } => expand_configured_path(executable),
+            Self::Item { executable, .. } => resolve_context_menu_executable(executable),
             Self::Submenu { .. } => None,
+        }
+    }
+
+    pub(crate) fn resolved_icon_path(&self, executable: &Path) -> PathBuf {
+        match self {
+            Self::Item { .. } => context_menu_executable_icon_path(executable),
+            Self::Submenu { .. } => executable.to_path_buf(),
         }
     }
 }
@@ -636,7 +643,7 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
 
         match item {
             CustomContextMenuItem::Item { executable, .. } => {
-                validate_configured_path(executable)?;
+                validate_context_menu_executable(executable)?;
             }
             CustomContextMenuItem::Submenu { items, .. } => {
                 validate_custom_context_menu_items(items)?;
@@ -660,6 +667,21 @@ fn validate_configured_path(path: &Path) -> io::Result<()> {
     }
 }
 
+fn validate_context_menu_executable(path: &Path) -> io::Result<()> {
+    resolve_context_menu_executable(path).map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "contextmenu executables must be absolute, begin with ~/, or resolve from PATH: {}",
+                    path.display()
+                ),
+            ))
+        },
+        |_| Ok(()),
+    )
+}
+
 fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     if path.is_absolute() {
         return Some(path.to_path_buf());
@@ -671,6 +693,125 @@ fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     let text = path.to_str()?;
     let remainder = text.strip_prefix("~/")?;
     crate::explorer::user_home_dir().map(|home| home.join(remainder))
+}
+
+fn resolve_context_menu_executable(path: &Path) -> Option<PathBuf> {
+    resolve_context_menu_executable_with(
+        path,
+        current_config_platform(),
+        |name| env::var_os(name),
+        |path| path.is_file(),
+    )
+}
+
+fn resolve_context_menu_executable_with(
+    path: &Path,
+    platform: ConfigPlatform,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
+    mut is_file: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(path) = expand_configured_path(path) {
+        return Some(path);
+    }
+    if !is_path_executable_name(path) {
+        return None;
+    }
+
+    let path_var = env_var("PATH")?;
+    let pathext = (platform == ConfigPlatform::Windows)
+        .then(|| windows_path_extensions(env_var("PATHEXT")))
+        .unwrap_or_default();
+
+    for directory in env::split_paths(&path_var) {
+        let direct = directory.join(path);
+        if is_file(&direct) {
+            return Some(direct);
+        }
+
+        if platform == ConfigPlatform::Windows && path.extension().is_none() {
+            for extension in &pathext {
+                let candidate = directory.join(format!("{}{}", path.to_string_lossy(), extension));
+                if is_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn context_menu_executable_icon_path(executable: &Path) -> PathBuf {
+    context_menu_executable_icon_path_with(
+        executable,
+        current_config_platform(),
+        |path| fs::read_to_string(path),
+        |path| path.is_file(),
+    )
+}
+
+fn context_menu_executable_icon_path_with(
+    executable: &Path,
+    platform: ConfigPlatform,
+    mut read_to_string: impl FnMut(&Path) -> io::Result<String>,
+    mut is_file: impl FnMut(&Path) -> bool,
+) -> PathBuf {
+    if platform != ConfigPlatform::Windows {
+        return executable.to_path_buf();
+    }
+
+    let shim_path = executable.with_extension("shim");
+    let Some(target) = read_to_string(&shim_path)
+        .ok()
+        .and_then(|contents| scoop_shim_target_path(&contents))
+        .filter(|target| is_file(target))
+    else {
+        return executable.to_path_buf();
+    };
+
+    target
+}
+
+fn scoop_shim_target_path(contents: &str) -> Option<PathBuf> {
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix("path")?.trim_start();
+        let value = value.strip_prefix('=')?.trim_start();
+        let value = value.strip_prefix('"')?;
+        let (path, remainder) = value.split_once('"')?;
+        remainder.trim().is_empty().then(|| PathBuf::from(path))
+    })
+}
+
+fn is_path_executable_name(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    !text.is_empty() && text != "." && text != ".." && !text.contains('/') && !text.contains('\\')
+}
+
+fn windows_path_extensions(value: Option<OsString>) -> Vec<String> {
+    value
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            value
+                .split(';')
+                .filter(|extension| !extension.is_empty())
+                .map(|extension| {
+                    if extension.starts_with('.') {
+                        extension.to_owned()
+                    } else {
+                        format!(".{extension}")
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            [".COM", ".EXE", ".BAT", ".CMD"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
 }
 
 fn is_tilde_path(path: &Path) -> bool {
@@ -1126,10 +1267,46 @@ mod tests {
     }
 
     #[test]
-    fn contextmenu_rejects_empty_labels_and_relative_executables() {
+    fn contextmenu_items_accept_recursive_submenus_and_path_executables() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "file_folder": [
+                        {
+                            "kind": "submenu",
+                            "label": "Tools",
+                            "items": [
+                                {
+                                    "kind": "item",
+                                    "label": "Inspect",
+                                    "executable": "rustc"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize recursive context menu");
+
+        assert!(settings.contextmenu.file_folder[0].label() == "Tools");
+        assert!(matches!(
+            &settings.contextmenu.file_folder[0],
+            CustomContextMenuItem::Submenu { items, .. }
+                if matches!(
+                    &items[0],
+                    CustomContextMenuItem::Item { executable, .. }
+                        if executable == Path::new("rustc")
+                )
+        ));
+    }
+
+    #[test]
+    fn contextmenu_rejects_empty_labels_relative_subpaths_and_missing_path_executables() {
         for json in [
             r#"{"contextmenu":{"directory":[{"kind":"item","label":"","executable":"~/tool"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"tools/relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"definitely-not-an-explorer-test-command"}]}}"#,
             r#"{"contextmenu":{"directory":[{"kind":"submenu","label":" ","items":[]}]}}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
@@ -1370,6 +1547,162 @@ mod tests {
         assert!(validate_configured_path(Path::new("~/Downloads")).is_ok());
         assert!(validate_configured_path(Path::new("~other/Downloads")).is_err());
         assert!(validate_configured_path(Path::new("Downloads")).is_err());
+    }
+
+    #[test]
+    fn contextmenu_executables_accept_absolute_tilde_and_path_items() {
+        let absolute = if cfg!(target_os = "windows") {
+            Path::new(r"C:\Tools\inspect.exe")
+        } else {
+            Path::new("/usr/bin/inspect")
+        };
+        assert!(validate_context_menu_executable(absolute).is_ok());
+        assert!(validate_context_menu_executable(Path::new("~/bin/inspect")).is_ok());
+        assert!(validate_context_menu_executable(Path::new("tools/inspect")).is_err());
+    }
+
+    #[test]
+    fn contextmenu_executable_resolves_from_path() {
+        let dir = unique_temp_dir("path-executable");
+        let tool = dir.join("inspect");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&tool, "").unwrap();
+        let path_var = env::join_paths([dir.as_path()]).unwrap();
+
+        let resolved = resolve_context_menu_executable_with(
+            Path::new("inspect"),
+            ConfigPlatform::Linux,
+            |name| match name {
+                "PATH" => Some(path_var.clone()),
+                _ => None,
+            },
+            |path| path.is_file(),
+        );
+
+        assert_eq!(resolved, Some(tool));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_contextmenu_executable_resolves_with_pathext() {
+        let dir = unique_temp_dir("windows-path-executable");
+        let tool = dir.join("zed.exe");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&tool, "").unwrap();
+        let path_var = env::join_paths([dir.as_path()]).unwrap();
+
+        let resolved = resolve_context_menu_executable_with(
+            Path::new("zed"),
+            ConfigPlatform::Windows,
+            |name| match name {
+                "PATH" => Some(path_var.clone()),
+                "PATHEXT" => Some(OsString::from(".com;.exe;.cmd")),
+                _ => None,
+            },
+            |path| path.is_file(),
+        );
+
+        assert_eq!(resolved, Some(tool));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_contextmenu_icon_path_uses_scoop_shim_target_when_available() {
+        let dir = unique_temp_dir("windows-shim-icon");
+        let shim_dir = dir.join("shims");
+        let app_dir = dir.join("apps").join("zed").join("current").join("bin");
+        let command = shim_dir.join("zed.exe");
+        let shim = shim_dir.join("zed.shim");
+        let target = app_dir.join("zed.exe");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(&command, "").unwrap();
+        fs::write(&target, "").unwrap();
+        fs::write(&shim, format!("path = \"{}\"\n", target.display())).unwrap();
+
+        assert_eq!(
+            context_menu_executable_icon_path_with(
+                &command,
+                ConfigPlatform::Windows,
+                |path| fs::read_to_string(path),
+                |path| path.is_file(),
+            ),
+            target
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_contextmenu_icon_path_falls_back_for_missing_or_invalid_scoop_shims() {
+        let dir = unique_temp_dir("windows-shim-icon-fallback");
+        let shim_dir = dir.join("shims");
+        let app_dir = dir.join("apps").join("zed").join("current").join("bin");
+        let command = shim_dir.join("zed.exe");
+        let shim = shim_dir.join("zed.shim");
+        let target = app_dir.join("zed.exe");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(&command, "").unwrap();
+
+        assert_eq!(
+            context_menu_executable_icon_path_with(
+                &command,
+                ConfigPlatform::Windows,
+                |path| fs::read_to_string(path),
+                |path| path.is_file(),
+            ),
+            command
+        );
+
+        fs::write(&shim, "path = \n").unwrap();
+        assert_eq!(
+            context_menu_executable_icon_path_with(
+                &command,
+                ConfigPlatform::Windows,
+                |path| fs::read_to_string(path),
+                |path| path.is_file(),
+            ),
+            command
+        );
+
+        fs::write(&shim, format!("path = \"{}\"\n", target.display())).unwrap();
+        assert_eq!(
+            context_menu_executable_icon_path_with(
+                &command,
+                ConfigPlatform::Windows,
+                |path| fs::read_to_string(path),
+                |path| path.is_file(),
+            ),
+            command
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn contextmenu_executable_rejects_missing_path_items_and_relative_subpaths() {
+        let path_var = env::join_paths([unique_temp_dir("empty-path").as_path()]).unwrap();
+
+        assert_eq!(
+            resolve_context_menu_executable_with(
+                Path::new("missing-tool"),
+                ConfigPlatform::Linux,
+                |name| match name {
+                    "PATH" => Some(path_var.clone()),
+                    _ => None,
+                },
+                |_| false,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_context_menu_executable_with(
+                Path::new("tools/inspect"),
+                ConfigPlatform::Linux,
+                |_| None,
+                |_| true,
+            ),
+            None
+        );
     }
 
     #[test]

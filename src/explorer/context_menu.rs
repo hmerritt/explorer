@@ -722,9 +722,10 @@ fn configured_context_menu_item(
     match item {
         CustomContextMenuItem::Item { label, .. } => {
             let executable = item.resolved_executable()?;
+            let icon_path = item.resolved_icon_path(&executable);
             Some(ContextMenuItem::Action {
                 id: format!("context-menu-custom-{id_suffix}"),
-                icon: Some(ContextMenuIcon::NativePath(executable.clone())),
+                icon: Some(ContextMenuIcon::NativePath(icon_path)),
                 label: label.clone(),
                 command: ContextMenuCommand::RunCustom {
                     executable,
@@ -839,6 +840,7 @@ pub(super) fn context_submenu_left(
 mod tests {
     use super::*;
     use crate::settings::CustomContextMenuItem;
+    use std::time::UNIX_EPOCH;
 
     fn configured_executable_path() -> PathBuf {
         if cfg!(target_os = "windows") {
@@ -847,6 +849,15 @@ mod tests {
             PathBuf::from("/usr/bin/inspect")
         }
     }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("explorer-context-menu-{name}-{nanos}"))
+    }
+
     use chrono::{Local, TimeZone};
 
     #[test]
@@ -1504,6 +1515,51 @@ mod tests {
         assert!(!items.iter().any(
             |item| matches!(item, ContextMenuItem::Submenu { label, .. } if label == "Empty")
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn configured_item_can_use_scoop_shim_target_for_icon_only() {
+        let dir = unique_temp_dir("scoop-shim-icon");
+        let shim_dir = dir.join("shims");
+        let app_dir = dir.join("apps").join("zed").join("current").join("bin");
+        let executable = shim_dir.join("zed.exe");
+        let icon_target = app_dir.join("zed.exe");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(&executable, "").unwrap();
+        fs::write(&icon_target, "").unwrap();
+        fs::write(
+            shim_dir.join("zed.shim"),
+            format!("path = \"{}\"\n", icon_target.display()),
+        )
+        .unwrap();
+        let targets = vec![PathBuf::from("a.txt")];
+        let configured = vec![CustomContextMenuItem::Item {
+            label: "Open in Zed".to_owned(),
+            executable: executable.clone(),
+        }];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+        );
+
+        assert!(matches!(
+            &items[2],
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::NativePath(path)),
+                command: ContextMenuCommand::RunCustom { executable: command, .. },
+                ..
+            } if path == &icon_target && command == &executable
+        ));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
