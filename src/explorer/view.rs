@@ -9,7 +9,7 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, Context, EventEmitter, FocusHandle, Pixels, Point, Subscription, Task,
+    AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Subscription, Task,
     UniformListScrollHandle, point, px,
 };
 
@@ -65,6 +65,7 @@ pub struct ExplorerView {
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
     pub(super) date_format: String,
+    pub(super) font: Font,
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
     pub(super) show_folder_size: bool,
@@ -214,6 +215,7 @@ impl ExplorerView {
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
             date_format: settings.date_format.clone(),
+            font: crate::settings::app_font(settings),
             show_hidden_files: settings.show_hidden_files,
             show_file_name_extensions: settings.show_file_name_extensions,
             show_folder_size: settings.show_folder_size,
@@ -238,6 +240,7 @@ impl ExplorerView {
         let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
         let folder_size_changed = self.show_folder_size != settings.show_folder_size;
         self.date_format.clone_from(&settings.date_format);
+        self.font = crate::settings::app_font(settings);
         self.show_hidden_files = settings.show_hidden_files;
         self.show_file_name_extensions = settings.show_file_name_extensions;
         self.show_folder_size = settings.show_folder_size;
@@ -788,6 +791,7 @@ mod tests {
 
         assert!(!view.show_hidden_files);
         assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
+        assert_eq!(view.font.family, ".SystemUIFont");
         assert!(view.show_file_name_extensions);
         assert!(!view.show_folder_size);
         assert!(view.resolve_icons);
@@ -839,6 +843,45 @@ mod tests {
         );
 
         assert_eq!(view.date_format, "%d %B %Y");
+    }
+
+    #[test]
+    fn view_uses_configured_font() {
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                font: "Inter".to_owned(),
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert_eq!(view.font.family, "Inter");
+    }
+
+    #[gpui::test]
+    fn apply_settings_updates_font(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        font: "Inter".to_owned(),
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.font.family, "Inter");
+        });
     }
 
     #[gpui::test]

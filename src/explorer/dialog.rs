@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
     IntoElement, LineFragment, Render, SharedString, Task, TextRun, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, font,
-    prelude::*, px, rgb, size,
+    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, prelude::*,
+    px, rgb, size,
 };
 use std::{
     path::{Path, PathBuf},
@@ -24,6 +24,7 @@ use crate::explorer::{
     },
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
+use crate::settings::SettingsState;
 
 actions!(
     dialog,
@@ -93,6 +94,7 @@ pub(super) struct ExplorerDialog {
     kind: ExplorerDialogKind,
     explorer: WeakEntity<ExplorerView>,
     date_format: String,
+    font: gpui::Font,
     focus_handle: FocusHandle,
     focused_choice: Option<DialogChoice>,
     completed: bool,
@@ -250,11 +252,13 @@ impl ExplorerDialog {
             _ => None,
         };
         let focused_choice = default_dialog_choice(&kind);
+        let font = crate::settings::current_app_font(cx);
 
         let mut dialog = Self {
             kind,
             explorer,
             date_format,
+            font,
             focus_handle,
             focused_choice,
             completed: false,
@@ -266,6 +270,11 @@ impl ExplorerDialog {
         };
         dialog.start_folder_size_task(cx);
         dialog.start_file_operation_progress_task(cx);
+        cx.observe_global::<SettingsState>(|this, cx| {
+            this.font = crate::settings::current_app_font(cx);
+            cx.notify();
+        })
+        .detach();
         dialog
     }
 
@@ -542,6 +551,7 @@ impl ExplorerDialog {
 impl Render for ExplorerDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .font(self.font.clone())
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -590,7 +600,7 @@ impl ExplorerDialog {
         let item_name = text
             .item_name
             .as_deref()
-            .map(|name| truncated_permanent_delete_file_name(name, window));
+            .map(|name| truncated_permanent_delete_file_name(name, &self.font, window));
         let body = if text.has_file_details() {
             render_permanent_delete_file_body(text, item_name, icon_kind)
         } else {
@@ -651,7 +661,7 @@ impl ExplorerDialog {
         let item_name = text
             .item_name
             .as_deref()
-            .map(|name| truncated_permanent_delete_file_name(name, window));
+            .map(|name| truncated_permanent_delete_file_name(name, &self.font, window));
         let body = if text.has_file_details() {
             render_permanent_delete_file_body(text, item_name, icon_kind)
         } else {
@@ -825,7 +835,8 @@ fn open_dialog_window(
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let date_format = cx.entity().read(cx).date_format.clone();
-    let options = dialog_window_options(&kind, &date_format, cx);
+    let font = crate::settings::current_app_font(cx);
+    let options = dialog_window_options(&kind, &date_format, &font, cx);
     let handle = cx
         .open_window(options, |window, cx| {
             let focus_handle = cx.focus_handle();
@@ -842,8 +853,13 @@ fn open_dialog_window(
     Ok(handle.into())
 }
 
-fn dialog_window_options(kind: &ExplorerDialogKind, date_format: &str, cx: &App) -> WindowOptions {
-    let (width, height) = dialog_window_size(kind, date_format, cx);
+fn dialog_window_options(
+    kind: &ExplorerDialogKind,
+    date_format: &str,
+    font: &gpui::Font,
+    cx: &App,
+) -> WindowOptions {
+    let (width, height) = dialog_window_size(kind, date_format, font, cx);
 
     WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
@@ -861,32 +877,42 @@ fn dialog_window_options(kind: &ExplorerDialogKind, date_format: &str, cx: &App)
     }
 }
 
-fn dialog_window_size(kind: &ExplorerDialogKind, date_format: &str, cx: &App) -> (f32, f32) {
+fn dialog_window_size(
+    kind: &ExplorerDialogKind,
+    date_format: &str,
+    font: &gpui::Font,
+    cx: &App,
+) -> (f32, f32) {
     match kind {
         ExplorerDialogKind::PermanentDelete(pending) => {
             let text = permanent_delete_dialog_text_with_format(pending, date_format);
-            let height = permanent_delete_dialog_height(&text, cx);
+            let height = permanent_delete_dialog_height(&text, font, cx);
             (DELETE_DIALOG_WIDTH, height)
         }
         ExplorerDialogKind::Trash(pending) => {
             let text = trash_dialog_text(pending);
-            let height = permanent_delete_dialog_height(&text, cx);
+            let height = permanent_delete_dialog_height(&text, font, cx);
             (DELETE_DIALOG_WIDTH, height)
         }
         ExplorerDialogKind::FileConflict(conflicts) => {
             let text = file_conflict_dialog_text(conflicts);
-            let height = file_conflict_dialog_height(&text.title, cx);
+            let height = file_conflict_dialog_height(&text.title, font, cx);
             (CONFLICT_DIALOG_WIDTH, height)
         }
         ExplorerDialogKind::FileOperation(_) => (PROGRESS_DIALOG_WIDTH, progress_dialog_height()),
     }
 }
 
-fn permanent_delete_dialog_height(text: &PermanentDeleteDialogText, cx: &App) -> f32 {
+fn permanent_delete_dialog_height(
+    text: &PermanentDeleteDialogText,
+    font: &gpui::Font,
+    cx: &App,
+) -> f32 {
     let prompt_height = wrapped_dialog_text_height(
         &text.message,
         DELETE_DIALOG_PROMPT_TEXT_SIZE,
         permanent_delete_detail_text_width(),
+        font,
         cx,
     );
 
@@ -914,11 +940,12 @@ fn permanent_delete_dialog_height_for_content_height(content_height: f32) -> f32
         + SHELL_DIALOG_VERTICAL_SLACK
 }
 
-fn file_conflict_dialog_height(title: &str, cx: &App) -> f32 {
+fn file_conflict_dialog_height(title: &str, font: &gpui::Font, cx: &App) -> f32 {
     let title_height = wrapped_dialog_text_height(
         title,
         CONFLICT_TITLE_TEXT_SIZE,
         dialog_content_width(CONFLICT_DIALOG_WIDTH),
+        font,
         cx,
     );
 
@@ -963,15 +990,19 @@ fn permanent_delete_detail_text_width() -> f32 {
         .max(0.0)
 }
 
-fn wrapped_dialog_text_height(text: &str, text_size: f32, width: f32, cx: &App) -> f32 {
+fn wrapped_dialog_text_height(
+    text: &str,
+    text_size: f32,
+    width: f32,
+    font: &gpui::Font,
+    cx: &App,
+) -> f32 {
     let line_height = dialog_line_height(text_size);
     if text.is_empty() {
         return line_height;
     }
 
-    let mut line_wrapper = cx
-        .text_system()
-        .line_wrapper(font(".SystemUIFont"), px(text_size));
+    let mut line_wrapper = cx.text_system().line_wrapper(font.clone(), px(text_size));
     let fragments = [LineFragment::text(text)];
     let wrapped_lines = line_wrapper.wrap_line(&fragments, px(width)).count() + 1;
 
@@ -1143,8 +1174,11 @@ fn render_delete_file_icon(icon_kind: DeleteDialogIconKind, slot_height: f32) ->
         ))
 }
 
-fn truncated_permanent_delete_file_name(name: &str, window: &Window) -> SharedString {
-    let name_font = font(".SystemUIFont");
+fn truncated_permanent_delete_file_name(
+    name: &str,
+    name_font: &gpui::Font,
+    window: &Window,
+) -> SharedString {
     let mut runs = vec![TextRun {
         len: name.len(),
         font: name_font.clone(),
@@ -1156,7 +1190,7 @@ fn truncated_permanent_delete_file_name(name: &str, window: &Window) -> SharedSt
 
     window
         .text_system()
-        .line_wrapper(name_font, px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+        .line_wrapper(name_font.clone(), px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
         .truncate_line(
             SharedString::from(name.to_owned()),
             px(permanent_delete_detail_text_width()),

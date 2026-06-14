@@ -70,6 +70,7 @@ struct TabDragPreview {
     label: SharedString,
     path: PathBuf,
     is_active: bool,
+    font: gpui::Font,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -799,6 +800,7 @@ impl ExplorerTabs {
                         is_active,
                     },
                     move |drag, _, _, cx| {
+                        let font = crate::settings::current_app_font(cx);
                         let _ = entity.update(cx, |this, cx| {
                             this.start_tab_drag(drag.id);
                             cx.notify();
@@ -807,6 +809,7 @@ impl ExplorerTabs {
                             label: drag.label.clone(),
                             path: drag.path.clone(),
                             is_active: drag.is_active,
+                            font,
                         })
                     },
                 )
@@ -843,6 +846,7 @@ impl ExplorerTabs {
 impl Render for ExplorerTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.cleanup_completed_background_operations(cx);
+        let app_font = crate::settings::current_app_font(cx);
         let active_view = self.active_tab().map(|tab| tab.view.clone());
         let drop_exit_view = active_view.clone();
         let input_mouse_down_view = active_view.clone();
@@ -851,6 +855,7 @@ impl Render for ExplorerTabs {
             .and_then(|view| view.read(cx).active_drop_indicator());
 
         let content = div()
+            .font(app_font.clone())
             .key_context("ExplorerTabs")
             .on_action(cx.listener(Self::handle_new_tab))
             .on_action(cx.listener(Self::handle_close_tab))
@@ -892,7 +897,7 @@ impl Render for ExplorerTabs {
                     .when_some(active_view, |this, view| this.child(view)),
             )
             .when_some(active_drop_indicator, |this, indicator| {
-                this.child(render_drop_indicator(indicator, window))
+                this.child(render_drop_indicator(indicator, &app_font, window))
             })
             .into_any_element();
 
@@ -902,12 +907,23 @@ impl Render for ExplorerTabs {
 
 impl Render for TabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        tab_preview_visual(self.label.clone(), &self.path, self.is_active)
+        tab_preview_visual(
+            self.label.clone(),
+            &self.path,
+            self.is_active,
+            self.font.clone(),
+        )
     }
 }
 
-fn tab_preview_visual(label: SharedString, path: &Path, is_active: bool) -> impl IntoElement {
+fn tab_preview_visual(
+    label: SharedString,
+    path: &Path,
+    is_active: bool,
+    font: gpui::Font,
+) -> impl IntoElement {
     div()
+        .font(font)
         .relative()
         .flex()
         .flex_row()
@@ -1477,6 +1493,11 @@ mod tests {
     use gpui::{AppContext, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext};
     use std::fs;
 
+    #[test]
+    fn tab_icon_font_remains_dedicated() {
+        assert_eq!(tab_icon_font().family, "Segoe Fluent Icons");
+    }
+
     fn test_tabs_with_files<'a>(
         cx: &'a mut TestAppContext,
         names: &[&str],
@@ -1634,6 +1655,7 @@ mod tests {
             state.value.show_hidden_files = true;
             state.value.show_file_name_extensions = false;
             state.value.show_folder_size = true;
+            state.value.font = "Inter".to_owned();
         });
         cx.run_until_parked();
 
@@ -1649,6 +1671,7 @@ mod tests {
                 assert!(!view.show_file_name_extensions);
                 assert!(view.show_folder_size);
                 assert_eq!(view.date_format, "%d %B %Y");
+                assert_eq!(view.font.family, "Inter");
             });
         }
 
@@ -1663,6 +1686,7 @@ mod tests {
             assert!(!view.show_file_name_extensions);
             assert!(view.show_folder_size);
             assert_eq!(view.date_format, "%d %B %Y");
+            assert_eq!(view.font.family, "Inter");
         });
     }
 

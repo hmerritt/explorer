@@ -5,8 +5,8 @@ use gpui::{
     Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement,
     ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, Window, canvas, div, font, prelude::*, px, rgb,
-    transparent_black, uniform_list,
+    SharedString, TextAlign, TextRun, Window, canvas, div, prelude::*, px, rgb, transparent_black,
+    uniform_list,
 };
 
 use crate::explorer::{
@@ -106,11 +106,13 @@ struct SidebarItemDragPreview {
     label: SharedString,
     kind: SidebarItemKind,
     width: f32,
+    font: gpui::Font,
 }
 
 impl Render for SidebarItemDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
+            .font(self.font.clone())
             .flex()
             .flex_row()
             .items_center()
@@ -177,6 +179,7 @@ impl ExplorerView {
         let breadcrumb = visible_breadcrumb_for_path(
             &self.path,
             directory_bar_available_width(f32::from(window.bounds().size.width)),
+            &self.font,
             window,
         );
 
@@ -1246,10 +1249,12 @@ impl ExplorerView {
                                 cx.notify();
                                 this.sidebar_width
                             });
+                            let font = entity.read(cx).font.clone();
                             cx.new(move |_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
                                 kind: drag.kind,
                                 width,
+                                font,
                             })
                         }
                     },
@@ -1507,7 +1512,8 @@ impl ExplorerView {
                             this.cancel_mouse_selection_drag();
                         }
                     });
-                    cx.new(|_| DragPreview::new(dragged, cursor_offset))
+                    let font = entity.read(cx).font.clone();
+                    cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
                 }
             });
         }
@@ -1604,10 +1610,23 @@ impl ExplorerView {
             format_timestamp(entry.modified, &self.date_format),
             COLUMN_DATE_WIDTH,
             false,
+            &self.font,
             window,
         );
-        let type_cell = text_cell(entry.type_label(), COLUMN_TYPE_WIDTH, false, window);
-        let size_cell = text_cell(format_size(entry.size), COLUMN_SIZE_WIDTH, true, window);
+        let type_cell = text_cell(
+            entry.type_label(),
+            COLUMN_TYPE_WIDTH,
+            false,
+            &self.font,
+            window,
+        );
+        let size_cell = text_cell(
+            format_size(entry.size),
+            COLUMN_SIZE_WIDTH,
+            true,
+            &self.font,
+            window,
+        );
 
         let (date_cell, type_cell, size_cell) = if let Some(drag_payload) = individual_drag_payload
         {
@@ -1652,6 +1671,7 @@ impl ExplorerView {
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
                 self.sidebar_width,
+                &self.font,
                 window,
             )
             .id(("explorer-entry-name", ix))
@@ -2408,7 +2428,11 @@ impl Render for ExplorerView {
     }
 }
 
-pub(super) fn render_drop_indicator(indicator: DropIndicator, window: &Window) -> AnyElement {
+pub(super) fn render_drop_indicator(
+    indicator: DropIndicator,
+    font: &gpui::Font,
+    window: &Window,
+) -> AnyElement {
     let origin = drop_indicator_origin(indicator.mouse_position);
     let (icon, action_label) = match indicator.operation {
         FileOperationKind::Move => (NavIcon::Forward.glyph(), "Move to"),
@@ -2416,12 +2440,14 @@ pub(super) fn render_drop_indicator(indicator: DropIndicator, window: &Window) -
     };
     let target_width = drop_indicator_target_width(measure_drop_indicator_target_text(
         &indicator.target_label,
+        font,
         window,
     ));
     let target_label =
-        truncated_drop_indicator_target_label(&indicator.target_label, target_width, window);
+        truncated_drop_indicator_target_label(&indicator.target_label, target_width, font, window);
 
     div()
+        .font(font.clone())
         .absolute()
         .left(px(origin.0))
         .top(px(origin.1))
@@ -2460,14 +2486,14 @@ pub(super) fn render_drop_indicator(indicator: DropIndicator, window: &Window) -
         .into_any_element()
 }
 
-fn measure_drop_indicator_target_text(text: &str, window: &Window) -> f32 {
+fn measure_drop_indicator_target_text(text: &str, font: &gpui::Font, window: &Window) -> f32 {
     if text.is_empty() {
         return 0.0;
     }
 
     let run = TextRun {
         len: text.len(),
-        font: font(".SystemUIFont"),
+        font: font.clone(),
         color: rgb(DROP_INDICATOR_TEXT_COLOR).into(),
         background_color: None,
         underline: None,
@@ -2489,9 +2515,9 @@ fn drop_indicator_target_width(natural_width: f32) -> f32 {
 fn truncated_drop_indicator_target_label(
     text: &str,
     available_width: f32,
+    target_font: &gpui::Font,
     window: &Window,
 ) -> SharedString {
-    let target_font = font(".SystemUIFont");
     let mut runs = vec![TextRun {
         len: text.len(),
         font: target_font.clone(),
@@ -2503,7 +2529,7 @@ fn truncated_drop_indicator_target_label(
 
     window
         .text_system()
-        .line_wrapper(target_font, px(DROP_INDICATOR_TEXT_SIZE))
+        .line_wrapper(target_font.clone(), px(DROP_INDICATOR_TEXT_SIZE))
         .truncate_line(
             SharedString::from(text.to_owned()),
             px(available_width),
@@ -3869,6 +3895,7 @@ fn name_cell(
     show_file_name_extensions: bool,
     show_full_path: bool,
     sidebar_width: f32,
+    font: &gpui::Font,
     window: &Window,
 ) -> Div {
     let list_viewport_width = (f32::from(window.bounds().size.width)
@@ -3883,6 +3910,7 @@ fn name_cell(
         entry.display_name_with_extensions(show_file_name_extensions),
         text_width,
         0x000000,
+        font,
         window,
     );
     div()
@@ -3900,6 +3928,7 @@ fn name_cell(
                 text_width,
                 RECURSIVE_SEARCH_PATH_TEXT_SIZE,
                 RECURSIVE_SEARCH_PATH_TEXT_COLOR,
+                font,
                 window,
             );
 
@@ -4045,9 +4074,17 @@ fn truncated_text(
     text: &str,
     available_width: f32,
     text_color: u32,
+    font: &gpui::Font,
     window: &Window,
 ) -> SharedString {
-    truncated_text_with_size(text, available_width, NAME_TEXT_SIZE, text_color, window)
+    truncated_text_with_size(
+        text,
+        available_width,
+        NAME_TEXT_SIZE,
+        text_color,
+        font,
+        window,
+    )
 }
 
 fn truncated_text_with_size(
@@ -4055,9 +4092,9 @@ fn truncated_text_with_size(
     available_width: f32,
     text_size: f32,
     text_color: u32,
+    name_font: &gpui::Font,
     window: &Window,
 ) -> SharedString {
-    let name_font = font(".SystemUIFont");
     let mut runs = vec![TextRun {
         len: text.len(),
         font: name_font.clone(),
@@ -4069,7 +4106,7 @@ fn truncated_text_with_size(
 
     window
         .text_system()
-        .line_wrapper(name_font, px(text_size))
+        .line_wrapper(name_font.clone(), px(text_size))
         .truncate_line(
             SharedString::from(text.to_owned()),
             px(available_width),
@@ -4109,14 +4146,21 @@ fn add_item_drag(
                 entity.update(cx, |this, _| {
                     this.begin_individual_item_drag(dragged);
                 });
-                cx.new(|_| DragPreview::new(dragged, cursor_offset))
+                let font = entity.read(cx).font.clone();
+                cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
             },
         )
         .into_any_element()
 }
 
-fn text_cell(text: String, width: f32, right: bool, window: &Window) -> Div {
-    let text = truncated_text(&text, text_cell_width(width), TEXT_CELL_TEXT_COLOR, window);
+fn text_cell(text: String, width: f32, right: bool, font: &gpui::Font, window: &Window) -> Div {
+    let text = truncated_text(
+        &text,
+        text_cell_width(width),
+        TEXT_CELL_TEXT_COLOR,
+        font,
+        window,
+    );
 
     let cell = div()
         .flex()

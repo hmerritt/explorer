@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use gpui::{TextRun, Window, font, px, rgb};
+use gpui::{Font, TextRun, Window, px, rgb};
 
 use crate::explorer::constants::{
     DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HORIZONTAL_PADDING,
@@ -133,18 +133,19 @@ pub(super) fn directory_bar_available_width(window_width: f32) -> f32 {
 pub(super) fn visible_breadcrumb_for_path(
     path: &Path,
     available_width: f32,
+    font: &Font,
     window: &Window,
 ) -> VisibleBreadcrumb {
     let segments = path_breadcrumb_segments(path);
     let segment_widths = segments
         .iter()
         .map(|segment| {
-            measure_directory_bar_text(&segment.label, window)
+            measure_directory_bar_text(&segment.label, font, window)
                 + DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING * 2.0
         })
         .collect::<Vec<_>>();
-    let separator_width = measure_directory_bar_text(DIRECTORY_BAR_SEPARATOR, window);
-    let ellipsis_width = measure_directory_bar_text(DIRECTORY_BAR_ELLIPSIS, window);
+    let separator_width = measure_directory_bar_text(DIRECTORY_BAR_SEPARATOR, font, window);
+    let ellipsis_width = measure_directory_bar_text(DIRECTORY_BAR_ELLIPSIS, font, window);
     let visibility = choose_visible_breadcrumb(
         &segment_widths,
         separator_width,
@@ -158,14 +159,14 @@ pub(super) fn visible_breadcrumb_for_path(
     }
 }
 
-pub(super) fn measure_directory_bar_text(text: &str, window: &Window) -> f32 {
+pub(super) fn measure_directory_bar_text(text: &str, font: &Font, window: &Window) -> f32 {
     if text.is_empty() {
         return 0.0;
     }
 
     let run = TextRun {
         len: text.len(),
-        font: font(".SystemUIFont"),
+        font: font.clone(),
         color: rgb(0x1f1f1f).into(),
         background_color: None,
         underline: None,

@@ -12,7 +12,7 @@ use std::path::{Component, Prefix};
 
 use gpui::{
     Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, TextRun, Window, div,
-    font, prelude::*, px, rgb,
+    prelude::*, px, rgb,
 };
 
 use crate::explorer::{
@@ -68,6 +68,7 @@ pub(super) enum ResolvedDrop {
 pub(super) struct DragPreview {
     label: SharedString,
     cursor_offset: Point<Pixels>,
+    font: gpui::Font,
 }
 
 const DRAG_PREVIEW_WIDTH: f32 = 160.0;
@@ -80,10 +81,15 @@ const DRAG_PREVIEW_TEXT_COLOR: u32 = 0x1f1f1f;
 const DRAG_PREVIEW_TRUNCATION_SUFFIX: &str = "…";
 
 impl DragPreview {
-    pub(super) fn new(dragged: &DraggedEntries, cursor_offset: Point<Pixels>) -> Self {
+    pub(super) fn new(
+        dragged: &DraggedEntries,
+        cursor_offset: Point<Pixels>,
+        font: gpui::Font,
+    ) -> Self {
         Self {
             label: SharedString::from(drag_preview_label(dragged)),
             cursor_offset,
+            font,
         }
     }
 }
@@ -93,33 +99,41 @@ impl Render for DragPreview {
         let origin = drag_preview_origin(self.cursor_offset);
         let root_width = f32::from(self.cursor_offset.x) + (DRAG_PREVIEW_WIDTH / 2.0);
         let root_height = f32::from(self.cursor_offset.y) + DRAG_PREVIEW_CURSOR_OVERLAP;
-        let label = truncated_drag_preview_label(&self.label, window);
+        let label = truncated_drag_preview_label(&self.label, &self.font, window);
 
-        div().relative().w(px(root_width)).h(px(root_height)).child(
-            div()
-                .absolute()
-                .left(px(origin.0))
-                .top(px(origin.1))
-                .w(px(DRAG_PREVIEW_WIDTH))
-                .h(px(DRAG_PREVIEW_HEIGHT))
-                .flex()
-                .items_center()
-                .px(px(DRAG_PREVIEW_HORIZONTAL_PADDING))
-                .py(px(DRAG_PREVIEW_VERTICAL_PADDING))
-                .rounded(px(3.0))
-                .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0x8a8a8a))
-                .shadow_md()
-                .text_size(px(DRAG_PREVIEW_TEXT_SIZE))
-                .text_color(rgb(DRAG_PREVIEW_TEXT_COLOR))
-                .child(div().min_w(px(0.0)).w_full().truncate().child(label)),
-        )
+        div()
+            .font(self.font.clone())
+            .relative()
+            .w(px(root_width))
+            .h(px(root_height))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(origin.0))
+                    .top(px(origin.1))
+                    .w(px(DRAG_PREVIEW_WIDTH))
+                    .h(px(DRAG_PREVIEW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .px(px(DRAG_PREVIEW_HORIZONTAL_PADDING))
+                    .py(px(DRAG_PREVIEW_VERTICAL_PADDING))
+                    .rounded(px(3.0))
+                    .bg(rgb(0xffffff))
+                    .border_1()
+                    .border_color(rgb(0x8a8a8a))
+                    .shadow_md()
+                    .text_size(px(DRAG_PREVIEW_TEXT_SIZE))
+                    .text_color(rgb(DRAG_PREVIEW_TEXT_COLOR))
+                    .child(div().min_w(px(0.0)).w_full().truncate().child(label)),
+            )
     }
 }
 
-fn truncated_drag_preview_label(label: &str, window: &Window) -> SharedString {
-    let label_font = font(".SystemUIFont");
+fn truncated_drag_preview_label(
+    label: &str,
+    label_font: &gpui::Font,
+    window: &Window,
+) -> SharedString {
     let mut runs = vec![TextRun {
         len: label.len(),
         font: label_font.clone(),
@@ -131,7 +145,7 @@ fn truncated_drag_preview_label(label: &str, window: &Window) -> SharedString {
 
     window
         .text_system()
-        .line_wrapper(label_font, px(DRAG_PREVIEW_TEXT_SIZE))
+        .line_wrapper(label_font.clone(), px(DRAG_PREVIEW_TEXT_SIZE))
         .truncate_line(
             SharedString::from(label.to_owned()),
             px(drag_preview_text_width()),

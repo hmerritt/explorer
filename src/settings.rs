@@ -7,13 +7,15 @@ use std::{
     time::Duration,
 };
 
-use gpui::{App, BorrowAppContext, Global};
+use gpui::{App, BorrowAppContext, Font, Global, SharedString, font};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
 pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
+pub(crate) const DEFAULT_FONT: &str = "default";
+const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
@@ -63,6 +65,8 @@ pub struct ExplorerSettings {
     pub sidebar_items: Vec<SidebarLocation>,
     #[serde(default = "default_date_format")]
     pub date_format: String,
+    #[serde(default = "default_font")]
+    pub font: String,
     pub show_hidden_files: bool,
     pub show_file_name_extensions: bool,
     pub show_folder_size: bool,
@@ -86,6 +90,7 @@ impl Default for ExplorerSettings {
                 SidebarLocation::Downloads,
             ],
             date_format: default_date_format(),
+            font: default_font(),
             show_hidden_files: false,
             show_file_name_extensions: true,
             show_folder_size: false,
@@ -503,6 +508,12 @@ fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
 }
 
 fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
+    if settings.font.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "font must not be empty",
+        ));
+    }
     chrono::format::StrftimeItems::new(&settings.date_format)
         .parse()
         .map_err(|error| {
@@ -658,6 +669,28 @@ fn default_date_format() -> String {
     DEFAULT_DATE_FORMAT.to_owned()
 }
 
+fn default_font() -> String {
+    DEFAULT_FONT.to_owned()
+}
+
+pub(crate) fn resolved_font_family(value: &str) -> SharedString {
+    if value == DEFAULT_FONT {
+        SYSTEM_UI_FONT.into()
+    } else {
+        value.to_owned().into()
+    }
+}
+
+pub(crate) fn app_font(settings: &ExplorerSettings) -> Font {
+    font(resolved_font_family(&settings.font))
+}
+
+pub(crate) fn current_app_font(cx: &App) -> Font {
+    cx.try_global::<SettingsState>()
+        .map(|state| app_font(&state.value))
+        .unwrap_or_else(|| app_font(&ExplorerSettings::default()))
+}
+
 fn deserialize_sidebar_width<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -723,6 +756,7 @@ mod tests {
         let settings = ExplorerSettings::default();
         assert!(!settings.show_hidden_files);
         assert_eq!(settings.date_format, DEFAULT_DATE_FORMAT);
+        assert_eq!(settings.font, DEFAULT_FONT);
         assert!(settings.show_file_name_extensions);
         assert!(!settings.show_folder_size);
         assert!(!settings.focus_new_tab_immediately);
@@ -759,6 +793,7 @@ mod tests {
                 .expect("deserialize partial settings");
         assert!(settings.show_hidden_files);
         assert_eq!(settings.date_format, DEFAULT_DATE_FORMAT);
+        assert_eq!(settings.font, DEFAULT_FONT);
         assert!(settings.show_file_name_extensions);
         assert!(!settings.show_folder_size);
         assert!(!settings.focus_new_tab_immediately);
@@ -820,6 +855,11 @@ mod tests {
         assert!(
             fs::read_to_string(&path)
                 .unwrap()
+                .contains("\n  \"font\": \"default\"")
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
                 .contains("\n  \"resolve_icons\": true")
         );
         assert!(
@@ -844,6 +884,29 @@ mod tests {
 
         assert!(load_settings_from_path(&path).is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn font_family_resolves_default_and_custom_values() {
+        assert_eq!(resolved_font_family(DEFAULT_FONT), SYSTEM_UI_FONT);
+        assert_eq!(resolved_font_family("Inter"), "Inter");
+    }
+
+    #[test]
+    fn empty_font_values_are_rejected_but_unavailable_names_are_valid() {
+        for font in ["", " ", "\t\r\n"] {
+            let settings = ExplorerSettings {
+                font: font.to_owned(),
+                ..ExplorerSettings::default()
+            };
+            assert!(validate_settings(&settings).is_err());
+        }
+
+        let settings = ExplorerSettings {
+            font: "Definitely Not An Installed Font".to_owned(),
+            ..ExplorerSettings::default()
+        };
+        assert!(validate_settings(&settings).is_ok());
     }
 
     #[test]
