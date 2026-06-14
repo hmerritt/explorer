@@ -10,7 +10,10 @@ mod loaders;
 mod settings;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-pub use settings::{ExplorerSettings, SidebarLocation, StartupLocation};
+pub use settings::{
+    AppSettings, ExplorerSettings, SidebarLocation, SidebarSettings, StartLocation, TabSettings,
+    ViewSettings,
+};
 
 #[cfg(all(
     feature = "benchmarks",

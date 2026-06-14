@@ -252,7 +252,7 @@ impl ExplorerTabs {
     }
 
     fn add_configured_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if cx.global::<SettingsState>().value.focus_new_tab_immediately {
+        if cx.global::<SettingsState>().value.tabs.focus_new {
             self.add_foreground_tab(path, window, cx);
         } else {
             self.add_background_tab(path, window, cx);
@@ -1651,11 +1651,11 @@ mod tests {
             });
         });
         cx.update_global::<SettingsState, _>(|state, _| {
-            state.value.date_format = "%d %B %Y".to_owned();
-            state.value.show_hidden_files = true;
-            state.value.show_file_name_extensions = false;
-            state.value.show_folder_size = true;
-            state.value.font = "Inter".to_owned();
+            state.value.view.date_format = "%d %B %Y".to_owned();
+            state.value.view.show_hidden = true;
+            state.value.view.show_extensions = false;
+            state.value.view.show_folder_sizes = true;
+            state.value.view.font = "Inter".to_owned();
         });
         cx.run_until_parked();
 
@@ -1744,7 +1744,7 @@ mod tests {
         let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
         let view = active_test_view(&tabs, cx);
         cx.update_global::<SettingsState, _>(|state, _| {
-            state.value.focus_new_tab_immediately = true;
+            state.value.tabs.focus_new = true;
         });
         cx.update(|window, app| {
             tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));

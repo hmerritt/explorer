@@ -548,7 +548,7 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            crate::settings::set_show_hidden_files(!this.show_hidden_files, cx);
+                            crate::settings::set_show_hidden(!this.show_hidden_files, cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -561,7 +561,7 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            crate::settings::set_show_file_name_extensions(
+                            crate::settings::set_show_extensions(
                                 !this.show_file_name_extensions,
                                 cx,
                             );
@@ -4650,7 +4650,10 @@ mod tests {
     ) {
         cx.set_global(crate::settings::SettingsState::for_test(
             crate::settings::ExplorerSettings {
-                sidebar_width: 312,
+                sidebar: crate::settings::SidebarSettings {
+                    width: 312,
+                    ..crate::settings::SidebarSettings::default()
+                },
                 ..crate::settings::ExplorerSettings::default()
             },
         ));
@@ -4691,7 +4694,8 @@ mod tests {
             cx.read(|cx| cx
                 .global::<crate::settings::SettingsState>()
                 .value
-                .sidebar_width),
+                .sidebar
+                .width),
             crate::settings::SIDEBAR_DEFAULT_WIDTH
         );
     }

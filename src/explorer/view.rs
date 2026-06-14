@@ -201,7 +201,7 @@ impl ExplorerView {
             cut_paths: BTreeSet::new(),
             active_drop_indicator: None,
             dragging_sidebar_item: None,
-            sidebar_width: settings.sidebar_width as f32,
+            sidebar_width: settings.sidebar.width as f32,
             sidebar_resize_drag: None,
             pending_permanent_delete: None,
             pending_trash: None,
@@ -214,17 +214,17 @@ impl ExplorerView {
             search: SearchState::default(),
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
-            date_format: settings.date_format.clone(),
+            date_format: settings.view.date_format.clone(),
             font: crate::settings::app_font(settings),
-            show_hidden_files: settings.show_hidden_files,
-            show_file_name_extensions: settings.show_file_name_extensions,
-            show_folder_size: settings.show_folder_size,
-            resolve_icons: settings.resolve_icons,
+            show_hidden_files: settings.view.show_hidden,
+            show_file_name_extensions: settings.view.show_extensions,
+            show_folder_size: settings.view.show_folder_sizes,
+            resolve_icons: settings.view.native_icons,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
-            sidebar_items: settings.sidebar_items.clone(),
+            sidebar_items: settings.sidebar.items.clone(),
             sidebar_sections: SidebarSections::default(),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
@@ -237,18 +237,18 @@ impl ExplorerView {
     }
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
-        let hidden_changed = self.show_hidden_files != settings.show_hidden_files;
-        let folder_size_changed = self.show_folder_size != settings.show_folder_size;
-        self.date_format.clone_from(&settings.date_format);
+        let hidden_changed = self.show_hidden_files != settings.view.show_hidden;
+        let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
+        self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
-        self.show_hidden_files = settings.show_hidden_files;
-        self.show_file_name_extensions = settings.show_file_name_extensions;
-        self.show_folder_size = settings.show_folder_size;
-        self.resolve_icons = settings.resolve_icons;
+        self.show_hidden_files = settings.view.show_hidden;
+        self.show_file_name_extensions = settings.view.show_extensions;
+        self.show_folder_size = settings.view.show_folder_sizes;
+        self.resolve_icons = settings.view.native_icons;
 
-        self.sidebar_items = settings.sidebar_items.clone();
+        self.sidebar_items = settings.sidebar.items.clone();
         if self.sidebar_resize_drag.is_none() {
-            self.sidebar_width = settings.sidebar_width as f32;
+            self.sidebar_width = settings.sidebar.width as f32;
         }
 
         if hidden_changed {
@@ -809,7 +809,10 @@ mod tests {
             PathBuf::from("configured"),
             None,
             &ExplorerSettings {
-                sidebar_width: 320,
+                sidebar: crate::settings::SidebarSettings {
+                    width: 320,
+                    ..crate::settings::SidebarSettings::default()
+                },
                 ..ExplorerSettings::default()
             },
         );
@@ -823,7 +826,10 @@ mod tests {
             PathBuf::from("configured"),
             None,
             &ExplorerSettings {
-                resolve_icons: false,
+                view: crate::settings::ViewSettings {
+                    native_icons: false,
+                    ..crate::settings::ViewSettings::default()
+                },
                 ..ExplorerSettings::default()
             },
         );
@@ -837,7 +843,10 @@ mod tests {
             PathBuf::from("configured"),
             None,
             &ExplorerSettings {
-                date_format: "%d %B %Y".to_owned(),
+                view: crate::settings::ViewSettings {
+                    date_format: "%d %B %Y".to_owned(),
+                    ..crate::settings::ViewSettings::default()
+                },
                 ..ExplorerSettings::default()
             },
         );
@@ -851,7 +860,10 @@ mod tests {
             PathBuf::from("configured"),
             None,
             &ExplorerSettings {
-                font: "Inter".to_owned(),
+                view: crate::settings::ViewSettings {
+                    font: "Inter".to_owned(),
+                    ..crate::settings::ViewSettings::default()
+                },
                 ..ExplorerSettings::default()
             },
         );
@@ -871,7 +883,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        font: "Inter".to_owned(),
+                        view: crate::settings::ViewSettings {
+                            font: "Inter".to_owned(),
+                            ..crate::settings::ViewSettings::default()
+                        },
                         ..ExplorerSettings::default()
                     },
                     cx,
@@ -896,7 +911,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        sidebar_width: 333,
+                        sidebar: crate::settings::SidebarSettings {
+                            width: 333,
+                            ..crate::settings::SidebarSettings::default()
+                        },
                         ..ExplorerSettings::default()
                     },
                     cx,
@@ -921,7 +939,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        resolve_icons: false,
+                        view: crate::settings::ViewSettings {
+                            native_icons: false,
+                            ..crate::settings::ViewSettings::default()
+                        },
                         ..ExplorerSettings::default()
                     },
                     cx,
@@ -954,7 +975,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        show_folder_size: true,
+                        view: crate::settings::ViewSettings {
+                            show_folder_sizes: true,
+                            ..crate::settings::ViewSettings::default()
+                        },
                         ..ExplorerSettings::default()
                     },
                     cx,
@@ -1001,7 +1025,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        show_folder_size: true,
+                        view: crate::settings::ViewSettings {
+                            show_folder_sizes: true,
+                            ..crate::settings::ViewSettings::default()
+                        },
                         ..ExplorerSettings::default()
                     },
                     cx,

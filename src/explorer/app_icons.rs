@@ -1375,7 +1375,10 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &crate::settings::ExplorerSettings {
-                        resolve_icons: false,
+                        view: crate::settings::ViewSettings {
+                            native_icons: false,
+                            ..crate::settings::ViewSettings::default()
+                        },
                         ..crate::settings::ExplorerSettings::default()
                     },
                     cx,

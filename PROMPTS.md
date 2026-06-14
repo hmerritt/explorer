@@ -1,6 +1,4 @@
-## New
-
-## Ideas
+## Todo
 
 ## 1
 
@@ -12,7 +10,6 @@
 
 ## 2
 
-- Organise the settings file (group related items)
 - Customizable context menus (add items to settings)
 - [Windows-only] detext WSL Linux install, show drive for it
 - Large icons grid view (alternate to the current Details view)
