@@ -745,22 +745,62 @@ fn validate_context_menu_executable(path: &Path) -> io::Result<()> {
 
 fn validate_context_menu_only_extensions(extensions: &[String]) -> io::Result<()> {
     for extension in extensions {
-        normalized_context_menu_only_extension(extension).ok_or_else(|| {
+        resolve_context_menu_only_filter(extension).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("contextmenu only extensions must be file extensions: {extension}"),
+                format!(
+                    "contextmenu only values must be file extensions or known aliases: {extension}"
+                ),
             )
         })?;
     }
     Ok(())
 }
 
-pub(crate) fn normalized_context_menu_only_extension(extension: &str) -> Option<String> {
-    let extension = extension.trim();
-    let extension = extension.strip_prefix('.').unwrap_or(extension);
-    (!extension.is_empty() && !extension.contains('/') && !extension.contains('\\'))
-        .then(|| extension.to_ascii_lowercase())
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ContextMenuOnlyFilter {
+    Extension(String),
+    Alias(&'static [&'static str]),
 }
+
+pub(crate) fn resolve_context_menu_only_filter(extension: &str) -> Option<ContextMenuOnlyFilter> {
+    let extension = extension.trim();
+    if let Some(alias) = extension.strip_prefix('*') {
+        return context_menu_only_alias_extensions(alias).map(ContextMenuOnlyFilter::Alias);
+    }
+
+    let extension = extension.strip_prefix('.').unwrap_or(extension);
+    (!extension.is_empty()
+        && !extension.contains('/')
+        && !extension.contains('\\')
+        && !extension.contains('*'))
+    .then(|| ContextMenuOnlyFilter::Extension(extension.to_ascii_lowercase()))
+}
+
+fn context_menu_only_alias_extensions(alias: &str) -> Option<&'static [&'static str]> {
+    match alias.to_ascii_lowercase().as_str() {
+        "audio" => Some(CONTEXT_MENU_AUDIO_EXTENSIONS),
+        "image" | "photo" => Some(CONTEXT_MENU_IMAGE_EXTENSIONS),
+        "video" => Some(CONTEXT_MENU_VIDEO_EXTENSIONS),
+        _ => None,
+    }
+}
+
+const CONTEXT_MENU_AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "wav", "wave", "flac", "aac", "m4a", "wma", "opus", "oga", "mid", "midi", "aif", "aiff",
+    "aifc", "ape", "amr", "au", "snd", "ac3", "dts", "ra",
+];
+
+const CONTEXT_MENU_IMAGE_EXTENSIONS: &[&str] = &[
+    "bmp", "gif", "jpg", "jpeg", "jpe", "jfif", "png", "apng", "webp", "tif", "tiff", "svg",
+    "svgz", "heic", "heif", "avif", "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "psd", "xcf",
+];
+
+const CONTEXT_MENU_VIDEO_EXTENSIONS: &[&str] = &[
+    "webm", "mkv", "flv", "vob", "ogv", "ogg", "rrc", "gifv", "mng", "mov", "avi", "qt", "wmv",
+    "yuv", "rm", "asf", "amv", "m2ts", "mp4", "m4p", "m4v", "mpg", "mp2", "mpeg", "mpe", "mpv",
+    "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
+];
 
 fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     if path.is_absolute() {
@@ -1521,6 +1561,29 @@ mod tests {
     }
 
     #[test]
+    fn contextmenu_only_accepts_media_aliases() {
+        let settings = ExplorerSettings {
+            contextmenu: ContextMenuSettings {
+                directory: Vec::new(),
+                file_folder: vec![CustomContextMenuItem::Item {
+                    label: "Media tool".to_owned(),
+                    exe: PathBuf::from("~/bin/media-tool"),
+                    only: vec![
+                        "*video".to_owned(),
+                        "*photo".to_owned(),
+                        "*image".to_owned(),
+                        "*audio".to_owned(),
+                        "*Video".to_owned(),
+                    ],
+                }],
+            },
+            ..ExplorerSettings::default()
+        };
+
+        assert!(validate_settings(&settings).is_ok());
+    }
+
+    #[test]
     fn contextmenu_rejects_empty_labels_relative_subpaths_and_invalid_only_extensions() {
         for json in [
             r#"{"contextmenu":{"directory":[{"label":"","exe":"~/tool"}]}}"#,
@@ -1528,6 +1591,9 @@ mod tests {
             r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":[""]}]}}"#,
             r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["."]}]}}"#,
             r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["folder/txt"]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["*media"]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["*"]}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","only":["txt*"]}]}}"#,
             r#"{"contextmenu":{"directory":[{"label":" ","items":[]}]}}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();

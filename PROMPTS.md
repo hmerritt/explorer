@@ -2,8 +2,6 @@
 
 ## 1
 
-- Custom contextmenu functionality for "only". Add special fields "*video", "*photo"|"\*image", "\*audio" as aliases for ALL video/photo/audio file exensions
-
 - Fix search bug where after searching (while the input is focused) a user then navigates via arrow keys (down) to a file, and then press enter. Currently this enter first de-focuses the input and then enters the file/folder. My expectation would be that it should both de-focus the input and open the item
 
 - “Open with” picker

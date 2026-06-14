@@ -14,7 +14,9 @@ use crate::explorer::{
     navigation::{HistoryMode, directory_new_tab_target},
     view::ExplorerView,
 };
-use crate::settings::{CustomContextMenuItem, normalized_context_menu_only_extension};
+use crate::settings::{
+    ContextMenuOnlyFilter, CustomContextMenuItem, resolve_context_menu_only_filter,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
@@ -796,11 +798,11 @@ fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[Fi
     let Some(selected_entries) = selected_entries.filter(|entries| !entries.is_empty()) else {
         return false;
     };
-    let normalized = only
+    let filters = only
         .iter()
-        .filter_map(|extension| normalized_context_menu_only_extension(extension))
+        .filter_map(|extension| resolve_context_menu_only_filter(extension))
         .collect::<Vec<_>>();
-    if normalized.is_empty() {
+    if filters.is_empty() {
         return false;
     }
 
@@ -812,7 +814,12 @@ fn context_menu_item_matches_only(only: &[String], selected_entries: Option<&[Fi
                 .and_then(|extension| extension.to_str())
                 .map(|extension| {
                     let extension = extension.to_ascii_lowercase();
-                    normalized.iter().any(|candidate| candidate == &extension)
+                    filters.iter().any(|filter| match filter {
+                        ContextMenuOnlyFilter::Extension(candidate) => candidate == &extension,
+                        ContextMenuOnlyFilter::Alias(candidates) => {
+                            candidates.contains(&extension.as_str())
+                        }
+                    })
                 })
                 .unwrap_or(false)
     })
@@ -935,6 +942,35 @@ mod tests {
             }
             ContextMenuItem::Separator | ContextMenuItem::Detail { .. } => false,
         })
+    }
+
+    fn custom_menu_for_entries(
+        label: &str,
+        only: &[&str],
+        selected_entries: Vec<FileEntry>,
+    ) -> Vec<ContextMenuItem> {
+        let executable = configured_executable_path();
+        let targets = selected_entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let configured = vec![CustomContextMenuItem::Item {
+            label: label.to_owned(),
+            exe: executable,
+            only: only.iter().map(|value| (*value).to_owned()).collect(),
+        }];
+
+        entry_context_menu_items_with_custom(
+            None,
+            selected_entries.len(),
+            selected_entries.len(),
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+            &selected_entries,
+        )
     }
 
     use chrono::{Local, TimeZone};
@@ -1677,6 +1713,69 @@ mod tests {
         assert!(menu_has_label(&items, "Text tool"));
         assert!(menu_has_label(&items, "Any tool"));
         assert!(!menu_has_label(&items, "Image tool"));
+    }
+
+    #[test]
+    fn configured_entry_items_filter_by_only_media_aliases() {
+        let image_items = custom_menu_for_entries(
+            "Image tool",
+            &["*image"],
+            vec![
+                FileEntry::test("photo.JPG", false, Some(1), None),
+                FileEntry::test("design.svg", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&image_items, "Image tool"));
+
+        let photo_items = custom_menu_for_entries(
+            "Photo tool",
+            &["*photo"],
+            vec![
+                FileEntry::test("photo.JPG", false, Some(1), None),
+                FileEntry::test("design.svg", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&photo_items, "Photo tool"));
+
+        let audio_items = custom_menu_for_entries(
+            "Audio tool",
+            &["*audio"],
+            vec![
+                FileEntry::test("song.M4A", false, Some(1), None),
+                FileEntry::test("mix.OPUS", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&audio_items, "Audio tool"));
+
+        let video_items = custom_menu_for_entries(
+            "Video tool",
+            &["*video"],
+            vec![
+                FileEntry::test("clip.MP4", false, Some(1), None),
+                FileEntry::test("movie.mkv", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&video_items, "Video tool"));
+
+        let mixed_items = custom_menu_for_entries(
+            "Image tool",
+            &["*image"],
+            vec![
+                FileEntry::test("photo.JPG", false, Some(1), None),
+                FileEntry::test("song.mp3", false, Some(1), None),
+            ],
+        );
+        assert!(!menu_has_label(&mixed_items, "Image tool"));
+
+        let combined_items = custom_menu_for_entries(
+            "Image or PDF tool",
+            &["*image", "pdf"],
+            vec![
+                FileEntry::test("photo.JPG", false, Some(1), None),
+                FileEntry::test("report.PDF", false, Some(1), None),
+            ],
+        );
+        assert!(menu_has_label(&combined_items, "Image or PDF tool"));
     }
 
     #[test]
