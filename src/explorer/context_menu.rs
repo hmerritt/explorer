@@ -843,11 +843,15 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     fn configured_executable_path() -> PathBuf {
-        if cfg!(target_os = "windows") {
-            PathBuf::from(r"C:\Tools\inspect.exe")
+        let dir = unique_temp_dir("configured-executable");
+        fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join(if cfg!(target_os = "windows") {
+            "inspect.exe"
         } else {
-            PathBuf::from("/usr/bin/inspect")
-        }
+            "inspect"
+        });
+        fs::write(&executable, "").unwrap();
+        executable
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
@@ -1479,6 +1483,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn configured_entry_items_skip_only_missing_executables() {
+        let executable = configured_executable_path();
+        let missing = executable.with_file_name("missing-inspect");
+        let targets = vec![PathBuf::from("a.txt")];
+        let configured = vec![
+            CustomContextMenuItem::Item {
+                label: "Missing".to_owned(),
+                executable: missing.clone(),
+            },
+            CustomContextMenuItem::Item {
+                label: "Inspect".to_owned(),
+                executable: executable.clone(),
+            },
+            CustomContextMenuItem::Submenu {
+                label: "Tools".to_owned(),
+                items: vec![
+                    CustomContextMenuItem::Item {
+                        label: "Missing child".to_owned(),
+                        executable: missing.clone(),
+                    },
+                    CustomContextMenuItem::Item {
+                        label: "Deep inspect".to_owned(),
+                        executable: executable.clone(),
+                    },
+                ],
+            },
+            CustomContextMenuItem::Submenu {
+                label: "Empty".to_owned(),
+                items: vec![CustomContextMenuItem::Item {
+                    label: "Only missing".to_owned(),
+                    executable: missing,
+                }],
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+        );
+
+        assert!(matches!(
+            &items[2],
+            ContextMenuItem::Action { label, .. } if label == "Inspect"
+        ));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Submenu { label, children, .. }
+                if label == "Tools"
+                    && children.len() == 1
+                    && matches!(
+                        &children[0],
+                        ContextMenuItem::Action { label, .. } if label == "Deep inspect"
+                    )
+        ));
+        assert!(matches!(items[4], ContextMenuItem::Separator));
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action { label, .. }
+            | ContextMenuItem::Submenu { label, .. }
+                if label == "Missing" || label == "Empty"
+        )));
     }
 
     #[test]

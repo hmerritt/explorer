@@ -2,8 +2,10 @@
 
 ## 1
 
-- If custom contextmenu settings item executable does not exist, do not render that specific item in the menu. Currently it will skip all items if one fails to resolve, it should only skip the failed ones
 - I would like to remove the custom contextmenu settings "kind" key and instead infer this. If "items" exists then always infer "submenu"
+- Add a custom contextmenu settings option to kind item "extensions" which is a string array of file extensions. Only render the item if the selected file (if multiselect ALL selected files) have one of the extensions listed (has a side-effect of limiting item to files only)
+
+- Fix search bug where after searching (while the input is focused) a user then navigates via arrow keys (down) to a file, and then press enter. Currently this enter first de-focuses the input and then enters the file/folder. My expectation would be that it should both de-focus the input and open the item
 
 - “Open with” picker
 - Dialog button improvements

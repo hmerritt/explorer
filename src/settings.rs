@@ -668,18 +668,17 @@ fn validate_configured_path(path: &Path) -> io::Result<()> {
 }
 
 fn validate_context_menu_executable(path: &Path) -> io::Result<()> {
-    resolve_context_menu_executable(path).map_or_else(
-        || {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "contextmenu executables must be absolute, begin with ~/, or resolve from PATH: {}",
-                    path.display()
-                ),
-            ))
-        },
-        |_| Ok(()),
-    )
+    if path.is_absolute() || is_tilde_path(path) || is_path_executable_name(path) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "contextmenu executables must be absolute, begin with ~/, or be an executable name from PATH: {}",
+                path.display()
+            ),
+        ))
+    }
 }
 
 fn expand_configured_path(path: &Path) -> Option<PathBuf> {
@@ -711,7 +710,7 @@ fn resolve_context_menu_executable_with(
     mut is_file: impl FnMut(&Path) -> bool,
 ) -> Option<PathBuf> {
     if let Some(path) = expand_configured_path(path) {
-        return Some(path);
+        return is_file(&path).then_some(path);
     }
     if !is_path_executable_name(path) {
         return None;
@@ -1302,11 +1301,79 @@ mod tests {
     }
 
     #[test]
-    fn contextmenu_rejects_empty_labels_relative_subpaths_and_missing_path_executables() {
+    fn contextmenu_accepts_missing_but_well_formed_executables() {
+        let missing_absolute =
+            unique_temp_dir("missing-contextmenu-executable").join("missing-tool");
+        let settings = ExplorerSettings {
+            contextmenu: ContextMenuSettings {
+                directory: vec![
+                    CustomContextMenuItem::Item {
+                        label: "Missing absolute".to_owned(),
+                        executable: missing_absolute.clone(),
+                    },
+                    CustomContextMenuItem::Item {
+                        label: "Missing PATH command".to_owned(),
+                        executable: PathBuf::from("definitely-not-an-explorer-test-command"),
+                    },
+                ],
+                file_folder: Vec::new(),
+            },
+            ..ExplorerSettings::default()
+        };
+
+        assert!(validate_settings(&settings).is_ok());
+        assert!(
+            settings.contextmenu.directory[0]
+                .resolved_executable()
+                .is_none()
+        );
+        assert!(
+            settings.contextmenu.directory[1]
+                .resolved_executable()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn settings_load_with_missing_contextmenu_executable() {
+        let path = unique_temp_dir("missing-contextmenu-load").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "kind": "item",
+                            "label": "Missing",
+                            "executable": "definitely-not-an-explorer-test-command"
+                        }
+                    ]
+                },
+                "view": {
+                    "show_hidden": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = load_settings_from_path(&path).unwrap();
+
+        assert!(settings.view.show_hidden);
+        assert_eq!(settings.contextmenu.directory.len(), 1);
+        assert!(
+            settings.contextmenu.directory[0]
+                .resolved_executable()
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn contextmenu_rejects_empty_labels_and_relative_subpaths() {
         for json in [
             r#"{"contextmenu":{"directory":[{"kind":"item","label":"","executable":"~/tool"}]}}"#,
             r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"tools/relative"}]}}"#,
-            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"definitely-not-an-explorer-test-command"}]}}"#,
             r#"{"contextmenu":{"directory":[{"kind":"submenu","label":" ","items":[]}]}}"#,
         ] {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
