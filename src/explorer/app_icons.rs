@@ -54,6 +54,8 @@ struct NativeIconRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PlatformIconRequest {
+    #[cfg(any(target_os = "linux", test))]
+    Linux(LinuxIconRequest),
     #[cfg(any(target_os = "windows", test))]
     Windows(WindowsIconRequest),
     #[cfg(any(target_os = "macos", test))]
@@ -62,11 +64,20 @@ enum PlatformIconRequest {
     Test,
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LinuxIconRequest {
+    Path { path: PathBuf },
+}
+
 #[cfg(any(target_os = "macos", test))]
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum MacIconRequest {
     AppBundle { path: PathBuf },
     FileType { extension: String },
+    Path { path: PathBuf },
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -227,6 +238,14 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<Arc<Image>> {
         self.native_icon_for_request(native_icon_request_for_entry(entry), cx)
+    }
+
+    pub(super) fn native_icon_for_path(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Image>> {
+        self.native_icon_for_request(native_icon_request_for_path(path), cx)
     }
 
     fn native_icon_for_request(
@@ -561,6 +580,50 @@ fn native_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest>
     None
 }
 
+fn native_icon_request_for_path(path: &Path) -> Option<NativeIconRequest> {
+    #[cfg(target_os = "macos")]
+    {
+        return Some(mac_native_icon_request(MacIconRequest::Path {
+            path: path.to_path_buf(),
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Some(windows_native_icon_request(WindowsIconRequest::Path {
+            path: path.to_path_buf(),
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return Some(linux_native_icon_request(LinuxIconRequest::Path {
+            path: path.to_path_buf(),
+        }));
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(test, allow(dead_code))]
+fn linux_native_icon_request(request: LinuxIconRequest) -> NativeIconRequest {
+    let key = match &request {
+        LinuxIconRequest::Path { path } => {
+            format!(
+                "{NATIVE_ICON_CACHE_VERSION}:linux:path:{}",
+                normalized_path_key(path)
+            )
+        }
+    };
+
+    NativeIconRequest {
+        key,
+        source: PlatformIconRequest::Linux(request),
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn mac_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
     if entry.uses_app_bundle_icon() {
@@ -589,6 +652,12 @@ fn mac_native_icon_request(request: MacIconRequest) -> NativeIconRequest {
         }
         MacIconRequest::FileType { extension, .. } => {
             format!("{NATIVE_ICON_CACHE_VERSION}:macos:file-type:{extension}")
+        }
+        MacIconRequest::Path { path } => {
+            format!(
+                "{NATIVE_ICON_CACHE_VERSION}:macos:path:{}",
+                normalized_path_key(path)
+            )
         }
     };
 
@@ -689,6 +758,10 @@ fn normalized_path_key(path: &Path) -> String {
 
 fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> {
     match &request.source {
+        #[cfg(target_os = "linux")]
+        PlatformIconRequest::Linux(request) => load_linux_icon_png_bytes(request),
+        #[cfg(all(test, not(target_os = "linux")))]
+        PlatformIconRequest::Linux(_) => None,
         #[cfg(target_os = "macos")]
         PlatformIconRequest::Mac(request) => load_macos_icon_png_bytes(request),
         #[cfg(all(test, not(target_os = "macos")))]
@@ -702,6 +775,103 @@ fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> 
         #[allow(unreachable_patterns)]
         _ => None,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn load_linux_icon_png_bytes(request: &LinuxIconRequest) -> Option<Vec<u8>> {
+    use freedesktop_desktop_entry::IconSource;
+
+    let LinuxIconRequest::Path { path } = request;
+    let entries =
+        std::panic::catch_unwind(|| freedesktop_desktop_entry::desktop_entries(&[])).ok()?;
+    let icon = linux_icon_source_for_executable(path, &entries)?;
+    let icon_path = match icon {
+        IconSource::Path(path) => path,
+        IconSource::Name(name) => {
+            let theme = freedesktop_icons::default_theme_gtk();
+            let lookup = freedesktop_icons::lookup(&name).with_size(32).with_cache();
+            match theme {
+                Some(theme) => lookup.with_theme(&theme).find(),
+                None => lookup.find(),
+            }?
+        }
+    };
+
+    load_linux_icon_path_as_png(&icon_path)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_icon_source_for_executable(
+    executable: &Path,
+    entries: &[freedesktop_desktop_entry::DesktopEntry],
+) -> Option<freedesktop_desktop_entry::IconSource> {
+    use freedesktop_desktop_entry::IconSource;
+
+    let executable_name = executable.file_name();
+    let entry = entries
+        .iter()
+        .filter_map(|entry| {
+            let command = entry
+                .parse_exec()
+                .ok()
+                .and_then(|arguments| arguments.into_iter().next())
+                .or_else(|| entry.try_exec().map(str::to_owned))?;
+            Some((entry, PathBuf::from(command)))
+        })
+        .find(|(_, command)| command == executable)
+        .or_else(|| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let command = entry
+                        .parse_exec()
+                        .ok()
+                        .and_then(|arguments| arguments.into_iter().next())
+                        .or_else(|| entry.try_exec().map(str::to_owned))?;
+                    let command = PathBuf::from(command);
+                    (command.file_name() == executable_name).then_some((entry, command))
+                })
+                .next()
+        })
+        .map(|(entry, _)| entry)?;
+
+    Some(IconSource::from_unknown(entry.icon()?))
+}
+
+#[cfg(target_os = "linux")]
+fn load_linux_icon_path_as_png(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    if path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        return linux_svg_to_png(&bytes);
+    }
+    valid_png_bytes(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let scale = (32.0 / size.width()).min(32.0 / size.height());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32)?;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            pixmap.data(),
+            pixmap.width(),
+            pixmap.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    valid_png_bytes(png)
 }
 
 #[cfg(target_os = "windows")]
@@ -898,6 +1068,7 @@ fn load_macos_icon_png_bytes(request: &MacIconRequest) -> Option<Vec<u8>> {
     match request {
         MacIconRequest::AppBundle { path } => load_app_bundle_icon_png_bytes(path),
         MacIconRequest::FileType { extension } => load_file_type_icon_png_bytes(extension),
+        MacIconRequest::Path { path } => load_icon_from_workspace(path),
     }
 }
 

@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::SystemTime,
 };
 
@@ -13,6 +14,7 @@ use crate::explorer::{
     navigation::{HistoryMode, directory_new_tab_target},
     view::ExplorerView,
 };
+use crate::settings::CustomContextMenuItem;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
@@ -31,16 +33,16 @@ pub(super) enum ContextMenuSource {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ContextMenuItem {
     Action {
-        id: &'static str,
+        id: String,
         icon: Option<ContextMenuIcon>,
         label: String,
         command: ContextMenuCommand,
         enabled: bool,
     },
     Submenu {
-        id: &'static str,
+        id: String,
         icon: Option<ContextMenuIcon>,
-        label: &'static str,
+        label: String,
         children: Vec<ContextMenuItem>,
     },
     Separator,
@@ -57,7 +59,7 @@ pub(super) enum ContextMenuIconSlot {
     Collapse,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuIcon {
     Cut,
     Copy,
@@ -69,14 +71,19 @@ pub(super) enum ContextMenuIcon {
     NativeFile,
     Folder,
     FolderKind(Option<DirectoryKind>),
+    NativePath(PathBuf),
     NewTab,
     Unpin,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuCommand {
-    OpenDirectory { path: PathBuf },
-    OpenDirectoryInNewTab { path: PathBuf },
+    OpenDirectory {
+        path: PathBuf,
+    },
+    OpenDirectoryInNewTab {
+        path: PathBuf,
+    },
     OpenSelectedFiles,
     OpenSelectedDirectoriesInNewTabs,
     CutSelected,
@@ -86,7 +93,13 @@ pub(super) enum ContextMenuCommand {
     RenameSelected,
     NewFile,
     NewFolder,
-    UnpinSidebar { configured_index: usize },
+    RunCustom {
+        executable: PathBuf,
+        targets: Vec<PathBuf>,
+    },
+    UnpinSidebar {
+        configured_index: usize,
+    },
 }
 
 impl ContextMenuState {
@@ -146,9 +159,18 @@ impl ExplorerView {
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
+        let custom_items = cx
+            .try_global::<crate::settings::SettingsState>()
+            .map(|settings| settings.value.contextmenu.directory.clone())
+            .unwrap_or_default();
         self.context_menu = Some(ContextMenuState::new(
             origin,
-            folder_context_menu_items(&self.path, can_paste, &self.date_format),
+            folder_context_menu_items_with_custom(
+                &self.path,
+                can_paste,
+                &self.date_format,
+                &custom_items,
+            ),
         ));
         true
     }
@@ -203,15 +225,22 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
+        let custom_items = cx
+            .try_global::<crate::settings::SettingsState>()
+            .map(|settings| settings.value.contextmenu.file_folder.clone())
+            .unwrap_or_default();
+        let targets = self.selected_paths();
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
-            entry_context_menu_items(
+            entry_context_menu_items_with_custom(
                 selected_context.single_directory_open_target,
                 selected_context.selected_count,
                 selected_context.file_open_count,
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
                 selected_context.native_icon_entry.is_some(),
+                &custom_items,
+                &targets,
             ),
             selected_context.native_icon_entry,
         ));
@@ -237,15 +266,22 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
+        let custom_items = cx
+            .try_global::<crate::settings::SettingsState>()
+            .map(|settings| settings.value.contextmenu.file_folder.clone())
+            .unwrap_or_default();
+        let targets = self.selected_paths();
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
-            entry_context_menu_items(
+            entry_context_menu_items_with_custom(
                 selected_context.single_directory_open_target,
                 selected_context.selected_count,
                 selected_context.file_open_count,
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
                 selected_context.native_icon_entry.is_some(),
+                &custom_items,
+                &targets,
             ),
             selected_context.native_icon_entry,
         ));
@@ -299,8 +335,32 @@ impl ExplorerView {
             }
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
+            ContextMenuCommand::RunCustom {
+                executable,
+                targets,
+            } => {
+                self.handle_custom_command_result(
+                    &executable,
+                    run_custom_command(&executable, &targets),
+                );
+            }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
+            }
+        }
+    }
+
+    fn handle_custom_command_result(&mut self, executable: &Path, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => self.open_error = None,
+            Err(error) => {
+                self.open_error = Some(format!(
+                    "Could not run {}: {error}",
+                    executable
+                        .file_name()
+                        .unwrap_or(executable.as_os_str())
+                        .to_string_lossy()
+                ));
             }
         }
     }
@@ -369,6 +429,20 @@ impl ExplorerView {
     }
 }
 
+fn run_custom_command(executable: &Path, targets: &[PathBuf]) -> std::io::Result<()> {
+    run_custom_command_with(executable, targets, |executable, targets| {
+        Command::new(executable).args(targets).spawn().map(|_| ())
+    })
+}
+
+fn run_custom_command_with(
+    executable: &Path,
+    targets: &[PathBuf],
+    spawn: impl FnOnce(&Path, &[PathBuf]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    spawn(executable, targets)
+}
+
 struct SelectedEntryContext {
     selected_count: usize,
     file_open_count: usize,
@@ -384,14 +458,14 @@ pub(super) fn sidebar_context_menu_items(
 ) -> Vec<ContextMenuItem> {
     let mut items = vec![
         ContextMenuItem::Action {
-            id: "context-menu-sidebar-open",
+            id: "context-menu-sidebar-open".to_owned(),
             icon: Some(ContextMenuIcon::FolderKind(open_icon_kind)),
             label: "Open".to_owned(),
             command: ContextMenuCommand::OpenDirectory { path: path.clone() },
             enabled: true,
         },
         ContextMenuItem::Action {
-            id: "context-menu-sidebar-open-new-tab",
+            id: "context-menu-sidebar-open-new-tab".to_owned(),
             icon: Some(ContextMenuIcon::NewTab),
             label: "Open in new tab".to_owned(),
             command: ContextMenuCommand::OpenDirectoryInNewTab { path },
@@ -401,7 +475,7 @@ pub(super) fn sidebar_context_menu_items(
     if let Some(configured_index) = configured_index {
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Action {
-            id: "context-menu-sidebar-unpin",
+            id: "context-menu-sidebar-unpin".to_owned(),
             icon: Some(ContextMenuIcon::Unpin),
             label: "Unpin".to_owned(),
             command: ContextMenuCommand::UnpinSidebar { configured_index },
@@ -411,6 +485,7 @@ pub(super) fn sidebar_context_menu_items(
     items
 }
 
+#[cfg(test)]
 pub(super) fn entry_context_menu_items(
     single_directory_open_target: Option<PathBuf>,
     selected_count: usize,
@@ -418,6 +493,28 @@ pub(super) fn entry_context_menu_items(
     selected_directory_count: usize,
     can_rename: bool,
     use_native_file_icon: bool,
+) -> Vec<ContextMenuItem> {
+    entry_context_menu_items_with_custom(
+        single_directory_open_target,
+        selected_count,
+        selected_file_count,
+        selected_directory_count,
+        can_rename,
+        use_native_file_icon,
+        &[],
+        &[],
+    )
+}
+
+fn entry_context_menu_items_with_custom(
+    single_directory_open_target: Option<PathBuf>,
+    selected_count: usize,
+    selected_file_count: usize,
+    selected_directory_count: usize,
+    can_rename: bool,
+    use_native_file_icon: bool,
+    custom_items: &[CustomContextMenuItem],
+    targets: &[PathBuf],
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     if selected_count == 1 {
@@ -435,7 +532,7 @@ pub(super) fn entry_context_menu_items(
             ContextMenuIcon::FolderKind(None)
         };
         items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-open",
+            id: "context-menu-entry-open".to_owned(),
             icon: Some(icon),
             label: "Open".to_owned(),
             command,
@@ -445,7 +542,7 @@ pub(super) fn entry_context_menu_items(
 
     if selected_count > 1 && selected_file_count > 0 {
         items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-open",
+            id: "context-menu-entry-open".to_owned(),
             icon: Some(ContextMenuIcon::File),
             label: format!("Open files ({selected_file_count})"),
             command: ContextMenuCommand::OpenSelectedFiles,
@@ -455,7 +552,7 @@ pub(super) fn entry_context_menu_items(
 
     if selected_directory_count > 0 {
         items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-open-new-tab",
+            id: "context-menu-entry-open-new-tab".to_owned(),
             icon: Some(ContextMenuIcon::NewTab),
             label: if selected_directory_count > 1 {
                 format!("Open new tabs ({selected_directory_count})")
@@ -470,17 +567,18 @@ pub(super) fn entry_context_menu_items(
     if !items.is_empty() {
         items.push(ContextMenuItem::Separator);
     }
+    insert_custom_items_after_first_separator(&mut items, custom_items, targets);
 
     items.extend([
         ContextMenuItem::Action {
-            id: "context-menu-entry-cut",
+            id: "context-menu-entry-cut".to_owned(),
             icon: Some(ContextMenuIcon::Cut),
             label: "Cut".to_owned(),
             command: ContextMenuCommand::CutSelected,
             enabled: true,
         },
         ContextMenuItem::Action {
-            id: "context-menu-entry-copy",
+            id: "context-menu-entry-copy".to_owned(),
             icon: Some(ContextMenuIcon::Copy),
             label: "Copy".to_owned(),
             command: ContextMenuCommand::CopySelected,
@@ -488,7 +586,7 @@ pub(super) fn entry_context_menu_items(
         },
         ContextMenuItem::Separator,
         ContextMenuItem::Action {
-            id: "context-menu-entry-delete",
+            id: "context-menu-entry-delete".to_owned(),
             icon: Some(ContextMenuIcon::Delete),
             label: "Delete".to_owned(),
             command: ContextMenuCommand::DeleteSelected,
@@ -497,7 +595,7 @@ pub(super) fn entry_context_menu_items(
     ]);
     if selected_count == 1 {
         items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-rename",
+            id: "context-menu-entry-rename".to_owned(),
             icon: Some(ContextMenuIcon::Rename),
             label: "Rename".to_owned(),
             command: ContextMenuCommand::RenameSelected,
@@ -511,16 +609,20 @@ fn entry_is_file_open_target(entry: &FileEntry) -> bool {
     !entry.is_directory_like() || entry.is_app_bundle()
 }
 
-pub(super) fn folder_context_menu_items(
+fn folder_context_menu_items_with_custom(
     path: &Path,
     can_paste: bool,
     date_format: &str,
+    custom_items: &[CustomContextMenuItem],
 ) -> Vec<ContextMenuItem> {
     let (created, modified) = fs::metadata(path)
         .map(|metadata| (metadata.created().ok(), metadata.modified().ok()))
         .unwrap_or((None, None));
 
-    folder_context_menu_items_from_times_with_format(can_paste, created, modified, date_format)
+    let mut items =
+        folder_context_menu_items_from_times_with_format(can_paste, created, modified, date_format);
+    insert_custom_items_after_first_separator(&mut items, custom_items, &[path.to_path_buf()]);
+    items
 }
 
 #[cfg(test)]
@@ -545,26 +647,26 @@ fn folder_context_menu_items_from_times_with_format(
 ) -> Vec<ContextMenuItem> {
     vec![
         ContextMenuItem::Action {
-            id: "context-menu-paste",
+            id: "context-menu-paste".to_owned(),
             icon: Some(ContextMenuIcon::Paste),
             label: "Paste".to_owned(),
             command: ContextMenuCommand::Paste,
             enabled: can_paste,
         },
         ContextMenuItem::Submenu {
-            id: "context-menu-new",
+            id: "context-menu-new".to_owned(),
             icon: Some(ContextMenuIcon::New),
-            label: "New",
+            label: "New".to_owned(),
             children: vec![
                 ContextMenuItem::Action {
-                    id: "context-menu-new-file",
+                    id: "context-menu-new-file".to_owned(),
                     icon: Some(ContextMenuIcon::File),
                     label: "File".to_owned(),
                     command: ContextMenuCommand::NewFile,
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-new-folder",
+                    id: "context-menu-new-folder".to_owned(),
                     icon: Some(ContextMenuIcon::Folder),
                     label: "Folder".to_owned(),
                     command: ContextMenuCommand::NewFolder,
@@ -584,6 +686,69 @@ fn folder_context_menu_items_from_times_with_format(
             icon_slot: ContextMenuIconSlot::Collapse,
         },
     ]
+}
+
+fn insert_custom_items_after_first_separator(
+    items: &mut Vec<ContextMenuItem>,
+    configured: &[CustomContextMenuItem],
+    targets: &[PathBuf],
+) {
+    let custom = configured
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| configured_context_menu_item(item, targets, &index.to_string()))
+        .collect::<Vec<_>>();
+    if custom.is_empty() {
+        return;
+    }
+
+    let insertion = items
+        .iter()
+        .position(|item| matches!(item, ContextMenuItem::Separator))
+        .map_or(items.len(), |index| index + 1);
+    items.splice(
+        insertion..insertion,
+        custom
+            .into_iter()
+            .chain(std::iter::once(ContextMenuItem::Separator)),
+    );
+}
+
+fn configured_context_menu_item(
+    item: &CustomContextMenuItem,
+    targets: &[PathBuf],
+    id_suffix: &str,
+) -> Option<ContextMenuItem> {
+    match item {
+        CustomContextMenuItem::Item { label, .. } => {
+            let executable = item.resolved_executable()?;
+            Some(ContextMenuItem::Action {
+                id: format!("context-menu-custom-{id_suffix}"),
+                icon: Some(ContextMenuIcon::NativePath(executable.clone())),
+                label: label.clone(),
+                command: ContextMenuCommand::RunCustom {
+                    executable,
+                    targets: targets.to_vec(),
+                },
+                enabled: true,
+            })
+        }
+        CustomContextMenuItem::Submenu { label, items } => {
+            let children = items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    configured_context_menu_item(item, targets, &format!("{id_suffix}-{index}"))
+                })
+                .collect::<Vec<_>>();
+            (!children.is_empty()).then(|| ContextMenuItem::Submenu {
+                id: format!("context-menu-custom-{id_suffix}"),
+                icon: None,
+                label: label.clone(),
+                children,
+            })
+        }
+    }
 }
 
 pub(super) fn context_menu_path_is_active(hovered_path: &[usize], path: &[usize]) -> bool {
@@ -673,6 +838,15 @@ pub(super) fn context_submenu_left(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::CustomContextMenuItem;
+
+    fn configured_executable_path() -> PathBuf {
+        if cfg!(target_os = "windows") {
+            PathBuf::from(r"C:\Tools\inspect.exe")
+        } else {
+            PathBuf::from("/usr/bin/inspect")
+        }
+    }
     use chrono::{Local, TimeZone};
 
     #[test]
@@ -690,7 +864,7 @@ mod tests {
     #[test]
     fn only_active_submenu_parents_are_persistently_active() {
         let action = ContextMenuItem::Action {
-            id: "action",
+            id: "action".to_owned(),
             icon: None,
             label: "Action".to_owned(),
             command: ContextMenuCommand::Paste,
@@ -702,9 +876,9 @@ mod tests {
             icon_slot: ContextMenuIconSlot::Collapse,
         };
         let submenu = ContextMenuItem::Submenu {
-            id: "submenu",
+            id: "submenu".to_owned(),
             icon: None,
-            label: "New",
+            label: "New".to_owned(),
             children: Vec::new(),
         };
         let hovered = vec![1, 0];
@@ -763,7 +937,7 @@ mod tests {
     fn menu_height_includes_item_gaps() {
         let items = vec![
             ContextMenuItem::Action {
-                id: "context-menu-paste",
+                id: "context-menu-paste".to_owned(),
                 icon: Some(ContextMenuIcon::Paste),
                 label: "Paste".to_owned(),
                 command: ContextMenuCommand::Paste,
@@ -784,16 +958,16 @@ mod tests {
     fn item_top_includes_prior_item_gaps() {
         let items = vec![
             ContextMenuItem::Action {
-                id: "context-menu-paste",
+                id: "context-menu-paste".to_owned(),
                 icon: Some(ContextMenuIcon::Paste),
                 label: "Paste".to_owned(),
                 command: ContextMenuCommand::Paste,
                 enabled: true,
             },
             ContextMenuItem::Submenu {
-                id: "context-menu-new",
+                id: "context-menu-new".to_owned(),
                 icon: Some(ContextMenuIcon::New),
-                label: "New",
+                label: "New".to_owned(),
                 children: Vec::new(),
             },
             ContextMenuItem::Separator,
@@ -885,7 +1059,7 @@ mod tests {
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
-                id: "context-menu-paste",
+                id: "context-menu-paste".to_owned(),
                 icon: Some(ContextMenuIcon::Paste),
                 label: "Paste".to_owned(),
                 command: ContextMenuCommand::Paste,
@@ -918,7 +1092,7 @@ mod tests {
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
-                id: "context-menu-sidebar-open",
+                id: "context-menu-sidebar-open".to_owned(),
                 icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Downloads))),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenDirectory { path: path.clone() },
@@ -928,7 +1102,7 @@ mod tests {
         assert_eq!(
             items[1],
             ContextMenuItem::Action {
-                id: "context-menu-sidebar-open-new-tab",
+                id: "context-menu-sidebar-open-new-tab".to_owned(),
                 icon: Some(ContextMenuIcon::NewTab),
                 label: "Open in new tab".to_owned(),
                 command: ContextMenuCommand::OpenDirectoryInNewTab { path },
@@ -939,7 +1113,7 @@ mod tests {
         assert_eq!(
             items[3],
             ContextMenuItem::Action {
-                id: "context-menu-sidebar-unpin",
+                id: "context-menu-sidebar-unpin".to_owned(),
                 icon: Some(ContextMenuIcon::Unpin),
                 label: "Unpin".to_owned(),
                 command: ContextMenuCommand::UnpinSidebar {
@@ -959,7 +1133,7 @@ mod tests {
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
-                id: "context-menu-sidebar-open",
+                id: "context-menu-sidebar-open".to_owned(),
                 icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Drive))),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenDirectory { path: path.clone() },
@@ -969,7 +1143,7 @@ mod tests {
         assert_eq!(
             items[1],
             ContextMenuItem::Action {
-                id: "context-menu-sidebar-open-new-tab",
+                id: "context-menu-sidebar-open-new-tab".to_owned(),
                 icon: Some(ContextMenuIcon::NewTab),
                 label: "Open in new tab".to_owned(),
                 command: ContextMenuCommand::OpenDirectoryInNewTab { path },
@@ -987,14 +1161,14 @@ mod tests {
             items,
             vec![
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-open",
+                    id: "context-menu-entry-open".to_owned(),
                     icon: Some(ContextMenuIcon::FolderKind(None)),
                     label: "Open".to_owned(),
                     command: ContextMenuCommand::OpenDirectory { path: path.clone() },
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-open-new-tab",
+                    id: "context-menu-entry-open-new-tab".to_owned(),
                     icon: Some(ContextMenuIcon::NewTab),
                     label: "Open in new tab".to_owned(),
                     command: ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
@@ -1002,14 +1176,14 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-cut",
+                    id: "context-menu-entry-cut".to_owned(),
                     icon: Some(ContextMenuIcon::Cut),
                     label: "Cut".to_owned(),
                     command: ContextMenuCommand::CutSelected,
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-copy",
+                    id: "context-menu-entry-copy".to_owned(),
                     icon: Some(ContextMenuIcon::Copy),
                     label: "Copy".to_owned(),
                     command: ContextMenuCommand::CopySelected,
@@ -1017,14 +1191,14 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-delete",
+                    id: "context-menu-entry-delete".to_owned(),
                     icon: Some(ContextMenuIcon::Delete),
                     label: "Delete".to_owned(),
                     command: ContextMenuCommand::DeleteSelected,
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-rename",
+                    id: "context-menu-entry-rename".to_owned(),
                     icon: Some(ContextMenuIcon::Rename),
                     label: "Rename".to_owned(),
                     command: ContextMenuCommand::RenameSelected,
@@ -1052,7 +1226,7 @@ mod tests {
         assert_eq!(
             items.first(),
             Some(&ContextMenuItem::Action {
-                id: "context-menu-entry-open",
+                id: "context-menu-entry-open".to_owned(),
                 icon: Some(ContextMenuIcon::NativeFile),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenSelectedFiles,
@@ -1077,7 +1251,7 @@ mod tests {
             items,
             vec![
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-open",
+                    id: "context-menu-entry-open".to_owned(),
                     icon: Some(ContextMenuIcon::File),
                     label: "Open files (2)".to_owned(),
                     command: ContextMenuCommand::OpenSelectedFiles,
@@ -1085,14 +1259,14 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-cut",
+                    id: "context-menu-entry-cut".to_owned(),
                     icon: Some(ContextMenuIcon::Cut),
                     label: "Cut".to_owned(),
                     command: ContextMenuCommand::CutSelected,
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-copy",
+                    id: "context-menu-entry-copy".to_owned(),
                     icon: Some(ContextMenuIcon::Copy),
                     label: "Copy".to_owned(),
                     command: ContextMenuCommand::CopySelected,
@@ -1100,7 +1274,7 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-delete",
+                    id: "context-menu-entry-delete".to_owned(),
                     icon: Some(ContextMenuIcon::Delete),
                     label: "Delete".to_owned(),
                     command: ContextMenuCommand::DeleteSelected,
@@ -1118,7 +1292,7 @@ mod tests {
             items,
             vec![
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-open-new-tab",
+                    id: "context-menu-entry-open-new-tab".to_owned(),
                     icon: Some(ContextMenuIcon::NewTab),
                     label: "Open new tabs (2)".to_owned(),
                     command: ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
@@ -1126,14 +1300,14 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-cut",
+                    id: "context-menu-entry-cut".to_owned(),
                     icon: Some(ContextMenuIcon::Cut),
                     label: "Cut".to_owned(),
                     command: ContextMenuCommand::CutSelected,
                     enabled: true,
                 },
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-copy",
+                    id: "context-menu-entry-copy".to_owned(),
                     icon: Some(ContextMenuIcon::Copy),
                     label: "Copy".to_owned(),
                     command: ContextMenuCommand::CopySelected,
@@ -1141,7 +1315,7 @@ mod tests {
                 },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
-                    id: "context-menu-entry-delete",
+                    id: "context-menu-entry-delete".to_owned(),
                     icon: Some(ContextMenuIcon::Delete),
                     label: "Delete".to_owned(),
                     command: ContextMenuCommand::DeleteSelected,
@@ -1228,6 +1402,145 @@ mod tests {
         });
 
         assert_eq!(opened, vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")]);
+    }
+
+    #[test]
+    fn configured_entry_items_are_inserted_after_first_separator_with_selected_targets() {
+        let executable = configured_executable_path();
+        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+        let configured = vec![
+            CustomContextMenuItem::Item {
+                label: "Inspect".to_owned(),
+                executable: executable.clone(),
+            },
+            CustomContextMenuItem::Submenu {
+                label: "Tools".to_owned(),
+                items: vec![CustomContextMenuItem::Item {
+                    label: "Deep inspect".to_owned(),
+                    executable: executable.clone(),
+                }],
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            1,
+            1,
+            false,
+            false,
+            &configured,
+            &targets,
+        );
+
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Action {
+                label,
+                icon: Some(ContextMenuIcon::NativePath(path)),
+                command: ContextMenuCommand::RunCustom {
+                    executable: command,
+                    targets: command_targets,
+                },
+                ..
+            } if label == "Inspect"
+                && path == &executable
+                && command == &executable
+                && command_targets == &targets
+        ));
+        assert!(matches!(
+            &items[4],
+            ContextMenuItem::Submenu { label, children, .. }
+                if label == "Tools" && matches!(
+                    children.first(),
+                    Some(ContextMenuItem::Action {
+                        command: ContextMenuCommand::RunCustom { targets: child_targets, .. },
+                        ..
+                    }) if child_targets == &targets
+                )
+        ));
+        assert!(matches!(items[5], ContextMenuItem::Separator));
+        assert!(matches!(
+            items[6],
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::CutSelected,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn configured_directory_items_receive_current_directory_and_empty_submenus_are_omitted() {
+        let directory = PathBuf::from("current");
+        let executable = configured_executable_path();
+        let configured = vec![
+            CustomContextMenuItem::Submenu {
+                label: "Empty".to_owned(),
+                items: Vec::new(),
+            },
+            CustomContextMenuItem::Item {
+                label: "Inspect directory".to_owned(),
+                executable: executable.clone(),
+            },
+        ];
+
+        let items = folder_context_menu_items_with_custom(
+            &directory,
+            false,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &configured,
+        );
+
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::RunCustom { targets, .. },
+                ..
+            } if targets == &[directory]
+        ));
+        assert!(matches!(items[4], ContextMenuItem::Separator));
+        assert!(!items.iter().any(
+            |item| matches!(item, ContextMenuItem::Submenu { label, .. } if label == "Empty")
+        ));
+    }
+
+    #[test]
+    fn custom_command_result_reports_and_clears_spawn_errors() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let executable = PathBuf::from("missing-tool");
+
+        view.handle_custom_command_result(
+            &executable,
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+        );
+        assert_eq!(
+            view.open_error.as_deref(),
+            Some("Could not run missing-tool: missing")
+        );
+
+        view.handle_custom_command_result(&executable, Ok(()));
+        assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn custom_command_launches_once_with_all_targets_in_order() {
+        let executable = configured_executable_path();
+        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+        let mut calls = Vec::new();
+
+        run_custom_command_with(
+            &executable,
+            &targets,
+            |actual_executable, actual_targets| {
+                calls.push((actual_executable.to_path_buf(), actual_targets.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, vec![(executable, targets)]);
     }
 
     #[test]

@@ -1,4 +1,10 @@
-use std::{any::Any, collections::BTreeSet, ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    any::Any,
+    collections::{BTreeSet, HashMap},
+    ops::Range,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
@@ -55,8 +61,8 @@ use crate::explorer::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
         NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, PASTE_ICON, RENAME_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, drive_icon, drive_windows_icon,
-        file_icon, file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        nav_icon_font,
+        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
+        folder_icon_sized, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -613,6 +619,17 @@ impl ExplorerView {
         let native_file_icon = native_icon_entry
             .as_ref()
             .and_then(|entry| self.native_icon_for_entry(entry, cx));
+        let native_path_icons = {
+            let mut paths = Vec::new();
+            collect_context_menu_native_paths(&self.context_menu.as_ref()?.items, &mut paths);
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    self.native_icon_for_path(&path, cx)
+                        .map(|icon| (path, icon))
+                })
+                .collect::<HashMap<_, _>>()
+        };
         let menu = self.context_menu.as_ref()?;
         let window_width = f32::from(window.bounds().size.width);
         let window_height = f32::from(window.bounds().size.height);
@@ -643,6 +660,7 @@ impl ExplorerView {
             cx,
             &mut menu_elements,
             native_file_icon.as_ref(),
+            &native_path_icons,
         );
 
         let mut overlay = div().absolute().left(px(0.0)).top(px(0.0)).size_full();
@@ -3032,6 +3050,7 @@ fn render_context_menu_level(
     cx: &mut Context<ExplorerView>,
     elements: &mut Vec<AnyElement>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) {
     let menu_width = context_menu_width(items, window);
     let menu_height = context_menu_height(
@@ -3074,6 +3093,7 @@ fn render_context_menu_level(
             hovered_path,
             cx,
             native_file_icon,
+            native_path_icons,
         ));
     }
 
@@ -3114,6 +3134,7 @@ fn render_context_menu_level(
             cx,
             elements,
             native_file_icon,
+            native_path_icons,
         );
     }
 }
@@ -3124,6 +3145,7 @@ fn render_context_menu_item(
     hovered_path: &[usize],
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> AnyElement {
     let active = context_menu_item_is_persistently_active(item, hovered_path, &path);
 
@@ -3135,8 +3157,8 @@ fn render_context_menu_item(
             command,
             enabled,
         } => context_menu_action_row(
-            *id,
-            *icon,
+            id,
+            icon.clone(),
             label,
             command.clone(),
             *enabled,
@@ -3144,21 +3166,39 @@ fn render_context_menu_item(
             active,
             cx,
             native_file_icon,
+            native_path_icons,
         ),
         ContextMenuItem::Submenu {
             id, icon, label, ..
-        } => context_menu_submenu_row(*id, *icon, label, path, active, cx, native_file_icon),
+        } => context_menu_submenu_row(
+            id,
+            icon.clone(),
+            label,
+            path,
+            active,
+            cx,
+            native_file_icon,
+            native_path_icons,
+        ),
         ContextMenuItem::Separator => context_menu_separator().into_any_element(),
         ContextMenuItem::Detail {
             label,
             value,
             icon_slot,
-        } => context_menu_detail_row(label, value, *icon_slot, path, active, cx),
+        } => context_menu_detail_row(
+            label,
+            value,
+            *icon_slot,
+            path,
+            active,
+            cx,
+            native_path_icons,
+        ),
     }
 }
 
 fn context_menu_action_row(
-    id: &'static str,
+    id: &str,
     icon: Option<ContextMenuIcon>,
     label: &str,
     command: ContextMenuCommand,
@@ -3167,6 +3207,7 @@ fn context_menu_action_row(
     active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> AnyElement {
     context_menu_row_base(
         id,
@@ -3176,6 +3217,7 @@ fn context_menu_action_row(
         active,
         cx,
         native_file_icon,
+        native_path_icons,
     )
     .child(context_menu_label(label, true))
     .when(!enabled, |this| this.opacity(0.45))
@@ -3191,13 +3233,14 @@ fn context_menu_action_row(
 }
 
 fn context_menu_submenu_row(
-    id: &'static str,
+    id: &str,
     icon: Option<ContextMenuIcon>,
-    label: &'static str,
+    label: &str,
     path: Vec<usize>,
     active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> AnyElement {
     context_menu_row_base(
         id,
@@ -3207,6 +3250,7 @@ fn context_menu_submenu_row(
         active,
         cx,
         native_file_icon,
+        native_path_icons,
     )
     .child(context_menu_label(label, true))
     .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
@@ -3220,6 +3264,7 @@ fn context_menu_detail_row(
     path: Vec<usize>,
     active: bool,
     cx: &mut Context<ExplorerView>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> AnyElement {
     let id = match label {
         "Created" => "context-menu-created",
@@ -3227,36 +3272,47 @@ fn context_menu_detail_row(
         _ => "context-menu-detail",
     };
 
-    context_menu_row_base(id, None, icon_slot, path, active, cx, None)
-        .child(context_menu_label(label, false))
-        .child(
-            div()
-                .debug_selector(|| "context-menu-detail-value".to_owned())
-                .ml(px(CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN))
-                .min_w(px(0.0))
-                .flex_1()
-                .truncate()
-                .text_align(TextAlign::Right)
-                .text_size(px(CONTEXT_MENU_TEXT_SIZE))
-                .text_color(rgb(0x595959))
-                .opacity(0.8)
-                .child(SharedString::from(value.to_owned())),
-        )
-        .into_any_element()
+    context_menu_row_base(
+        id,
+        None,
+        icon_slot,
+        path,
+        active,
+        cx,
+        None,
+        native_path_icons,
+    )
+    .child(context_menu_label(label, false))
+    .child(
+        div()
+            .debug_selector(|| "context-menu-detail-value".to_owned())
+            .ml(px(CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN))
+            .min_w(px(0.0))
+            .flex_1()
+            .truncate()
+            .text_align(TextAlign::Right)
+            .text_size(px(CONTEXT_MENU_TEXT_SIZE))
+            .text_color(rgb(0x595959))
+            .opacity(0.8)
+            .child(SharedString::from(value.to_owned())),
+    )
+    .into_any_element()
 }
 
 fn context_menu_row_base(
-    id: &'static str,
+    id: &str,
     icon: Option<ContextMenuIcon>,
     icon_slot: ContextMenuIconSlot,
     path: Vec<usize>,
     active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> gpui::Stateful<Div> {
+    let id = id.to_owned();
     div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
         .flex()
         .flex_row()
         .items_center()
@@ -3274,7 +3330,11 @@ fn context_menu_row_base(
             }
         }))
         .when(icon_slot == ContextMenuIconSlot::Reserve, |this| {
-            this.child(context_menu_icon_slot(icon, native_file_icon))
+            this.child(context_menu_icon_slot(
+                icon,
+                native_file_icon,
+                native_path_icons,
+            ))
         })
 }
 
@@ -3391,6 +3451,7 @@ fn context_menu_separator() -> Div {
 fn context_menu_icon_slot(
     icon: Option<ContextMenuIcon>,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> Div {
     div()
         .flex()
@@ -3400,7 +3461,9 @@ fn context_menu_icon_slot(
         .h(px(CONTEXT_MENU_ICON_SLOT_SIZE))
         .flex_shrink_0()
         .when_some(
-            icon.and_then(|icon| context_menu_icon_element(icon, native_file_icon)),
+            icon.and_then(|icon| {
+                context_menu_icon_element(icon, native_file_icon, native_path_icons)
+            }),
             |this, icon| this.child(icon),
         )
 }
@@ -3408,6 +3471,7 @@ fn context_menu_icon_slot(
 fn context_menu_icon_element(
     icon: ContextMenuIcon,
     native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
 ) -> Option<AnyElement> {
     Some(match icon {
         ContextMenuIcon::Cut => gpui::img(CUT_ICON.clone())
@@ -3442,6 +3506,10 @@ fn context_menu_icon_element(
         ContextMenuIcon::FolderKind(kind) => kind
             .map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
+        ContextMenuIcon::NativePath(path) => native_path_icons
+            .get(&path)
+            .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
+            .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
@@ -3451,6 +3519,21 @@ fn context_menu_icon_element(
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
     })
+}
+
+fn collect_context_menu_native_paths(items: &[ContextMenuItem], paths: &mut Vec<PathBuf>) {
+    for item in items {
+        match item {
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::NativePath(path)),
+                ..
+            } => paths.push(path.clone()),
+            ContextMenuItem::Submenu { children, .. } => {
+                collect_context_menu_native_paths(children, paths);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn context_menu_trailing_slot(glyph: Option<&'static str>) -> Div {
@@ -4465,16 +4548,16 @@ mod tests {
     #[gpui::test]
     fn context_menu_levels_calculate_widths_independently(cx: &mut gpui::TestAppContext) {
         let child_items = vec![ContextMenuItem::Action {
-            id: "context-menu-child",
+            id: "context-menu-child".to_owned(),
             icon: None,
             label: "A significantly wider submenu action".to_owned(),
             command: crate::explorer::context_menu::ContextMenuCommand::Paste,
             enabled: true,
         }];
         let root_items = vec![ContextMenuItem::Submenu {
-            id: "context-menu-root",
+            id: "context-menu-root".to_owned(),
             icon: None,
-            label: "New",
+            label: "New".to_owned(),
             children: child_items.clone(),
         }];
         let temp = TempDir::new();

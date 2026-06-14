@@ -63,9 +63,30 @@ pub enum StartLocation {
 #[serde(default)]
 pub struct ExplorerSettings {
     pub app: AppSettings,
+    pub contextmenu: ContextMenuSettings,
     pub sidebar: SidebarSettings,
     pub tabs: TabSettings,
     pub view: ViewSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ContextMenuSettings {
+    pub directory: Vec<CustomContextMenuItem>,
+    pub file_folder: Vec<CustomContextMenuItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum CustomContextMenuItem {
+    Item {
+        label: String,
+        executable: PathBuf,
+    },
+    Submenu {
+        label: String,
+        items: Vec<CustomContextMenuItem>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,6 +129,7 @@ impl Default for ExplorerSettings {
     fn default() -> Self {
         Self {
             app: AppSettings::default(),
+            contextmenu: ContextMenuSettings::default(),
             sidebar: SidebarSettings::default(),
             tabs: TabSettings::default(),
             view: ViewSettings::default(),
@@ -253,6 +275,21 @@ impl StartLocation {
                 crate::explorer::user_music_dir(home.as_deref())
             }
             Self::Custom { path } => expand_configured_path(path),
+        }
+    }
+}
+
+impl CustomContextMenuItem {
+    pub(crate) fn label(&self) -> &str {
+        match self {
+            Self::Item { label, .. } | Self::Submenu { label, .. } => label,
+        }
+    }
+
+    pub(crate) fn resolved_executable(&self) -> Option<PathBuf> {
+        match self {
+            Self::Item { executable, .. } => expand_configured_path(executable),
+            Self::Submenu { .. } => None,
         }
     }
 }
@@ -583,6 +620,29 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
     if let StartLocation::Custom { path } = &settings.app.start {
         validate_configured_path(path)?;
     }
+    validate_custom_context_menu_items(&settings.contextmenu.file_folder)?;
+    validate_custom_context_menu_items(&settings.contextmenu.directory)?;
+    Ok(())
+}
+
+fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Result<()> {
+    for item in items {
+        if item.label().trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "contextmenu labels must not be empty",
+            ));
+        }
+
+        match item {
+            CustomContextMenuItem::Item { executable, .. } => {
+                validate_configured_path(executable)?;
+            }
+            CustomContextMenuItem::Submenu { items, .. } => {
+                validate_custom_context_menu_items(items)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -650,12 +710,83 @@ fn sync_settings_document(document: &mut Value, settings: &ExplorerSettings) {
         .expect("serialized ExplorerSettings is an object");
 
     for (key, value) in known {
-        if key == "sidebar" {
-            sync_sidebar(document.entry(key.clone()).or_insert(Value::Null), settings);
+        match key.as_str() {
+            "contextmenu" => {
+                sync_context_menu(document.entry(key.clone()).or_insert(Value::Null), settings)
+            }
+            "sidebar" => sync_sidebar(document.entry(key.clone()).or_insert(Value::Null), settings),
+            _ => merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value),
+        }
+    }
+}
+
+fn sync_context_menu(document: &mut Value, settings: &ExplorerSettings) {
+    let known = serde_json::to_value(&settings.contextmenu)
+        .expect("ContextMenuSettings serialization cannot fail");
+    let Some(document) = document.as_object_mut() else {
+        *document = known;
+        return;
+    };
+    let known = known
+        .as_object()
+        .expect("serialized ContextMenuSettings is an object");
+
+    for (key, value) in known {
+        let configured_items = match key.as_str() {
+            "directory" => Some(settings.contextmenu.directory.as_slice()),
+            "file_folder" => Some(settings.contextmenu.file_folder.as_slice()),
+            _ => None,
+        };
+        if let Some(configured_items) = configured_items {
+            sync_custom_context_menu_items(
+                document.entry(key.clone()).or_insert(Value::Null),
+                configured_items,
+            );
         } else {
             merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
         }
     }
+}
+
+fn sync_custom_context_menu_items(document: &mut Value, configured: &[CustomContextMenuItem]) {
+    let existing = document.as_array().cloned().unwrap_or_default();
+    let mut used = vec![false; existing.len()];
+    let mut items = Vec::with_capacity(configured.len());
+
+    for item in configured {
+        let known =
+            serde_json::to_value(item).expect("CustomContextMenuItem serialization cannot fail");
+        let matching = existing.iter().enumerate().find_map(|(index, value)| {
+            (!used[index]
+                && serde_json::from_value::<CustomContextMenuItem>(value.clone())
+                    .ok()
+                    .as_ref()
+                    == Some(item))
+            .then_some(index)
+        });
+        let mut value = matching
+            .map(|index| {
+                used[index] = true;
+                existing[index].clone()
+            })
+            .unwrap_or(Value::Null);
+        let existing_children = value.get("items").cloned();
+        merge_known_value(&mut value, &known);
+
+        if let CustomContextMenuItem::Submenu {
+            items: child_items, ..
+        } = item
+            && let Some(children) = value.get_mut("items")
+        {
+            if let Some(existing_children) = existing_children {
+                *children = existing_children;
+            }
+            sync_custom_context_menu_items(children, child_items);
+        }
+        items.push(value);
+    }
+
+    *document = Value::Array(items);
 }
 
 fn sync_sidebar(document: &mut Value, settings: &ExplorerSettings) {
@@ -827,6 +958,8 @@ mod tests {
     #[test]
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
+        assert!(settings.contextmenu.directory.is_empty());
+        assert!(settings.contextmenu.file_folder.is_empty());
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
@@ -871,6 +1004,8 @@ mod tests {
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
         assert!(settings.view.native_icons);
+        assert!(settings.contextmenu.directory.is_empty());
+        assert!(settings.contextmenu.file_folder.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
     }
@@ -953,6 +1088,88 @@ mod tests {
 
         assert!(load_settings_from_path(&path).is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn contextmenu_items_support_recursive_submenus_and_tilde_executables() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "file_folder": [
+                        {
+                            "kind": "submenu",
+                            "label": "Tools",
+                            "items": [
+                                {
+                                    "kind": "item",
+                                    "label": "Inspect",
+                                    "executable": "~/bin/inspect"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize recursive context menu");
+
+        assert!(validate_settings(&settings).is_ok());
+        assert!(matches!(
+            &settings.contextmenu.file_folder[0],
+            CustomContextMenuItem::Submenu { items, .. }
+                if matches!(
+                    &items[0],
+                    CustomContextMenuItem::Item { executable, .. }
+                        if executable == Path::new("~/bin/inspect")
+                )
+        ));
+    }
+
+    #[test]
+    fn contextmenu_rejects_empty_labels_and_relative_executables() {
+        for json in [
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"","executable":"~/tool"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"item","label":"Tool","executable":"relative"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"kind":"submenu","label":" ","items":[]}]}}"#,
+        ] {
+            let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
+            assert!(validate_settings(&settings).is_err());
+        }
+    }
+
+    #[test]
+    fn contextmenu_sync_preserves_unknown_fields_recursively() {
+        let mut document: Value = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "kind": "submenu",
+                            "label": "Tools",
+                            "note": "parent",
+                            "items": [
+                                {
+                                    "kind": "item",
+                                    "label": "Inspect",
+                                    "executable": "~/bin/inspect",
+                                    "note": "child"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
+
+        sync_settings_document(&mut document, &settings);
+
+        assert_eq!(document["contextmenu"]["directory"][0]["note"], "parent");
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["items"][0]["note"],
+            "child"
+        );
     }
 
     #[test]

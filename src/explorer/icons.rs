@@ -245,6 +245,10 @@ pub(super) fn file_icon_sized(size: f32) -> Div {
     sized_file_icon(FileIconKind::Generic, size)
 }
 
+pub(super) fn executable_icon_sized(size: f32) -> Div {
+    sized_file_icon(FileIconKind::Executable, size)
+}
+
 pub(super) fn file_icon_for_path(path: &Path) -> Div {
     sized_file_icon(FileIconKind::for_path(path), FILE_ICON_SIZE)
 }
