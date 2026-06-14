@@ -158,7 +158,7 @@ impl ExplorerView {
         let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
         view.restart_directory_watcher(cx);
         view.schedule_entry_metadata_resolution(cx);
-        view.observe_native_icon_cache(cx);
+        view.observe_icon_caches(cx);
         view
     }
 

@@ -5,6 +5,8 @@ mod debug_options;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod explorer;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod http_client;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod loaders;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod settings;

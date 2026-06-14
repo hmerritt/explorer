@@ -630,6 +630,13 @@ impl ExplorerView {
                 })
                 .collect::<HashMap<_, _>>()
         };
+        let url_icon_paths = {
+            let mut urls = Vec::new();
+            collect_context_menu_url_icons(&self.context_menu.as_ref()?.items, &mut urls);
+            urls.into_iter()
+                .filter_map(|url| self.cached_url_icon_path(&url, cx).map(|path| (url, path)))
+                .collect::<HashMap<_, _>>()
+        };
         let menu = self.context_menu.as_ref()?;
         let window_width = f32::from(window.bounds().size.width);
         let window_height = f32::from(window.bounds().size.height);
@@ -661,6 +668,7 @@ impl ExplorerView {
             &mut menu_elements,
             native_file_icon.as_ref(),
             &native_path_icons,
+            &url_icon_paths,
         );
 
         let mut overlay = div().absolute().left(px(0.0)).top(px(0.0)).size_full();
@@ -3051,6 +3059,7 @@ fn render_context_menu_level(
     elements: &mut Vec<AnyElement>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) {
     let menu_width = context_menu_width(items, window);
     let menu_height = context_menu_height(
@@ -3094,6 +3103,7 @@ fn render_context_menu_level(
             cx,
             native_file_icon,
             native_path_icons,
+            url_icon_paths,
         ));
     }
 
@@ -3135,6 +3145,7 @@ fn render_context_menu_level(
             elements,
             native_file_icon,
             native_path_icons,
+            url_icon_paths,
         );
     }
 }
@@ -3146,6 +3157,7 @@ fn render_context_menu_item(
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let active = context_menu_item_is_persistently_active(item, hovered_path, &path);
 
@@ -3167,6 +3179,7 @@ fn render_context_menu_item(
             cx,
             native_file_icon,
             native_path_icons,
+            url_icon_paths,
         ),
         ContextMenuItem::Submenu {
             id, icon, label, ..
@@ -3179,6 +3192,7 @@ fn render_context_menu_item(
             cx,
             native_file_icon,
             native_path_icons,
+            url_icon_paths,
         ),
         ContextMenuItem::Separator => context_menu_separator().into_any_element(),
         ContextMenuItem::Detail {
@@ -3193,6 +3207,7 @@ fn render_context_menu_item(
             active,
             cx,
             native_path_icons,
+            url_icon_paths,
         ),
     }
 }
@@ -3208,6 +3223,7 @@ fn context_menu_action_row(
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
         id,
@@ -3218,6 +3234,7 @@ fn context_menu_action_row(
         cx,
         native_file_icon,
         native_path_icons,
+        url_icon_paths,
     )
     .child(context_menu_label(label, true))
     .when(!enabled, |this| this.opacity(0.45))
@@ -3241,6 +3258,7 @@ fn context_menu_submenu_row(
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
         id,
@@ -3251,6 +3269,7 @@ fn context_menu_submenu_row(
         cx,
         native_file_icon,
         native_path_icons,
+        url_icon_paths,
     )
     .child(context_menu_label(label, true))
     .child(context_menu_trailing_slot(Some(CONTEXT_MENU_CHEVRON)))
@@ -3265,6 +3284,7 @@ fn context_menu_detail_row(
     active: bool,
     cx: &mut Context<ExplorerView>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let id = match label {
         "Created" => "context-menu-created",
@@ -3281,6 +3301,7 @@ fn context_menu_detail_row(
         cx,
         None,
         native_path_icons,
+        url_icon_paths,
     )
     .child(context_menu_label(label, false))
     .child(
@@ -3308,6 +3329,7 @@ fn context_menu_row_base(
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> gpui::Stateful<Div> {
     let id = id.to_owned();
     div()
@@ -3334,6 +3356,7 @@ fn context_menu_row_base(
                 icon,
                 native_file_icon,
                 native_path_icons,
+                url_icon_paths,
             ))
         })
 }
@@ -3452,6 +3475,7 @@ fn context_menu_icon_slot(
     icon: Option<ContextMenuIcon>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> Div {
     div()
         .flex()
@@ -3462,7 +3486,7 @@ fn context_menu_icon_slot(
         .flex_shrink_0()
         .when_some(
             icon.and_then(|icon| {
-                context_menu_icon_element(icon, native_file_icon, native_path_icons)
+                context_menu_icon_element(icon, native_file_icon, native_path_icons, url_icon_paths)
             }),
             |this, icon| this.child(icon),
         )
@@ -3472,6 +3496,7 @@ fn context_menu_icon_element(
     icon: ContextMenuIcon,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    url_icon_paths: &HashMap<String, PathBuf>,
 ) -> Option<AnyElement> {
     Some(match icon {
         ContextMenuIcon::Cut => gpui::img(CUT_ICON.clone())
@@ -3512,6 +3537,18 @@ fn context_menu_icon_element(
         ContextMenuIcon::ImagePathWithExecutableFallback(path) => {
             context_menu_image_path_icon(path, ContextMenuIconImageFallback::Executable)
         }
+        ContextMenuIcon::ImageUrl(url) => url_icon_paths
+            .get(&url)
+            .map(|path| {
+                context_menu_image_path_icon(path.clone(), ContextMenuIconImageFallback::None)
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+        ContextMenuIcon::ImageUrlWithExecutableFallback(url) => url_icon_paths
+            .get(&url)
+            .map(|path| {
+                context_menu_image_path_icon(path.clone(), ContextMenuIconImageFallback::Executable)
+            })
+            .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NativePath(path) => native_path_icons
             .get(&path)
             .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
@@ -3572,6 +3609,32 @@ fn collect_context_menu_native_paths(items: &[ContextMenuItem], paths: &mut Vec<
                     paths.push(path.clone());
                 }
                 collect_context_menu_native_paths(children, paths);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_context_menu_url_icons(items: &[ContextMenuItem], urls: &mut Vec<String>) {
+    for item in items {
+        match item {
+            ContextMenuItem::Action {
+                icon:
+                    Some(
+                        ContextMenuIcon::ImageUrl(url)
+                        | ContextMenuIcon::ImageUrlWithExecutableFallback(url),
+                    ),
+                ..
+            } => urls.push(url.clone()),
+            ContextMenuItem::Submenu { icon, children, .. } => {
+                if let Some(
+                    ContextMenuIcon::ImageUrl(url)
+                    | ContextMenuIcon::ImageUrlWithExecutableFallback(url),
+                ) = icon
+                {
+                    urls.push(url.clone());
+                }
+                collect_context_menu_url_icons(children, urls);
             }
             _ => {}
         }

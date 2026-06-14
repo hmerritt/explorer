@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures::AsyncReadExt;
 use gpui::{App, Context, Global, Image};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +18,9 @@ use crate::{
 };
 
 const NATIVE_ICON_LOAD_INTERVAL: Duration = Duration::from_millis(16);
+const URL_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v1";
+const URL_ICON_CACHE_VERSION: &str = "url-icons-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "mappings.json";
 const DISK_ICON_DIR_NAME: &str = "icons";
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -32,6 +35,12 @@ pub(super) struct NativeIconCache {
 
 impl Global for NativeIconCache {}
 
+pub(super) struct UrlIconCache {
+    inner: RefCell<UrlIconCacheInner>,
+}
+
+impl Global for UrlIconCache {}
+
 impl NativeIconCache {
     fn new() -> Self {
         Self {
@@ -42,8 +51,17 @@ impl NativeIconCache {
     }
 }
 
+impl UrlIconCache {
+    fn new() -> Self {
+        Self {
+            inner: RefCell::new(UrlIconCacheInner::new(url_icon_cache_dir())),
+        }
+    }
+}
+
 pub(crate) fn initialize(cx: &mut App) {
     cx.set_global(NativeIconCache::new());
+    cx.set_global(UrlIconCache::new());
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +129,25 @@ struct NativeIconLoadJob {
     queued_at: Instant,
     cache_dir: Option<PathBuf>,
     stale_hash: Option<String>,
+}
+
+struct UrlIconCacheInner {
+    cache_dir: Option<PathBuf>,
+    states: HashMap<String, UrlIconState>,
+    pending: VecDeque<String>,
+    loader_running: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UrlIconState {
+    Pending,
+    Ready(PathBuf),
+    Failed { retry_after: Instant },
+}
+
+struct UrlIconLoadJob {
+    url: String,
+    path: PathBuf,
 }
 
 impl NativeIconCacheInner {
@@ -213,6 +250,76 @@ impl NativeIconCacheInner {
     }
 }
 
+impl UrlIconCacheInner {
+    fn new(cache_dir: Option<PathBuf>) -> Self {
+        Self {
+            cache_dir,
+            states: HashMap::new(),
+            pending: VecDeque::new(),
+            loader_running: false,
+        }
+    }
+
+    fn icon_path_for_url(&mut self, url: &str) -> (Option<PathBuf>, bool) {
+        match self.states.get(url) {
+            Some(UrlIconState::Ready(path)) if path.is_file() => {
+                return (Some(path.clone()), false);
+            }
+            Some(UrlIconState::Pending) => return (None, false),
+            Some(UrlIconState::Failed { retry_after }) if Instant::now() < *retry_after => {
+                return (None, false);
+            }
+            Some(UrlIconState::Ready(_)) | None => {}
+            Some(UrlIconState::Failed { .. }) => {}
+        }
+
+        if let Some(path) = existing_url_icon_file_path(self.cache_dir.as_deref(), url) {
+            self.states
+                .insert(url.to_owned(), UrlIconState::Ready(path.clone()));
+            return (Some(path), false);
+        }
+
+        if preferred_url_icon_file_path(self.cache_dir.as_deref(), url).is_none() {
+            return (None, false);
+        }
+
+        self.states.insert(url.to_owned(), UrlIconState::Pending);
+        self.pending.push_back(url.to_owned());
+        let should_start_loader = !self.loader_running;
+        self.loader_running = true;
+        (None, should_start_loader)
+    }
+
+    fn next_load_job(&mut self) -> Option<UrlIconLoadJob> {
+        loop {
+            let url = self.pending.pop_front()?;
+            let Some(path) = preferred_url_icon_file_path(self.cache_dir.as_deref(), &url) else {
+                self.states.insert(
+                    url,
+                    UrlIconState::Failed {
+                        retry_after: Instant::now() + URL_ICON_RETRY_INTERVAL,
+                    },
+                );
+                continue;
+            };
+            return Some(UrlIconLoadJob { url, path });
+        }
+    }
+
+    fn finish_request(&mut self, url: String, path: Option<PathBuf>) {
+        let state = path
+            .map(UrlIconState::Ready)
+            .unwrap_or_else(|| UrlIconState::Failed {
+                retry_after: Instant::now() + URL_ICON_RETRY_INTERVAL,
+            });
+        self.states.insert(url, state);
+
+        if self.pending.is_empty() {
+            self.loader_running = false;
+        }
+    }
+}
+
 impl NativeIconState {
     fn icon(&self) -> Option<Arc<Image>> {
         match self {
@@ -227,8 +334,10 @@ impl NativeIconState {
 }
 
 impl ExplorerView {
-    pub(super) fn observe_native_icon_cache(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn observe_icon_caches(&mut self, cx: &mut Context<Self>) {
         cx.observe_global::<NativeIconCache>(|_, cx| cx.notify())
+            .detach();
+        cx.observe_global::<UrlIconCache>(|_, cx| cx.notify())
             .detach();
     }
 
@@ -246,6 +355,23 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<Arc<Image>> {
         self.native_icon_for_request(native_icon_request_for_path(path), cx)
+    }
+
+    pub(super) fn cached_url_icon_path(
+        &mut self,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<PathBuf> {
+        let (path, should_start_loader) = cx
+            .try_global::<UrlIconCache>()
+            .map(|cache| cache.inner.borrow_mut().icon_path_for_url(url))
+            .unwrap_or((None, false));
+
+        if should_start_loader {
+            start_url_icon_loader(cx);
+        }
+
+        path
     }
 
     fn native_icon_for_request(
@@ -342,6 +468,98 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
         timings.finish();
     })
     .detach();
+}
+
+fn start_url_icon_loader(cx: &mut Context<ExplorerView>) {
+    let client = cx.http_client();
+    cx.spawn(async move |view, cx| {
+        loop {
+            let job = cx
+                .update(|cx| {
+                    cx.try_global::<UrlIconCache>()
+                        .and_then(|cache| cache.inner.borrow_mut().next_load_job())
+                })
+                .ok()
+                .flatten();
+            let Some(job) = job else {
+                break;
+            };
+
+            let url = job.url.clone();
+            let path = job.path.clone();
+            let client = client.clone();
+            let load_task = cx
+                .background_executor()
+                .spawn(async move { download_url_icon_to_path(client, &url, &path).await });
+            let loaded_path = load_task.await;
+
+            let _committed = cx.update_global::<UrlIconCache, _>(|cache, _| {
+                cache
+                    .inner
+                    .borrow_mut()
+                    .finish_request(job.url, loaded_path);
+            });
+            let _ = view.update(cx, |_, cx| cx.notify());
+
+            cx.background_executor()
+                .timer(NATIVE_ICON_LOAD_INTERVAL)
+                .await;
+        }
+    })
+    .detach();
+}
+
+async fn download_url_icon_to_path(
+    client: Arc<dyn gpui::http_client::HttpClient>,
+    url: &str,
+    path: &Path,
+) -> Option<PathBuf> {
+    let mut response = match client.get(url, ().into(), true).await {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("failed to download context menu URL icon {url}: {error}");
+            return None;
+        }
+    };
+    let content_type_extension = response
+        .headers()
+        .get(gpui::http_client::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(url_icon_extension_for_content_type);
+    let mut body = Vec::new();
+    if let Err(error) = response.body_mut().read_to_end(&mut body).await {
+        eprintln!("failed to read context menu URL icon {url}: {error}");
+        return None;
+    }
+    if !response.status().is_success() {
+        eprintln!(
+            "failed to download context menu URL icon {url}: HTTP {}",
+            response.status()
+        );
+        return None;
+    }
+    if body.is_empty() {
+        eprintln!("failed to download context menu URL icon {url}: empty response body");
+        return None;
+    }
+
+    let path = if path.extension().and_then(OsStr::to_str) == Some("img") {
+        content_type_extension
+            .map(|extension| path.with_extension(extension))
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    if let Err(error) = write_atomic(&path, &body) {
+        eprintln!(
+            "failed to cache context menu URL icon {url} at {}: {error}",
+            path.display()
+        );
+        return None;
+    }
+
+    Some(path)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1436,6 +1654,11 @@ fn native_icon_cache_dir() -> Option<PathBuf> {
     native_icon_cache_dir_for(current_config_platform(), env_path)
 }
 
+fn url_icon_cache_dir() -> Option<PathBuf> {
+    platform_cache_dir(current_config_platform(), env_path)
+        .map(|dir| dir.join(URL_ICON_CACHE_VERSION))
+}
+
 fn current_config_platform() -> ConfigPlatform {
     if cfg!(target_os = "macos") {
         ConfigPlatform::MacOS
@@ -1454,9 +1677,16 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 fn native_icon_cache_dir_for(
     platform: ConfigPlatform,
+    env_path: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    platform_cache_dir(platform, env_path).map(|dir| dir.join(NATIVE_ICON_CACHE_VERSION))
+}
+
+fn platform_cache_dir(
+    platform: ConfigPlatform,
     mut env_path: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let cache_dir = match platform {
+    match platform {
         ConfigPlatform::MacOS => {
             env_path("HOME").map(|home| home.join(".config").join("explorer").join("cache"))
         }
@@ -1468,9 +1698,85 @@ fn native_icon_cache_dir_for(
             .or_else(|| {
                 config_dir_for(ConfigPlatform::Windows, env_path).map(|dir| dir.join("cache"))
             }),
-    }?;
+    }
+}
 
-    Some(cache_dir.join(NATIVE_ICON_CACHE_VERSION))
+fn existing_url_icon_file_path(cache_dir: Option<&Path>, url: &str) -> Option<PathBuf> {
+    let cache_dir = cache_dir?;
+    for extension in url_icon_file_extensions(url) {
+        let path = url_icon_file_path_with_extension(Some(cache_dir), url, extension)?;
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn preferred_url_icon_file_path(cache_dir: Option<&Path>, url: &str) -> Option<PathBuf> {
+    url_icon_file_path_with_extension(cache_dir, url, preferred_url_icon_extension(url))
+}
+
+fn url_icon_file_path_with_extension(
+    cache_dir: Option<&Path>,
+    url: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    let hash = url_icon_key_hash(url);
+    Some(cache_dir?.join(format!("{hash}.{extension}")))
+}
+
+fn url_icon_file_extensions(url: &str) -> Vec<&'static str> {
+    let preferred = preferred_url_icon_extension(url);
+    let mut extensions = vec![preferred];
+    for extension in ["png", "svg", "ico", "img"] {
+        if extension != preferred {
+            extensions.push(extension);
+        }
+    }
+    extensions
+}
+
+fn preferred_url_icon_extension(url: &str) -> &'static str {
+    url_icon_extension_for_path(url).unwrap_or("img")
+}
+
+fn url_icon_extension_for_path(url: &str) -> Option<&'static str> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    let extension = file_name.rsplit_once('.')?.1;
+    supported_url_icon_extension(extension)
+}
+
+fn url_icon_extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    match media_type.as_str() {
+        "image/png" => Some("png"),
+        "image/svg+xml" | "text/svg" => Some("svg"),
+        "image/x-icon" | "image/vnd.microsoft.icon" | "image/ico" => Some("ico"),
+        _ => None,
+    }
+}
+
+fn supported_url_icon_extension(extension: &str) -> Option<&'static str> {
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "svg" => Some("svg"),
+        "ico" => Some("ico"),
+        _ => None,
+    }
+}
+
+fn url_icon_key_hash(url: &str) -> String {
+    let mut hash = StableHash::new();
+    hash.write_str(URL_ICON_CACHE_VERSION);
+    hash.write_u64(url.len() as u64);
+    hash.write_str(url);
+    format!("{:016x}", hash.finish())
 }
 
 fn icon_content_hash(bytes: &[u8]) -> String {
@@ -1538,6 +1844,92 @@ mod tests {
 
     fn cache_with_dir(cache_dir: Option<PathBuf>) -> NativeIconCacheInner {
         NativeIconCacheInner::new(DiskIconStore::load(cache_dir))
+    }
+
+    #[test]
+    fn url_icon_cache_schedules_missing_urls_once() {
+        let temp = TempDir::new();
+        let mut cache = UrlIconCacheInner::new(Some(temp.path().join("url-icons")));
+        let url = "https://example.com/icon.svg";
+
+        assert_eq!(cache.icon_path_for_url(url), (None, true));
+        assert_eq!(cache.pending.len(), 1);
+        assert_eq!(cache.icon_path_for_url(url), (None, false));
+        assert_eq!(cache.pending.len(), 1);
+
+        let job = cache.next_load_job().expect("url icon job");
+        assert_eq!(job.url, url);
+        assert_eq!(
+            job.path,
+            preferred_url_icon_file_path(Some(&temp.path().join("url-icons")), url).unwrap()
+        );
+        assert_eq!(job.path.extension().and_then(OsStr::to_str), Some("svg"));
+    }
+
+    #[test]
+    fn url_icon_cache_reuses_existing_disk_file() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("url-icons");
+        let url = "https://example.com/icon.ico";
+        let path = preferred_url_icon_file_path(Some(&cache_dir), url).unwrap();
+        write_atomic(&path, b"icon-bytes").expect("write cached url icon");
+        let mut cache = UrlIconCacheInner::new(Some(cache_dir));
+
+        assert_eq!(cache.icon_path_for_url(url), (Some(path), false));
+        assert!(cache.pending.is_empty());
+    }
+
+    #[test]
+    fn url_icon_cache_paths_preserve_supported_url_extensions() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("url-icons");
+
+        for (url, extension) in [
+            ("https://example.com/icon.png", "png"),
+            ("https://example.com/icon.svg?raw=1", "svg"),
+            ("https://example.com/icon.ico#icon", "ico"),
+            ("https://example.com/icon", "img"),
+        ] {
+            let path = preferred_url_icon_file_path(Some(&cache_dir), url).unwrap();
+            assert_eq!(path.extension().and_then(OsStr::to_str), Some(extension));
+        }
+    }
+
+    #[test]
+    fn url_icon_content_type_fallback_selects_supported_extensions() {
+        assert_eq!(
+            url_icon_extension_for_content_type("image/png; charset=utf-8"),
+            Some("png")
+        );
+        assert_eq!(
+            url_icon_extension_for_content_type("image/svg+xml"),
+            Some("svg")
+        );
+        assert_eq!(
+            url_icon_extension_for_content_type("image/vnd.microsoft.icon"),
+            Some("ico")
+        );
+        assert_eq!(url_icon_extension_for_content_type("text/plain"), None);
+    }
+
+    #[test]
+    fn url_icon_cache_retries_failed_urls_after_cooldown() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("url-icons");
+        let url = "https://example.com/icon.png";
+        let mut cache = UrlIconCacheInner::new(Some(cache_dir));
+
+        cache.finish_request(url.to_owned(), None);
+        assert_eq!(cache.icon_path_for_url(url), (None, false));
+
+        cache.states.insert(
+            url.to_owned(),
+            UrlIconState::Failed {
+                retry_after: Instant::now() - Duration::from_secs(1),
+            },
+        );
+        assert_eq!(cache.icon_path_for_url(url), (None, true));
+        assert_eq!(cache.pending.len(), 1);
     }
 
     #[gpui::test]

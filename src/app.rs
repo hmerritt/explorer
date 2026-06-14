@@ -437,6 +437,7 @@ pub fn run() {
 
     app.run(|cx: &mut App| {
         register_embedded_fonts(cx);
+        crate::http_client::initialize(cx);
         crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
         crate::explorer::initialize_native_icon_cache(cx);

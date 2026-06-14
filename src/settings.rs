@@ -138,6 +138,7 @@ pub enum CustomContextMenuItem {
 pub(crate) enum ContextMenuConfiguredIcon {
     Image(PathBuf),
     NativePath(PathBuf),
+    Url(String),
 }
 
 impl Serialize for CustomContextMenuItem {
@@ -884,6 +885,10 @@ fn validate_context_menu_icon(path: Option<&Path>) -> io::Result<()> {
         return Ok(());
     };
 
+    if context_menu_icon_path_is_url(path) {
+        return Ok(());
+    }
+
     if context_menu_icon_path_is_image(path) {
         return validate_configured_path(path);
     }
@@ -1029,6 +1034,10 @@ fn resolve_context_menu_executable_with(
 
 fn resolve_context_menu_icon(path: Option<&Path>) -> Option<ContextMenuConfiguredIcon> {
     let path = path?;
+    if let Some(url) = context_menu_icon_url(path) {
+        return Some(ContextMenuConfiguredIcon::Url(url.to_owned()));
+    }
+
     if context_menu_icon_path_is_image(path) {
         return expand_configured_path(path).map(ContextMenuConfiguredIcon::Image);
     }
@@ -1078,6 +1087,15 @@ fn context_menu_icon_path_is_image(path: &Path) -> bool {
                     .iter()
                     .any(|supported| extension.eq_ignore_ascii_case(supported))
             })
+}
+
+fn context_menu_icon_path_is_url(path: &Path) -> bool {
+    context_menu_icon_url(path).is_some()
+}
+
+fn context_menu_icon_url(path: &Path) -> Option<&str> {
+    let text = path.to_str()?.trim();
+    (text.starts_with("https://") || text.starts_with("http://")).then_some(text)
 }
 
 fn scoop_shim_target_path(contents: &str) -> Option<PathBuf> {
@@ -1653,11 +1671,12 @@ mod tests {
     #[test]
     fn contextmenu_items_accept_optional_icons_on_items_and_submenus() {
         let item_icon = unique_temp_dir("contextmenu-item-icon").join("tool.png");
+        let submenu_icon = "https://raw.githubusercontent.com/microsoft/terminal/9853bc96076e811cef5eab4469095fc9be58201e/res/terminal/images/Square44x44Logo.targetsize-48.png";
         let value = serde_json::json!({
             "contextmenu": [
                 {
                     "label": "Tools",
-                    "icon": "code",
+                    "icon": submenu_icon,
                     "items": [
                         {
                             "label": "Inspect",
@@ -1676,7 +1695,7 @@ mod tests {
         assert!(matches!(
             &settings.contextmenu.items[0],
             CustomContextMenuItem::Submenu { icon, items, .. }
-                if icon.as_deref() == Some(Path::new("code"))
+                if icon.as_deref() == Some(Path::new(submenu_icon))
                     && matches!(
                         &items[0],
                         CustomContextMenuItem::Item { icon: child_icon, .. }
@@ -1685,11 +1704,15 @@ mod tests {
         ));
         let serialized =
             serde_json::to_value(&settings.contextmenu).expect("serialize context menu with icons");
-        assert_eq!(serialized[0]["icon"], "code");
+        assert_eq!(serialized[0]["icon"], submenu_icon);
         assert_eq!(
             serialized[0]["items"][0]["icon"],
             serde_json::json!(item_icon)
         );
+        assert!(matches!(
+            settings.contextmenu.items[0].resolved_icon(),
+            Some(ContextMenuConfiguredIcon::Url(url)) if url == submenu_icon
+        ));
     }
 
     #[test]

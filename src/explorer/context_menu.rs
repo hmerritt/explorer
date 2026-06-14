@@ -77,6 +77,8 @@ pub(super) enum ContextMenuIcon {
     FolderKind(Option<DirectoryKind>),
     ImagePath(PathBuf),
     ImagePathWithExecutableFallback(PathBuf),
+    ImageUrl(String),
+    ImageUrlWithExecutableFallback(String),
     NativePath(PathBuf),
     NativePathOptional(PathBuf),
     NewTab,
@@ -809,6 +811,9 @@ fn configured_context_menu_item(
                 Some(ContextMenuConfiguredIcon::Image(path)) => {
                     ContextMenuIcon::ImagePathWithExecutableFallback(path)
                 }
+                Some(ContextMenuConfiguredIcon::Url(url)) => {
+                    ContextMenuIcon::ImageUrlWithExecutableFallback(url)
+                }
                 Some(ContextMenuConfiguredIcon::NativePath(path)) => {
                     ContextMenuIcon::NativePath(path)
                 }
@@ -845,6 +850,7 @@ fn configured_context_menu_item(
                 Some(ContextMenuConfiguredIcon::Image(path)) => {
                     Some(ContextMenuIcon::ImagePath(path))
                 }
+                Some(ContextMenuConfiguredIcon::Url(url)) => Some(ContextMenuIcon::ImageUrl(url)),
                 Some(ContextMenuConfiguredIcon::NativePath(path)) => {
                     Some(ContextMenuIcon::NativePathOptional(path))
                 }
@@ -1820,6 +1826,61 @@ mod tests {
                 icon: Some(ContextMenuIcon::NativePathOptional(path)),
                 ..
             } if path == &icon_executable
+        ));
+    }
+
+    #[test]
+    fn configured_items_and_submenus_include_explicit_url_icons() {
+        let executable = configured_executable_path();
+        let action_url = "https://example.com/action.svg";
+        let submenu_url = "https://example.com/submenu.ico";
+        let child = CustomContextMenuItem::Item {
+            label: "Inspect".to_owned(),
+            exe: executable.clone(),
+            icon: None,
+            args: Vec::new(),
+            only: Vec::new(),
+        };
+        let configured = vec![
+            CustomContextMenuItem::Item {
+                label: "URL action".to_owned(),
+                exe: executable,
+                icon: Some(PathBuf::from(action_url)),
+                args: Vec::new(),
+                only: Vec::new(),
+            },
+            CustomContextMenuItem::Submenu {
+                label: "URL submenu".to_owned(),
+                icon: Some(PathBuf::from(submenu_url)),
+                items: vec![child],
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &[PathBuf::from("a.txt")],
+            &[],
+        );
+
+        assert!(matches!(
+            &items[2],
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::ImageUrlWithExecutableFallback(url)),
+                ..
+            } if url == action_url
+        ));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Submenu {
+                icon: Some(ContextMenuIcon::ImageUrl(url)),
+                ..
+            } if url == submenu_url
         ));
     }
 
