@@ -3506,10 +3506,20 @@ fn context_menu_icon_element(
         ContextMenuIcon::FolderKind(kind) => kind
             .map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
+        ContextMenuIcon::ImagePath(path) => {
+            context_menu_image_path_icon(path, ContextMenuIconImageFallback::None)
+        }
+        ContextMenuIcon::ImagePathWithExecutableFallback(path) => {
+            context_menu_image_path_icon(path, ContextMenuIconImageFallback::Executable)
+        }
         ContextMenuIcon::NativePath(path) => native_path_icons
             .get(&path)
             .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
+        ContextMenuIcon::NativePathOptional(path) => native_path_icons
+            .get(&path)
+            .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
+            .unwrap_or_else(|| div().into_any_element()),
         ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
@@ -3521,14 +3531,46 @@ fn context_menu_icon_element(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContextMenuIconImageFallback {
+    None,
+    Executable,
+}
+
+fn context_menu_image_path_icon(
+    path: PathBuf,
+    fallback: ContextMenuIconImageFallback,
+) -> AnyElement {
+    gpui::img(path)
+        .w(px(CONTEXT_MENU_ICON_SIZE))
+        .h(px(CONTEXT_MENU_ICON_SIZE))
+        .with_fallback(move || match fallback {
+            ContextMenuIconImageFallback::None => div().into_any_element(),
+            ContextMenuIconImageFallback::Executable => {
+                executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()
+            }
+        })
+        .into_any_element()
+}
+
 fn collect_context_menu_native_paths(items: &[ContextMenuItem], paths: &mut Vec<PathBuf>) {
     for item in items {
         match item {
             ContextMenuItem::Action {
-                icon: Some(ContextMenuIcon::NativePath(path)),
+                icon:
+                    Some(
+                        ContextMenuIcon::NativePath(path)
+                        | ContextMenuIcon::NativePathOptional(path),
+                    ),
                 ..
             } => paths.push(path.clone()),
-            ContextMenuItem::Submenu { children, .. } => {
+            ContextMenuItem::Submenu { icon, children, .. } => {
+                if let Some(
+                    ContextMenuIcon::NativePath(path) | ContextMenuIcon::NativePathOptional(path),
+                ) = icon
+                {
+                    paths.push(path.clone());
+                }
                 collect_context_menu_native_paths(children, paths);
             }
             _ => {}

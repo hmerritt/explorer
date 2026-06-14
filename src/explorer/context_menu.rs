@@ -16,7 +16,8 @@ use crate::explorer::{
     view::ExplorerView,
 };
 use crate::settings::{
-    ContextMenuOnlyFilter, CustomContextMenuItem, resolve_context_menu_only_filter,
+    ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
+    resolve_context_menu_only_filter,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,7 +75,10 @@ pub(super) enum ContextMenuIcon {
     NativeFile,
     Folder,
     FolderKind(Option<DirectoryKind>),
+    ImagePath(PathBuf),
+    ImagePathWithExecutableFallback(PathBuf),
     NativePath(PathBuf),
+    NativePathOptional(PathBuf),
     NewTab,
     Unpin,
 }
@@ -801,10 +805,20 @@ fn configured_context_menu_item(
                 return None;
             }
             let executable = item.resolved_executable()?;
-            let icon_path = item.resolved_icon_path(&executable);
+            let icon = match item.resolved_icon() {
+                Some(ContextMenuConfiguredIcon::Image(path)) => {
+                    ContextMenuIcon::ImagePathWithExecutableFallback(path)
+                }
+                Some(ContextMenuConfiguredIcon::NativePath(path)) => {
+                    ContextMenuIcon::NativePath(path)
+                }
+                None => {
+                    ContextMenuIcon::NativePath(item.resolved_executable_icon_path(&executable))
+                }
+            };
             Some(ContextMenuItem::Action {
                 id: format!("context-menu-custom-{id_suffix}"),
-                icon: Some(ContextMenuIcon::NativePath(icon_path)),
+                icon: Some(icon),
                 label: label.clone(),
                 command: ContextMenuCommand::RunCustom {
                     executable,
@@ -814,7 +828,7 @@ fn configured_context_menu_item(
                 enabled: true,
             })
         }
-        CustomContextMenuItem::Submenu { label, items } => {
+        CustomContextMenuItem::Submenu { label, items, .. } => {
             let children = items
                 .iter()
                 .enumerate()
@@ -827,9 +841,18 @@ fn configured_context_menu_item(
                     )
                 })
                 .collect::<Vec<_>>();
+            let icon = match item.resolved_icon() {
+                Some(ContextMenuConfiguredIcon::Image(path)) => {
+                    Some(ContextMenuIcon::ImagePath(path))
+                }
+                Some(ContextMenuConfiguredIcon::NativePath(path)) => {
+                    Some(ContextMenuIcon::NativePathOptional(path))
+                }
+                None => None,
+            };
             (!children.is_empty()).then(|| ContextMenuItem::Submenu {
                 id: format!("context-menu-custom-{id_suffix}"),
-                icon: None,
+                icon,
                 label: label.clone(),
                 children,
             })
@@ -1042,6 +1065,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: label.to_owned(),
             exe: executable,
+            icon: None,
             args: Vec::new(),
             only: only.iter().map(|value| (*value).to_owned()).collect(),
         }];
@@ -1624,14 +1648,17 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: vec!["--inspect".to_owned()],
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
                 label: "Tools".to_owned(),
+                icon: None,
                 items: vec![CustomContextMenuItem::Item {
                     label: "Deep inspect".to_owned(),
                     exe: executable.clone(),
+                    icon: None,
                     args: Vec::new(),
                     only: Vec::new(),
                 }],
@@ -1690,6 +1717,113 @@ mod tests {
     }
 
     #[test]
+    fn configured_entry_items_use_explicit_icons_before_executable_icons() {
+        let command = configured_executable_path();
+        let icon_executable = configured_executable_path();
+        let image_icon = unique_temp_dir("custom-image-icon").join("tool.svg");
+        let targets = vec![PathBuf::from("a.txt")];
+        let configured = vec![
+            CustomContextMenuItem::Item {
+                label: "Image icon".to_owned(),
+                exe: command.clone(),
+                icon: Some(image_icon.clone()),
+                args: Vec::new(),
+                only: Vec::new(),
+            },
+            CustomContextMenuItem::Item {
+                label: "Executable icon".to_owned(),
+                exe: command.clone(),
+                icon: Some(icon_executable.clone()),
+                args: Vec::new(),
+                only: Vec::new(),
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+            &[],
+        );
+
+        assert!(matches!(
+            &items[2],
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::ImagePathWithExecutableFallback(path)),
+                command: ContextMenuCommand::RunCustom { executable, .. },
+                ..
+            } if path == &image_icon && executable == &command
+        ));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::NativePath(path)),
+                command: ContextMenuCommand::RunCustom { executable, .. },
+                ..
+            } if path == &icon_executable && executable == &command
+        ));
+    }
+
+    #[test]
+    fn configured_submenus_include_explicit_image_and_executable_icons() {
+        let executable = configured_executable_path();
+        let icon_executable = configured_executable_path();
+        let image_icon = unique_temp_dir("custom-submenu-image-icon").join("tools.ico");
+        let targets = vec![PathBuf::from("a.txt")];
+        let child = CustomContextMenuItem::Item {
+            label: "Inspect".to_owned(),
+            exe: executable,
+            icon: None,
+            args: Vec::new(),
+            only: Vec::new(),
+        };
+        let configured = vec![
+            CustomContextMenuItem::Submenu {
+                label: "Image tools".to_owned(),
+                icon: Some(image_icon.clone()),
+                items: vec![child.clone()],
+            },
+            CustomContextMenuItem::Submenu {
+                label: "Executable tools".to_owned(),
+                icon: Some(icon_executable.clone()),
+                items: vec![child],
+            },
+        ];
+
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            false,
+            false,
+            &configured,
+            &targets,
+            &[],
+        );
+
+        assert!(matches!(
+            &items[2],
+            ContextMenuItem::Submenu {
+                icon: Some(ContextMenuIcon::ImagePath(path)),
+                ..
+            } if path == &image_icon
+        ));
+        assert!(matches!(
+            &items[3],
+            ContextMenuItem::Submenu {
+                icon: Some(ContextMenuIcon::NativePathOptional(path)),
+                ..
+            } if path == &icon_executable
+        ));
+    }
+
+    #[test]
     fn configured_entry_items_skip_only_missing_executables() {
         let executable = configured_executable_path();
         let missing = executable.with_file_name("missing-inspect");
@@ -1698,27 +1832,32 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Missing".to_owned(),
                 exe: missing.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
                 label: "Tools".to_owned(),
+                icon: None,
                 items: vec![
                     CustomContextMenuItem::Item {
                         label: "Missing child".to_owned(),
                         exe: missing.clone(),
+                        icon: None,
                         args: Vec::new(),
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Deep inspect".to_owned(),
                         exe: executable.clone(),
+                        icon: None,
                         args: Vec::new(),
                         only: Vec::new(),
                     },
@@ -1726,9 +1865,11 @@ mod tests {
             },
             CustomContextMenuItem::Submenu {
                 label: "Empty".to_owned(),
+                icon: None,
                 items: vec![CustomContextMenuItem::Item {
                     label: "Only missing".to_owned(),
                     exe: missing,
+                    icon: None,
                     args: Vec::new(),
                     only: Vec::new(),
                 }],
@@ -1779,18 +1920,21 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Text tool".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: vec!["txt".to_owned(), ".MD".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Image tool".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: vec!["png".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Any tool".to_owned(),
                 exe: executable,
+                icon: None,
                 args: Vec::new(),
                 only: Vec::new(),
             },
@@ -2007,6 +2151,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: "Code tool".to_owned(),
             exe: executable,
+            icon: None,
             args: Vec::new(),
             only: vec!["rs".to_owned(), ".toml".to_owned()],
         }];
@@ -2071,9 +2216,11 @@ mod tests {
         let selected_entries = vec![FileEntry::test("README.txt", false, Some(1), None)];
         let configured = vec![CustomContextMenuItem::Submenu {
             label: "Tools".to_owned(),
+            icon: None,
             items: vec![CustomContextMenuItem::Item {
                 label: "Image tool".to_owned(),
                 exe: executable,
+                icon: None,
                 args: Vec::new(),
                 only: vec!["png".to_owned()],
             }],
@@ -2101,35 +2248,41 @@ mod tests {
         let configured = vec![
             CustomContextMenuItem::Submenu {
                 label: "Empty".to_owned(),
+                icon: None,
                 items: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Implicit entry-only".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Inspect directory".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: vec!["*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Png or directory".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: vec![".png".to_owned(), "*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Text-only directory".to_owned(),
                 exe: executable.clone(),
+                icon: None,
                 args: Vec::new(),
                 only: vec!["txt".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Folder-only directory".to_owned(),
                 exe: executable,
+                icon: None,
                 args: Vec::new(),
                 only: vec!["*folder".to_owned()],
             },
@@ -2181,6 +2334,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: "Open in Zed".to_owned(),
             exe: executable.clone(),
+            icon: None,
             args: Vec::new(),
             only: Vec::new(),
         }];

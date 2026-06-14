@@ -123,13 +123,21 @@ pub enum CustomContextMenuItem {
     Item {
         label: String,
         exe: PathBuf,
+        icon: Option<PathBuf>,
         args: Vec<String>,
         only: Vec<String>,
     },
     Submenu {
         label: String,
+        icon: Option<PathBuf>,
         items: Vec<CustomContextMenuItem>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ContextMenuConfiguredIcon {
+    Image(PathBuf),
+    NativePath(PathBuf),
 }
 
 impl Serialize for CustomContextMenuItem {
@@ -141,10 +149,14 @@ impl Serialize for CustomContextMenuItem {
             Self::Item {
                 label,
                 exe,
+                icon,
                 args,
                 only,
             } => {
                 let mut length = 2;
+                if icon.is_some() {
+                    length += 1;
+                }
                 if !args.is_empty() {
                     length += 1;
                 }
@@ -154,6 +166,9 @@ impl Serialize for CustomContextMenuItem {
                 let mut map = serializer.serialize_map(Some(length))?;
                 map.serialize_entry("label", label)?;
                 map.serialize_entry("exe", exe)?;
+                if let Some(icon) = icon {
+                    map.serialize_entry("icon", icon)?;
+                }
                 if !args.is_empty() {
                     map.serialize_entry("args", args)?;
                 }
@@ -162,9 +177,12 @@ impl Serialize for CustomContextMenuItem {
                 }
                 map.end()
             }
-            Self::Submenu { label, items } => {
-                let mut map = serializer.serialize_map(Some(2))?;
+            Self::Submenu { label, icon, items } => {
+                let mut map = serializer.serialize_map(Some(if icon.is_some() { 3 } else { 2 }))?;
                 map.serialize_entry("label", label)?;
+                if let Some(icon) = icon {
+                    map.serialize_entry("icon", icon)?;
+                }
                 map.serialize_entry("items", items)?;
                 map.end()
             }
@@ -185,10 +203,15 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
             .remove("label")
             .ok_or_else(|| de::Error::missing_field("label"))
             .and_then(|value| serde_json::from_value(value).map_err(de::Error::custom))?;
+        let icon = object
+            .remove("icon")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(de::Error::custom)?;
 
         if let Some(items) = object.remove("items") {
             let items = serde_json::from_value(items).map_err(de::Error::custom)?;
-            return Ok(Self::Submenu { label, items });
+            return Ok(Self::Submenu { label, icon, items });
         }
 
         let exe = object
@@ -212,6 +235,7 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
         Ok(Self::Item {
             label,
             exe,
+            icon,
             args,
             only,
         })
@@ -431,10 +455,18 @@ impl CustomContextMenuItem {
         }
     }
 
-    pub(crate) fn resolved_icon_path(&self, executable: &Path) -> PathBuf {
+    pub(crate) fn resolved_executable_icon_path(&self, executable: &Path) -> PathBuf {
         match self {
             Self::Item { .. } => context_menu_executable_icon_path(executable),
             Self::Submenu { .. } => executable.to_path_buf(),
+        }
+    }
+
+    pub(crate) fn resolved_icon(&self) -> Option<ContextMenuConfiguredIcon> {
+        match self {
+            Self::Item { icon, .. } | Self::Submenu { icon, .. } => {
+                resolve_context_menu_icon(icon.as_deref())
+            }
         }
     }
 }
@@ -803,11 +835,15 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
         }
 
         match item {
-            CustomContextMenuItem::Item { exe, only, .. } => {
+            CustomContextMenuItem::Item {
+                exe, icon, only, ..
+            } => {
                 validate_context_menu_executable(exe)?;
+                validate_context_menu_icon(icon.as_deref())?;
                 validate_context_menu_only_extensions(only)?;
             }
-            CustomContextMenuItem::Submenu { items, .. } => {
+            CustomContextMenuItem::Submenu { icon, items, .. } => {
+                validate_context_menu_icon(icon.as_deref())?;
                 validate_custom_context_menu_items(items)?;
             }
         }
@@ -841,6 +877,26 @@ fn validate_context_menu_executable(path: &Path) -> io::Result<()> {
             ),
         ))
     }
+}
+
+fn validate_context_menu_icon(path: Option<&Path>) -> io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+
+    if context_menu_icon_path_is_image(path) {
+        return validate_configured_path(path);
+    }
+
+    validate_context_menu_executable(path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "contextmenu icons must be absolute, begin with ~/, or be an executable name from PATH: {}",
+                path.display()
+            ),
+        )
+    })
 }
 
 fn validate_context_menu_only_extensions(extensions: &[String]) -> io::Result<()> {
@@ -971,6 +1027,16 @@ fn resolve_context_menu_executable_with(
     None
 }
 
+fn resolve_context_menu_icon(path: Option<&Path>) -> Option<ContextMenuConfiguredIcon> {
+    let path = path?;
+    if context_menu_icon_path_is_image(path) {
+        return expand_configured_path(path).map(ContextMenuConfiguredIcon::Image);
+    }
+
+    resolve_context_menu_executable(path)
+        .map(|path| ContextMenuConfiguredIcon::NativePath(context_menu_executable_icon_path(&path)))
+}
+
 fn context_menu_executable_icon_path(executable: &Path) -> PathBuf {
     context_menu_executable_icon_path_with(
         executable,
@@ -1000,6 +1066,18 @@ fn context_menu_executable_icon_path_with(
     };
 
     target
+}
+
+fn context_menu_icon_path_is_image(path: &Path) -> bool {
+    (path.is_absolute() || is_tilde_path(path))
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["png", "svg", "ico"]
+                    .iter()
+                    .any(|supported| extension.eq_ignore_ascii_case(supported))
+            })
 }
 
 fn scoop_shim_target_path(contents: &str) -> Option<PathBuf> {
@@ -1573,6 +1651,60 @@ mod tests {
     }
 
     #[test]
+    fn contextmenu_items_accept_optional_icons_on_items_and_submenus() {
+        let item_icon = unique_temp_dir("contextmenu-item-icon").join("tool.png");
+        let value = serde_json::json!({
+            "contextmenu": [
+                {
+                    "label": "Tools",
+                    "icon": "code",
+                    "items": [
+                        {
+                            "label": "Inspect",
+                            "exe": "~/bin/inspect",
+                            "icon": item_icon,
+                            "args": ["--mode", "deep"]
+                        }
+                    ]
+                }
+            ]
+        });
+        let settings: ExplorerSettings =
+            serde_json::from_value(value).expect("deserialize context menu icons");
+
+        assert!(validate_settings(&settings).is_ok());
+        assert!(matches!(
+            &settings.contextmenu.items[0],
+            CustomContextMenuItem::Submenu { icon, items, .. }
+                if icon.as_deref() == Some(Path::new("code"))
+                    && matches!(
+                        &items[0],
+                        CustomContextMenuItem::Item { icon: child_icon, .. }
+                            if child_icon.as_deref() == Some(item_icon.as_path())
+                    )
+        ));
+        let serialized =
+            serde_json::to_value(&settings.contextmenu).expect("serialize context menu with icons");
+        assert_eq!(serialized[0]["icon"], "code");
+        assert_eq!(
+            serialized[0]["items"][0]["icon"],
+            serde_json::json!(item_icon)
+        );
+    }
+
+    #[test]
+    fn contextmenu_icons_reject_relative_paths_with_separators() {
+        for json in [
+            r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","icon":"icons/tool.png"}]}"#,
+            r#"{"contextmenu":[{"label":"Tools","icon":"icons/tool.exe","items":[]}]}"#,
+        ] {
+            let settings: ExplorerSettings =
+                serde_json::from_str(json).expect("deserialize context menu icon path");
+            assert!(validate_settings(&settings).is_err());
+        }
+    }
+
+    #[test]
     fn contextmenu_rejects_invalid_args_values() {
         for json in [
             r#"{"contextmenu":[{"label":"Tool","exe":"~/tool","args":"--bad 'quote"}]}"#,
@@ -1739,12 +1871,14 @@ mod tests {
                     CustomContextMenuItem::Item {
                         label: "Missing absolute".to_owned(),
                         exe: missing_absolute.clone(),
+                        icon: None,
                         args: Vec::new(),
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Missing PATH command".to_owned(),
                         exe: PathBuf::from("definitely-not-an-explorer-test-command"),
+                        icon: None,
                         args: Vec::new(),
                         only: Vec::new(),
                     },
@@ -1808,6 +1942,7 @@ mod tests {
                 items: vec![CustomContextMenuItem::Item {
                     label: "Known tool".to_owned(),
                     exe: PathBuf::from("~/bin/known-tool"),
+                    icon: None,
                     args: Vec::new(),
                     only: vec![
                         "*video".to_owned(),
@@ -1908,11 +2043,13 @@ mod tests {
         let mut document: Value = serde_json::json!({
             "contextmenu": []
         });
+        let icon = unique_temp_dir("contextmenu-sync-icon").join("inspect.png");
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
                 items: vec![CustomContextMenuItem::Item {
                     label: "Inspect".to_owned(),
                     exe: PathBuf::from("~/bin/inspect"),
+                    icon: Some(icon.clone()),
                     args: Vec::new(),
                     only: vec!["rs".to_owned(), ".toml".to_owned()],
                 }],
@@ -1923,6 +2060,7 @@ mod tests {
         sync_settings_document(&mut document, &settings);
 
         assert_eq!(document["contextmenu"][0]["exe"], "~/bin/inspect");
+        assert_eq!(document["contextmenu"][0]["icon"], serde_json::json!(icon));
         assert_eq!(
             document["contextmenu"][0]["only"],
             serde_json::json!(["rs", ".toml"])
