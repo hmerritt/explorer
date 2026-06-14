@@ -900,6 +900,13 @@ fn load_windows_shell_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec
     let wide_path = path
         .as_os_str()
         .encode_wide()
+        .map(|unit| {
+            if !use_file_attributes && unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let attributes = if use_file_attributes {
@@ -1991,14 +1998,33 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn assert_windows_shell_icon_request_extracts_valid_png(request: WindowsIconRequest) {
+        static SHELL_ICON_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = SHELL_ICON_TEST_LOCK.lock().expect("shell icon test lock");
+        let bytes = load_windows_shell_icon_png_bytes(&request).expect("icon png");
+
+        assert!(valid_png_bytes(bytes).is_some());
+    }
+
+    #[cfg(target_os = "windows")]
     #[test]
     fn windows_shell_icon_loader_extracts_valid_png_for_current_exe() {
         let request = WindowsIconRequest::Path {
             path: std::env::current_exe().expect("current exe"),
         };
-        let bytes = load_windows_shell_icon_png_bytes(&request).expect("icon png");
+        assert_windows_shell_icon_request_extracts_valid_png(request);
+    }
 
-        assert!(valid_png_bytes(bytes).is_some());
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_icon_loader_accepts_forward_slash_paths() {
+        let current_exe = std::env::current_exe().expect("current exe");
+        let forward_slash_path = PathBuf::from(current_exe.to_string_lossy().replace('\\', "/"));
+        assert!(forward_slash_path.to_string_lossy().contains('/'));
+        let request = WindowsIconRequest::Path {
+            path: forward_slash_path,
+        };
+        assert_windows_shell_icon_request_extracts_valid_png(request);
     }
 
     #[cfg(target_os = "macos")]
