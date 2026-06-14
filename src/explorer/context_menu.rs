@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -97,6 +98,7 @@ pub(super) enum ContextMenuCommand {
     NewFolder,
     RunCustom {
         executable: PathBuf,
+        args: Vec<String>,
         targets: Vec<PathBuf>,
     },
     UnpinSidebar {
@@ -343,11 +345,12 @@ impl ExplorerView {
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
             ContextMenuCommand::RunCustom {
                 executable,
+                args,
                 targets,
             } => {
                 self.handle_custom_command_result(
                     &executable,
-                    run_custom_command(&executable, &targets),
+                    run_custom_command(&executable, &args, &targets),
                 );
             }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
@@ -443,18 +446,59 @@ impl ExplorerView {
     }
 }
 
-fn run_custom_command(executable: &Path, targets: &[PathBuf]) -> std::io::Result<()> {
-    run_custom_command_with(executable, targets, |executable, targets| {
-        Command::new(executable).args(targets).spawn().map(|_| ())
+fn run_custom_command(
+    executable: &Path,
+    args: &[String],
+    targets: &[PathBuf],
+) -> std::io::Result<()> {
+    run_custom_command_with(executable, args, targets, |executable, arguments| {
+        Command::new(executable).args(arguments).spawn().map(|_| ())
     })
 }
 
 fn run_custom_command_with(
     executable: &Path,
+    args: &[String],
     targets: &[PathBuf],
-    spawn: impl FnOnce(&Path, &[PathBuf]) -> std::io::Result<()>,
+    spawn: impl FnOnce(&Path, &[OsString]) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    spawn(executable, targets)
+    let arguments = custom_command_arguments(args, targets);
+    spawn(executable, &arguments)
+}
+
+fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsString> {
+    let mut arguments = Vec::new();
+    let mut expanded_placeholder = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "{path}" => {
+                expanded_placeholder = true;
+                if let Some(target) = targets.first() {
+                    arguments.push(target.as_os_str().to_os_string());
+                }
+            }
+            "{paths}" => {
+                expanded_placeholder = true;
+                arguments.extend(
+                    targets
+                        .iter()
+                        .map(|target| target.as_os_str().to_os_string()),
+                );
+            }
+            _ => arguments.push(OsString::from(arg)),
+        }
+    }
+
+    if !expanded_placeholder {
+        arguments.extend(
+            targets
+                .iter()
+                .map(|target| target.as_os_str().to_os_string()),
+        );
+    }
+
+    arguments
 }
 
 struct SelectedEntryContext {
@@ -750,7 +794,9 @@ fn configured_context_menu_item(
     id_suffix: &str,
 ) -> Option<ContextMenuItem> {
     match item {
-        CustomContextMenuItem::Item { label, only, .. } => {
+        CustomContextMenuItem::Item {
+            label, args, only, ..
+        } => {
             if !context_menu_item_matches_only(only, selected_entries) {
                 return None;
             }
@@ -762,6 +808,7 @@ fn configured_context_menu_item(
                 label: label.clone(),
                 command: ContextMenuCommand::RunCustom {
                     executable,
+                    args: args.clone(),
                     targets: targets.to_vec(),
                 },
                 enabled: true,
@@ -983,6 +1030,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: label.to_owned(),
             exe: executable,
+            args: Vec::new(),
             only: only.iter().map(|value| (*value).to_owned()).collect(),
         }];
 
@@ -1564,6 +1612,7 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
+                args: vec!["--inspect".to_owned()],
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
@@ -1571,6 +1620,7 @@ mod tests {
                 items: vec![CustomContextMenuItem::Item {
                     label: "Deep inspect".to_owned(),
                     exe: executable.clone(),
+                    args: Vec::new(),
                     only: Vec::new(),
                 }],
             },
@@ -1596,12 +1646,14 @@ mod tests {
                 icon: Some(ContextMenuIcon::NativePath(path)),
                 command: ContextMenuCommand::RunCustom {
                     executable: command,
+                    args,
                     targets: command_targets,
                 },
                 ..
             } if label == "Inspect"
                 && path == &executable
                 && command == &executable
+                && args == &vec!["--inspect".to_owned()]
                 && command_targets == &targets
         ));
         assert!(matches!(
@@ -1634,11 +1686,13 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Missing".to_owned(),
                 exe: missing.clone(),
+                args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
+                args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
@@ -1647,11 +1701,13 @@ mod tests {
                     CustomContextMenuItem::Item {
                         label: "Missing child".to_owned(),
                         exe: missing.clone(),
+                        args: Vec::new(),
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Deep inspect".to_owned(),
                         exe: executable.clone(),
+                        args: Vec::new(),
                         only: Vec::new(),
                     },
                 ],
@@ -1661,6 +1717,7 @@ mod tests {
                 items: vec![CustomContextMenuItem::Item {
                     label: "Only missing".to_owned(),
                     exe: missing,
+                    args: Vec::new(),
                     only: Vec::new(),
                 }],
             },
@@ -1710,16 +1767,19 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Text tool".to_owned(),
                 exe: executable.clone(),
+                args: Vec::new(),
                 only: vec!["txt".to_owned(), ".MD".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Image tool".to_owned(),
                 exe: executable.clone(),
+                args: Vec::new(),
                 only: vec!["png".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Any tool".to_owned(),
                 exe: executable,
+                args: Vec::new(),
                 only: Vec::new(),
             },
         ];
@@ -1911,6 +1971,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: "Code tool".to_owned(),
             exe: executable,
+            args: Vec::new(),
             only: vec!["rs".to_owned(), ".toml".to_owned()],
         }];
         let matching_targets = vec![PathBuf::from("main.rs"), PathBuf::from("Cargo.TOML")];
@@ -1977,6 +2038,7 @@ mod tests {
             items: vec![CustomContextMenuItem::Item {
                 label: "Image tool".to_owned(),
                 exe: executable,
+                args: Vec::new(),
                 only: vec!["png".to_owned()],
             }],
         }];
@@ -2008,16 +2070,19 @@ mod tests {
             CustomContextMenuItem::Item {
                 label: "Inspect directory".to_owned(),
                 exe: executable.clone(),
+                args: Vec::new(),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
                 label: "Text-only directory".to_owned(),
                 exe: executable.clone(),
+                args: Vec::new(),
                 only: vec!["txt".to_owned()],
             },
             CustomContextMenuItem::Item {
                 label: "Folder-only directory".to_owned(),
                 exe: executable,
+                args: Vec::new(),
                 only: vec!["*folders".to_owned()],
             },
         ];
@@ -2066,6 +2131,7 @@ mod tests {
         let configured = vec![CustomContextMenuItem::Item {
             label: "Open in Zed".to_owned(),
             exe: executable.clone(),
+            args: Vec::new(),
             only: Vec::new(),
         }];
 
@@ -2113,20 +2179,66 @@ mod tests {
     #[test]
     fn custom_command_launches_once_with_all_targets_in_order() {
         let executable = configured_executable_path();
+        let args = vec!["--inspect".to_owned()];
         let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
         let mut calls = Vec::new();
 
         run_custom_command_with(
             &executable,
+            &args,
             &targets,
-            |actual_executable, actual_targets| {
-                calls.push((actual_executable.to_path_buf(), actual_targets.to_vec()));
+            |actual_executable, actual_arguments| {
+                calls.push((actual_executable.to_path_buf(), actual_arguments.to_vec()));
                 Ok(())
             },
         )
         .unwrap();
 
-        assert_eq!(calls, vec![(executable, targets)]);
+        assert_eq!(
+            calls,
+            vec![(
+                executable,
+                vec![
+                    OsString::from("--inspect"),
+                    OsString::from("a.txt"),
+                    OsString::from("folder")
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn custom_command_arguments_expand_exact_path_placeholder_to_first_target() {
+        let args = vec![
+            "--open".to_owned(),
+            "{path}".to_owned(),
+            "--literal={path}".to_owned(),
+        ];
+        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")];
+
+        assert_eq!(
+            custom_command_arguments(&args, &targets),
+            vec![
+                OsString::from("--open"),
+                OsString::from("a.txt"),
+                OsString::from("--literal={path}")
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_command_arguments_expand_paths_placeholder_to_all_targets_without_append() {
+        let args = vec!["--open".to_owned(), "{paths}".to_owned()];
+        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+
+        assert_eq!(
+            custom_command_arguments(&args, &targets),
+            vec![
+                OsString::from("--open"),
+                OsString::from("a.txt"),
+                OsString::from("folder")
+            ]
+        );
     }
 
     #[test]

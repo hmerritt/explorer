@@ -81,6 +81,7 @@ pub enum CustomContextMenuItem {
     Item {
         label: String,
         exe: PathBuf,
+        args: Vec<String>,
         only: Vec<String>,
     },
     Submenu {
@@ -95,11 +96,25 @@ impl Serialize for CustomContextMenuItem {
         S: Serializer,
     {
         match self {
-            Self::Item { label, exe, only } => {
-                let mut map =
-                    serializer.serialize_map(Some(if only.is_empty() { 2 } else { 3 }))?;
+            Self::Item {
+                label,
+                exe,
+                args,
+                only,
+            } => {
+                let mut length = 2;
+                if !args.is_empty() {
+                    length += 1;
+                }
+                if !only.is_empty() {
+                    length += 1;
+                }
+                let mut map = serializer.serialize_map(Some(length))?;
                 map.serialize_entry("label", label)?;
                 map.serialize_entry("exe", exe)?;
+                if !args.is_empty() {
+                    map.serialize_entry("args", args)?;
+                }
                 if !only.is_empty() {
                     map.serialize_entry("only", only)?;
                 }
@@ -145,8 +160,28 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
             .transpose()
             .map_err(de::Error::custom)?
             .unwrap_or_default();
+        let args = object
+            .remove("args")
+            .map(deserialize_context_menu_args)
+            .transpose()
+            .map_err(de::Error::custom)?
+            .unwrap_or_default();
 
-        Ok(Self::Item { label, exe, only })
+        Ok(Self::Item {
+            label,
+            exe,
+            args,
+            only,
+        })
+    }
+}
+
+fn deserialize_context_menu_args(value: Value) -> Result<Vec<String>, String> {
+    match value {
+        Value::Array(_) => serde_json::from_value(value).map_err(|error| error.to_string()),
+        Value::String(args) => shlex::split(&args)
+            .ok_or_else(|| "contextmenu args strings must use valid shell quoting".to_owned()),
+        _ => Err("contextmenu args must be an array or string".to_owned()),
     }
 }
 
@@ -1377,6 +1412,7 @@ mod tests {
                                 {
                                     "label": "Inspect",
                                     "exe": "~/bin/inspect",
+                                    "args": ["--mode", "deep"],
                                     "only": ["txt", ".MD"]
                                 }
                             ]
@@ -1393,11 +1429,64 @@ mod tests {
             CustomContextMenuItem::Submenu { items, .. }
                 if matches!(
                     &items[0],
-                    CustomContextMenuItem::Item { exe, only, .. }
+                    CustomContextMenuItem::Item { exe, args, only, .. }
                         if exe == Path::new("~/bin/inspect")
+                            && args == &vec!["--mode".to_owned(), "deep".to_owned()]
                             && only == &vec!["txt".to_owned(), ".MD".to_owned()]
                 )
         ));
+    }
+
+    #[test]
+    fn contextmenu_items_accept_array_and_string_args() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "contextmenu": {
+                    "directory": [
+                        {
+                            "label": "Array args",
+                            "exe": "~/bin/inspect",
+                            "args": ["--line", "two words", "{path}"]
+                        },
+                        {
+                            "label": "String args",
+                            "exe": "~/bin/inspect",
+                            "args": "--line 'two words' {paths}"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("deserialize context menu args");
+
+        assert!(matches!(
+            &settings.contextmenu.directory[0],
+            CustomContextMenuItem::Item { args, .. }
+                if args == &vec![
+                    "--line".to_owned(),
+                    "two words".to_owned(),
+                    "{path}".to_owned()
+                ]
+        ));
+        assert!(matches!(
+            &settings.contextmenu.directory[1],
+            CustomContextMenuItem::Item { args, .. }
+                if args == &vec![
+                    "--line".to_owned(),
+                    "two words".to_owned(),
+                    "{paths}".to_owned()
+                ]
+        ));
+    }
+
+    #[test]
+    fn contextmenu_rejects_invalid_args_values() {
+        for json in [
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","args":"--bad 'quote"}]}}"#,
+            r#"{"contextmenu":{"directory":[{"label":"Tool","exe":"~/tool","args":42}]}}"#,
+        ] {
+            assert!(serde_json::from_str::<ExplorerSettings>(json).is_err());
+        }
     }
 
     #[test]
@@ -1507,11 +1596,13 @@ mod tests {
                     CustomContextMenuItem::Item {
                         label: "Missing absolute".to_owned(),
                         exe: missing_absolute.clone(),
+                        args: Vec::new(),
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
                         label: "Missing PATH command".to_owned(),
                         exe: PathBuf::from("definitely-not-an-explorer-test-command"),
+                        args: Vec::new(),
                         only: Vec::new(),
                     },
                 ],
@@ -1576,6 +1667,7 @@ mod tests {
                 file_folder: vec![CustomContextMenuItem::Item {
                     label: "Known tool".to_owned(),
                     exe: PathBuf::from("~/bin/known-tool"),
+                    args: Vec::new(),
                     only: vec![
                         "*video".to_owned(),
                         "*photo".to_owned(),
@@ -1628,6 +1720,7 @@ mod tests {
                                     "kind": "item",
                                     "label": "Inspect",
                                     "executable": "~/bin/inspect",
+                                    "args": "--line 'two words'",
                                     "note": "child"
                                 }
                             ]
@@ -1649,6 +1742,10 @@ mod tests {
         assert_eq!(
             document["contextmenu"]["directory"][0]["items"][0]["exe"],
             "~/bin/inspect"
+        );
+        assert_eq!(
+            document["contextmenu"]["directory"][0]["items"][0]["args"],
+            serde_json::json!(["--line", "two words"])
         );
         assert!(
             document["contextmenu"]["directory"][0]
@@ -1679,6 +1776,7 @@ mod tests {
                 directory: vec![CustomContextMenuItem::Item {
                     label: "Inspect".to_owned(),
                     exe: PathBuf::from("~/bin/inspect"),
+                    args: Vec::new(),
                     only: vec!["rs".to_owned(), ".toml".to_owned()],
                 }],
                 file_folder: Vec::new(),
@@ -1695,6 +1793,11 @@ mod tests {
         assert_eq!(
             document["contextmenu"]["directory"][0]["only"],
             serde_json::json!(["rs", ".toml"])
+        );
+        assert!(
+            document["contextmenu"]["directory"][0]
+                .get("args")
+                .is_none()
         );
         assert!(
             document["contextmenu"]["directory"][0]
