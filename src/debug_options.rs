@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fmt,
     sync::atomic::{AtomicU8, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::{App, Global};
@@ -11,7 +11,8 @@ use gpui::{App, Global};
 const DEBUG_NAV: u8 = 1 << 0;
 const DEBUG_SEARCH: u8 = 1 << 1;
 const DEBUG_ICONS: u8 = 1 << 2;
-const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS;
+const DEBUG_ARCHIVE: u8 = 1 << 3;
+const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -26,6 +27,54 @@ struct NavTimingBatchState {
 
 pub(crate) struct NavTimingBatch {
     active: bool,
+}
+
+pub(crate) struct ArchiveTiming {
+    started: Option<Instant>,
+    stage: &'static str,
+    details: Option<String>,
+    outcome: &'static str,
+}
+
+impl ArchiveTiming {
+    pub(crate) fn start(stage: &'static str, details: fmt::Arguments<'_>) -> Self {
+        if archive_timings_enabled() {
+            Self {
+                started: Some(Instant::now()),
+                stage,
+                details: Some(details.to_string()),
+                outcome: "error",
+            }
+        } else {
+            Self {
+                started: None,
+                stage,
+                details: None,
+                outcome: "error",
+            }
+        }
+    }
+
+    pub(crate) fn ok(&mut self) {
+        self.outcome = "ok";
+    }
+
+    pub(crate) fn cancelled(&mut self) {
+        self.outcome = "cancelled";
+    }
+}
+
+impl Drop for ArchiveTiming {
+    fn drop(&mut self) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let details = self.details.as_deref().unwrap_or_default();
+        log_archive_timing(
+            started.elapsed(),
+            format_args!("{} {details} outcome={}", self.stage, self.outcome),
+        );
+    }
 }
 
 impl NavTimingBatch {
@@ -96,6 +145,10 @@ impl DebugOptions {
         self.flags & DEBUG_ICONS != 0
     }
 
+    pub(crate) fn archive_timings(self) -> bool {
+        self.flags & DEBUG_ARCHIVE != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
@@ -106,6 +159,10 @@ impl DebugOptions {
 
     fn enable_icons(&mut self) {
         self.flags |= DEBUG_ICONS;
+    }
+
+    fn enable_archive(&mut self) {
+        self.flags |= DEBUG_ARCHIVE;
     }
 
     fn enable_all(&mut self) {
@@ -141,6 +198,13 @@ pub(crate) fn icon_timings_enabled() -> bool {
         flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
     }
     .icon_timings()
+}
+
+pub(crate) fn archive_timings_enabled() -> bool {
+    DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .archive_timings()
 }
 
 pub(crate) fn log_nav_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
@@ -190,6 +254,16 @@ pub(crate) fn log_icon_timing(message: fmt::Arguments<'_>) {
     }
 }
 
+pub(crate) fn log_archive_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
+    if archive_timings_enabled() {
+        eprintln!("{}", format_archive_timing_line(elapsed, message));
+    }
+}
+
+fn format_archive_timing_line(elapsed: Duration, message: fmt::Arguments<'_>) -> String {
+    format!("[archive] {} {message}", format_timing_duration(elapsed))
+}
+
 fn format_timing_duration(elapsed: Duration) -> String {
     format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
@@ -230,9 +304,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
             "nav" => options.enable_nav(),
             "search" => options.enable_search(),
             "icon" | "icons" => options.enable_icons(),
+            "archive" | "extract" => options.enable_archive(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, extract, all, or *."
             )),
         }
     }
@@ -258,6 +333,7 @@ mod tests {
         assert!(options.nav_timings());
         assert!(options.search_timings());
         assert!(options.icon_timings());
+        assert!(!options.archive_timings());
         assert!(warnings.is_empty());
     }
 
@@ -286,6 +362,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_archive_debug_aliases() {
+        let (archive_options, archive_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=archive"]));
+        let (extract_options, extract_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=nav,extract"]));
+
+        assert!(archive_options.archive_timings());
+        assert!(extract_options.archive_timings());
+        assert!(extract_options.nav_timings());
+        assert!(!archive_options.nav_timings());
+        assert!(archive_warnings.is_empty());
+        assert!(extract_warnings.is_empty());
+    }
+
+    #[test]
     fn parses_all_aliases() {
         let (all_options, all_warnings) =
             parse_debug_options(args(&["explorer", "--debug", "all"]));
@@ -294,9 +385,11 @@ mod tests {
         assert!(all_options.nav_timings());
         assert!(all_options.search_timings());
         assert!(all_options.icon_timings());
+        assert!(all_options.archive_timings());
         assert!(star_options.nav_timings());
         assert!(star_options.search_timings());
         assert!(star_options.icon_timings());
+        assert!(star_options.archive_timings());
         assert!(all_warnings.is_empty());
         assert!(star_warnings.is_empty());
     }
@@ -308,9 +401,11 @@ mod tests {
         assert!(options.nav_timings());
         assert!(!options.search_timings());
         assert!(!options.icon_timings());
+        assert!(!options.archive_timings());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("paint"));
         assert!(warnings[0].contains("icons"));
+        assert!(warnings[0].contains("archive"));
     }
 
     #[test]
@@ -320,6 +415,7 @@ mod tests {
         assert!(options.nav_timings());
         assert!(options.search_timings());
         assert!(options.icon_timings());
+        assert!(options.archive_timings());
         assert!(warnings.is_empty());
     }
 
@@ -330,6 +426,7 @@ mod tests {
         assert!(options.nav_timings());
         assert!(options.search_timings());
         assert!(options.icon_timings());
+        assert!(options.archive_timings());
         assert!(warnings.is_empty());
     }
 
@@ -354,6 +451,17 @@ mod tests {
         assert_eq!(
             format_timing_duration(Duration::from_millis(12_345)),
             "12345.000  ms"
+        );
+    }
+
+    #[test]
+    fn archive_timing_line_includes_prefix_stage_details_and_outcome() {
+        assert_eq!(
+            format_archive_timing_line(
+                Duration::from_micros(12_345),
+                format_args!("prepare.list archive={:?} outcome=ok", "example.zip")
+            ),
+            "[archive] 12.345     ms prepare.list archive=\"example.zip\" outcome=ok"
         );
     }
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
+    fmt,
     fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
@@ -14,7 +15,7 @@ use std::{
 use filetime::FileTime;
 use thousands::Separable;
 
-use crate::explorer::{entry::FileEntry, sorting::sort_entries};
+use crate::explorer::{entry::FileEntry, formatting::format_size, sorting::sort_entries};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const COMPOUND_ARCHIVE_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "tar.xz", "tar.zst"];
@@ -22,6 +23,7 @@ const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
     "zip", "tar", "tgz", "tbz", "txz", "tzst", "ar", "gz", "bz", "bz2", "xz", "zst", "rar", "7z",
 ];
 const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
+const ARCHIVE_THROUGHPUT_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_start_path() -> PathBuf {
@@ -1089,6 +1091,366 @@ struct ArchiveExtractEntry {
     byte_weight: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ArchiveThroughputInterval {
+    output_bytes: u64,
+    elapsed: Duration,
+}
+
+#[derive(Debug, Default)]
+struct ArchiveThroughputStats {
+    compressed_bytes: u64,
+    output_bytes: u64,
+    elapsed: Duration,
+    intervals: Vec<ArchiveThroughputInterval>,
+    compressed_equivalent_intervals: Vec<ArchiveThroughputInterval>,
+}
+
+impl ArchiveThroughputStats {
+    fn output_rates(&self) -> Vec<f64> {
+        self.intervals
+            .iter()
+            .map(|interval| throughput_bytes_per_second(interval.output_bytes, interval.elapsed))
+            .collect()
+    }
+
+    fn compressed_equivalent_rates(&self) -> Vec<f64> {
+        self.compressed_equivalent_intervals
+            .iter()
+            .map(|interval| throughput_bytes_per_second(interval.output_bytes, interval.elapsed))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct ArchiveThroughputObservedPath {
+    display_path: PathBuf,
+    destination: PathBuf,
+    baseline: Option<ArchiveThroughputFileState>,
+    changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ArchiveThroughputFileState {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+enum ArchiveThroughputCommand {
+    SetAlternateRoot(Option<PathBuf>),
+    Finish,
+}
+
+struct ArchiveThroughputSampler {
+    command_tx: Option<std::sync::mpsc::Sender<ArchiveThroughputCommand>>,
+    handle: Option<std::thread::JoinHandle<ArchiveThroughputStats>>,
+}
+
+impl ArchiveThroughputSampler {
+    fn start(
+        archive: &Path,
+        entries: &[ArchiveExtractEntry],
+        conflict_choice: ConflictChoice,
+    ) -> Self {
+        if !crate::debug_options::archive_timings_enabled() {
+            return Self {
+                command_tx: None,
+                handle: None,
+            };
+        }
+
+        let compressed_bytes = fs::metadata(archive)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let observed_paths = entries
+            .iter()
+            .filter(|entry| !(entry.conflict && conflict_choice == ConflictChoice::Skip))
+            .map(|entry| ArchiveThroughputObservedPath {
+                display_path: entry.display_path.clone(),
+                destination: entry.destination.clone(),
+                baseline: archive_throughput_file_state(&entry.destination),
+                changed: false,
+            })
+            .collect();
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            collect_archive_throughput(compressed_bytes, observed_paths, command_rx)
+        });
+
+        Self {
+            command_tx: Some(command_tx),
+            handle: Some(handle),
+        }
+    }
+
+    fn set_alternate_root(&self, root: Option<PathBuf>) {
+        if let Some(command_tx) = &self.command_tx {
+            let _ = command_tx.send(ArchiveThroughputCommand::SetAlternateRoot(root));
+        }
+    }
+
+    fn finish(mut self) -> Option<ArchiveThroughputStats> {
+        let command_tx = self.command_tx.take()?;
+        let handle = self.handle.take()?;
+        let _ = command_tx.send(ArchiveThroughputCommand::Finish);
+        handle.join().ok()
+    }
+}
+
+struct ArchiveThroughputOperation {
+    enabled: bool,
+    outcome: &'static str,
+    stats: Vec<ArchiveThroughputStats>,
+}
+
+impl ArchiveThroughputOperation {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            outcome: "error",
+            stats: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, stats: ArchiveThroughputStats) {
+        self.stats.push(stats);
+    }
+
+    fn ok(&mut self) {
+        self.outcome = "ok";
+    }
+
+    fn cancelled(&mut self) {
+        self.outcome = "cancelled";
+    }
+}
+
+impl Drop for ArchiveThroughputOperation {
+    fn drop(&mut self) {
+        if !self.enabled || self.stats.is_empty() {
+            return;
+        }
+
+        let total = aggregate_archive_throughput(&self.stats);
+        log_archive_throughput(
+            "execute.throughput.total",
+            format_args!("archives={}", self.stats.len()),
+            self.outcome,
+            &total,
+        );
+    }
+}
+
+fn collect_archive_throughput(
+    compressed_bytes: u64,
+    mut observed_paths: Vec<ArchiveThroughputObservedPath>,
+    command_rx: std::sync::mpsc::Receiver<ArchiveThroughputCommand>,
+) -> ArchiveThroughputStats {
+    let started = Instant::now();
+    let mut last_sampled = started;
+    let mut last_output_bytes = 0;
+    let mut alternate_root = None;
+    let mut intervals = Vec::new();
+
+    let output_bytes = loop {
+        let timeout = ARCHIVE_THROUGHPUT_SAMPLE_INTERVAL.saturating_sub(last_sampled.elapsed());
+        match command_rx.recv_timeout(timeout) {
+            Ok(ArchiveThroughputCommand::SetAlternateRoot(root)) => {
+                alternate_root = root;
+            }
+            Ok(ArchiveThroughputCommand::Finish) => {
+                break sample_archive_throughput(
+                    &mut observed_paths,
+                    None,
+                    &mut last_sampled,
+                    &mut last_output_bytes,
+                    &mut intervals,
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                sample_archive_throughput(
+                    &mut observed_paths,
+                    alternate_root.as_deref(),
+                    &mut last_sampled,
+                    &mut last_output_bytes,
+                    &mut intervals,
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break sample_archive_throughput(
+                    &mut observed_paths,
+                    None,
+                    &mut last_sampled,
+                    &mut last_output_bytes,
+                    &mut intervals,
+                );
+            }
+        }
+    };
+    let compressed_equivalent_intervals =
+        scale_archive_throughput_intervals(&intervals, compressed_bytes, output_bytes);
+
+    ArchiveThroughputStats {
+        compressed_bytes,
+        output_bytes,
+        elapsed: started.elapsed(),
+        intervals,
+        compressed_equivalent_intervals,
+    }
+}
+
+fn sample_archive_throughput(
+    observed_paths: &mut [ArchiveThroughputObservedPath],
+    alternate_root: Option<&Path>,
+    last_sampled: &mut Instant,
+    last_output_bytes: &mut u64,
+    intervals: &mut Vec<ArchiveThroughputInterval>,
+) -> u64 {
+    let sampled_at = Instant::now();
+    let output_bytes = measure_archive_output_bytes(observed_paths, alternate_root);
+    let elapsed = sampled_at.saturating_duration_since(*last_sampled);
+    if elapsed > Duration::ZERO {
+        intervals.push(ArchiveThroughputInterval {
+            output_bytes: output_bytes.saturating_sub(*last_output_bytes),
+            elapsed,
+        });
+    }
+    *last_output_bytes = output_bytes;
+    *last_sampled = sampled_at;
+    output_bytes
+}
+
+fn archive_throughput_file_state(path: &Path) -> Option<ArchiveThroughputFileState> {
+    let metadata = fs::metadata(path).ok()?;
+    metadata.is_file().then(|| ArchiveThroughputFileState {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn measure_archive_output_bytes(
+    observed_paths: &mut [ArchiveThroughputObservedPath],
+    alternate_root: Option<&Path>,
+) -> u64 {
+    observed_paths.iter_mut().fold(0_u64, |total, observed| {
+        let alternate = alternate_root
+            .and_then(|root| archive_throughput_file_state(&root.join(&observed.display_path)));
+        let current = alternate.or_else(|| archive_throughput_file_state(&observed.destination));
+        let Some(current) = current else {
+            return total;
+        };
+
+        let should_count = if alternate.is_some() || observed.baseline.is_none() {
+            true
+        } else {
+            observed.changed |= observed.baseline != Some(current);
+            observed.changed
+        };
+        total.saturating_add(if should_count { current.len } else { 0 })
+    })
+}
+
+fn scale_archive_throughput_intervals(
+    intervals: &[ArchiveThroughputInterval],
+    compressed_bytes: u64,
+    output_bytes: u64,
+) -> Vec<ArchiveThroughputInterval> {
+    if output_bytes == 0 {
+        return intervals
+            .iter()
+            .map(|interval| ArchiveThroughputInterval {
+                output_bytes: 0,
+                elapsed: interval.elapsed,
+            })
+            .collect();
+    }
+
+    intervals
+        .iter()
+        .map(|interval| ArchiveThroughputInterval {
+            output_bytes: (interval.output_bytes as f64 * compressed_bytes as f64
+                / output_bytes as f64)
+                .round() as u64,
+            elapsed: interval.elapsed,
+        })
+        .collect()
+}
+
+fn aggregate_archive_throughput(stats: &[ArchiveThroughputStats]) -> ArchiveThroughputStats {
+    let mut total = ArchiveThroughputStats::default();
+    for stats in stats {
+        total.compressed_bytes = total
+            .compressed_bytes
+            .saturating_add(stats.compressed_bytes);
+        total.output_bytes = total.output_bytes.saturating_add(stats.output_bytes);
+        total.elapsed += stats.elapsed;
+        total.intervals.extend_from_slice(&stats.intervals);
+        total
+            .compressed_equivalent_intervals
+            .extend_from_slice(&stats.compressed_equivalent_intervals);
+    }
+    total
+}
+
+fn throughput_bytes_per_second(bytes: u64, elapsed: Duration) -> f64 {
+    throughput_bytes_per_second_f64(bytes as f64, elapsed)
+}
+
+fn throughput_bytes_per_second_f64(bytes: f64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds > 0.0 { bytes / seconds } else { 0.0 }
+}
+
+fn nearest_rank_percentile(values: &[f64], percentile: u32) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mut values = values.to_vec();
+    values.sort_by(f64::total_cmp);
+    let rank = ((percentile as usize * values.len()).div_ceil(100)).max(1);
+    values[rank - 1]
+}
+
+fn format_archive_throughput(bytes_per_second: f64) -> String {
+    format!("{:.1}MiB/s", bytes_per_second / (1024.0 * 1024.0))
+}
+
+fn log_archive_throughput(
+    stage: &'static str,
+    details: fmt::Arguments<'_>,
+    outcome: &str,
+    stats: &ArchiveThroughputStats,
+) {
+    let output_rates = stats.output_rates();
+    let compressed_rates = stats.compressed_equivalent_rates();
+    let output_average = throughput_bytes_per_second(stats.output_bytes, stats.elapsed);
+    let compressed_average = if stats.output_bytes > 0 {
+        throughput_bytes_per_second(stats.compressed_bytes, stats.elapsed)
+    } else {
+        0.0
+    };
+
+    crate::debug_options::log_archive_timing(
+        stats.elapsed,
+        format_args!(
+            "{stage} {details} sample_interval_ms={} samples={} output_bytes={:?} output_avg={} output_p1={} output_p50={} output_p99={} compressed_bytes={:?} compressed_equiv_avg={} compressed_equiv_p1={} compressed_equiv_p50={} compressed_equiv_p99={} outcome={outcome}",
+            ARCHIVE_THROUGHPUT_SAMPLE_INTERVAL.as_millis(),
+            stats.intervals.len(),
+            format_size(Some(stats.output_bytes)),
+            format_archive_throughput(output_average),
+            format_archive_throughput(nearest_rank_percentile(&output_rates, 1)),
+            format_archive_throughput(nearest_rank_percentile(&output_rates, 50)),
+            format_archive_throughput(nearest_rank_percentile(&output_rates, 99)),
+            format_size(Some(stats.compressed_bytes)),
+            format_archive_throughput(compressed_average),
+            format_archive_throughput(nearest_rank_percentile(&compressed_rates, 1)),
+            format_archive_throughput(nearest_rank_percentile(&compressed_rates, 50)),
+            format_archive_throughput(nearest_rank_percentile(&compressed_rates, 99)),
+        ),
+    );
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FileOperationStep {
     CreateDirectory(PathBuf),
@@ -1305,6 +1667,11 @@ fn prepare_extract_archive_operation(
     archives: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationJob, String> {
+    let mut total_timing = crate::debug_options::ArchiveTiming::start(
+        "prepare.total",
+        format_args!("archives={}", archives.len()),
+    );
+
     if archives.is_empty() {
         return Err("No archive files were selected.".to_owned());
     }
@@ -1336,7 +1703,21 @@ fn prepare_extract_archive_operation(
             ));
         }
 
-        let listing = archive_listing(archive)?;
+        let mut listing_timing = crate::debug_options::ArchiveTiming::start(
+            "prepare.list",
+            format_args!("archive={archive:?}"),
+        );
+        let listing = archive_listing(archive);
+        if listing.is_ok() {
+            listing_timing.ok();
+        }
+        drop(listing_timing);
+        let listing = listing?;
+
+        let mut plan_timing = crate::debug_options::ArchiveTiming::start(
+            "prepare.plan",
+            format_args!("archive={archive:?}"),
+        );
         let top_level_entries = top_level_entries_from_listing(&listing.entries);
         if top_level_entries.is_empty() {
             return Err(format!(
@@ -1379,14 +1760,17 @@ fn prepare_extract_archive_operation(
                 source_is_dir: false,
             });
         }
+        plan_timing.ok();
     }
 
-    Ok(FileOperationJob {
+    let job = FileOperationJob {
         kind: FileOperationKind::Extract,
         stats,
         steps,
         roots,
-    })
+    };
+    total_timing.ok();
+    Ok(job)
 }
 
 fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
@@ -1445,6 +1829,24 @@ pub(super) fn execute_file_operation_with_progress(
     cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
+    let archive_timings_enabled = crate::debug_options::archive_timings_enabled();
+    let archive_count = if job.kind == FileOperationKind::Extract && archive_timings_enabled {
+        job.steps
+            .iter()
+            .filter(|step| matches!(step, FileOperationStep::ExtractArchive { .. }))
+            .count()
+    } else {
+        0
+    };
+    let mut total_timing = (job.kind == FileOperationKind::Extract).then(|| {
+        crate::debug_options::ArchiveTiming::start(
+            "execute.total",
+            format_args!("archives={archive_count}"),
+        )
+    });
+    let mut throughput_operation = ArchiveThroughputOperation::new(
+        job.kind == FileOperationKind::Extract && archive_timings_enabled,
+    );
     let mut operated_destinations = HashSet::new();
     let mut progress = job.initial_progress();
     on_progress(progress.clone());
@@ -1454,6 +1856,10 @@ pub(super) fn execute_file_operation_with_progress(
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress);
+            if let Some(timing) = total_timing.as_mut() {
+                timing.cancelled();
+            }
+            throughput_operation.cancelled();
             return Err(FileOperationError::Cancelled);
         }
 
@@ -1529,7 +1935,16 @@ pub(super) fn execute_file_operation_with_progress(
             } => {
                 progress.phase = FileOperationPhase::Extracting;
                 on_progress(progress.clone());
-                extract_archive_with_entry_progress(
+                let backend = archive_timings_enabled
+                    .then(|| archive_extract_backend(archive))
+                    .unwrap_or_default();
+                let mut extract_timing = crate::debug_options::ArchiveTiming::start(
+                    "execute.extract",
+                    format_args!("archive={archive:?} backend={backend}"),
+                );
+                let throughput_sampler =
+                    ArchiveThroughputSampler::start(archive, entries, conflict_choice);
+                let result = extract_archive_with_entry_progress(
                     archive,
                     destination,
                     entries,
@@ -1537,7 +1952,35 @@ pub(super) fn execute_file_operation_with_progress(
                     &cancel,
                     &mut progress,
                     &mut on_progress,
-                )?;
+                    &throughput_sampler,
+                );
+                let outcome = match &result {
+                    Ok(()) => "ok",
+                    Err(FileOperationError::Cancelled) => "cancelled",
+                    Err(FileOperationError::Failed(_)) => "error",
+                };
+                if let Some(stats) = throughput_sampler.finish() {
+                    log_archive_throughput(
+                        "execute.throughput",
+                        format_args!("archive={archive:?} backend={backend}"),
+                        outcome,
+                        &stats,
+                    );
+                    throughput_operation.add(stats);
+                }
+                match &result {
+                    Ok(()) => extract_timing.ok(),
+                    Err(FileOperationError::Cancelled) => {
+                        extract_timing.cancelled();
+                        if let Some(timing) = total_timing.as_mut() {
+                            timing.cancelled();
+                        }
+                        throughput_operation.cancelled();
+                    }
+                    Err(FileOperationError::Failed(_)) => {}
+                }
+                drop(extract_timing);
+                result?;
                 operated_destinations.insert(destination.clone());
             }
             FileOperationStep::RemoveEmptyDirectory(path) => {
@@ -1550,6 +1993,12 @@ pub(super) fn execute_file_operation_with_progress(
         }
     }
 
+    let mut finalize_timing = (job.kind == FileOperationKind::Extract).then(|| {
+        crate::debug_options::ArchiveTiming::start(
+            "execute.finalize",
+            format_args!("archives={archive_count}"),
+        )
+    });
     let mut summary = FileOperationSummary::default();
     for root in &job.roots {
         if job.kind == FileOperationKind::Extract {
@@ -1576,7 +2025,30 @@ pub(super) fn execute_file_operation_with_progress(
     progress.cancellable = false;
     on_progress(progress);
 
+    if let Some(timing) = finalize_timing.as_mut() {
+        timing.ok();
+    }
+    if let Some(timing) = total_timing.as_mut() {
+        timing.ok();
+    }
+    throughput_operation.ok();
     Ok(summary)
+}
+
+fn archive_extract_backend(archive: &Path) -> &'static str {
+    if archive_is_rar(archive) {
+        "rar"
+    } else if archive_is_7z(archive) {
+        "7z"
+    } else if archive_is_ar(archive) {
+        "ar"
+    } else if archive_supports_filtered_extract(archive)
+        || archive_is_single_file_compression(archive)
+    {
+        "decompress-filtered"
+    } else {
+        "decompress"
+    }
 }
 
 fn extract_archive_with_entry_progress(
@@ -1587,6 +2059,7 @@ fn extract_archive_with_entry_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    throughput_sampler: &ArchiveThroughputSampler,
 ) -> Result<(), FileOperationError> {
     if archive_is_rar(archive) {
         extract_rar_archive_with_entry_progress(
@@ -1597,6 +2070,7 @@ fn extract_archive_with_entry_progress(
             cancel,
             progress,
             on_progress,
+            throughput_sampler,
         )?;
     } else if archive_is_7z(archive) {
         extract_7z_archive_with_entry_progress(
@@ -1867,6 +2341,7 @@ fn extract_rar_archive_with_entry_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    throughput_sampler: &ArchiveThroughputSampler,
 ) -> Result<(), FileOperationError> {
     let temp_directory = temp_extract_directory_for(destination)
         .map_err(|error| operation_error("create", destination, error))?;
@@ -1881,6 +2356,7 @@ fn extract_rar_archive_with_entry_progress(
         cancel,
         progress,
         on_progress,
+        throughput_sampler,
     );
 
     let cleanup = fs::remove_dir_all(&temp_directory);
@@ -1899,6 +2375,7 @@ fn extract_rar_archive_to_temp(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    throughput_sampler: &ArchiveThroughputSampler,
 ) -> Result<(), FileOperationError> {
     let archive_file = archive.to_string_lossy().to_string();
     let temp_destination = temp_directory.to_string_lossy().to_string();
@@ -1912,7 +2389,14 @@ fn extract_rar_archive_to_temp(
         })?;
     let mut index = 0;
 
-    while let Some(result) = archive_reader.next() {
+    loop {
+        throughput_sampler.set_alternate_root(Some(temp_directory.to_path_buf()));
+        let result = archive_reader.next();
+        throughput_sampler.set_alternate_root(None);
+        let Some(result) = result else {
+            break;
+        };
+
         if cancel.load(Ordering::Relaxed) {
             return Err(FileOperationError::Cancelled);
         }
@@ -2566,6 +3050,197 @@ mod tests {
         assert_eq!(
             archive_extract_root_name(Path::new("package.rar")).unwrap(),
             OsString::from("package")
+        );
+    }
+
+    #[test]
+    fn archive_extract_backend_labels_pipeline_implementations() {
+        assert_eq!(archive_extract_backend(Path::new("archive.rar")), "rar");
+        assert_eq!(archive_extract_backend(Path::new("archive.7z")), "7z");
+        assert_eq!(archive_extract_backend(Path::new("archive.ar")), "ar");
+        assert_eq!(
+            archive_extract_backend(Path::new("archive.zip")),
+            "decompress-filtered"
+        );
+        assert_eq!(
+            archive_extract_backend(Path::new("archive.bz")),
+            "decompress-filtered"
+        );
+        assert_eq!(
+            archive_extract_backend(Path::new("archive.unknown")),
+            "decompress"
+        );
+    }
+
+    #[test]
+    fn archive_throughput_percentiles_use_nearest_rank() {
+        assert_eq!(nearest_rank_percentile(&[42.0], 1), 42.0);
+        assert_eq!(nearest_rank_percentile(&[42.0], 50), 42.0);
+        assert_eq!(nearest_rank_percentile(&[42.0], 99), 42.0);
+
+        let values = [30.0, 0.0, 20.0, 10.0];
+        assert_eq!(nearest_rank_percentile(&values, 1), 0.0);
+        assert_eq!(nearest_rank_percentile(&values, 50), 10.0);
+        assert_eq!(nearest_rank_percentile(&values, 99), 30.0);
+        assert_eq!(nearest_rank_percentile(&[], 50), 0.0);
+    }
+
+    #[test]
+    fn archive_throughput_scales_compressed_equivalent_intervals() {
+        let intervals = vec![
+            ArchiveThroughputInterval {
+                output_bytes: 100,
+                elapsed: Duration::from_secs(1),
+            },
+            ArchiveThroughputInterval {
+                output_bytes: 300,
+                elapsed: Duration::from_secs(1),
+            },
+        ];
+
+        let scaled = scale_archive_throughput_intervals(&intervals, 100, 400);
+
+        assert_eq!(scaled[0].output_bytes, 25);
+        assert_eq!(scaled[1].output_bytes, 75);
+        assert_eq!(
+            scale_archive_throughput_intervals(&intervals, 100, 0)
+                .iter()
+                .map(|interval| interval.output_bytes)
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+    }
+
+    #[test]
+    fn archive_throughput_measures_new_changed_and_alternate_output_files() {
+        let temp = TempDir::new();
+        let unchanged = temp.path().join("unchanged.txt");
+        let changed = temp.path().join("changed.txt");
+        let new = temp.path().join("nested").join("new.txt");
+        fs::write(&unchanged, b"same").unwrap();
+        fs::write(&changed, b"old").unwrap();
+        let mut observed = vec![
+            ArchiveThroughputObservedPath {
+                display_path: PathBuf::from("unchanged.txt"),
+                destination: unchanged.clone(),
+                baseline: archive_throughput_file_state(&unchanged),
+                changed: false,
+            },
+            ArchiveThroughputObservedPath {
+                display_path: PathBuf::from("changed.txt"),
+                destination: changed.clone(),
+                baseline: archive_throughput_file_state(&changed),
+                changed: false,
+            },
+            ArchiveThroughputObservedPath {
+                display_path: PathBuf::from("nested/new.txt"),
+                destination: new.clone(),
+                baseline: None,
+                changed: false,
+            },
+        ];
+
+        fs::write(&changed, b"replacement").unwrap();
+        fs::create_dir_all(new.parent().unwrap()).unwrap();
+        fs::write(&new, b"new output").unwrap();
+        assert_eq!(
+            measure_archive_output_bytes(&mut observed, None),
+            b"replacement".len() as u64 + b"new output".len() as u64
+        );
+
+        let alternate = temp.path().join("alternate");
+        fs::create_dir_all(alternate.join("nested")).unwrap();
+        fs::write(alternate.join("unchanged.txt"), b"temp").unwrap();
+        fs::write(alternate.join("nested/new.txt"), b"temporary").unwrap();
+        assert_eq!(
+            measure_archive_output_bytes(&mut observed, Some(&alternate)),
+            b"temp".len() as u64 + b"temporary".len() as u64 + b"replacement".len() as u64
+        );
+    }
+
+    #[test]
+    fn archive_throughput_does_not_count_unchanged_preexisting_files() {
+        let temp = TempDir::new();
+        let output = temp.path().join("output.txt");
+        fs::write(&output, b"old").unwrap();
+        let mut observed = vec![ArchiveThroughputObservedPath {
+            display_path: PathBuf::from("output.txt"),
+            destination: output.clone(),
+            baseline: archive_throughput_file_state(&output),
+            changed: false,
+        }];
+
+        assert_eq!(measure_archive_output_bytes(&mut observed, None), 0);
+    }
+
+    #[test]
+    fn archive_throughput_collector_records_final_partial_interval() {
+        let temp = TempDir::new();
+        let output = temp.path().join("output.txt");
+        let observed = vec![ArchiveThroughputObservedPath {
+            display_path: PathBuf::from("output.txt"),
+            destination: output.clone(),
+            baseline: None,
+            changed: false,
+        }];
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+        let handle =
+            std::thread::spawn(move || collect_archive_throughput(5, observed, command_rx));
+
+        fs::write(&output, b"ten bytes!").unwrap();
+        command_tx.send(ArchiveThroughputCommand::Finish).unwrap();
+        let stats = handle.join().unwrap();
+
+        assert_eq!(stats.output_bytes, 10);
+        assert_eq!(stats.compressed_bytes, 5);
+        assert_eq!(stats.intervals.len(), 1);
+        assert_eq!(stats.intervals[0].output_bytes, 10);
+        assert_eq!(stats.compressed_equivalent_intervals[0].output_bytes, 5);
+    }
+
+    #[test]
+    fn archive_throughput_aggregation_pools_intervals_and_totals() {
+        let first = ArchiveThroughputStats {
+            compressed_bytes: 10,
+            output_bytes: 20,
+            elapsed: Duration::from_secs(1),
+            intervals: vec![ArchiveThroughputInterval {
+                output_bytes: 20,
+                elapsed: Duration::from_secs(1),
+            }],
+            compressed_equivalent_intervals: vec![ArchiveThroughputInterval {
+                output_bytes: 10,
+                elapsed: Duration::from_secs(1),
+            }],
+        };
+        let second = ArchiveThroughputStats {
+            compressed_bytes: 30,
+            output_bytes: 60,
+            elapsed: Duration::from_secs(2),
+            intervals: vec![ArchiveThroughputInterval {
+                output_bytes: 60,
+                elapsed: Duration::from_secs(2),
+            }],
+            compressed_equivalent_intervals: vec![ArchiveThroughputInterval {
+                output_bytes: 30,
+                elapsed: Duration::from_secs(2),
+            }],
+        };
+
+        let total = aggregate_archive_throughput(&[first, second]);
+
+        assert_eq!(total.compressed_bytes, 40);
+        assert_eq!(total.output_bytes, 80);
+        assert_eq!(total.elapsed, Duration::from_secs(3));
+        assert_eq!(total.intervals.len(), 2);
+        assert_eq!(total.compressed_equivalent_intervals.len(), 2);
+    }
+
+    #[test]
+    fn archive_throughput_formats_mib_per_second() {
+        assert_eq!(
+            format_archive_throughput(12.25 * 1024.0 * 1024.0),
+            "12.2MiB/s"
         );
     }
 

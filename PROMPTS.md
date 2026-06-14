@@ -8,8 +8,7 @@
 - Dialog button improvements
     - Focus state: Blue border, with an additional dashed black border inset 1px
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
-- Debug and speed up archive extraction
-- Context menu for files needs to inherit the os native icon (multiselect can use the generic one)
+- Speed up archive extraction
 - Improve readme - add screenshots / branding
 
 ## 2

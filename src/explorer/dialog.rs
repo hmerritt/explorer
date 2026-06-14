@@ -189,7 +189,7 @@ impl ExplorerView {
             return;
         };
 
-        match open_dialog_window(kind, cx.entity(), cx) {
+        match open_dialog_window(kind, cx.entity(), self.date_format.clone(), cx) {
             Ok(handle) => self.active_dialog_window = Some(handle),
             Err(error) => self.open_error = Some(format!("Failed to open dialog: {error}")),
         }
@@ -214,7 +214,12 @@ impl ExplorerView {
             return;
         };
 
-        match open_dialog_window(ExplorerDialogKind::FileOperation(progress), cx.entity(), cx) {
+        match open_dialog_window(
+            ExplorerDialogKind::FileOperation(progress),
+            cx.entity(),
+            self.date_format.clone(),
+            cx,
+        ) {
             Ok(handle) => self.active_dialog_window = Some(handle),
             Err(error) => {
                 self.open_error = Some(format!("Failed to open progress dialog: {error}"))
@@ -832,9 +837,9 @@ impl ExplorerDialog {
 fn open_dialog_window(
     kind: ExplorerDialogKind,
     explorer: Entity<ExplorerView>,
+    date_format: String,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let date_format = cx.entity().read(cx).date_format.clone();
     let font = crate::settings::current_app_font(cx);
     let options = dialog_window_options(&kind, &date_format, &font, cx);
     let handle = cx
@@ -1555,7 +1560,10 @@ mod tests {
             move_paths_to_directory,
         },
         test_support::TempDir,
+        view::FileOperationState,
     };
+    use crate::settings::{ExplorerSettings, SettingsState};
+    use gpui::TestAppContext;
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -2026,6 +2034,29 @@ mod tests {
     #[test]
     fn shell_progress_green_uses_copy_progress_green() {
         assert_eq!(SHELL_PROGRESS_GREEN, EXPLORER_COPY_GREEN);
+    }
+
+    #[gpui::test]
+    fn file_operation_dialog_opens_during_explorer_view_update(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_with_focus_handle_for_test(
+                PathBuf::from("dialog-test"),
+                cx.focus_handle(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.active_file_operation = Some(FileOperationState {
+                    progress: test_progress(),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    task: None,
+                });
+                view.open_file_operation_window(cx);
+                assert!(view.active_dialog_window.is_some());
+            });
+        });
     }
 
     #[test]
