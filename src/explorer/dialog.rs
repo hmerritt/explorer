@@ -1576,10 +1576,7 @@ mod tests {
             .modified()
             .ok();
 
-        let text = permanent_delete_dialog_text(&PendingPermanentDelete {
-            paths: vec![path],
-            fallback_index: None,
-        });
+        let text = permanent_delete_dialog_text(&PendingPermanentDelete { paths: vec![path] });
 
         assert_eq!(
             text.message,
@@ -1609,10 +1606,7 @@ mod tests {
             .ok();
 
         let text = permanent_delete_dialog_text_with_format(
-            &PendingPermanentDelete {
-                paths: vec![path],
-                fallback_index: None,
-            },
+            &PendingPermanentDelete { paths: vec![path] },
             "%d %B %Y",
         );
 
@@ -1637,7 +1631,6 @@ mod tests {
 
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![folder.clone()],
-            fallback_index: None,
         });
 
         assert_eq!(
@@ -1661,7 +1654,6 @@ mod tests {
     fn permanent_delete_text_falls_back_to_path_name_when_metadata_is_missing() {
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![PathBuf::from("missing.txt")],
-            fallback_index: None,
         });
 
         assert_eq!(text.item_name, Some("missing.txt".to_owned()));
@@ -1676,7 +1668,6 @@ mod tests {
         let long_name = format!("{}{}", "a".repeat(160), ".txt");
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![PathBuf::from(&long_name)],
-            fallback_index: None,
         });
 
         assert_eq!(
@@ -1697,7 +1688,6 @@ mod tests {
     fn permanent_delete_text_uses_plural_item_count() {
         let text = permanent_delete_dialog_text(&PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
-            fallback_index: None,
         });
 
         assert_eq!(
@@ -1798,10 +1788,7 @@ mod tests {
         let path = temp.path().join("a.txt");
         fs::write(&path, []).expect("create selected file");
 
-        let text = trash_dialog_text(&PendingTrash {
-            paths: vec![path],
-            fallback_index: None,
-        });
+        let text = trash_dialog_text(&PendingTrash { paths: vec![path] });
 
         assert_eq!(
             text.message,
@@ -1818,7 +1805,6 @@ mod tests {
     fn trash_text_uses_plural_recycle_bin_message() {
         let text = trash_dialog_text(&PendingTrash {
             paths: vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
-            fallback_index: None,
         });
 
         assert_eq!(
@@ -1836,11 +1822,9 @@ mod tests {
     fn confirmation_dialogs_default_to_primary_choice() {
         let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
         let trash = ExplorerDialogKind::Trash(PendingTrash {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
         let conflict = ExplorerDialogKind::FileConflict(single_conflict_batch());
 
@@ -1881,11 +1865,9 @@ mod tests {
     fn focused_choice_maps_to_each_dialog_action() {
         let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
         let trash = ExplorerDialogKind::Trash(PendingTrash {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
         let conflict = ExplorerDialogKind::FileConflict(single_conflict_batch());
 
@@ -2065,7 +2047,6 @@ mod tests {
         let mut view = ExplorerView::new(PathBuf::from("delete"));
         view.pending_permanent_delete = Some(PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
 
         view.dialog_window_released(
@@ -2082,7 +2063,6 @@ mod tests {
         let mut view = ExplorerView::new(PathBuf::from("delete"));
         view.pending_permanent_delete = Some(PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt")],
-            fallback_index: None,
         });
 
         view.dialog_window_released(

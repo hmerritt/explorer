@@ -121,13 +121,11 @@ impl EventEmitter<ExplorerViewEvent> for ExplorerView {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingPermanentDelete {
     pub(super) paths: Vec<PathBuf>,
-    pub(super) fallback_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingTrash {
     pub(super) paths: Vec<PathBuf>,
-    pub(super) fallback_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

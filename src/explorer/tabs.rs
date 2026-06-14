@@ -1487,7 +1487,7 @@ mod tests {
         actions::{RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
-        view::tab_label_for_path,
+        view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
     use crate::settings::{ExplorerSettings, SettingsState};
     use gpui::{AppContext, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext};
@@ -2151,7 +2151,7 @@ mod tests {
 
     #[gpui::test]
     fn folder_context_menu_delete_removes_selected_folder(cx: &mut TestAppContext) {
-        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a");
 
@@ -2159,9 +2159,58 @@ mod tests {
         click_selector(cx, "context-menu-entry-delete");
 
         assert!(!path.exists());
+        assert!(temp.path().join("b").exists());
         cx.read_entity(&view, |view, _| {
             assert!(selected_names(view).is_empty());
             assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn confirmed_trash_clears_multi_selection(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
+        let view = active_test_view(&tabs, cx);
+        let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.restore_selection_from_paths(&paths);
+                view.pending_trash = Some(PendingTrash {
+                    paths: paths.clone(),
+                });
+                view.confirm_pending_trash(cx);
+            });
+        });
+
+        assert!(!paths[0].exists());
+        assert!(!paths[1].exists());
+        assert!(temp.path().join("c.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn confirmed_permanent_delete_clears_multi_selection(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
+        let view = active_test_view(&tabs, cx);
+        let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.restore_selection_from_paths(&paths);
+                view.pending_permanent_delete = Some(PendingPermanentDelete {
+                    paths: paths.clone(),
+                });
+                view.confirm_pending_permanent_delete(cx);
+            });
+        });
+
+        assert!(!paths[0].exists());
+        assert!(!paths[1].exists());
+        assert!(temp.path().join("c.txt").exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
         });
     }
 

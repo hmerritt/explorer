@@ -159,12 +159,11 @@ impl ExplorerView {
             return;
         }
 
-        let fallback_index = self.selection_fallback_index_for_delete();
         match trash_paths(&paths) {
             Ok(()) => {
                 self.remove_cut_paths(&paths);
                 self.reload_with_entry_metadata_resolution(cx);
-                self.select_fallback_index(fallback_index);
+                self.clear_selection();
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
@@ -184,10 +183,7 @@ impl ExplorerView {
             return;
         }
 
-        self.pending_trash = Some(PendingTrash {
-            fallback_index: self.selection_fallback_index_for_paths(&paths),
-            paths,
-        });
+        self.pending_trash = Some(PendingTrash { paths });
         self.open_error = None;
         self.open_pending_dialog_window(cx);
     }
@@ -201,7 +197,7 @@ impl ExplorerView {
             Ok(()) => {
                 self.remove_cut_paths(&pending.paths);
                 self.reload_with_entry_metadata_resolution(cx);
-                self.select_fallback_index(pending.fallback_index);
+                self.clear_selection();
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
@@ -222,10 +218,7 @@ impl ExplorerView {
             return;
         }
 
-        self.pending_permanent_delete = Some(PendingPermanentDelete {
-            paths,
-            fallback_index: self.selection_fallback_index_for_delete(),
-        });
+        self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
         self.open_error = None;
         self.open_pending_dialog_window(cx);
     }
@@ -239,7 +232,7 @@ impl ExplorerView {
             Ok(()) => {
                 self.remove_cut_paths(&pending.paths);
                 self.reload_with_entry_metadata_resolution(cx);
-                self.select_fallback_index(pending.fallback_index);
+                self.clear_selection();
                 self.open_error = None;
                 self.emit_filesystem_changed(cx);
             }
@@ -493,26 +486,6 @@ impl ExplorerView {
         if let Some(diagnostics) = summary.archive_diagnostics {
             diagnostics.add_reload(reload_started.elapsed());
         }
-    }
-
-    fn selection_fallback_index_for_delete(&self) -> Option<usize> {
-        self.selection.selected_indices.first().copied()
-    }
-
-    fn selection_fallback_index_for_paths(&self, paths: &[PathBuf]) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|entry| paths.iter().any(|path| path == &entry.path))
-    }
-
-    fn select_fallback_index(&mut self, fallback_index: Option<usize>) {
-        let Some(last) = self.entries.len().checked_sub(1) else {
-            self.clear_selection();
-            return;
-        };
-
-        let ix = fallback_index.unwrap_or(0).min(last);
-        self.select_single_index(ix);
     }
 }
 
@@ -784,19 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn path_delete_fallback_uses_first_matching_entry_index() {
-        let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
-
-        assert_eq!(
-            view.selection_fallback_index_for_paths(&[
-                PathBuf::from("missing.txt"),
-                PathBuf::from("b.txt"),
-            ]),
-            Some(1)
-        );
-    }
-
-    #[test]
     fn only_cut_paths_are_dimmed() {
         let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
 
@@ -830,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_fallback_selects_next_surviving_row() {
+    fn successful_delete_reload_can_leave_surviving_rows_deselected() {
         let temp = TempDir::new();
         let a = temp.path().join("a.txt");
         let b = temp.path().join("b.txt");
@@ -841,11 +801,17 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.select_single_path(&b);
 
-        let fallback = view.selection_fallback_index_for_delete();
         remove_paths_permanently(std::slice::from_ref(&b)).expect("delete b");
         view.reload();
-        view.select_fallback_index(fallback);
+        view.clear_selection();
 
-        assert_eq!(selected_names(&view), vec!["c.txt"]);
+        assert_eq!(selected_names(&view), Vec::<String>::new());
+        assert_eq!(
+            view.entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "c.txt"]
+        );
     }
 }
