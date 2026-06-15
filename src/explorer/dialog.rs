@@ -2149,7 +2149,7 @@ mod tests {
     fn confirmation_button_geometry_matches_windows_spacing() {
         assert_approx_eq(DELETE_DIALOG_BUTTON_MIN_WIDTH, 84.0);
         assert_approx_eq(DELETE_DIALOG_BUTTON_GAP, 12.0);
-        assert_approx_eq(DELETE_DIALOG_BUTTON_BORDER_RADIUS, 3.0);
+        assert_approx_eq(DELETE_DIALOG_BUTTON_BORDER_RADIUS, 0.0);
     }
 
     #[test]
