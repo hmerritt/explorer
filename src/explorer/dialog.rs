@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, LineFragment, Render, SharedString, Task, TextRun, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div, prelude::*,
-    px, rgb, size,
+    IntoElement, LineFragment, MouseButton, Render, SharedString, Task, TextRun, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div,
+    prelude::*, px, rgb, size,
 };
 use std::{
     path::{Path, PathBuf},
@@ -46,15 +46,20 @@ const SHELL_PROGRESS_GREEN: u32 = EXPLORER_COPY_GREEN;
 const SHELL_DIALOG_COMMAND_BLUE: u32 = 0x001f60;
 const SHELL_DIALOG_COMMAND_SELECTED_BG: u32 = 0xcfe8ff;
 const SHELL_DIALOG_COMMAND_HOVER_BG: u32 = 0xe5f3ff;
-const SHELL_DIALOG_BUTTON_BG: u32 = 0xf3f3f3;
-const SHELL_DIALOG_BUTTON_BORDER: u32 = 0x8a8a8a;
-const SHELL_DIALOG_BUTTON_HOVER_BORDER: u32 = 0x0078d7;
+const SHELL_DIALOG_BUTTON_BG: u32 = 0xfdfdfd;
+const SHELL_DIALOG_BUTTON_BORDER: u32 = 0xd0d0d0;
+const SHELL_DIALOG_BUTTON_HOVER_BG: u32 = 0xe0eef9;
+const SHELL_DIALOG_BUTTON_PRESSED_BG: u32 = 0xcce4f7;
+const SHELL_DIALOG_BUTTON_ACTIVE_BORDER: u32 = 0x0078d4;
 const SHELL_DIALOG_LINE_HEIGHT_SCALE: f32 = 1.618;
 const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
 const DELETE_DIALOG_WIDTH: f32 = 460.0;
 const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 12.0;
 const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 24.0;
 const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
+const DELETE_DIALOG_BUTTON_MIN_WIDTH: f32 = 84.0;
+const DELETE_DIALOG_BUTTON_GAP: f32 = 12.0;
+const DELETE_DIALOG_BUTTON_BORDER_RADIUS: f32 = 0.0;
 const DELETE_DIALOG_ICON_SLOT_WIDTH: f32 = 40.0;
 const DELETE_DIALOG_ICON_SLOT_HEIGHT: f32 = 64.0;
 const DELETE_DIALOG_COMPACT_ICON_SLOT_HEIGHT: f32 = 46.0;
@@ -322,6 +327,14 @@ impl ExplorerDialog {
         }
     }
 
+    fn focus_choice_from_pointer(&mut self, choice: DialogChoice, cx: &mut Context<Self>) {
+        let focused_choice = pointer_focused_dialog_choice(&self.kind, self.focused_choice, choice);
+        if self.focused_choice != focused_choice {
+            self.focused_choice = focused_choice;
+            cx.notify();
+        }
+    }
+
     fn activate(
         &mut self,
         activation: DialogActivation,
@@ -579,7 +592,7 @@ impl Render for ExplorerDialog {
                 ExplorerDialogKind::FileConflict(conflicts) => {
                     self.render_file_conflict(conflicts, cx)
                 }
-                ExplorerDialogKind::FileOperation(_) => self.render_file_operation(cx),
+                ExplorerDialogKind::FileOperation(_) => self.render_file_operation(window, cx),
             })
     }
 }
@@ -623,13 +636,20 @@ impl ExplorerDialog {
                     .flex()
                     .flex_row()
                     .justify_end()
-                    .gap(px(8.0))
+                    .gap(px(DELETE_DIALOG_BUTTON_GAP))
                     .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
                     .child(
                         dialog_button(
                             "permanent-delete-yes",
                             "Yes",
                             self.focused_choice == Some(DialogChoice::Primary),
+                            window.scale_factor(),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focus_choice_from_pointer(DialogChoice::Primary, cx);
+                            }),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -643,6 +663,13 @@ impl ExplorerDialog {
                             "permanent-delete-no",
                             "No",
                             self.focused_choice == Some(DialogChoice::Secondary),
+                            window.scale_factor(),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
+                            }),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -684,13 +711,20 @@ impl ExplorerDialog {
                     .flex()
                     .flex_row()
                     .justify_end()
-                    .gap(px(8.0))
+                    .gap(px(DELETE_DIALOG_BUTTON_GAP))
                     .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
                     .child(
                         dialog_button(
                             "trash-yes",
                             "Yes",
                             self.focused_choice == Some(DialogChoice::Primary),
+                            window.scale_factor(),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focus_choice_from_pointer(DialogChoice::Primary, cx);
+                            }),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -704,6 +738,13 @@ impl ExplorerDialog {
                             "trash-no",
                             "No",
                             self.focused_choice == Some(DialogChoice::Secondary),
+                            window.scale_factor(),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
+                            }),
                         )
                         .on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
@@ -775,7 +816,7 @@ impl ExplorerDialog {
             .into_any_element()
     }
 
-    fn render_file_operation(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_operation(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let progress = self.file_operation_progress.clone();
         let title = progress
             .as_ref()
@@ -821,12 +862,18 @@ impl ExplorerDialog {
                         .justify_end()
                         .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
                         .child(
-                            dialog_button("file-operation-cancel", "Cancel", false).on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                            dialog_button(
+                                "file-operation-cancel",
+                                "Cancel",
+                                false,
+                                window.scale_factor(),
+                            )
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| {
                                     this.cancel(window, cx);
                                     cx.stop_propagation();
-                                }),
-                            ),
+                                },
+                            )),
                         ),
                 )
             })
@@ -1033,28 +1080,55 @@ fn dialog_button(
     id: &'static str,
     label: &'static str,
     selected: bool,
+    scale_factor: f32,
 ) -> gpui::Stateful<gpui::Div> {
+    let focus_inset = dialog_focus_inset(scale_factor);
+
     div()
         .id(id)
-        .min_w(px(76.0))
+        .min_w(px(DELETE_DIALOG_BUTTON_MIN_WIDTH))
         .h(px(28.0))
+        .relative()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(1.0))
+        .rounded(px(DELETE_DIALOG_BUTTON_BORDER_RADIUS))
         .border_1()
         .border_color(rgb(SHELL_DIALOG_BUTTON_BORDER))
         .bg(rgb(SHELL_DIALOG_BUTTON_BG))
         .when(selected, |this| {
-            this.border_color(rgb(SHELL_DIALOG_BUTTON_HOVER_BORDER))
+            this.border_color(rgb(SHELL_DIALOG_BUTTON_ACTIVE_BORDER))
         })
         .hover(|style| {
             style
-                .bg(rgb(SHELL_DIALOG_COMMAND_HOVER_BG))
-                .border_color(rgb(SHELL_DIALOG_BUTTON_HOVER_BORDER))
+                .bg(rgb(SHELL_DIALOG_BUTTON_HOVER_BG))
+                .border_color(rgb(SHELL_DIALOG_BUTTON_ACTIVE_BORDER))
+        })
+        .active(|style| {
+            style
+                .bg(rgb(SHELL_DIALOG_BUTTON_PRESSED_BG))
+                .border_color(rgb(SHELL_DIALOG_BUTTON_ACTIVE_BORDER))
         })
         .cursor_default()
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(focus_inset)
+                    .right(focus_inset)
+                    .bottom(focus_inset)
+                    .left(focus_inset)
+                    .rounded(px(DELETE_DIALOG_BUTTON_BORDER_RADIUS))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(SHELL_DIALOG_TEXT_COLOR)),
+            )
+        })
         .child(label)
+}
+
+fn dialog_focus_inset(scale_factor: f32) -> gpui::Pixels {
+    px(1.0 / scale_factor)
 }
 
 fn default_dialog_choice(kind: &ExplorerDialogKind) -> Option<DialogChoice> {
@@ -1071,6 +1145,21 @@ fn focused_dialog_choice(
     requested_choice: DialogChoice,
 ) -> Option<DialogChoice> {
     current_choice.map(|_| requested_choice)
+}
+
+fn pointer_focused_dialog_choice(
+    kind: &ExplorerDialogKind,
+    current_choice: Option<DialogChoice>,
+    requested_choice: DialogChoice,
+) -> Option<DialogChoice> {
+    match kind {
+        ExplorerDialogKind::PermanentDelete(_) | ExplorerDialogKind::Trash(_) => {
+            Some(requested_choice)
+        }
+        ExplorerDialogKind::FileConflict(_) | ExplorerDialogKind::FileOperation(_) => {
+            current_choice
+        }
+    }
 }
 
 fn dialog_activation(
@@ -1862,6 +1951,49 @@ mod tests {
     }
 
     #[test]
+    fn pointer_down_focuses_confirmation_choice_but_not_other_dialog_controls() {
+        let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
+            paths: vec![PathBuf::from("a.txt")],
+        });
+        let trash = ExplorerDialogKind::Trash(PendingTrash {
+            paths: vec![PathBuf::from("a.txt")],
+        });
+        let conflict = ExplorerDialogKind::FileConflict(single_conflict_batch());
+        let progress = ExplorerDialogKind::FileOperation(test_progress());
+
+        for kind in [&delete, &trash] {
+            assert_eq!(
+                pointer_focused_dialog_choice(
+                    kind,
+                    Some(DialogChoice::Primary),
+                    DialogChoice::Secondary,
+                ),
+                Some(DialogChoice::Secondary)
+            );
+        }
+        assert_eq!(
+            pointer_focused_dialog_choice(
+                &conflict,
+                Some(DialogChoice::Primary),
+                DialogChoice::Secondary,
+            ),
+            Some(DialogChoice::Primary)
+        );
+        assert_eq!(
+            pointer_focused_dialog_choice(&progress, None, DialogChoice::Secondary),
+            None
+        );
+    }
+
+    #[test]
+    fn dialog_focus_inset_is_one_device_pixel_at_common_scale_factors() {
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let logical_inset = f32::from(dialog_focus_inset(scale_factor));
+            assert_approx_eq(logical_inset * scale_factor, 1.0);
+        }
+    }
+
+    #[test]
     fn focused_choice_maps_to_each_dialog_action() {
         let delete = ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
             paths: vec![PathBuf::from("a.txt")],
@@ -2011,6 +2143,13 @@ mod tests {
 
         assert!(progress_dialog_height() >= minimum_height);
         assert_approx_eq(progress_dialog_height(), 188.0);
+    }
+
+    #[test]
+    fn confirmation_button_geometry_matches_windows_spacing() {
+        assert_approx_eq(DELETE_DIALOG_BUTTON_MIN_WIDTH, 84.0);
+        assert_approx_eq(DELETE_DIALOG_BUTTON_GAP, 12.0);
+        assert_approx_eq(DELETE_DIALOG_BUTTON_BORDER_RADIUS, 3.0);
     }
 
     #[test]

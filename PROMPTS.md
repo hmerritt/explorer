@@ -3,14 +3,11 @@
 ## 1
 
 - “Open with” picker
-- Dialog button improvements
-    - Focus state: Blue border, with an additional dashed black border inset 1px
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Improve readme - add screenshots / branding
 
 ## 2
 
-- Customizable context menus (add items to settings)
 - [Windows-only] detext WSL Linux install, show drive for it
 - Large icons grid view (alternate to the current Details view)
 - UI refinement and improvements (tighten everything up, make it look nice)
@@ -20,6 +17,8 @@
 ## 3
 
 - Settings UI
+    - context-menu
+        - Detect installed programs, suggest adding into menu
 - Split-screen (see Zed)
 - rsync copy/sync builtin
 - Shell-extension system
