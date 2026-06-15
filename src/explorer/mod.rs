@@ -18,6 +18,7 @@ mod icons;
 mod mouse_selection;
 mod navigation;
 mod open_with;
+mod properties;
 mod recursive_search;
 mod rename;
 mod render;
@@ -41,10 +42,10 @@ pub use actions::{
     AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag,
     CloseTab, CopySelected, CreateNewFolder, CutSelected, EnterSelected, ExtendDown, ExtendEnd,
     ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab,
-    OpenSelected, OpenSettings, PasteClipboard, PermanentlyDeleteSelected, RecursiveSearchEdit,
-    Refresh, RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy,
-    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
-    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
+    OpenProperties, OpenSelected, OpenSettings, PasteClipboard, PermanentlyDeleteSelected,
+    RecursiveSearchEdit, Refresh, RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit,
+    RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop,
+    RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
     RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
     RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy,
     SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste,

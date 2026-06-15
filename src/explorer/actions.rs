@@ -24,6 +24,7 @@ actions!(
         GoUp,
         CancelDrag,
         OpenSelected,
+        OpenProperties,
         OpenSettings,
         EnterSelected,
         Refresh,

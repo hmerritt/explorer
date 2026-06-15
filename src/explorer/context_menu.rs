@@ -109,6 +109,7 @@ pub(super) enum ContextMenuCommand {
     Paste,
     DeleteSelected,
     RenameSelected,
+    PropertiesSelected,
     NewFile,
     NewFolder,
     RunCustom {
@@ -365,6 +366,9 @@ impl ExplorerView {
             ContextMenuCommand::DeleteSelected => self.trash_selected_paths(cx),
             ContextMenuCommand::RenameSelected => {
                 self.start_rename_selected(window, cx);
+            }
+            ContextMenuCommand::PropertiesSelected => {
+                self.open_selected_properties(window, cx);
             }
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
@@ -701,6 +705,16 @@ fn entry_context_menu_items_with_custom(
             enabled: can_rename,
         });
     }
+    items.extend([
+        ContextMenuItem::Separator,
+        ContextMenuItem::Action {
+            id: "context-menu-entry-properties".to_owned(),
+            icon: Some(ContextMenuIcon::File),
+            label: "Properties".to_owned(),
+            command: ContextMenuCommand::PropertiesSelected,
+            enabled: selected_count > 0,
+        },
+    ]);
     items
 }
 
@@ -1474,13 +1488,27 @@ mod tests {
                     command: ContextMenuCommand::RenameSelected,
                     enabled: false,
                 },
+                ContextMenuItem::Separator,
+                ContextMenuItem::Action {
+                    id: "context-menu-entry-properties".to_owned(),
+                    icon: Some(ContextMenuIcon::File),
+                    label: "Properties".to_owned(),
+                    command: ContextMenuCommand::PropertiesSelected,
+                    enabled: true,
+                },
             ]
         );
 
         let enabled_items =
             entry_context_menu_items(Some(PathBuf::from("/tmp/folder")), 1, 0, 1, true, false);
         assert!(matches!(
-            enabled_items.last(),
+            enabled_items.iter().find(|item| matches!(
+                item,
+                ContextMenuItem::Action {
+                    command: ContextMenuCommand::RenameSelected,
+                    ..
+                }
+            )),
             Some(ContextMenuItem::Action {
                 command: ContextMenuCommand::RenameSelected,
                 enabled: true,
@@ -1504,7 +1532,13 @@ mod tests {
             })
         );
         assert!(matches!(
-            items.last(),
+            items.iter().find(|item| matches!(
+                item,
+                ContextMenuItem::Action {
+                    command: ContextMenuCommand::RenameSelected,
+                    ..
+                }
+            )),
             Some(ContextMenuItem::Action {
                 command: ContextMenuCommand::RenameSelected,
                 enabled: true,
@@ -1687,6 +1721,14 @@ mod tests {
                     command: ContextMenuCommand::DeleteSelected,
                     enabled: true,
                 },
+                ContextMenuItem::Separator,
+                ContextMenuItem::Action {
+                    id: "context-menu-entry-properties".to_owned(),
+                    icon: Some(ContextMenuIcon::File),
+                    label: "Properties".to_owned(),
+                    command: ContextMenuCommand::PropertiesSelected,
+                    enabled: true,
+                },
             ]
         );
     }
@@ -1728,8 +1770,32 @@ mod tests {
                     command: ContextMenuCommand::DeleteSelected,
                     enabled: true,
                 },
+                ContextMenuItem::Separator,
+                ContextMenuItem::Action {
+                    id: "context-menu-entry-properties".to_owned(),
+                    icon: Some(ContextMenuIcon::File),
+                    label: "Properties".to_owned(),
+                    command: ContextMenuCommand::PropertiesSelected,
+                    enabled: true,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn entry_menu_for_any_selection_ends_with_properties() {
+        let items = entry_context_menu_items(None, 2, 1, 1, false, false);
+
+        assert!(matches!(
+            items.last(),
+            Some(ContextMenuItem::Action {
+                id,
+                label,
+                command: ContextMenuCommand::PropertiesSelected,
+                enabled: true,
+                ..
+            }) if id == "context-menu-entry-properties" && label == "Properties"
+        ));
     }
 
     #[test]

@@ -2257,6 +2257,7 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_go_up))
             .on_action(cx.listener(Self::handle_cancel_drag))
             .on_action(cx.listener(Self::handle_open_selected))
+            .on_action(cx.listener(Self::handle_open_properties))
             .on_action(cx.listener(Self::handle_open_settings))
             .on_action(cx.listener(Self::handle_enter_selected))
             .on_action(cx.listener(Self::handle_refresh))
