@@ -119,6 +119,7 @@ svg_icon!(
 );
 svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
 svg_icon!(NEW_TAB_ICON, "utility", "new_tab.svg");
+svg_icon!(OPEN_WITH_ICON, "utility", "open_with.svg");
 svg_icon!(PASTE_ICON, "utility", "paste.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 

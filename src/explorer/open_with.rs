@@ -5,10 +5,8 @@ use std::{
 
 use gpui::{Context, Window};
 
-#[cfg(target_os = "macos")]
-use crate::explorer::context_menu::ContextMenuIcon;
 use crate::explorer::{
-    context_menu::{ContextMenuCommand, ContextMenuItem},
+    context_menu::{ContextMenuCommand, ContextMenuIcon, ContextMenuItem},
     filesystem::format_open_error,
     view::ExplorerView,
 };
@@ -61,7 +59,7 @@ pub(super) fn context_menu_item(path: &Path) -> ContextMenuItem {
 
         ContextMenuItem::Submenu {
             id: "context-menu-entry-open-with".to_owned(),
-            icon: None,
+            icon: Some(ContextMenuIcon::OpenWith),
             label: "Open with".to_owned(),
             children,
         }
@@ -71,7 +69,7 @@ pub(super) fn context_menu_item(path: &Path) -> ContextMenuItem {
     {
         ContextMenuItem::Action {
             id: "context-menu-entry-open-with".to_owned(),
-            icon: None,
+            icon: Some(ContextMenuIcon::OpenWith),
             label: "Open with".to_owned(),
             command: ContextMenuCommand::ChooseApplication {
                 path: path.to_path_buf(),

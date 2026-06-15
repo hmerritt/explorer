@@ -82,6 +82,7 @@ pub(super) enum ContextMenuIcon {
     NativePath(PathBuf),
     NativePathOptional(PathBuf),
     NewTab,
+    OpenWith,
     Unpin,
 }
 
@@ -1531,13 +1532,18 @@ mod tests {
             matches!(
                 items.get(1),
                 Some(ContextMenuItem::Action {
+                    icon: Some(ContextMenuIcon::OpenWith),
                     label,
                     command: ContextMenuCommand::ChooseApplication { path },
                     ..
                 }) if label == "Open with" && path == Path::new("file.txt")
             ) || matches!(
                 items.get(1),
-                Some(ContextMenuItem::Submenu { label, .. }) if label == "Open with"
+                Some(ContextMenuItem::Submenu {
+                    icon: Some(ContextMenuIcon::OpenWith),
+                    label,
+                    ..
+                }) if label == "Open with"
             )
         );
 
