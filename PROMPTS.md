@@ -2,7 +2,6 @@
 
 ## 1
 
-- “Open with” picker
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Improve readme - add screenshots / branding
 
@@ -77,7 +76,7 @@ Major remaining Windows Explorer parity areas:
    The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
 
 3. **Context menus and shell verbs**
-   No full right-click model yet: Open with, Properties, Copy as path, Send to, Share, Pin, New item templates, terminal/open here, app-specific verbs, and empty-folder/background context menus.
+   No full right-click model yet: Properties, Copy as path, Send to, Share, Pin, New item templates, terminal/open here, app-specific verbs, and empty-folder/background context menus.
 
 4. **Properties and metadata**
    Missing file/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
@@ -92,4 +91,4 @@ Major remaining Windows Explorer parity areas:
    Implemented keys cover common navigation and rename, but Explorer has a large set left: Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window.
 
 8. **Shell integration and platform associations**
-   Opening files uses the default app, but there is no full file association management, “Open with” picker, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.
+   Opening files uses the default app, but there is no full file association management, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.

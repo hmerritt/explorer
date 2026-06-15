@@ -119,6 +119,10 @@ impl FileEntry {
         matches!(self.kind, EntryKind::Directory)
     }
 
+    pub(super) fn is_open_with_target(&self) -> bool {
+        matches!(self.kind, EntryKind::File)
+    }
+
     pub(super) fn set_folder_size(&mut self, size: Option<u64>) -> bool {
         if !self.is_real_directory() || self.size == size {
             return false;

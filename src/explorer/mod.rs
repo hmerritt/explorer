@@ -17,6 +17,7 @@ mod formatting;
 mod icons;
 mod mouse_selection;
 mod navigation;
+mod open_with;
 mod recursive_search;
 mod rename;
 mod render;

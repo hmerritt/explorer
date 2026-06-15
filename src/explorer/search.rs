@@ -368,7 +368,7 @@ impl ExplorerView {
         if let Some(EntryAction::OpenFile(path)) =
             self.activate_focused_entry_with_watcher(true, cx)
         {
-            self.open_file_with_default_app(&path);
+            self.open_file_with_default_app(&path, window, cx);
         }
         cx.stop_propagation();
         cx.notify();

@@ -760,10 +760,6 @@ fn has_windows_hidden_attribute_with_metadata(_: &Path, _: &fs::Metadata) -> boo
     false
 }
 
-pub(super) fn open_path_with_default_app(path: &Path) -> std::io::Result<()> {
-    open::that_detached(path)
-}
-
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod benchmark_support {

@@ -94,6 +94,14 @@ pub(super) enum ContextMenuCommand {
         path: PathBuf,
     },
     OpenSelectedFiles,
+    ChooseApplication {
+        path: PathBuf,
+    },
+    #[cfg(target_os = "macos")]
+    OpenWithApplication {
+        target: PathBuf,
+        application: PathBuf,
+    },
     OpenSelectedDirectoriesInNewTabs,
     CutSelected,
     CopySelected,
@@ -333,7 +341,17 @@ impl ExplorerView {
                 cx.emit(crate::explorer::view::ExplorerViewEvent::OpenDirectoryInNewTab(path));
             }
             ContextMenuCommand::OpenSelectedFiles => {
-                self.open_selected_files_with_default_app();
+                self.open_selected_files_with_default_app(window, cx);
+            }
+            ContextMenuCommand::ChooseApplication { path } => {
+                self.choose_application_for_file(path, window, cx);
+            }
+            #[cfg(target_os = "macos")]
+            ContextMenuCommand::OpenWithApplication {
+                target,
+                application,
+            } => {
+                self.open_file_with_application(target, application, window, cx);
             }
             ContextMenuCommand::OpenSelectedDirectoriesInNewTabs => {
                 for path in self.selected_directory_new_tab_targets() {
@@ -437,10 +455,12 @@ impl ExplorerView {
             .collect()
     }
 
-    fn open_selected_files_with_default_app(&mut self) {
-        for path in self.selected_file_open_targets() {
-            self.open_file_with_default_app(&path);
-        }
+    fn open_selected_files_with_default_app(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_files_with_default_app(self.selected_file_open_targets(), window, cx);
     }
 
     #[cfg(test)]
@@ -604,6 +624,13 @@ fn entry_context_menu_items_with_custom(
             command,
             enabled: true,
         });
+
+        if let Some(entry) = selected_entries
+            .first()
+            .filter(|entry| entry.is_open_with_target())
+        {
+            items.push(crate::explorer::open_with::context_menu_item(&entry.path));
+        }
     }
 
     if selected_count > 1 && selected_file_count > 0 {
@@ -1482,6 +1509,138 @@ mod tests {
                 enabled: true,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn entry_menu_shows_open_with_only_for_one_ordinary_file() {
+        let file = FileEntry::test("file.txt", false, Some(1), None);
+        let items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            true,
+            true,
+            &[],
+            std::slice::from_ref(&file.path),
+            std::slice::from_ref(&file),
+        );
+
+        assert!(
+            matches!(
+                items.get(1),
+                Some(ContextMenuItem::Action {
+                    label,
+                    command: ContextMenuCommand::ChooseApplication { path },
+                    ..
+                }) if label == "Open with" && path == Path::new("file.txt")
+            ) || matches!(
+                items.get(1),
+                Some(ContextMenuItem::Submenu { label, .. }) if label == "Open with"
+            )
+        );
+
+        let folder = FileEntry::test("folder", true, None, None);
+        let folder_items = entry_context_menu_items_with_custom(
+            Some(folder.path.clone()),
+            1,
+            0,
+            1,
+            true,
+            false,
+            &[],
+            std::slice::from_ref(&folder.path),
+            std::slice::from_ref(&folder),
+        );
+        assert!(!menu_has_label(&folder_items, "Open with"));
+
+        let shortcut = FileEntry::test_directory_link(
+            "linked",
+            crate::explorer::entry::DirectoryLinkKind::FilesystemLink,
+        );
+        let shortcut_items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            0,
+            1,
+            true,
+            false,
+            &[],
+            std::slice::from_ref(&shortcut.path),
+            std::slice::from_ref(&shortcut),
+        );
+        assert!(!menu_has_label(&shortcut_items, "Open with"));
+
+        let file_shortcut = FileEntry::test_directory_link(
+            "file.lnk",
+            crate::explorer::entry::DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("file.txt"),
+                target_kind: crate::explorer::entry::ShellShortcutTargetKind::NonDirectory,
+            },
+        );
+        let file_shortcut_items = entry_context_menu_items_with_custom(
+            None,
+            1,
+            1,
+            0,
+            true,
+            false,
+            &[],
+            std::slice::from_ref(&file_shortcut.path),
+            std::slice::from_ref(&file_shortcut),
+        );
+        assert!(!menu_has_label(&file_shortcut_items, "Open with"));
+
+        #[cfg(target_os = "macos")]
+        {
+            let app = FileEntry::test("Preview.app", true, None, None);
+            let app_items = entry_context_menu_items_with_custom(
+                None,
+                1,
+                1,
+                0,
+                true,
+                true,
+                &[],
+                std::slice::from_ref(&app.path),
+                std::slice::from_ref(&app),
+            );
+            assert!(!menu_has_label(&app_items, "Open with"));
+        }
+
+        let multi_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            2,
+            0,
+            false,
+            false,
+            &[],
+            &[PathBuf::from("first.txt"), PathBuf::from("second.txt")],
+            &[
+                FileEntry::test("first.txt", false, Some(1), None),
+                FileEntry::test("second.txt", false, Some(1), None),
+            ],
+        );
+        assert!(!menu_has_label(&multi_items, "Open with"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_open_with_submenu_always_ends_with_other() {
+        let item = crate::explorer::open_with::context_menu_item(Path::new("file.txt"));
+        let ContextMenuItem::Submenu { children, .. } = item else {
+            panic!("expected Open with submenu");
+        };
+
+        assert!(matches!(
+            children.last(),
+            Some(ContextMenuItem::Action {
+                label,
+                command: ContextMenuCommand::ChooseApplication { .. },
+                ..
+            }) if label == "Other..."
         ));
     }
 

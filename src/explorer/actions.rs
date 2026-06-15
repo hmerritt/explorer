@@ -244,27 +244,34 @@ impl ExplorerView {
     pub(super) fn handle_open_settings(
         &mut self,
         _: &OpenSettings,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let path = cx
             .global::<crate::settings::SettingsState>()
             .settings_path()
             .map(Path::to_path_buf);
-        self.open_settings_file(path.as_deref());
+        match path {
+            Some(path) => self.open_file_with_default_app(&path, window, cx),
+            None => {
+                self.open_error = Some(
+                    "Could not open settings.json: settings file path is unavailable".to_owned(),
+                )
+            }
+        }
         cx.notify();
     }
 
     pub(super) fn handle_enter_selected(
         &mut self,
         _: &EnterSelected,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(EntryAction::OpenFile(path)) =
             self.activate_focused_entry_with_watcher(true, cx)
         {
-            self.open_file_with_default_app(&path);
+            self.open_file_with_default_app(&path, window, cx);
         }
         cx.notify();
     }

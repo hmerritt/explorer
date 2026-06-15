@@ -207,6 +207,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "rand 0.9.4",
+ "raw-window-handle",
  "serde",
  "serde_repr",
  "url",
@@ -1945,6 +1946,7 @@ name = "explorer"
 version = "0.12.0"
 dependencies = [
  "ar",
+ "ashpd 0.11.1",
  "chrono",
  "cocoa 0.26.0",
  "criterion",
@@ -1966,6 +1968,7 @@ dependencies = [
  "open",
  "paste",
  "plist",
+ "raw-window-handle",
  "resvg",
  "serde",
  "serde_json",

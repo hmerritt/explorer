@@ -5,9 +5,10 @@ use std::{
 
 use gpui::Context;
 
+#[cfg(test)]
+use crate::explorer::filesystem::format_open_error;
 use crate::explorer::{
     entry::FileEntry,
-    filesystem::{format_open_error, open_path_with_default_app},
     selection::SelectionModifiers,
     view::{EntryClickSequence, ExplorerView},
 };
@@ -353,15 +354,7 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn open_file_with_default_app(&mut self, path: &Path) {
-        let result = open_path_with_default_app(path);
-        self.handle_open_file_result(path, result);
-    }
-
-    pub(super) fn open_settings_file(&mut self, path: Option<&Path>) {
-        self.open_settings_file_with(path, open_path_with_default_app);
-    }
-
+    #[cfg(test)]
     fn open_settings_file_with(
         &mut self,
         path: Option<&Path>,
@@ -376,6 +369,7 @@ impl ExplorerView {
         self.handle_open_file_result(path, open(path));
     }
 
+    #[cfg(test)]
     pub(super) fn handle_open_file_result(&mut self, path: &Path, result: std::io::Result<()>) {
         match result {
             Ok(()) => self.open_error = None,

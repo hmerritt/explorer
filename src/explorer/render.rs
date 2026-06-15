@@ -1482,7 +1482,7 @@ impl ExplorerView {
                     selection_modifiers_for_click(event),
                     cx,
                 ) {
-                    this.open_file_with_default_app(&path);
+                    this.open_file_with_default_app(&path, window, cx);
                 }
                 cx.stop_propagation();
                 cx.notify();
@@ -1729,7 +1729,7 @@ impl ExplorerView {
                     window,
                     cx,
                 ) {
-                    this.open_file_with_default_app(&path);
+                    this.open_file_with_default_app(&path, window, cx);
                 }
                 cx.stop_propagation();
                 cx.notify();
