@@ -3,9 +3,7 @@ use std::collections::BTreeSet;
 use gpui::{Bounds, MouseButton, Pixels, Point, px, size};
 
 use crate::explorer::{
-    constants::{SCROLLBAR_GUTTER_WIDTH, effective_name_column_width},
-    selection::SelectionModifiers,
-    view::ExplorerView,
+    constants::SCROLLBAR_GUTTER_WIDTH, selection::SelectionModifiers, view::ExplorerView,
 };
 
 const DRAG_ACTIVATION_DISTANCE: f32 = 3.0;
@@ -74,12 +72,16 @@ impl ExplorerView {
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
+        let viewport_width = f32::from(viewport_size.width);
+        let name_column_width =
+            self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
         pointer_drag_intent_at_with_offsets(
             f32::from(local_position.x),
             f32::from(local_position.y),
             scroll_top,
             self.visible_horizontal_scroll_offset(),
-            f32::from(viewport_size.width),
+            viewport_width,
+            name_column_width,
             self.entries.len(),
             &self.selection.selected_indices,
             self.entry_row_height(),
@@ -368,12 +370,16 @@ pub(super) fn pointer_drag_intent_at_with_row_height(
     selected_indices: &BTreeSet<usize>,
     row_height: f32,
 ) -> Option<PointerDragIntent> {
+    let name_column_width = crate::explorer::constants::effective_name_column_width(
+        viewport_width + SCROLLBAR_GUTTER_WIDTH,
+    );
     pointer_drag_intent_at_with_offsets(
         local_x,
         local_y,
         scroll_top,
         0.0,
         viewport_width,
+        name_column_width,
         entry_count,
         selected_indices,
         row_height,
@@ -386,6 +392,7 @@ pub(super) fn pointer_drag_intent_at_with_offsets(
     scroll_top: f32,
     scroll_left: f32,
     viewport_width: f32,
+    name_column_width: f32,
     entry_count: usize,
     selected_indices: &BTreeSet<usize>,
     row_height: f32,
@@ -400,9 +407,7 @@ pub(super) fn pointer_drag_intent_at_with_offsets(
 
     if selected_indices.contains(&ix) {
         Some(PointerDragIntent::ItemDrag)
-    } else if local_x + scroll_left
-        < effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH)
-    {
+    } else if local_x + scroll_left < name_column_width {
         Some(PointerDragIntent::RubberBand)
     } else {
         Some(PointerDragIntent::ItemDrag)
@@ -454,9 +459,10 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explorer::constants::ROW_HEIGHT;
+    use crate::explorer::constants::{ROW_HEIGHT, effective_name_column_width};
     use crate::explorer::context_menu::ContextMenuState;
     use crate::explorer::test_support::{selected_names, test_view_with_entries};
+    use crate::settings::FileColumnKind;
 
     #[test]
     fn selection_box_normalizes_reverse_drags() {
@@ -560,6 +566,7 @@ mod tests {
                 0.0,
                 40.0,
                 400.0,
+                210.0,
                 5,
                 &BTreeSet::new(),
                 ROW_HEIGHT,
@@ -573,6 +580,7 @@ mod tests {
                 0.0,
                 40.0,
                 400.0,
+                250.0,
                 5,
                 &BTreeSet::new(),
                 ROW_HEIGHT,
@@ -597,6 +605,21 @@ mod tests {
 
         assert_eq!(
             view.pointer_drag_intent(gpui::point(px(1.0), px(1.0)), size(px(400.0), px(100.0))),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn pointer_drag_intent_uses_live_name_column_boundary() {
+        let mut view = test_view_with_entries(&["a.txt"]);
+        view.file_columns.widths.insert(FileColumnKind::Type, 300);
+
+        assert_eq!(
+            view.pointer_drag_intent(gpui::point(px(320.0), px(1.0)), size(px(900.0), px(100.0))),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            view.pointer_drag_intent(gpui::point(px(350.0), px(1.0)), size(px(900.0), px(100.0))),
             Some(PointerDragIntent::ItemDrag)
         );
     }

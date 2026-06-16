@@ -1,7 +1,7 @@
-pub(super) const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
-pub(super) const COLUMN_DATE_WIDTH: f32 = 150.0;
-pub(super) const COLUMN_TYPE_WIDTH: f32 = 150.0;
-pub(super) const COLUMN_SIZE_WIDTH: f32 = 120.0;
+pub(crate) const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
+pub(crate) const COLUMN_DATE_WIDTH: f32 = 150.0;
+pub(crate) const COLUMN_TYPE_WIDTH: f32 = 150.0;
+pub(crate) const COLUMN_SIZE_WIDTH: f32 = 120.0;
 pub(super) const NAVBAR_HEIGHT: f32 = 52.0;
 pub(super) const NAV_ICON_TEXT_SIZE: f32 = 12.0;
 pub(super) const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;
@@ -69,6 +69,7 @@ pub(super) const MB_BYTES: u64 = KB_BYTES * 1024;
 pub(super) const GB_BYTES: u64 = MB_BYTES * 1024;
 pub(super) const TB_BYTES: u64 = GB_BYTES * 1024;
 
+#[cfg(test)]
 pub(super) fn effective_name_column_width(viewport_width: f32) -> f32 {
     let fixed_columns_width =
         COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH + SCROLLBAR_GUTTER_WIDTH;
@@ -76,6 +77,7 @@ pub(super) fn effective_name_column_width(viewport_width: f32) -> f32 {
     (viewport_width - fixed_columns_width).max(COLUMN_NAME_MIN_WIDTH)
 }
 
+#[cfg(test)]
 pub(super) fn minimum_file_columns_width() -> f32 {
     COLUMN_NAME_MIN_WIDTH + COLUMN_DATE_WIDTH + COLUMN_TYPE_WIDTH + COLUMN_SIZE_WIDTH
 }

@@ -25,25 +25,25 @@ use crate::explorer::{
         visible_breadcrumb_for_path,
     },
     clipboard::file_clipboard_from_item,
+    columns::file_column_label,
     constants::{
-        COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
-        DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
-        DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
-        DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
-        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, HEADER_HEIGHT,
-        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
-        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
-        NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING,
-        RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
-        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
-        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
-        SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
-        SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP,
-        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
-        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
-        UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
-        UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
-        UTILITY_MENU_WIDTH, effective_name_column_width, minimum_file_columns_width,
+        COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT,
+        DIRECTORY_BAR_HORIZONTAL_PADDING, DIRECTORY_BAR_RADIUS,
+        DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE,
+        EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
+        FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, HEADER_HEIGHT, NAV_BUTTON_ACTIVE_OPACITY,
+        NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR,
+        NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP,
+        OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, RECURSIVE_SEARCH_ROW_HEIGHT,
+        ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
+        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
+        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG, SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH,
+        SEARCH_NO_MATCHES_MESSAGE, SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING,
+        SIDEBAR_ICON_TEXT_GAP, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, STATUS_BAR_HEIGHT,
+        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
+        STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
+        UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
+        UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
@@ -80,7 +80,7 @@ use crate::explorer::{
     },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
-use crate::settings::SettingsState;
+use crate::settings::{FileColumnKind, SettingsState};
 use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -100,6 +100,35 @@ const SIDEBAR_ROW_BG: u32 = 0xffffff;
 const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
+const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileColumnHeaderDrag {
+    kind: FileColumnKind,
+}
+
+struct FileColumnHeaderDragPreview {
+    label: SharedString,
+    width: f32,
+}
+
+impl Render for FileColumnHeaderDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_start()
+            .h(px(HEADER_HEIGHT))
+            .w(px(self.width))
+            .pl(px(8.0))
+            .pt(px(8.0))
+            .border_1()
+            .border_color(rgb(0x7aa7d9))
+            .bg(rgb(0xf7fbff))
+            .text_size(px(12.0))
+            .text_color(rgb(0x1f4e79))
+            .child(self.label.clone())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SidebarItemDrag {
@@ -179,6 +208,15 @@ impl ExplorerView {
         } else {
             ROW_HEIGHT
         }
+    }
+
+    fn list_viewport_width(&self, window: &Window) -> f32 {
+        (f32::from(window.bounds().size.width) - normalized_sidebar_width_f32(self.sidebar_width))
+            .max(0.0)
+    }
+
+    fn name_column_width(&self, window: &Window) -> f32 {
+        self.effective_name_column_width(self.list_viewport_width(window))
     }
 
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -915,12 +953,25 @@ impl ExplorerView {
         .into_any_element()
     }
 
-    fn render_header(&self) -> Div {
+    fn render_header(&self, cx: &mut Context<Self>) -> Div {
         let scroll_left = if self.content_branch() == ExplorerContentBranch::List {
             self.visible_horizontal_scroll_offset()
         } else {
             0.0
         };
+        let mut header_row = div()
+            .relative()
+            .left(px(-scroll_left))
+            .flex()
+            .flex_row()
+            .h_full()
+            .w_full()
+            .min_w(px(self.minimum_file_columns_width()))
+            .child(name_header_cell());
+
+        for kind in self.file_columns.order.iter().copied() {
+            header_row = header_row.child(self.render_file_column_header_cell(kind, cx));
+        }
 
         div()
             .flex()
@@ -933,22 +984,55 @@ impl ExplorerView {
             .text_size(px(12.0))
             .text_color(rgb(0x1f4e79))
             .child(
-                div().relative().flex_1().h_full().overflow_hidden().child(
-                    div()
-                        .relative()
-                        .left(px(-scroll_left))
-                        .flex()
-                        .flex_row()
-                        .h_full()
-                        .w_full()
-                        .min_w(px(minimum_file_columns_width()))
-                        .child(name_header_cell())
-                        .child(header_cell("Date modified", COLUMN_DATE_WIDTH, false))
-                        .child(header_cell("Type", COLUMN_TYPE_WIDTH, false))
-                        .child(header_cell("Size", COLUMN_SIZE_WIDTH, false)),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(header_row),
             )
             .child(scrollbar_header_spacer())
+    }
+
+    fn render_file_column_header_cell(
+        &self,
+        kind: FileColumnKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let width = self.file_column_width(kind);
+        let label = file_column_label(kind);
+
+        header_cell(label, width)
+            .id(file_column_header_element_id(kind))
+            .on_drag(FileColumnHeaderDrag { kind }, {
+                let label = SharedString::from(label);
+                move |_, _, _, cx| {
+                    cx.new(|_| FileColumnHeaderDragPreview {
+                        label: label.clone(),
+                        width,
+                    })
+                }
+            })
+            .on_drag_move::<FileColumnHeaderDrag>({
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<FileColumnHeaderDrag>, _, cx| {
+                    let left = f32::from(event.bounds.origin.x);
+                    let width = f32::from(event.bounds.size.width);
+                    let cursor_x = f32::from(event.event.position.x);
+                    let before = cursor_x < left + (width / 2.0);
+                    let dragged = event.drag(cx).kind;
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.reorder_file_column(dragged, kind, before) {
+                            crate::settings::reorder_file_column(dragged, kind, before, cx);
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(file_column_resize_handle(kind, entity))
+            .into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1440,6 +1524,7 @@ impl ExplorerView {
             .items_center()
             .h(px(self.entry_row_height()))
             .w_full()
+            .min_w(px(self.minimum_file_columns_width()))
             .bg(if is_selected {
                 rgb(0xcce8ff)
             } else {
@@ -1637,57 +1722,32 @@ impl ExplorerView {
                 }));
         }
 
-        let date_cell = text_cell(
-            format_timestamp(entry.modified, &self.date_format),
-            COLUMN_DATE_WIDTH,
-            false,
-            &self.font,
-            window,
-        );
-        let type_cell = text_cell(
-            entry.type_label(),
-            COLUMN_TYPE_WIDTH,
-            false,
-            &self.font,
-            window,
-        );
-        let size_cell = text_cell(
-            format_size(entry.size),
-            COLUMN_SIZE_WIDTH,
-            true,
-            &self.font,
-            window,
-        );
-
-        let (date_cell, type_cell, size_cell) = if let Some(drag_payload) = individual_drag_payload
-        {
-            (
-                add_item_drag(
-                    date_cell,
-                    ("explorer-entry-date-drag", ix),
-                    drag_payload.clone(),
-                    entity.clone(),
-                ),
-                add_item_drag(
-                    type_cell,
-                    ("explorer-entry-type-drag", ix),
-                    drag_payload.clone(),
-                    entity.clone(),
-                ),
-                add_item_drag(
-                    size_cell,
-                    ("explorer-entry-size-drag", ix),
-                    drag_payload,
-                    entity.clone(),
-                ),
-            )
-        } else {
-            (
-                date_cell.into_any_element(),
-                type_cell.into_any_element(),
-                size_cell.into_any_element(),
-            )
-        };
+        let non_name_cells = self
+            .file_columns
+            .order
+            .iter()
+            .copied()
+            .map(|kind| {
+                let cell = file_column_cell(
+                    kind,
+                    &entry,
+                    self.file_column_width(kind),
+                    &self.date_format,
+                    &self.font,
+                    window,
+                );
+                if let Some(drag_payload) = individual_drag_payload.clone() {
+                    add_item_drag(
+                        cell,
+                        (file_column_entry_drag_element_id(kind), ix),
+                        drag_payload,
+                        entity.clone(),
+                    )
+                } else {
+                    cell.into_any_element()
+                }
+            })
+            .collect::<Vec<_>>();
 
         let name_cell = if self.rename_is_active_for_path(&entry.path) {
             rename_name_cell(&entry, app_icon, self.active_rename_focus_handle(), cx)
@@ -1701,7 +1761,7 @@ impl ExplorerView {
                 app_icon,
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
-                self.sidebar_width,
+                self.name_column_width(window),
                 &self.font,
                 window,
             )
@@ -1773,11 +1833,11 @@ impl ExplorerView {
             .into_any_element()
         };
 
-        row.child(name_cell)
-            .child(date_cell)
-            .child(type_cell)
-            .child(size_cell)
-            .into_any_element()
+        let mut row = row.child(name_cell);
+        for cell in non_name_cells {
+            row = row.child(cell);
+        }
+        row.into_any_element()
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2401,7 +2461,7 @@ impl Render for ExplorerView {
                             .min_w(px(0.0))
                             .h_full()
                             .overflow_hidden()
-                            .child(self.render_header())
+                            .child(self.render_header(cx))
                             .child(
                                 match self.content_branch() {
                                     ExplorerContentBranch::Error => div().child(
@@ -4095,7 +4155,7 @@ fn directory_bar_separator() -> Div {
         .child(DIRECTORY_BAR_SEPARATOR)
 }
 
-fn header_cell(label: &'static str, width: f32, first: bool) -> Div {
+fn header_cell(label: &'static str, width: f32) -> Div {
     div()
         .relative()
         .flex()
@@ -4103,11 +4163,119 @@ fn header_cell(label: &'static str, width: f32, first: bool) -> Div {
         .h_full()
         .w(px(width))
         .flex_shrink_0()
-        .pl(px(if first { 36.0 } else { 8.0 }))
+        .pl(px(8.0))
         .pt(px(8.0))
         .border_r_1()
         .border_color(rgb(0xe7e7e7))
         .child(label)
+}
+
+fn file_column_header_element_id(kind: FileColumnKind) -> &'static str {
+    match kind {
+        FileColumnKind::DateModified => "explorer-header-date-modified",
+        FileColumnKind::Type => "explorer-header-type",
+        FileColumnKind::Size => "explorer-header-size",
+    }
+}
+
+fn file_column_entry_drag_element_id(kind: FileColumnKind) -> &'static str {
+    match kind {
+        FileColumnKind::DateModified => "explorer-entry-date-drag",
+        FileColumnKind::Type => "explorer-entry-type-drag",
+        FileColumnKind::Size => "explorer-entry-size-drag",
+    }
+}
+
+fn file_column_resize_debug_selector(kind: FileColumnKind) -> &'static str {
+    match kind {
+        FileColumnKind::DateModified => "explorer-header-date-modified-resizer",
+        FileColumnKind::Type => "explorer-header-type-resizer",
+        FileColumnKind::Size => "explorer-header-size-resizer",
+    }
+}
+
+fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>) -> AnyElement {
+    div()
+        .debug_selector(move || file_column_resize_debug_selector(kind).to_owned())
+        .absolute()
+        .top(px(0.0))
+        .right(px(-(FILE_COLUMN_RESIZE_HIT_WIDTH / 2.0)))
+        .w(px(FILE_COLUMN_RESIZE_HIT_WIDTH))
+        .h_full()
+        .cursor(CursorStyle::ResizeColumn)
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseDownEvent, _, _, cx| {
+                            if event.button != MouseButton::Left
+                                || !bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+
+                            let _ = entity.update(cx, |this, cx| {
+                                this.close_context_menu();
+                                this.begin_file_column_resize(kind, f32::from(event.position.x));
+                                cx.stop_propagation();
+                                cx.notify();
+                            });
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseMoveEvent, _, _, cx| {
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                return;
+                            }
+
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.file_column_resize_drag.is_none() {
+                                    return;
+                                }
+
+                                if this.update_file_column_resize(f32::from(event.position.x)) {
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            });
+                        }
+                    });
+
+                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                        match event.button {
+                            MouseButton::Left => {
+                                let _ = entity.update(cx, |this, cx| {
+                                    let Some((kind, width)) = this.finish_file_column_resize()
+                                    else {
+                                        return;
+                                    };
+
+                                    crate::settings::set_file_column_width(kind, width, cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                });
+                            }
+                            MouseButton::Right if bounds.contains(&event.position) => {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    let (kind, width) = this.reset_file_column_width(kind);
+                                    crate::settings::set_file_column_width(kind, width, cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                });
+                            }
+                            _ => {}
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 fn name_header_cell() -> Div {
@@ -4131,17 +4299,14 @@ fn name_cell(
     app_icon: Option<Arc<Image>>,
     show_file_name_extensions: bool,
     show_full_path: bool,
-    sidebar_width: f32,
+    name_column_width: f32,
     font: &gpui::Font,
     window: &Window,
 ) -> Div {
-    let list_viewport_width = (f32::from(window.bounds().size.width)
-        - normalized_sidebar_width_f32(sidebar_width))
-    .max(0.0);
     let text_width = if show_full_path {
-        recursive_result_text_width(list_viewport_width)
+        recursive_result_text_width(name_column_width)
     } else {
-        available_filename_text_width(list_viewport_width)
+        available_filename_text_width(name_column_width)
     };
     let filename = truncated_text(
         entry.display_name_with_extensions(show_file_name_extensions),
@@ -4300,11 +4465,11 @@ fn filename_text_width(name_column_width: f32) -> f32 {
 }
 
 fn available_filename_text_width(viewport_width: f32) -> f32 {
-    filename_text_width(effective_name_column_width(viewport_width))
+    filename_text_width(viewport_width)
 }
 
-fn recursive_result_text_width(viewport_width: f32) -> f32 {
-    available_filename_text_width(viewport_width)
+fn recursive_result_text_width(name_column_width: f32) -> f32 {
+    available_filename_text_width(name_column_width)
 }
 
 fn truncated_text(
@@ -4354,6 +4519,23 @@ fn truncated_text_with_size(
 
 fn text_cell_width(column_width: f32) -> f32 {
     (column_width - TEXT_CELL_HORIZONTAL_PADDING * 2.0).max(0.0)
+}
+
+fn file_column_cell(
+    kind: FileColumnKind,
+    entry: &FileEntry,
+    width: f32,
+    date_format: &str,
+    font: &gpui::Font,
+    window: &Window,
+) -> Div {
+    let (text, right) = match kind {
+        FileColumnKind::DateModified => (format_timestamp(entry.modified, date_format), false),
+        FileColumnKind::Type => (entry.type_label(), false),
+        FileColumnKind::Size => (format_size(entry.size), true),
+    };
+
+    text_cell(text, width, right, font, window)
 }
 
 fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
@@ -4493,10 +4675,9 @@ mod tests {
         DirectoryKind,
         clipboard::{FileClipboard, FileClipboardOperation, clipboard_item_for_files},
         constants::{
-            COLUMN_DATE_WIDTH, COLUMN_NAME_MIN_WIDTH, COLUMN_SIZE_WIDTH, COLUMN_TYPE_WIDTH,
-            EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-            EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES, NAV_BUTTON_ACTIVE_OPACITY,
-            SCROLLBAR_GUTTER_WIDTH,
+            COLUMN_NAME_MIN_WIDTH, COLUMN_TYPE_WIDTH, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
+            EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
+            NAV_BUTTON_ACTIVE_OPACITY,
         },
         entry::FileEntry,
         selection::SelectionModifiers,
@@ -4893,6 +5074,58 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn right_clicking_file_column_resizer_restores_and_persists_default_width(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings
+            .view
+            .file_columns
+            .widths
+            .insert(crate::settings::FileColumnKind::Type, 312);
+        cx.set_global(crate::settings::SettingsState::for_test(settings));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.file_columns
+                .widths
+                .insert(crate::settings::FileColumnKind::Type, 312);
+            view.begin_file_column_resize(crate::settings::FileColumnKind::Type, 312.0);
+            view
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-header-type-resizer")
+            .expect("type column resizer bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+
+        let default_width =
+            crate::settings::default_file_column_width(crate::settings::FileColumnKind::Type);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.file_columns.widths[&crate::settings::FileColumnKind::Type],
+                default_width
+            );
+            assert_eq!(view.file_column_resize_drag, None);
+        });
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .file_columns
+                .widths[&crate::settings::FileColumnKind::Type]),
+            default_width
+        );
+    }
+
     #[test]
     fn entry_hover_is_only_enabled_for_unselected_rows_without_a_context_menu() {
         assert!(entry_row_hover_enabled(false, false));
@@ -4936,16 +5169,11 @@ mod tests {
     }
 
     #[test]
-    fn name_text_width_uses_remaining_viewport_width() {
+    fn name_text_width_uses_name_column_width() {
         let name_column_width = 400.0;
-        let viewport_width = name_column_width
-            + COLUMN_DATE_WIDTH
-            + COLUMN_TYPE_WIDTH
-            + COLUMN_SIZE_WIDTH
-            + SCROLLBAR_GUTTER_WIDTH;
 
         assert_eq!(
-            available_filename_text_width(viewport_width),
+            available_filename_text_width(name_column_width),
             name_column_width - NAME_CELL_LEFT_PADDING - FILE_ICON_SLOT_WIDTH - NAME_ICON_TEXT_GAP
         );
     }
@@ -4953,7 +5181,7 @@ mod tests {
     #[test]
     fn name_text_width_respects_name_column_minimum() {
         assert_eq!(
-            available_filename_text_width(100.0),
+            available_filename_text_width(COLUMN_NAME_MIN_WIDTH),
             COLUMN_NAME_MIN_WIDTH
                 - NAME_CELL_LEFT_PADDING
                 - FILE_ICON_SLOT_WIDTH

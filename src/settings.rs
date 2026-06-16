@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     fs, io,
@@ -21,6 +22,7 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: u32 = 225;
 pub(crate) const SIDEBAR_MIN_WIDTH: u32 = 100;
+pub(crate) const FILE_COLUMN_MIN_WIDTH: u32 = 48;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConfigPlatform {
@@ -280,12 +282,31 @@ pub struct TabSettings {
 pub struct ViewSettings {
     #[serde(default = "default_date_format")]
     pub date_format: String,
+    #[serde(
+        default = "default_file_columns",
+        deserialize_with = "deserialize_file_column_settings"
+    )]
+    pub file_columns: FileColumnSettings,
     #[serde(default = "default_font")]
     pub font: String,
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
     pub show_hidden: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileColumnKind {
+    DateModified,
+    Type,
+    Size,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FileColumnSettings {
+    pub order: Vec<FileColumnKind>,
+    pub widths: BTreeMap<FileColumnKind, u32>,
 }
 
 impl Default for ExplorerSettings {
@@ -332,12 +353,19 @@ impl Default for ViewSettings {
     fn default() -> Self {
         Self {
             date_format: default_date_format(),
+            file_columns: default_file_columns(),
             font: default_font(),
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
             show_hidden: false,
         }
+    }
+}
+
+impl Default for FileColumnSettings {
+    fn default() -> Self {
+        default_file_columns()
     }
 }
 
@@ -536,8 +564,38 @@ pub(crate) fn set_sidebar_width(value: u32, cx: &mut impl BorrowAppContext) {
     });
 }
 
+pub(crate) fn set_file_column_width(
+    kind: FileColumnKind,
+    value: u32,
+    cx: &mut impl BorrowAppContext,
+) {
+    update_settings(cx, |settings| {
+        settings
+            .view
+            .file_columns
+            .widths
+            .insert(kind, normalized_file_column_width(value));
+        normalize_file_column_settings(&mut settings.view.file_columns);
+    });
+}
+
+pub(crate) fn reorder_file_column(
+    dragged: FileColumnKind,
+    target: FileColumnKind,
+    before: bool,
+    cx: &mut impl BorrowAppContext,
+) -> bool {
+    update_settings(cx, |settings| {
+        reorder_file_column_in_settings(&mut settings.view.file_columns, dragged, target, before)
+    })
+}
+
 pub(crate) fn normalized_sidebar_width(value: u32) -> u32 {
     value.max(SIDEBAR_MIN_WIDTH)
+}
+
+pub(crate) fn normalized_file_column_width(value: u32) -> u32 {
+    value.max(FILE_COLUMN_MIN_WIDTH)
 }
 
 pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> bool {
@@ -615,6 +673,37 @@ fn sidebar_reorder_index(
         target_index + 1
     };
     (new_index != source_index).then_some(new_index)
+}
+
+fn reorder_file_column_in_settings(
+    settings: &mut FileColumnSettings,
+    dragged: FileColumnKind,
+    target: FileColumnKind,
+    before: bool,
+) -> bool {
+    normalize_file_column_settings(settings);
+    if dragged == target {
+        return false;
+    }
+
+    let Some(dragged_index) = settings.order.iter().position(|kind| *kind == dragged) else {
+        return false;
+    };
+    let Some(mut target_index) = settings.order.iter().position(|kind| *kind == target) else {
+        return false;
+    };
+    if dragged_index < target_index {
+        target_index -= 1;
+    }
+
+    let insert_index = if before {
+        target_index
+    } else {
+        target_index + 1
+    };
+    let dragged = settings.order.remove(dragged_index);
+    settings.order.insert(insert_index, dragged);
+    true
 }
 
 fn pin_sidebar_path_in_settings(
@@ -1377,6 +1466,108 @@ fn default_font() -> String {
     DEFAULT_FONT.to_owned()
 }
 
+fn default_file_columns() -> FileColumnSettings {
+    let mut widths = BTreeMap::new();
+    for kind in default_file_column_order() {
+        widths.insert(*kind, default_file_column_width(*kind));
+    }
+    FileColumnSettings {
+        order: default_file_column_order().to_vec(),
+        widths,
+    }
+}
+
+pub(crate) fn default_file_column_order() -> &'static [FileColumnKind] {
+    &[
+        FileColumnKind::DateModified,
+        FileColumnKind::Type,
+        FileColumnKind::Size,
+    ]
+}
+
+pub(crate) fn default_file_column_width(kind: FileColumnKind) -> u32 {
+    match kind {
+        FileColumnKind::DateModified => crate::explorer::constants::COLUMN_DATE_WIDTH as u32,
+        FileColumnKind::Type => crate::explorer::constants::COLUMN_TYPE_WIDTH as u32,
+        FileColumnKind::Size => crate::explorer::constants::COLUMN_SIZE_WIDTH as u32,
+    }
+}
+
+fn file_column_kind_from_str(value: &str) -> Option<FileColumnKind> {
+    match value {
+        "date_modified" => Some(FileColumnKind::DateModified),
+        "type" => Some(FileColumnKind::Type),
+        "size" => Some(FileColumnKind::Size),
+        _ => None,
+    }
+}
+
+fn deserialize_file_column_settings<'de, D>(deserializer: D) -> Result<FileColumnSettings, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(file_column_settings_from_value(value))
+}
+
+fn file_column_settings_from_value(value: Value) -> FileColumnSettings {
+    let mut settings = default_file_columns();
+    let Some(object) = value.as_object() else {
+        return settings;
+    };
+
+    if let Some(order) = object.get("order").and_then(Value::as_array) {
+        settings.order = order
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(file_column_kind_from_str)
+            .collect();
+    }
+
+    if let Some(widths) = object.get("widths").and_then(Value::as_object) {
+        for (key, value) in widths {
+            let Some(kind) = file_column_kind_from_str(key) else {
+                continue;
+            };
+            let Some(width) = value.as_u64().and_then(|width| u32::try_from(width).ok()) else {
+                continue;
+            };
+            settings
+                .widths
+                .insert(kind, normalized_file_column_width(width));
+        }
+    }
+
+    normalize_file_column_settings(&mut settings);
+    settings
+}
+
+fn normalize_file_column_settings(settings: &mut FileColumnSettings) {
+    let mut normalized_order = Vec::with_capacity(default_file_column_order().len());
+    for kind in settings.order.iter().copied() {
+        if default_file_column_order().contains(&kind) && !normalized_order.contains(&kind) {
+            normalized_order.push(kind);
+        }
+    }
+    for kind in default_file_column_order().iter().copied() {
+        if !normalized_order.contains(&kind) {
+            normalized_order.push(kind);
+        }
+    }
+    settings.order = normalized_order;
+
+    let mut normalized_widths = BTreeMap::new();
+    for kind in default_file_column_order().iter().copied() {
+        let width = settings
+            .widths
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| default_file_column_width(kind));
+        normalized_widths.insert(kind, normalized_file_column_width(width));
+    }
+    settings.widths = normalized_widths;
+}
+
 pub(crate) fn resolved_font_family(value: &str) -> SharedString {
     if value == DEFAULT_FONT {
         SYSTEM_UI_FONT.into()
@@ -1466,6 +1657,18 @@ mod tests {
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
         assert!(settings.view.native_icons);
+        assert_eq!(
+            settings.view.file_columns.order,
+            default_file_column_order()
+        );
+        assert_eq!(
+            settings
+                .view
+                .file_columns
+                .widths
+                .get(&FileColumnKind::DateModified),
+            Some(&default_file_column_width(FileColumnKind::DateModified))
+        );
         assert_eq!(settings.app.start, StartLocation::Downloads);
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
@@ -1503,6 +1706,7 @@ mod tests {
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
         assert!(settings.view.native_icons);
+        assert_eq!(settings.view.file_columns, default_file_columns());
         assert!(settings.contextmenu.items.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
@@ -1538,6 +1742,86 @@ mod tests {
         assert_eq!(
             load_settings_from_path(&path).unwrap().sidebar.width,
             SIDEBAR_MIN_WIDTH
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn file_column_settings_ignore_unknowns_dedupe_and_append_missing_defaults() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"view":{"file_columns":{"order":["size","unknown","size"],"widths":{"size":10,"unknown":999}}}}"#,
+        )
+        .expect("deserialize file columns");
+
+        assert_eq!(
+            settings.view.file_columns.order,
+            vec![
+                FileColumnKind::Size,
+                FileColumnKind::DateModified,
+                FileColumnKind::Type
+            ]
+        );
+        assert_eq!(
+            settings.view.file_columns.widths[&FileColumnKind::Size],
+            FILE_COLUMN_MIN_WIDTH
+        );
+        assert_eq!(
+            settings.view.file_columns.widths[&FileColumnKind::Type],
+            default_file_column_width(FileColumnKind::Type)
+        );
+    }
+
+    #[gpui::test]
+    fn set_file_column_width_persists_clamped_value(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("file-column-width").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| {
+            set_file_column_width(FileColumnKind::Type, 10, cx);
+        });
+
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .view
+                .file_columns
+                .widths[&FileColumnKind::Type],
+            FILE_COLUMN_MIN_WIDTH
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn reorder_file_column_persists_global_order(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("file-column-order").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        let changed = cx.update(|cx| {
+            reorder_file_column(FileColumnKind::Size, FileColumnKind::DateModified, true, cx)
+        });
+
+        assert!(changed);
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .view
+                .file_columns
+                .order,
+            vec![
+                FileColumnKind::Size,
+                FileColumnKind::DateModified,
+                FileColumnKind::Type
+            ]
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

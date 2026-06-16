@@ -4,6 +4,7 @@ mod app_icons;
 mod archive_diagnostics;
 mod breadcrumb;
 mod clipboard;
+mod columns;
 pub(crate) mod constants;
 mod context_menu;
 mod dialog;

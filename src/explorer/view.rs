@@ -29,7 +29,7 @@ use crate::explorer::{
     selection::SelectionState,
     watcher::DirectoryWatcher,
 };
-use crate::settings::{ExplorerSettings, SidebarLocation};
+use crate::settings::{ExplorerSettings, FileColumnKind, FileColumnSettings, SidebarLocation};
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -55,6 +55,8 @@ pub struct ExplorerView {
     pub(super) dragging_sidebar_item: Option<usize>,
     pub(super) sidebar_width: f32,
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
+    pub(super) file_columns: FileColumnSettings,
+    pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
@@ -101,6 +103,13 @@ pub(super) struct EntryClickSequence {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SidebarResizeDrag {
+    pub(super) start_pointer_x: f32,
+    pub(super) start_width: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FileColumnResizeDrag {
+    pub(super) kind: FileColumnKind,
     pub(super) start_pointer_x: f32,
     pub(super) start_width: f32,
 }
@@ -205,6 +214,8 @@ impl ExplorerView {
             dragging_sidebar_item: None,
             sidebar_width: settings.sidebar.width as f32,
             sidebar_resize_drag: None,
+            file_columns: settings.view.file_columns.clone(),
+            file_column_resize_drag: None,
             pending_permanent_delete: None,
             pending_trash: None,
             pending_file_conflict: None,
@@ -251,6 +262,15 @@ impl ExplorerView {
         self.sidebar_items = settings.sidebar.items.clone();
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
+        }
+        if let Some(drag) = self.file_column_resize_drag {
+            let width = self.file_columns.widths.get(&drag.kind).copied();
+            self.file_columns = settings.view.file_columns.clone();
+            if let Some(width) = width {
+                self.file_columns.widths.insert(drag.kind, width);
+            }
+        } else {
+            self.file_columns = settings.view.file_columns.clone();
         }
 
         if hidden_changed {
@@ -652,6 +672,113 @@ impl ExplorerView {
         crate::settings::SIDEBAR_DEFAULT_WIDTH
     }
 
+    pub(super) fn file_column_width(&self, kind: FileColumnKind) -> f32 {
+        crate::explorer::columns::file_column_width(&self.file_columns, kind)
+    }
+
+    pub(super) fn minimum_file_columns_width(&self) -> f32 {
+        crate::explorer::columns::minimum_file_columns_width(&self.file_columns)
+    }
+
+    pub(super) fn effective_name_column_width(&self, viewport_width: f32) -> f32 {
+        crate::explorer::columns::effective_name_column_width(viewport_width, &self.file_columns)
+    }
+
+    pub(super) fn begin_file_column_resize(&mut self, kind: FileColumnKind, pointer_x: f32) {
+        self.file_column_resize_drag = Some(FileColumnResizeDrag {
+            kind,
+            start_pointer_x: pointer_x,
+            start_width: self.file_column_width(kind),
+        });
+    }
+
+    pub(super) fn update_file_column_resize(&mut self, pointer_x: f32) -> bool {
+        let Some(drag) = self.file_column_resize_drag else {
+            return false;
+        };
+
+        let width = crate::settings::normalized_file_column_width(
+            (drag.start_width + pointer_x - drag.start_pointer_x)
+                .round()
+                .max(0.0) as u32,
+        );
+        let current_width = self
+            .file_columns
+            .widths
+            .get(&drag.kind)
+            .copied()
+            .unwrap_or_else(|| crate::settings::default_file_column_width(drag.kind));
+        if current_width == width {
+            return false;
+        }
+
+        self.file_columns.widths.insert(drag.kind, width);
+        true
+    }
+
+    pub(super) fn finish_file_column_resize(&mut self) -> Option<(FileColumnKind, u32)> {
+        let drag = self.file_column_resize_drag.take()?;
+        let width = self
+            .file_columns
+            .widths
+            .get(&drag.kind)
+            .copied()
+            .unwrap_or_else(|| crate::settings::default_file_column_width(drag.kind));
+        Some((
+            drag.kind,
+            crate::settings::normalized_file_column_width(width),
+        ))
+    }
+
+    pub(super) fn reset_file_column_width(
+        &mut self,
+        kind: FileColumnKind,
+    ) -> (FileColumnKind, u32) {
+        self.file_column_resize_drag = None;
+        let width = crate::settings::default_file_column_width(kind);
+        self.file_columns.widths.insert(kind, width);
+        (kind, width)
+    }
+
+    pub(super) fn reorder_file_column(
+        &mut self,
+        dragged: FileColumnKind,
+        target: FileColumnKind,
+        before: bool,
+    ) -> bool {
+        if dragged == target {
+            return false;
+        }
+        let Some(dragged_index) = self
+            .file_columns
+            .order
+            .iter()
+            .position(|kind| *kind == dragged)
+        else {
+            return false;
+        };
+        let Some(mut target_index) = self
+            .file_columns
+            .order
+            .iter()
+            .position(|kind| *kind == target)
+        else {
+            return false;
+        };
+        if dragged_index < target_index {
+            target_index -= 1;
+        }
+
+        let insert_index = if before {
+            target_index
+        } else {
+            target_index + 1
+        };
+        let dragged = self.file_columns.order.remove(dragged_index);
+        self.file_columns.order.insert(insert_index, dragged);
+        true
+    }
+
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
@@ -659,6 +786,7 @@ impl ExplorerView {
         self.close_context_menu();
         self.cancel_mouse_selection_drag();
         self.sidebar_resize_drag = None;
+        self.file_column_resize_drag = None;
         self.clear_drop_indicator();
         self.pending_permanent_delete = None;
         self.pending_trash = None;
@@ -1117,6 +1245,26 @@ mod tests {
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
         );
         assert_eq!(view.sidebar_resize_drag, None);
+    }
+
+    #[test]
+    fn reset_file_column_width_restores_default_and_clears_drag() {
+        let mut view = ExplorerView::new(PathBuf::from("reset-file-column"));
+        view.file_columns.widths.insert(FileColumnKind::Type, 320);
+        view.begin_file_column_resize(FileColumnKind::Type, 320.0);
+
+        assert_eq!(
+            view.reset_file_column_width(FileColumnKind::Type),
+            (
+                FileColumnKind::Type,
+                crate::settings::default_file_column_width(FileColumnKind::Type)
+            )
+        );
+        assert_eq!(
+            view.file_columns.widths[&FileColumnKind::Type],
+            crate::settings::default_file_column_width(FileColumnKind::Type)
+        );
+        assert_eq!(view.file_column_resize_drag, None);
     }
 
     #[test]

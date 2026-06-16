@@ -13,8 +13,8 @@ mod settings;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
-    AppSettings, ContextMenuSettings, CustomContextMenuItem, ExplorerSettings, SidebarLocation,
-    SidebarSettings, StartLocation, TabSettings, ViewSettings,
+    AppSettings, ContextMenuSettings, CustomContextMenuItem, ExplorerSettings, FileColumnKind,
+    FileColumnSettings, SidebarLocation, SidebarSettings, StartLocation, TabSettings, ViewSettings,
 };
 
 #[cfg(all(
