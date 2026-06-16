@@ -11,6 +11,7 @@
 - Large icons grid view (alternate to the current Details view)
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
+- EXIF reader for Properties > Details tab for images
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3

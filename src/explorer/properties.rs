@@ -2,36 +2,45 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::SystemTime,
 };
 
 use filetime::{FileTime, set_file_times};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, ClickEvent, Context, FocusHandle, Focusable, IntoElement,
-    Render, SharedString, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    AnyElement, AnyWindowHandle, App, ClickEvent, Context, FocusHandle, Focusable, Image,
+    IntoElement, Render, SharedString, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowDecorations, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
 };
+use thousands::Separable;
 
 use crate::explorer::{
     DialogCancel, DialogConfirm,
     entry::{DirectoryLinkKind, EntryKind},
     folder_size::calculate_folder_size,
     formatting::{format_size, format_timestamp},
+    icons::{
+        copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
+        folder_icon_sized, image_icon,
+    },
+    open_with::{DefaultApplication, OpenWithOutcome, default_application_for_file},
     view::ExplorerView,
 };
 use crate::settings::SettingsState;
 
-const PROPERTIES_WIDTH: f32 = 430.0;
-const PROPERTIES_HEIGHT: f32 = 560.0;
-const PROPERTIES_PADDING: f32 = 14.0;
-const PROPERTIES_TAB_HEIGHT: f32 = 28.0;
+const PROPERTIES_WIDTH: f32 = 408.0;
+const PROPERTIES_HEIGHT: f32 = 520.0;
+const PROPERTIES_PADDING: f32 = 10.0;
+const PROPERTIES_PANEL_PADDING: f32 = 20.0;
+const PROPERTIES_TAB_HEIGHT: f32 = 30.0;
 const PROPERTIES_ROW_HEIGHT: f32 = 24.0;
 const PROPERTIES_BUTTON_HEIGHT: f32 = 28.0;
 const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
-const PROPERTIES_LABEL_WIDTH: f32 = 122.0;
+const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
+const PROPERTIES_ITEM_ICON_SIZE: f32 = 48.0;
+const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
 const PROPERTIES_BORDER: u32 = 0xd0d0d0;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
-const PROPERTIES_LINK_BLUE: u32 = 0x0067c0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PropertyTarget {
@@ -57,6 +66,7 @@ pub(super) struct PropertySnapshot {
     pub(super) group: MixedValue<String>,
     pub(super) unix_mode: MixedValue<u32>,
     pub(super) permission_summary: MixedValue<String>,
+    pub(super) default_app: Option<PropertyDefaultApp>,
     pub(super) shortcut: Option<ShortcutDetails>,
     pub(super) details: Vec<PropertyDetail>,
 }
@@ -107,6 +117,21 @@ pub(super) struct PropertyAttributes {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PropertyDefaultApp {
+    pub(super) name: String,
+    pub(super) path: Option<PathBuf>,
+}
+
+impl From<DefaultApplication> for PropertyDefaultApp {
+    fn from(value: DefaultApplication) -> Self {
+        Self {
+            name: value.name,
+            path: value.path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ShortcutDetails {
     pub(super) target: String,
     pub(super) target_type: String,
@@ -121,10 +146,13 @@ pub(super) struct PropertyDetail {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PropertyTab {
     General,
-    Shortcut,
-    Security,
     Details,
 }
+
+const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
+    (PropertyTab::General, "General"),
+    (PropertyTab::Details, "Details"),
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PropertySnapshotState {
@@ -143,8 +171,10 @@ pub(super) struct PropertiesDialog {
     snapshot_state: PropertySnapshotState,
     snapshot_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
+    default_app_task: Option<Task<()>>,
     draft: EditablePropertyDraft,
     apply_error: Option<String>,
+    default_app_error: Option<String>,
     completed: bool,
 }
 
@@ -202,8 +232,10 @@ impl PropertiesDialog {
             snapshot_state: PropertySnapshotState::Loading,
             snapshot_task: None,
             apply_task: None,
+            default_app_task: None,
             draft: EditablePropertyDraft::default(),
             apply_error: None,
+            default_app_error: None,
             completed: false,
         };
         dialog.start_snapshot_task(cx);
@@ -321,20 +353,116 @@ impl PropertiesDialog {
         self.apply_task = Some(task);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn change_default_app(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.default_app_task.is_some() {
+            return;
+        }
+        let Some(path) = single_file_default_app_path(snapshot).map(Path::to_path_buf) else {
+            return;
+        };
+
+        self.default_app_error = None;
+        let before = snapshot.default_app.clone();
+        let result = crate::explorer::open_with::choose_default_application_for_file(&path, window);
+        self.refresh_after_default_app_change(path, before, result, cx);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn change_default_app(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.default_app_task.is_some() {
+            return;
+        }
+        let Some(path) = single_file_default_app_path(snapshot).map(Path::to_path_buf) else {
+            return;
+        };
+
+        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+        self.default_app_error = None;
+        let before = snapshot.default_app.clone();
+        let target = snapshot.target.clone();
+        let window_handle = HasWindowHandle::window_handle(window)
+            .ok()
+            .map(|handle| handle.as_raw());
+        let display_handle = HasDisplayHandle::display_handle(window)
+            .ok()
+            .map(|handle| handle.as_raw());
+        let path_for_result = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = crate::explorer::open_with::choose_default_application_for_file(
+                &path,
+                window_handle.as_ref(),
+                display_handle.as_ref(),
+            )
+            .await;
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { collect_property_snapshot(target) })
+                .await
+                .ok();
+
+            let _ = this.update(cx, |dialog, cx| {
+                dialog.default_app_task = None;
+                dialog.default_app_error =
+                    default_app_change_error(&path_for_result, &before, &result, snapshot.as_ref());
+                if let Some(snapshot) = snapshot {
+                    dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
+                    dialog.snapshot_state = PropertySnapshotState::Ready(snapshot);
+                }
+                cx.notify();
+            });
+        });
+        self.default_app_task = Some(task);
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn refresh_after_default_app_change(
+        &mut self,
+        path: PathBuf,
+        before: Option<PropertyDefaultApp>,
+        result: std::io::Result<OpenWithOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.target.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { collect_property_snapshot(target) })
+                .await
+                .ok();
+
+            let _ = this.update(cx, |dialog, cx| {
+                dialog.default_app_task = None;
+                dialog.default_app_error =
+                    default_app_change_error(&path, &before, &result, snapshot.as_ref());
+                if let Some(snapshot) = snapshot {
+                    dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
+                    dialog.snapshot_state = PropertySnapshotState::Ready(snapshot);
+                }
+                cx.notify();
+            });
+        });
+        self.default_app_task = Some(task);
+        cx.notify();
+    }
+
     fn set_active_tab(&mut self, tab: PropertyTab, cx: &mut Context<Self>) {
         if self.active_tab != tab {
             self.active_tab = tab;
             cx.notify();
         }
-    }
-
-    fn set_timestamp_now(&mut self, which: TimestampField, cx: &mut Context<Self>) {
-        let now = SystemTime::now();
-        match which {
-            TimestampField::Modified => self.draft.modified = Some(now),
-            TimestampField::Accessed => self.draft.accessed = Some(now),
-        }
-        cx.notify();
     }
 
     fn toggle_readonly(&mut self, cx: &mut Context<Self>) {
@@ -348,19 +476,6 @@ impl PropertiesDialog {
         self.draft.hidden = Some(!current);
         cx.notify();
     }
-
-    #[cfg(unix)]
-    fn toggle_mode_bit(&mut self, bit: u32, cx: &mut Context<Self>) {
-        let Some(current) = self
-            .draft
-            .unix_mode
-            .or_else(|| snapshot_unix_mode(&self.snapshot_state))
-        else {
-            return;
-        };
-        self.draft.unix_mode = Some(current ^ bit);
-        cx.notify();
-    }
 }
 
 impl Render for PropertiesDialog {
@@ -370,7 +485,7 @@ impl Render for PropertiesDialog {
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(rgb(0xffffff))
+            .bg(rgb(0xf3f3f3))
             .cursor_default()
             .text_size(px(12.0))
             .text_color(rgb(0x000000))
@@ -397,78 +512,45 @@ impl Focusable for PropertiesDialog {
 
 impl PropertiesDialog {
     fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let show_shortcut = matches!(
-            self.snapshot_state,
-            PropertySnapshotState::Ready(PropertySnapshot {
-                shortcut: Some(_),
-                ..
-            })
-        );
-        div()
-            .flex()
-            .flex_row()
-            .h(px(PROPERTIES_TAB_HEIGHT))
-            .border_b_1()
-            .border_color(rgb(PROPERTIES_BORDER))
-            .child(tab_button(
-                "General",
-                PropertyTab::General,
-                self.active_tab,
-                cx,
-            ))
-            .when(show_shortcut, |this| {
-                this.child(tab_button(
-                    "Shortcut",
-                    PropertyTab::Shortcut,
-                    self.active_tab,
-                    cx,
-                ))
-            })
-            .child(tab_button(
-                "Security",
-                PropertyTab::Security,
-                self.active_tab,
-                cx,
-            ))
-            .child(tab_button(
-                "Details",
-                PropertyTab::Details,
-                self.active_tab,
-                cx,
-            ))
-            .into_any_element()
+        let mut tabs = div().flex().flex_row().h(px(PROPERTIES_TAB_HEIGHT));
+        for &(tab, label) in PROPERTY_TABS {
+            tabs = tabs.child(tab_button(label, tab, self.active_tab, cx));
+        }
+        tabs.into_any_element()
     }
 
     fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        match &self.snapshot_state {
+        let body = match &self.snapshot_state {
             PropertySnapshotState::Loading => centered_message("Loading properties..."),
             PropertySnapshotState::Failed(error) => centered_message(error),
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
                 PropertyTab::General => self.render_general(snapshot, window, cx),
-                PropertyTab::Shortcut => self.render_shortcut(snapshot),
-                PropertyTab::Security => self.render_security(snapshot, cx),
                 PropertyTab::Details => self.render_details(snapshot),
             },
-        }
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .border_1()
+            .border_color(rgb(PROPERTIES_BORDER))
+            .bg(rgb(0xffffff))
+            .p(px(PROPERTIES_PANEL_PADDING))
+            .child(body)
+            .into_any_element()
     }
 
     fn render_general(
         &self,
         snapshot: &PropertySnapshot,
-        _: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let created = mixed_time_label(&snapshot.created, &self.date_format);
-        let modified = self
-            .draft
-            .modified
-            .map(|time| format_timestamp(Some(time), &self.date_format))
-            .unwrap_or_else(|| mixed_time_label(&snapshot.modified, &self.date_format));
-        let accessed = self
-            .draft
-            .accessed
-            .map(|time| format_timestamp(Some(time), &self.date_format))
-            .unwrap_or_else(|| mixed_time_label(&snapshot.accessed, &self.date_format));
+        let modified = mixed_time_label(&snapshot.modified, &self.date_format);
+        let accessed = mixed_time_label(&snapshot.accessed, &self.date_format);
 
         div()
             .flex()
@@ -476,116 +558,198 @@ impl PropertiesDialog {
             .flex_1()
             .id("properties-general-body")
             .overflow_y_scroll()
-            .pt(px(12.0))
-            .child(title_row(&snapshot.title, snapshot.item_kind))
+            .child(self.render_title_row(snapshot, cx))
+            .child(separator())
+            .child(property_row("Type of file:", type_of_file_label(snapshot)))
+            .when(single_file_default_app_path(snapshot).is_some(), |this| {
+                this.child(self.render_open_with_row(snapshot, window, cx))
+            })
             .child(separator())
             .child(property_row(
-                "Type",
-                mixed_string_label(&snapshot.type_label),
-            ))
-            .child(property_row(
-                "Location",
+                "Location:",
                 mixed_string_label(&snapshot.location),
             ))
-            .child(property_row("Size", format_size(Some(snapshot.size))))
+            .child(property_row("Size:", property_size_label(snapshot.size)))
             .child(property_row(
-                "Size on disk",
-                format_size(Some(snapshot.size_on_disk)),
+                "Size on disk:",
+                property_size_label(snapshot.size_on_disk),
             ))
             .when_some(snapshot.contains.as_ref(), |this, contains| {
                 this.child(property_row(
-                    "Contains",
+                    "Contains:",
                     format!("{} Files, {} Folders", contains.files, contains.folders),
                 ))
             })
             .child(separator())
-            .child(property_row("Created", created))
-            .child(timestamp_row(
-                "Modified",
-                modified,
-                TimestampField::Modified,
-                cx,
-            ))
-            .child(timestamp_row(
-                "Accessed",
-                accessed,
-                TimestampField::Accessed,
-                cx,
-            ))
+            .child(property_row("Created:", created))
+            .child(property_row("Modified:", modified))
+            .child(property_row("Accessed:", accessed))
             .child(separator())
-            .child(attribute_row(
+            .child(self.render_attributes_row(snapshot, cx))
+            .when_some(self.default_app_error.as_ref(), |this, error| {
+                this.child(error_message(error))
+            })
+            .when_some(self.apply_error.as_ref(), |this, error| {
+                this.child(error_message(error))
+            })
+            .into_any_element()
+    }
+
+    fn render_title_row(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(14.0))
+            .pb(px(8.0))
+            .child(self.render_item_icon(snapshot, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h(px(34.0))
+                    .border_1()
+                    .border_color(rgb(PROPERTIES_BORDER))
+                    .bg(rgb(0xffffff))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .child(SharedString::from(snapshot.title.clone())),
+            )
+            .into_any_element()
+    }
+
+    fn render_item_icon(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+        if let PropertyIconSource::Single(path) = property_icon_source(snapshot) {
+            if let Some(icon) = self.native_icon_for_path(&path, cx) {
+                return image_icon(icon, PROPERTIES_ITEM_ICON_SIZE, PROPERTIES_ITEM_ICON_SIZE);
+            }
+            return fallback_property_icon(snapshot.item_kind, &path, PROPERTIES_ITEM_ICON_SIZE);
+        }
+
+        copy_file_dialog_icon_sized(PROPERTIES_ITEM_ICON_SIZE).into_any_element()
+    }
+
+    fn render_open_with_row(
+        &self,
+        snapshot: &PropertySnapshot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let snapshot_for_click = snapshot.clone();
+        let enabled = self.default_app_task.is_none();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_h(px(34.0))
+            .child(
+                div()
+                    .w(px(PROPERTIES_LABEL_WIDTH))
+                    .flex_shrink_0()
+                    .child("Opens with:"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .gap(px(8.0))
+                    .when_some(snapshot.default_app.as_ref(), |this, default_app| {
+                        this.child(self.render_default_app_icon(default_app, cx))
+                    })
+                    .child(
+                        div().min_w(px(0.0)).truncate().child(SharedString::from(
+                            snapshot
+                                .default_app
+                                .as_ref()
+                                .map(|default_app| default_app.name.clone())
+                                .unwrap_or_else(|| "Unknown application".to_owned()),
+                        )),
+                    ),
+            )
+            .child(
+                property_button(
+                    "properties-change-default-app",
+                    "Change...",
+                    enabled,
+                    window.scale_factor(),
+                )
+                .when(enabled, |this| {
+                    this.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.change_default_app(&snapshot_for_click, window, cx);
+                        cx.stop_propagation();
+                    }))
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_default_app_icon(
+        &self,
+        default_app: &PropertyDefaultApp,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(path) = default_app.path.as_ref() else {
+            return div()
+                .w(px(PROPERTIES_OPEN_WITH_ICON_SIZE))
+                .h(px(PROPERTIES_OPEN_WITH_ICON_SIZE))
+                .into_any_element();
+        };
+
+        self.native_icon_for_path(path, cx)
+            .map(|icon| {
+                image_icon(
+                    icon,
+                    PROPERTIES_OPEN_WITH_ICON_SIZE,
+                    PROPERTIES_OPEN_WITH_ICON_SIZE,
+                )
+            })
+            .unwrap_or_else(|| {
+                file_icon_for_path_sized(path, PROPERTIES_OPEN_WITH_ICON_SIZE).into_any_element()
+            })
+    }
+
+    fn native_icon_for_path(&self, path: &Path, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+        self.explorer
+            .update(cx, |explorer, cx| explorer.native_icon_for_path(path, cx))
+            .ok()
+            .flatten()
+    }
+
+    fn render_attributes_row(
+        &self,
+        snapshot: &PropertySnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_h(px(PROPERTIES_ROW_HEIGHT))
+            .child(
+                div()
+                    .w(px(PROPERTIES_LABEL_WIDTH))
+                    .flex_shrink_0()
+                    .child("Attributes:"),
+            )
+            .child(attribute_inline(
                 "Read-only",
                 self.draft
                     .readonly
                     .or(mixed_bool_value(&snapshot.attributes.readonly)),
                 cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_readonly(cx)),
             ))
-            .child(attribute_row(
+            .child(attribute_inline(
                 "Hidden",
                 self.draft
                     .hidden
                     .or(mixed_bool_value(&snapshot.attributes.hidden)),
                 cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_hidden(cx)),
-            ))
-            .when_some(self.apply_error.as_ref(), |this, error| {
-                this.child(
-                    div()
-                        .mt(px(10.0))
-                        .p(px(8.0))
-                        .border_1()
-                        .border_color(rgb(0xe81123))
-                        .text_color(rgb(0x9b0000))
-                        .child(SharedString::from(error.clone())),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_shortcut(&self, snapshot: &PropertySnapshot) -> AnyElement {
-        let Some(shortcut) = snapshot.shortcut.as_ref() else {
-            return centered_message("No shortcut details are available for this selection.");
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .id("properties-shortcut-body")
-            .overflow_y_scroll()
-            .pt(px(12.0))
-            .child(property_row("Target type", shortcut.target_type.clone()))
-            .child(property_row("Target", shortcut.target.clone()))
-            .child(property_row(
-                "Status",
-                if Path::new(&shortcut.target).exists() {
-                    "Available".to_owned()
-                } else {
-                    "Target not found".to_owned()
-                },
-            ))
-            .into_any_element()
-    }
-
-    fn render_security(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .id("properties-security-body")
-            .overflow_y_scroll()
-            .pt(px(12.0))
-            .child(property_row("Owner", mixed_string_label(&snapshot.owner)))
-            .child(property_row("Group", mixed_string_label(&snapshot.group)))
-            .child(property_row(
-                "Permissions",
-                mixed_string_label(&snapshot.permission_summary),
-            ))
-            .child(separator())
-            .child(security_permissions_element(
-                self.draft
-                    .unix_mode
-                    .or_else(|| mixed_u32_value(&snapshot.unix_mode)),
-                cx,
             ))
             .into_any_element()
     }
@@ -597,15 +761,26 @@ impl PropertiesDialog {
             .flex_1()
             .id("properties-details-body")
             .overflow_y_scroll()
-            .pt(px(12.0));
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .min_h(px(26.0))
+                    .border_b_1()
+                    .border_color(rgb(PROPERTIES_BORDER))
+                    .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .child(div().w(px(154.0)).flex_shrink_0().child("Property"))
+                    .child(div().flex_1().min_w(px(0.0)).child("Value")),
+            );
 
         for detail in &snapshot.details {
-            body = body.child(property_row(&detail.name, detail.value.clone()));
+            body = body.child(detail_row(&detail.name, &detail.value));
         }
 
         if snapshot.details.is_empty() {
             body.child(
                 div()
+                    .pt(px(12.0))
                     .text_color(rgb(PROPERTIES_MUTED_TEXT))
                     .child("No additional metadata is available."),
             )
@@ -660,12 +835,6 @@ impl PropertiesDialog {
             )
             .into_any_element()
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TimestampField {
-    Modified,
-    Accessed,
 }
 
 impl Default for EditablePropertyDraft {
@@ -728,8 +897,8 @@ fn properties_window_options(title: String, cx: &App) -> WindowOptions {
         }),
         kind: WindowKind::Floating,
         is_movable: true,
-        is_resizable: true,
-        is_minimizable: true,
+        is_resizable: false,
+        is_minimizable: false,
         window_decorations: Some(WindowDecorations::Server),
         ..Default::default()
     }
@@ -780,6 +949,7 @@ fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot,
     let shortcut = (items.len() == 1)
         .then(|| items[0].shortcut.clone())
         .flatten();
+    let default_app = single_file_default_app(&items);
     let details = merged_details(&items);
 
     Ok(PropertySnapshot {
@@ -800,6 +970,7 @@ fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot,
         group,
         unix_mode,
         permission_summary,
+        default_app,
         shortcut,
         details,
     })
@@ -935,6 +1106,17 @@ fn contains_summary(items: &[PropertyItem]) -> Option<PropertyContains> {
         }
     }
     has_directory.then_some(PropertyContains { files, folders })
+}
+
+fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp> {
+    let [item] = items else {
+        return None;
+    };
+    if !item.exists || item.is_dir {
+        return None;
+    }
+
+    default_application_for_file(&item.path).map(PropertyDefaultApp::from)
 }
 
 fn count_directory_children(path: &Path) -> Option<PropertyContains> {
@@ -1339,11 +1521,128 @@ fn apply_hidden_attribute(_: &Path, _: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn snapshot_unix_mode(state: &PropertySnapshotState) -> Option<u32> {
-    match state {
-        PropertySnapshotState::Ready(snapshot) => mixed_u32_value(&snapshot.unix_mode),
-        _ => None,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PropertyIconSource {
+    Single(PathBuf),
+    Multiple,
+}
+
+fn property_icon_source(snapshot: &PropertySnapshot) -> PropertyIconSource {
+    if snapshot.target.paths.len() == 1 {
+        PropertyIconSource::Single(snapshot.target.paths[0].clone())
+    } else {
+        PropertyIconSource::Multiple
+    }
+}
+
+fn fallback_property_icon(kind: PropertyItemKind, path: &Path, size: f32) -> AnyElement {
+    match kind {
+        PropertyItemKind::SingleFolder => folder_icon_sized(size).into_any_element(),
+        PropertyItemKind::SingleShortcut => directory_shortcut_icon_sized(size).into_any_element(),
+        _ => file_icon_for_path_sized(path, size).into_any_element(),
+    }
+}
+
+fn single_file_default_app_path(snapshot: &PropertySnapshot) -> Option<&Path> {
+    matches!(snapshot.item_kind, PropertyItemKind::SingleFile)
+        .then(|| snapshot.target.paths.first().map(PathBuf::as_path))
+        .flatten()
+}
+
+fn default_app_change_error(
+    path: &Path,
+    before: &Option<PropertyDefaultApp>,
+    result: &std::io::Result<OpenWithOutcome>,
+    snapshot: Option<&PropertySnapshot>,
+) -> Option<String> {
+    match result {
+        Err(error) => Some(format!(
+            "Could not change the default app for {}: {error}",
+            property_path_display_name(path)
+        )),
+        Ok(OpenWithOutcome::Cancelled) => None,
+        Ok(OpenWithOutcome::Opened) => {
+            let Some(snapshot) = snapshot else {
+                return Some(format!(
+                    "The default app for {} could not be verified.",
+                    property_path_display_name(path)
+                ));
+            };
+            if &snapshot.default_app != before {
+                None
+            } else if snapshot.default_app.is_none() {
+                Some(format!(
+                    "No default app for {} could be verified.",
+                    property_path_display_name(path)
+                ))
+            } else {
+                Some(format!(
+                    "The selected app was opened, but the default app for {} did not appear to change.",
+                    property_path_display_name(path)
+                ))
+            }
+        }
+    }
+}
+
+fn property_path_display_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn type_of_file_label(snapshot: &PropertySnapshot) -> String {
+    let label = mixed_string_label(&snapshot.type_label);
+    if matches!(snapshot.item_kind, PropertyItemKind::SingleFile) {
+        if let Some(path) = snapshot.target.paths.first() {
+            return single_file_type_label(path, &label);
+        }
+    }
+    label
+}
+
+fn single_file_type_label(path: &Path, base_label: &str) -> String {
+    let base_label = if base_label.is_empty() {
+        "File"
+    } else {
+        base_label
+    };
+    let Some(suffix) = file_type_suffix(path) else {
+        return base_label.to_owned();
+    };
+    let label = if base_label == "File" {
+        let type_name = suffix.trim_start_matches('.').to_ascii_uppercase();
+        if type_name.is_empty() {
+            base_label.to_owned()
+        } else {
+            format!("{type_name} File")
+        }
+    } else {
+        base_label.to_owned()
+    };
+
+    format!("{label} ({suffix})")
+}
+
+fn file_type_suffix(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    if name.starts_with('.') && !name[1..].contains('.') {
+        return Some(name.into_owned());
+    }
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!(".{extension}"))
+}
+
+fn property_size_label(size: u64) -> String {
+    let label = format_size(Some(size));
+    if label.ends_with(" bytes") {
+        label
+    } else {
+        format!("{label} ({} bytes)", size.separate_with_commas())
     }
 }
 
@@ -1355,8 +1654,6 @@ fn tab_button(
 ) -> AnyElement {
     let id = match tab {
         PropertyTab::General => "properties-tab-general",
-        PropertyTab::Shortcut => "properties-tab-shortcut",
-        PropertyTab::Security => "properties-tab-security",
         PropertyTab::Details => "properties-tab-details",
     };
     div()
@@ -1389,39 +1686,6 @@ fn centered_message(message: impl Into<String>) -> AnyElement {
         .into_any_element()
 }
 
-fn title_row(title: &str, kind: PropertyItemKind) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .pb(px(8.0))
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .border_1()
-                .border_color(rgb(PROPERTIES_BORDER))
-                .child(match kind {
-                    PropertyItemKind::SingleFolder | PropertyItemKind::MultipleFolders => "[]",
-                    PropertyItemKind::SingleShortcut => "->",
-                    _ => "*",
-                }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(14.0))
-                .child(SharedString::from(title.to_owned())),
-        )
-        .into_any_element()
-}
-
 fn property_row(label: impl Into<String>, value: impl Into<String>) -> AnyElement {
     let label = label.into();
     let value = value.into();
@@ -1447,12 +1711,7 @@ fn property_row(label: impl Into<String>, value: impl Into<String>) -> AnyElemen
         .into_any_element()
 }
 
-fn timestamp_row(
-    label: &'static str,
-    value: String,
-    which: TimestampField,
-    cx: &mut Context<PropertiesDialog>,
-) -> AnyElement {
+fn detail_row(label: &str, value: &str) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -1460,25 +1719,23 @@ fn timestamp_row(
         .min_h(px(PROPERTIES_ROW_HEIGHT))
         .child(
             div()
-                .w(px(PROPERTIES_LABEL_WIDTH))
+                .w(px(154.0))
                 .flex_shrink_0()
                 .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child(label),
+                .truncate()
+                .child(SharedString::from(label.to_owned())),
         )
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.0))
                 .truncate()
-                .child(SharedString::from(value)),
+                .child(SharedString::from(value.to_owned())),
         )
-        .child(mini_button("Set to now").on_click(
-            cx.listener(move |this, _: &ClickEvent, _, cx| this.set_timestamp_now(which, cx)),
-        ))
         .into_any_element()
 }
 
-fn attribute_row(
+fn attribute_inline(
     label: &'static str,
     value: Option<bool>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -1493,114 +1750,29 @@ fn attribute_row(
         .flex()
         .flex_row()
         .items_center()
-        .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .mr(px(20.0))
         .cursor_default()
-        .child(
-            div()
-                .w(px(PROPERTIES_LABEL_WIDTH))
-                .flex_shrink_0()
-                .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child(label),
-        )
         .child(check_box(value))
-        .child(div().ml(px(8.0)).child(match value {
-            Some(true) => "On",
-            Some(false) => "Off",
-            None => "Mixed",
-        }))
+        .child(div().ml(px(6.0)).child(label))
         .on_click(on_click)
         .into_any_element()
 }
 
 fn check_box(value: Option<bool>) -> AnyElement {
     div()
-        .w(px(14.0))
-        .h(px(14.0))
+        .w(px(16.0))
+        .h(px(16.0))
         .border_1()
         .border_color(rgb(0x707070))
         .flex()
         .items_center()
         .justify_center()
+        .text_size(px(11.0))
         .child(match value {
             Some(true) => "x",
             Some(false) => "",
             None => "-",
         })
-        .into_any_element()
-}
-
-#[cfg(unix)]
-fn security_permissions_element(
-    mode: Option<u32>,
-    cx: &mut Context<PropertiesDialog>,
-) -> AnyElement {
-    permission_matrix(mode, cx)
-}
-
-#[cfg(not(unix))]
-fn security_permissions_element(_: Option<u32>, _: &mut Context<PropertiesDialog>) -> AnyElement {
-    div()
-        .text_color(rgb(PROPERTIES_MUTED_TEXT))
-        .child("Security details are read-only in this version.")
-        .into_any_element()
-}
-
-#[cfg(unix)]
-fn permission_matrix(mode: Option<u32>, cx: &mut Context<PropertiesDialog>) -> AnyElement {
-    let mode = mode.unwrap_or(0);
-    div()
-        .id(("properties-permission", label, bit))
-        .flex()
-        .flex_col()
-        .gap(px(5.0))
-        .child(property_row("Mode", format!("{mode:o}")))
-        .child(permission_row("Owner", mode, [0o400, 0o200, 0o100], cx))
-        .child(permission_row("Group", mode, [0o040, 0o020, 0o010], cx))
-        .child(permission_row("Everyone", mode, [0o004, 0o002, 0o001], cx))
-        .into_any_element()
-}
-
-#[cfg(unix)]
-fn permission_row(
-    label: &'static str,
-    mode: u32,
-    bits: [u32; 3],
-    cx: &mut Context<PropertiesDialog>,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .min_h(px(PROPERTIES_ROW_HEIGHT))
-        .child(
-            div()
-                .w(px(PROPERTIES_LABEL_WIDTH))
-                .flex_shrink_0()
-                .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child(label),
-        )
-        .child(permission_cell("Read", mode, bits[0], cx))
-        .child(permission_cell("Write", mode, bits[1], cx))
-        .child(permission_cell("Execute", mode, bits[2], cx))
-        .into_any_element()
-}
-
-#[cfg(unix)]
-fn permission_cell(
-    label: &'static str,
-    mode: u32,
-    bit: u32,
-    cx: &mut Context<PropertiesDialog>,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .mr(px(8.0))
-        .cursor_default()
-        .child(check_box(Some(mode & bit != 0)))
-        .child(div().ml(px(4.0)).child(label))
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_mode_bit(bit, cx)))
         .into_any_element()
 }
 
@@ -1613,22 +1785,15 @@ fn separator() -> AnyElement {
         .into_any_element()
 }
 
-fn mini_button(label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn error_message(message: &str) -> AnyElement {
     div()
-        .id("properties-mini-button")
-        .h(px(22.0))
-        .px(px(8.0))
+        .mt(px(10.0))
+        .p(px(8.0))
         .border_1()
-        .border_color(rgb(PROPERTIES_BORDER))
-        .bg(rgb(0xfdfdfd))
-        .hover(|style| style.bg(rgb(0xe5f3ff)))
-        .active(|style| style.bg(rgb(0xcce4f7)))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_default()
-        .text_color(rgb(PROPERTIES_LINK_BLUE))
-        .child(label)
+        .border_color(rgb(0xe81123))
+        .text_color(rgb(0x9b0000))
+        .child(SharedString::from(message.to_owned()))
+        .into_any_element()
 }
 
 fn property_button(
@@ -1721,6 +1886,140 @@ mod tests {
         assert_eq!(snapshot.item_kind, PropertyItemKind::MultipleFiles);
         assert_eq!(snapshot.type_label, MixedValue::Mixed);
         assert_eq!(mixed_string_label(&snapshot.type_label), "");
+    }
+
+    #[test]
+    fn properties_dialog_exposes_only_general_and_details_tabs() {
+        assert_eq!(
+            PROPERTY_TABS,
+            &[
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+    }
+
+    #[test]
+    fn property_icon_source_uses_single_path_or_multi_copy_icon() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        let folder = temp.path().join("folder");
+        fs::write(&file, b"a").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let single_file = collect_property_snapshot(PropertyTarget {
+            paths: vec![file.clone()],
+        })
+        .unwrap();
+        let single_folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder.clone()],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![file.clone(), folder],
+        })
+        .unwrap();
+
+        assert_eq!(
+            property_icon_source(&single_file),
+            PropertyIconSource::Single(file)
+        );
+        assert_eq!(
+            property_icon_source(&single_folder),
+            PropertyIconSource::Single(single_folder.target.paths[0].clone())
+        );
+        assert_eq!(property_icon_source(&mixed), PropertyIconSource::Multiple);
+    }
+
+    #[test]
+    fn type_of_file_label_matches_explorer_suffix_style() {
+        let temp = TempDir::new();
+        let gitignore = temp.path().join(".gitignore");
+        let text = temp.path().join("note.txt");
+        let no_extension = temp.path().join("Makefile");
+        let folder = temp.path().join("folder");
+        fs::write(&gitignore, b"target").unwrap();
+        fs::write(&text, b"text").unwrap();
+        fs::write(&no_extension, b"build").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let gitignore = collect_property_snapshot(PropertyTarget {
+            paths: vec![gitignore],
+        })
+        .unwrap();
+        let text = collect_property_snapshot(PropertyTarget { paths: vec![text] }).unwrap();
+        let no_extension = collect_property_snapshot(PropertyTarget {
+            paths: vec![no_extension],
+        })
+        .unwrap();
+        let folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+
+        assert_eq!(
+            type_of_file_label(&gitignore),
+            "GITIGNORE File (.gitignore)"
+        );
+        assert_eq!(type_of_file_label(&text), "TXT File (.txt)");
+        assert_eq!(type_of_file_label(&no_extension), "File");
+        assert_eq!(type_of_file_label(&folder), "File folder");
+    }
+
+    #[test]
+    fn size_label_includes_raw_bytes_for_scaled_units() {
+        assert_eq!(property_size_label(99), "99 bytes");
+        assert_eq!(property_size_label(2048), "2.0 KB (2,048 bytes)");
+    }
+
+    #[test]
+    fn default_app_change_error_reports_unverified_changes() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"a").unwrap();
+        let mut snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![file.clone()],
+        })
+        .unwrap();
+        let before = Some(PropertyDefaultApp {
+            name: "Old".to_owned(),
+            path: None,
+        });
+        snapshot.default_app = before.clone();
+
+        assert_eq!(
+            default_app_change_error(
+                &file,
+                &before,
+                &Ok(OpenWithOutcome::Cancelled),
+                Some(&snapshot)
+            ),
+            None
+        );
+        assert!(
+            default_app_change_error(
+                &file,
+                &before,
+                &Ok(OpenWithOutcome::Opened),
+                Some(&snapshot)
+            )
+            .unwrap()
+            .contains("did not appear to change")
+        );
+
+        snapshot.default_app = Some(PropertyDefaultApp {
+            name: "New".to_owned(),
+            path: None,
+        });
+        assert_eq!(
+            default_app_change_error(
+                &file,
+                &before,
+                &Ok(OpenWithOutcome::Opened),
+                Some(&snapshot)
+            ),
+            None
+        );
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub(super) enum OpenWithOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DefaultApplication {
+    pub(super) name: String,
+    pub(super) path: Option<PathBuf>,
+}
+
 pub(super) fn context_menu_item(path: &Path) -> ContextMenuItem {
     #[cfg(target_os = "macos")]
     {
@@ -77,6 +83,57 @@ pub(super) fn context_menu_item(path: &Path) -> ContextMenuItem {
             enabled: true,
         }
     }
+}
+
+pub(super) fn default_application_for_file(path: &Path) -> Option<DefaultApplication> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_default_application_for_file(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return mac_default_application_for_file(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return linux_default_application_for_file(path);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn choose_default_application_for_file(
+    path: &Path,
+    window: &Window,
+) -> io::Result<OpenWithOutcome> {
+    windows_choose_application(path, windows_parent_hwnd(window), true)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn choose_default_application_for_file(
+    path: &Path,
+    _: &Window,
+) -> io::Result<OpenWithOutcome> {
+    mac_open_file(path, &OpenFileIntent::ChooseApplication)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn choose_default_application_for_file(
+    path: &Path,
+    window_handle: Option<&raw_window_handle::RawWindowHandle>,
+    display_handle: Option<&raw_window_handle::RawDisplayHandle>,
+) -> io::Result<OpenWithOutcome> {
+    linux_open_file(
+        path,
+        &OpenFileIntent::ChooseApplication,
+        window_handle,
+        display_handle,
+    )
+    .await
 }
 
 impl ExplorerView {
@@ -243,11 +300,11 @@ fn windows_open_file(
         OpenFileIntent::Default => match open::that_detached(path) {
             Ok(()) => Ok(OpenWithOutcome::Opened),
             Err(error) if windows_error_is_no_association(&error) => {
-                windows_choose_application(path, parent)
+                windows_choose_application(path, parent, false)
             }
             Err(error) => Err(error),
         },
-        OpenFileIntent::ChooseApplication => windows_choose_application(path, parent),
+        OpenFileIntent::ChooseApplication => windows_choose_application(path, parent, false),
     }
 }
 
@@ -260,12 +317,16 @@ fn windows_error_is_no_association(error: &io::Error) -> bool {
 fn windows_choose_application(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
+    register_default: bool,
 ) -> io::Result<OpenWithOutcome> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::{
             Foundation::ERROR_CANCELLED,
-            UI::Shell::{OAIF_EXEC, OPENASINFO, SHOpenWithDialog},
+            UI::Shell::{
+                OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT,
+                OPENASINFO, SHOpenWithDialog,
+            },
         },
         core::{HRESULT, PCWSTR},
     };
@@ -278,7 +339,11 @@ fn windows_choose_application(
     let info = OPENASINFO {
         pcszFile: PCWSTR::from_raw(path.as_ptr()),
         pcszClass: PCWSTR::null(),
-        oaifInFlags: OAIF_EXEC,
+        oaifInFlags: if register_default {
+            OAIF_EXEC | OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_FORCE_REGISTRATION
+        } else {
+            OAIF_EXEC
+        },
     };
 
     match unsafe { SHOpenWithDialog(parent, &info) } {
@@ -288,6 +353,108 @@ fn windows_choose_application(
         }
         Err(error) => Err(io::Error::other(error)),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_default_application_for_file(path: &Path) -> Option<DefaultApplication> {
+    let association = windows_file_association_query(path)?;
+    let name = windows_assoc_query_string(&association, windows_assoc_friendly_app_name())
+        .or_else(|| {
+            windows_assoc_query_string(&association, windows_assoc_executable())
+                .and_then(|path| windows_executable_display_name(Path::new(&path)))
+        })?;
+    let path =
+        windows_assoc_query_string(&association, windows_assoc_executable()).map(PathBuf::from);
+
+    Some(DefaultApplication { name, path })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_file_association_query(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    if name.starts_with('.') && !name[1..].contains('.') {
+        return Some(name.into_owned());
+    }
+
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!(".{extension}"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_assoc_friendly_app_name() -> windows::Win32::UI::Shell::ASSOCSTR {
+    windows::Win32::UI::Shell::ASSOCSTR_FRIENDLYAPPNAME
+}
+
+#[cfg(target_os = "windows")]
+fn windows_assoc_executable() -> windows::Win32::UI::Shell::ASSOCSTR {
+    windows::Win32::UI::Shell::ASSOCSTR_EXECUTABLE
+}
+
+#[cfg(target_os = "windows")]
+fn windows_assoc_query_string(
+    association: &str,
+    query: windows::Win32::UI::Shell::ASSOCSTR,
+) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::UI::Shell::{ASSOCF_INIT_IGNOREUNKNOWN, AssocQueryStringW},
+        core::{PCWSTR, PWSTR},
+    };
+
+    let association = std::ffi::OsStr::new(association)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut len = 0u32;
+    unsafe {
+        let _ = AssocQueryStringW(
+            ASSOCF_INIT_IGNOREUNKNOWN,
+            query,
+            PCWSTR::from_raw(association.as_ptr()),
+            PCWSTR::null(),
+            None,
+            &mut len,
+        );
+    }
+    if len == 0 {
+        return None;
+    }
+
+    let mut output = vec![0u16; len as usize];
+    let result = unsafe {
+        AssocQueryStringW(
+            ASSOCF_INIT_IGNOREUNKNOWN,
+            query,
+            PCWSTR::from_raw(association.as_ptr()),
+            PCWSTR::null(),
+            Some(PWSTR::from_raw(output.as_mut_ptr())),
+            &mut len,
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+
+    output.truncate(
+        output
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(output.len()),
+    );
+    String::from_utf16(&output)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_executable_display_name(path: &Path) -> Option<String> {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
 }
 
 #[cfg(target_os = "linux")]
@@ -369,6 +536,57 @@ fn linux_has_default_application(path: &Path) -> Option<bool> {
         .status
         .success()
         .then(|| !String::from_utf8_lossy(&default.stdout).trim().is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_application_for_file(path: &Path) -> Option<DefaultApplication> {
+    let mime = linux_file_mime_type(path)?;
+    let default_id = linux_default_desktop_id_for_mime(&mime)?;
+    let entries = freedesktop_desktop_entry::desktop_entries(&[]);
+    let app_id = default_id.strip_suffix(".desktop").unwrap_or(&default_id);
+    let entry = entries
+        .iter()
+        .find(|entry| entry.id() == app_id || format!("{}.desktop", entry.id()) == default_id);
+    let name = entry
+        .and_then(|entry| entry.full_name::<&str>(&[]))
+        .or_else(|| entry.and_then(|entry| entry.name::<&str>(&[])))
+        .map(|name| name.into_owned())
+        .unwrap_or_else(|| default_id.clone());
+
+    Some(DefaultApplication { name, path: None })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_file_mime_type(path: &Path) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("xdg-mime")
+        .args(["query", "filetype"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_desktop_id_for_mime(mime: &str) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("xdg-mime")
+        .args(["query", "default", mime])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(target_os = "macos")]
@@ -457,6 +675,36 @@ fn mac_has_default_application(path: &Path) -> bool {
         });
         let _: () = msg_send![pool, drain];
         has_default
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_default_application_for_file(path: &Path) -> Option<DefaultApplication> {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let default = (|| {
+            let url = mac_file_url(path)?;
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let application: id = msg_send![workspace, URLForApplicationToOpenURL: url];
+            if application == nil {
+                return None;
+            }
+            let path = mac_path_from_url(application)?;
+            let name = path
+                .file_stem()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+            Some(DefaultApplication {
+                name,
+                path: Some(path),
+            })
+        })();
+        let _: () = msg_send![pool, drain];
+        default
     }
 }
 
@@ -625,6 +873,19 @@ mod tests {
         assert!(!windows_error_is_no_association(
             &io::Error::from_raw_os_error(2)
         ));
+    }
+
+    #[test]
+    fn windows_association_query_treats_leading_dot_names_as_extensions() {
+        assert_eq!(
+            windows_file_association_query(Path::new(".gitignore")).as_deref(),
+            Some(".gitignore")
+        );
+        assert_eq!(
+            windows_file_association_query(Path::new("notes.txt")).as_deref(),
+            Some(".txt")
+        );
+        assert_eq!(windows_file_association_query(Path::new("Makefile")), None);
     }
 
     #[cfg(target_os = "linux")]

@@ -86,6 +86,7 @@ png_icon!(PROGRAM_FILE_ICON, "files", "program.png");
 png_icon!(TEXT_FILE_ICON, "files", "text.png");
 png_icon!(VIDEO_FILE_ICON, "files", "video.png");
 png_icon!(DELETE_FILE_DIALOG_ICON, "files/large", "delete.png");
+png_icon!(COPY_FILE_DIALOG_ICON, "files/large", "copy.png");
 png_icon!(DELETE_FOLDER_DIALOG_ICON, "folders", "delete.png");
 png_icon!(DELETE_MIXED_DIALOG_ICON, "emblems", "alert.png");
 png_icon!(FOLDER_ICON, "folders", "folder.png");
@@ -227,15 +228,15 @@ pub(super) fn folder_icon_sized(size: f32) -> Div {
 }
 
 pub(super) fn directory_shortcut_icon() -> Div {
+    directory_shortcut_icon_sized(FILE_ICON_SIZE)
+}
+
+pub(super) fn directory_shortcut_icon_sized(size: f32) -> Div {
     div()
-        .w(px(FILE_ICON_SIZE))
-        .h(px(FILE_ICON_SIZE))
+        .w(px(size))
+        .h(px(size))
         .flex_shrink_0()
-        .child(image_icon(
-            FOLDER_SHORTCUT_ICON.clone(),
-            FILE_ICON_SIZE,
-            FILE_ICON_SIZE,
-        ))
+        .child(image_icon(FOLDER_SHORTCUT_ICON.clone(), size, size))
 }
 
 pub(super) fn file_icon() -> Div {
@@ -251,7 +252,19 @@ pub(super) fn executable_icon_sized(size: f32) -> Div {
 }
 
 pub(super) fn file_icon_for_path(path: &Path) -> Div {
-    sized_file_icon(FileIconKind::for_path(path), FILE_ICON_SIZE)
+    file_icon_for_path_sized(path, FILE_ICON_SIZE)
+}
+
+pub(super) fn file_icon_for_path_sized(path: &Path, size: f32) -> Div {
+    sized_file_icon(FileIconKind::for_path(path), size)
+}
+
+pub(super) fn copy_file_dialog_icon_sized(size: f32) -> Div {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .child(image_icon(COPY_FILE_DIALOG_ICON.clone(), size, size))
 }
 
 fn sized_file_icon(kind: FileIconKind, size: f32) -> Div {
@@ -388,6 +401,7 @@ mod tests {
     #[test]
     fn dialog_delete_icons_use_bundled_png_assets() {
         assert!(!DELETE_FILE_DIALOG_ICON_BYTES.is_empty());
+        assert!(!COPY_FILE_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_FOLDER_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_MIXED_DIALOG_ICON_BYTES.is_empty());
     }
