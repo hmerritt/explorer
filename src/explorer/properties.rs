@@ -994,7 +994,6 @@ impl PropertiesDialog {
             .bg(rgb(0xffffff))
             .min_w(px(0.0))
             .overflow_hidden()
-            .p(px(PROPERTIES_PANEL_PADDING))
             .child(body)
             .into_any_element()
     }
@@ -1028,6 +1027,7 @@ impl PropertiesDialog {
             .min_w(px(0.0))
             .id("properties-general-body")
             .overflow_y_scroll()
+            .p(px(PROPERTIES_PANEL_PADDING))
             .child(self.render_title_row(snapshot, cx))
             .child(separator());
 
@@ -1329,6 +1329,7 @@ impl PropertiesDialog {
             .id("properties-details-body")
             .overflow_y_scroll()
             .scrollbar_width(px(0.0))
+            .p(px(PROPERTIES_PANEL_PADDING))
             .track_scroll(&self.details_scroll_handle)
             .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
                 cx.notify();
@@ -1415,6 +1416,7 @@ impl PropertiesDialog {
             .id("properties-frames-body")
             .overflow_y_scroll()
             .scrollbar_width(px(0.0))
+            .p(px(PROPERTIES_PANEL_PADDING))
             .track_scroll(&self.frames_scroll_handle)
             .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
                 cx.notify();

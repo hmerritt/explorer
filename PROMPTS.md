@@ -2,10 +2,9 @@
 
 ## 1
 
-- Improve the "frames" tab for videos: Remove the "#n" prefix before the frame timestamp. Just show the timestamp. Extract full-resolution frames, as they are in the video, instead of a reduced size thumbnail.
-- Ability to paste an image that is currently in the clipboard and save it as a file in the current directory. auto-name the file 'image.<extension>' and instantly enter rename
 - Improve readme - add screenshots / branding
 - Large icons grid view (alternate to the current Details view)
+- Alt-double-click opens Properties dialog opens a "Details" window, for both files/folders.
 
 ## 2
 
@@ -27,7 +26,6 @@
 - Network drives (rclone https://rclone.org/ builtin)
 - rclone hook for drive, B2, S3, etc...
 - rclone https://rclone.org/ builtin, adding support for
-- Alt-double-click opens a "Details" window, for both files/folders.
 - Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
