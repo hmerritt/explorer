@@ -59,7 +59,6 @@ Major remaining Windows Explorer parity areas:
 - Open With "Custom" needs a rework (it doesn't work)
 - Image metadata
     - Remove quotes from string EXIF values, just show the text without the quotes
-    - Support for exifmeta custom tags
     - Edit metadata values
 - Video metadata
     - Frame Rate

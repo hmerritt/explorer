@@ -183,6 +183,7 @@ pub(super) enum PropertyDetailGroupKind {
     Camera,
     Exposure,
     Gps,
+    Exifmeta,
     Misc,
     NonStandard,
 }
@@ -194,6 +195,7 @@ impl PropertyDetailGroupKind {
             Self::Camera => "camera",
             Self::Exposure => "exposure",
             Self::Gps => "gps",
+            Self::Exifmeta => "exifmeta",
             Self::Misc => "misc",
             Self::NonStandard => "non-standard",
         }
@@ -205,6 +207,7 @@ const PROPERTY_DETAIL_GROUP_ORDER: &[PropertyDetailGroupKind] = &[
     PropertyDetailGroupKind::Camera,
     PropertyDetailGroupKind::Exposure,
     PropertyDetailGroupKind::Gps,
+    PropertyDetailGroupKind::Exifmeta,
     PropertyDetailGroupKind::Misc,
     PropertyDetailGroupKind::NonStandard,
 ];
@@ -1946,6 +1949,16 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
     let mut used_names = BTreeMap::new();
     let mut groups: BTreeMap<PropertyDetailGroupKind, Vec<PropertyDetail>> = BTreeMap::new();
     for field in fields {
+        if field.tag == exif::Tag::UserComment {
+            if let Some(details) = exifmeta_details(field) {
+                groups
+                    .entry(PropertyDetailGroupKind::Exifmeta)
+                    .or_default()
+                    .extend(details);
+                continue;
+            }
+        }
+
         let kind = exif_detail_group_kind(field);
         let tag = exif_tag_name(field.tag);
         let base_name = if tag_counts.get(&tag).copied().unwrap_or(0) > 1 {
@@ -1976,6 +1989,70 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
             (!details.is_empty()).then(|| property_detail_group(*kind, details))
         })
         .collect()
+}
+
+fn exifmeta_details(field: &exif::Field) -> Option<Vec<PropertyDetail>> {
+    let comment = exif_user_comment_text(&field.value)?;
+    let payload = exifmeta_json_payload(&comment)?;
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let object = value.as_object()?;
+    let mut details: Vec<_> = object
+        .iter()
+        .filter_map(|(key, value)| {
+            exifmeta_value_label(value).map(|value| PropertyDetail {
+                name: humanized_exif_tag_name(key),
+                value,
+            })
+        })
+        .collect();
+    details.sort_by(|left, right| left.name.cmp(&right.name));
+    (!details.is_empty()).then_some(details)
+}
+
+fn exif_user_comment_text(value: &exif::Value) -> Option<String> {
+    let bytes = match value {
+        exif::Value::Ascii(values) => values.first()?.as_slice(),
+        exif::Value::Undefined(bytes, _) => exif_user_comment_payload_bytes(bytes),
+        _ => return None,
+    };
+    let text = String::from_utf8_lossy(bytes);
+    Some(text.trim_matches('\0').trim().to_owned())
+}
+
+fn exif_user_comment_payload_bytes(bytes: &[u8]) -> &[u8] {
+    const ASCII_PREFIX: &[u8; 8] = b"ASCII\0\0\0";
+    const JIS_PREFIX: &[u8; 8] = b"JIS\0\0\0\0\0";
+    const UNICODE_PREFIX: &[u8; 8] = b"UNICODE\0";
+    const UNDEFINED_PREFIX: &[u8; 8] = b"\0\0\0\0\0\0\0\0";
+
+    for prefix in [
+        ASCII_PREFIX.as_slice(),
+        JIS_PREFIX.as_slice(),
+        UNICODE_PREFIX.as_slice(),
+        UNDEFINED_PREFIX.as_slice(),
+    ] {
+        if let Some(payload) = bytes.strip_prefix(prefix) {
+            return payload;
+        }
+    }
+
+    bytes
+}
+
+fn exifmeta_json_payload(comment: &str) -> Option<&str> {
+    let versioned_payload = comment.strip_prefix("exifmeta-v")?;
+    let json_start = versioned_payload.find('{')?;
+    Some(versioned_payload[json_start..].trim())
+}
+
+fn exifmeta_value_label(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => Some("null".to_owned()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
 }
 
 fn exif_tag_name(tag: exif::Tag) -> String {
@@ -3318,6 +3395,126 @@ mod tests {
     }
 
     #[test]
+    fn exifmeta_user_comment_renders_as_own_group() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        fs::write(
+            &file,
+            jpeg_with_exif(&exifmeta_tiff(
+                "exifmeta-v0.1.0\n{\"LocationExact\":\"The Yellow River in Jinan\",\"FilmRoll\":36,\"FilmMaker\":\"Kodak\",\"FilmName\":\"Vision 3 250D\",\"FilmFormat\":120,\"FilmColor\":true,\"FilmNegative\":true,\"FilmDevelopProcess\":\"ECN-2\",\"FilmDeveloper\":\"CD-3\",\"FilmProcessLab\":\"栗子胶片社 (Chestnut Film Studio)\",\"FilmProcessDate\":\"2026-05-22\",\"FilmScanner\":\"Hasselblad Flextight X5\"}",
+            )),
+        )
+        .unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Color",
+            "true",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Develop Process",
+            "ECN-2",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Format",
+            "120",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Process Lab",
+            "栗子胶片社 (Chestnut Film Studio)",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Location Exact",
+            "The Yellow River in Jinan",
+        );
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Misc, "User Comment"),
+            None
+        );
+
+        let exifmeta_index = group_index(&exif_groups, PropertyDetailGroupKind::Exifmeta).unwrap();
+        let misc_index = group_index(&exif_groups, PropertyDetailGroupKind::Misc).unwrap();
+        assert!(exifmeta_index < misc_index);
+
+        let exifmeta_group = detail_group(&exif_groups, PropertyDetailGroupKind::Exifmeta).unwrap();
+        let names: Vec<_> = exifmeta_group
+            .details
+            .iter()
+            .map(|detail| detail.name.as_str())
+            .collect();
+        let mut sorted_names = names.clone();
+        sorted_names.sort_unstable();
+        assert_eq!(names, sorted_names);
+    }
+
+    #[test]
+    fn invalid_exifmeta_user_comment_stays_in_misc() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        fs::write(
+            &file,
+            jpeg_with_exif(&exifmeta_tiff("exifmeta-v0.1.0\nnot json")),
+        )
+        .unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert!(detail_group(&exif_groups, PropertyDetailGroupKind::Exifmeta).is_none());
+        assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "User Comment");
+    }
+
+    #[test]
+    fn multiselect_exifmeta_details_use_existing_mixed_value_behavior() {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.jpg");
+        let second = temp.path().join("b.jpg");
+        fs::write(
+            &first,
+            jpeg_with_exif(&exifmeta_tiff(
+                "exifmeta-v0.1.0\n{\"FilmMaker\":\"Kodak\",\"FilmName\":\"Same\"}",
+            )),
+        )
+        .unwrap();
+        fs::write(
+            &second,
+            jpeg_with_exif(&exifmeta_tiff(
+                "exifmeta-v0.2.0\n{\"FilmMaker\":\"Fuji\",\"FilmName\":\"Same\"}",
+            )),
+        )
+        .unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget {
+            paths: vec![first, second],
+        });
+
+        assert_eq!(
+            detail_value(
+                &exif_groups,
+                PropertyDetailGroupKind::Exifmeta,
+                "Film Maker"
+            ),
+            Some("")
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Name",
+            "Same",
+        );
+    }
+
+    #[test]
     fn non_image_details_do_not_include_exif_fields() {
         let temp = TempDir::new();
         let file = temp.path().join("note.txt");
@@ -3515,6 +3712,10 @@ mod tests {
         groups.iter().find(|group| group.kind == kind)
     }
 
+    fn group_index(groups: &[PropertyDetailGroup], kind: PropertyDetailGroupKind) -> Option<usize> {
+        groups.iter().position(|group| group.kind == kind)
+    }
+
     fn detail_value<'a>(
         groups: &'a [PropertyDetailGroup],
         kind: PropertyDetailGroupKind,
@@ -3613,6 +3814,51 @@ mod tests {
         tiff
     }
 
+    fn exifmeta_tiff(comment: &str) -> Vec<u8> {
+        let make = ascii_exif_value("Canon");
+        let model = ascii_exif_value("TestCam");
+        let comment = undefined_exif_value(comment);
+        let ifd0_entry_count = 4u16;
+        let ifd0_start = 8usize;
+        let ifd0_end = ifd0_start + 2 + usize::from(ifd0_entry_count) * 12 + 4;
+        let make_offset = ifd0_end;
+        let model_offset = make_offset + make.len();
+        let exif_ifd_offset = model_offset + model.len();
+        let comment_offset = exif_ifd_offset + 2 + 12 + 4;
+
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&(ifd0_start as u32).to_le_bytes());
+        tiff.extend_from_slice(&ifd0_entry_count.to_le_bytes());
+        push_ifd_entry(&mut tiff, 0x010f, 2, make.len() as u32, make_offset as u32);
+        push_ifd_entry(
+            &mut tiff,
+            0x0110,
+            2,
+            model.len() as u32,
+            model_offset as u32,
+        );
+        push_ifd_entry(&mut tiff, 0x0112, 3, 1, 1);
+        push_ifd_entry(&mut tiff, 0x8769, 4, 1, exif_ifd_offset as u32);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&make);
+        tiff.extend_from_slice(&model);
+
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        push_ifd_entry(
+            &mut tiff,
+            0x9286,
+            7,
+            comment.len() as u32,
+            comment_offset as u32,
+        );
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&comment);
+
+        tiff
+    }
+
     fn grouped_exif_tiff() -> Vec<u8> {
         let make = ascii_exif_value("Canon");
         let model = ascii_exif_value("TestCam");
@@ -3657,6 +3903,12 @@ mod tests {
     }
 
     fn ascii_exif_value(value: &str) -> Vec<u8> {
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
+    fn undefined_exif_value(value: &str) -> Vec<u8> {
         let mut bytes = value.as_bytes().to_vec();
         bytes.push(0);
         bytes
