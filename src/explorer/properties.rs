@@ -31,14 +31,14 @@ const PROPERTIES_WIDTH: f32 = 408.0;
 const PROPERTIES_HEIGHT: f32 = 520.0;
 const PROPERTIES_PADDING: f32 = 10.0;
 const PROPERTIES_PANEL_PADDING: f32 = 20.0;
-const PROPERTIES_TAB_HEIGHT: f32 = 30.0;
+const PROPERTIES_TAB_HEIGHT: f32 = 22.0;
 const PROPERTIES_ROW_HEIGHT: f32 = 24.0;
 const PROPERTIES_BUTTON_HEIGHT: f32 = 28.0;
 const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
 const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
 const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
-const PROPERTIES_BORDER: u32 = 0xd0d0d0;
+const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -614,32 +614,10 @@ impl PropertiesDialog {
     }
 
     fn render_title_row(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
-        let title: AnyElement = if let Some(counts) = snapshot.selection_counts.as_ref() {
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .h(px(34.0))
-                .flex()
-                .items_center()
-                .truncate()
-                .text_size(px(12.0))
-                .child(SharedString::from(selection_count_label(counts)))
-                .into_any_element()
+        let title_text = if let Some(counts) = snapshot.selection_counts.as_ref() {
+            selection_count_label(counts)
         } else {
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .h(px(34.0))
-                .border_1()
-                .border_color(rgb(PROPERTIES_BORDER))
-                .bg(rgb(0xffffff))
-                .px(px(6.0))
-                .flex()
-                .items_center()
-                .truncate()
-                .text_size(px(12.0))
-                .child(SharedString::from(snapshot.title.clone()))
-                .into_any_element()
+            snapshot.title.clone()
         };
 
         div()
@@ -649,7 +627,18 @@ impl PropertiesDialog {
             .gap(px(32.0)) // Refactor so item name is inline with the rest of the values below it
             .pb(px(8.0))
             .child(self.render_item_icon(snapshot, cx))
-            .child(title)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h(px(34.0))
+                    .flex()
+                    .items_center()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .child(SharedString::from(title_text))
+                    .into_any_element(),
+            )
             .into_any_element()
     }
 
@@ -830,8 +819,6 @@ impl PropertiesDialog {
             .justify_end()
             .gap(px(8.0))
             .pt(px(12.0))
-            .border_t_1()
-            .border_color(rgb(0xe5e5e5))
             .child(
                 property_button("properties-ok", "OK", true, window.scale_factor()).on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1843,12 +1830,12 @@ fn tab_button(
         .flex()
         .items_center()
         .border_1()
-        .border_color(rgb(if active == tab {
-            PROPERTIES_BORDER
-        } else {
-            0xffffff
-        }))
-        .bg(rgb(if active == tab { 0xffffff } else { 0xf4f4f4 }))
+        .border_color(rgb(PROPERTIES_BORDER))
+        .border_b_0()
+        .bg(rgb(if active == tab { 0xffffff } else { 0xf3f3f3 }))
+        .when(active != tab, |this| {
+            this.hover(|style| style.bg(rgb(0xededed)))
+        })
         .cursor_default()
         .child(label)
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_active_tab(tab, cx)))
