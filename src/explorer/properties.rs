@@ -1978,7 +1978,7 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
 
         groups.entry(kind).or_default().push(PropertyDetail {
             name,
-            value: field.display_value().with_unit(&exif).to_string(),
+            value: exif_detail_value_label(field, &exif),
         });
     }
 
@@ -1989,6 +1989,26 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
             (!details.is_empty()).then(|| property_detail_group(*kind, details))
         })
         .collect()
+}
+
+fn exif_detail_value_label(field: &exif::Field, exif: &exif::Exif) -> String {
+    match &field.value {
+        exif::Value::Ascii(values) => exif_ascii_value_label(values),
+        _ => field.display_value().with_unit(exif).to_string(),
+    }
+}
+
+fn exif_ascii_value_label(values: &[Vec<u8>]) -> String {
+    values
+        .iter()
+        .filter_map(|bytes| {
+            let value = String::from_utf8_lossy(bytes)
+                .trim_end_matches('\0')
+                .to_owned();
+            (!value.is_empty()).then_some(value)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn exifmeta_details(field: &exif::Field) -> Option<Vec<PropertyDetail>> {
@@ -3325,17 +3345,13 @@ mod tests {
 
         let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
 
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Camera,
-            "Make",
-            "Canon",
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
+            Some("Canon")
         );
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Camera,
-            "Model",
-            "TestCam",
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Model"),
+            Some("TestCam")
         );
         assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "Orientation");
     }
@@ -3352,18 +3368,31 @@ mod tests {
 
         let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
 
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Camera,
-            "Make (IFD 0)",
-            "Canon",
+        assert_eq!(
+            detail_value(
+                &exif_groups,
+                PropertyDetailGroupKind::Camera,
+                "Make (IFD 0)"
+            ),
+            Some("Canon")
         );
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Camera,
-            "Make (IFD 1)",
-            "Thumb",
+        assert_eq!(
+            detail_value(
+                &exif_groups,
+                PropertyDetailGroupKind::Camera,
+                "Make (IFD 1)"
+            ),
+            Some("Thumb")
         );
+    }
+
+    #[test]
+    fn exif_ascii_values_render_without_quotes() {
+        assert_eq!(
+            exif_ascii_value_label(&[b"Canon\0".to_vec(), b"".to_vec(), b"TestCam\0\0".to_vec()]),
+            "Canon, TestCam"
+        );
+        assert_eq!(exif_ascii_value_label(&[b"\0".to_vec()]), "");
     }
 
     #[test]

@@ -58,13 +58,23 @@ Major remaining Windows Explorer parity areas:
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - Open With "Custom" needs a rework (it doesn't work)
 - Image metadata
-    - Remove quotes from string EXIF values, just show the text without the quotes
     - Edit metadata values
 - Video metadata
+    - https://crates.io/crates/ffmpeg-sidecar#getting-started
+    - (ffprobe-like)
+    - (display eveything possible, such as items below (and more). Do so in an organised human-readable way)
     - Frame Rate
     - Resolution
     - Codec
+    - Container format
+    - Bit rate (both in kb/s, and MB/s)
+    - Subtitle(s)
+    - Video tracks
+    - Audio tracks
     - Format
+    - Duration
+    - aspect ratio
+    - Embeded title
     - Levels
     - Chroma Loc
     - Colormatrix
