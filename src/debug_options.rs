@@ -13,7 +13,8 @@ const DEBUG_SEARCH: u8 = 1 << 1;
 const DEBUG_ICONS: u8 = 1 << 2;
 const DEBUG_ARCHIVE: u8 = 1 << 3;
 const DEBUG_ARCHIVE_VERBOSE: u8 = 1 << 4;
-const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE;
+const DEBUG_PROPERTIES: u8 = 1 << 5;
+const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE | DEBUG_PROPERTIES;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -128,6 +129,10 @@ impl DebugOptions {
         self.flags & DEBUG_ARCHIVE_VERBOSE != 0
     }
 
+    pub(crate) fn properties_timings(self) -> bool {
+        self.flags & DEBUG_PROPERTIES != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
@@ -146,6 +151,10 @@ impl DebugOptions {
 
     fn enable_archive_verbose(&mut self) {
         self.flags |= DEBUG_ARCHIVE | DEBUG_ARCHIVE_VERBOSE;
+    }
+
+    fn enable_properties(&mut self) {
+        self.flags |= DEBUG_PROPERTIES;
     }
 
     fn enable_all(&mut self) {
@@ -195,6 +204,13 @@ pub(crate) fn archive_verbose_enabled() -> bool {
         flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
     }
     .archive_verbose()
+}
+
+pub(crate) fn properties_timings_enabled() -> bool {
+    DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .properties_timings()
 }
 
 #[cfg(feature = "benchmarks")]
@@ -256,6 +272,12 @@ pub(crate) fn log_icon_timing(message: fmt::Arguments<'_>) {
     }
 }
 
+pub(crate) fn log_property_timing(elapsed: Duration, message: fmt::Arguments<'_>) {
+    if properties_timings_enabled() {
+        eprintln!("[properties] {} {message}", format_timing_duration(elapsed));
+    }
+}
+
 fn format_timing_duration(elapsed: Duration) -> String {
     format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
@@ -298,9 +320,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
             "icon" | "icons" => options.enable_icons(),
             "archive" | "extract" => options.enable_archive(),
             "archive-verbose" | "extract-verbose" => options.enable_archive_verbose(),
+            "properties" | "property" | "props" => options.enable_properties(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, properties, all, or *."
             )),
         }
     }
@@ -327,6 +350,7 @@ mod tests {
         assert!(options.search_timings());
         assert!(options.icon_timings());
         assert!(!options.archive_timings());
+        assert!(!options.properties_timings());
         assert!(warnings.is_empty());
     }
 
@@ -336,6 +360,7 @@ mod tests {
 
         assert!(options.nav_timings());
         assert!(!options.search_timings());
+        assert!(!options.properties_timings());
         assert!(warnings.is_empty());
     }
 
@@ -350,6 +375,8 @@ mod tests {
         assert!(singular_options.icon_timings());
         assert!(!plural_options.nav_timings());
         assert!(!singular_options.search_timings());
+        assert!(!plural_options.properties_timings());
+        assert!(!singular_options.properties_timings());
         assert!(plural_warnings.is_empty());
         assert!(singular_warnings.is_empty());
     }
@@ -365,6 +392,7 @@ mod tests {
         assert!(extract_options.archive_timings());
         assert!(extract_options.nav_timings());
         assert!(!archive_options.nav_timings());
+        assert!(!archive_options.properties_timings());
         assert!(archive_warnings.is_empty());
         assert!(extract_warnings.is_empty());
     }
@@ -376,7 +404,29 @@ mod tests {
 
         assert!(options.archive_timings());
         assert!(options.archive_verbose());
+        assert!(!options.properties_timings());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_properties_debug_items() {
+        let (properties_options, properties_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=properties"]));
+        let (property_options, property_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=property"]));
+        let (props_options, props_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=props"]));
+
+        assert!(properties_options.properties_timings());
+        assert!(property_options.properties_timings());
+        assert!(props_options.properties_timings());
+        assert!(!properties_options.nav_timings());
+        assert!(!property_options.search_timings());
+        assert!(!props_options.icon_timings());
+        assert!(!properties_options.archive_timings());
+        assert!(properties_warnings.is_empty());
+        assert!(property_warnings.is_empty());
+        assert!(props_warnings.is_empty());
     }
 
     #[test]
@@ -389,10 +439,12 @@ mod tests {
         assert!(all_options.search_timings());
         assert!(all_options.icon_timings());
         assert!(all_options.archive_timings());
+        assert!(all_options.properties_timings());
         assert!(star_options.nav_timings());
         assert!(star_options.search_timings());
         assert!(star_options.icon_timings());
         assert!(star_options.archive_timings());
+        assert!(star_options.properties_timings());
         assert!(all_warnings.is_empty());
         assert!(star_warnings.is_empty());
     }
@@ -405,10 +457,12 @@ mod tests {
         assert!(!options.search_timings());
         assert!(!options.icon_timings());
         assert!(!options.archive_timings());
+        assert!(!options.properties_timings());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("paint"));
         assert!(warnings[0].contains("icons"));
         assert!(warnings[0].contains("archive"));
+        assert!(warnings[0].contains("properties"));
     }
 
     #[test]
@@ -419,6 +473,7 @@ mod tests {
         assert!(options.search_timings());
         assert!(options.icon_timings());
         assert!(options.archive_timings());
+        assert!(options.properties_timings());
         assert!(warnings.is_empty());
     }
 
@@ -430,6 +485,7 @@ mod tests {
         assert!(options.search_timings());
         assert!(options.icon_timings());
         assert!(options.archive_timings());
+        assert!(options.properties_timings());
         assert!(warnings.is_empty());
     }
 

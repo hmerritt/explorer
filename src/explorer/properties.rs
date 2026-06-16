@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 #[cfg(target_os = "windows")]
@@ -372,9 +372,30 @@ impl PropertiesDialog {
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(
-                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
-                )
+                .spawn(async move {
+                    let path_count = target.paths.len();
+                    let started = Instant::now();
+                    let result = collect_property_snapshot_with_date_format(target, &date_format);
+                    match &result {
+                        Ok(snapshot) => crate::debug_options::log_property_timing(
+                            started.elapsed(),
+                            format_args!(
+                                "general snapshot ready paths={} details={} title={:?}",
+                                path_count,
+                                detail_count(&snapshot.details),
+                                snapshot.title
+                            ),
+                        ),
+                        Err(error) => crate::debug_options::log_property_timing(
+                            started.elapsed(),
+                            format_args!(
+                                "general snapshot failed paths={} error={:?}",
+                                path_count, error
+                            ),
+                        ),
+                    }
+                    result
+                })
                 .await;
 
             let _ = this.update(cx, |dialog, cx| {
@@ -430,7 +451,27 @@ impl PropertiesDialog {
         let task = cx.spawn(async move |this, cx| {
             let groups = cx
                 .background_executor()
-                .spawn(async move { collect_media_detail_groups(&target) })
+                .spawn(async move {
+                    let path_count = target.paths.len();
+                    let candidate_count = target
+                        .paths
+                        .iter()
+                        .filter(|path| path_may_have_media_details(path))
+                        .count();
+                    let started = Instant::now();
+                    let groups = collect_media_detail_groups(&target);
+                    crate::debug_options::log_property_timing(
+                        started.elapsed(),
+                        format_args!(
+                            "details ready paths={} media_candidates={} groups={} details={}",
+                            path_count,
+                            candidate_count,
+                            groups.len(),
+                            detail_count(&groups)
+                        ),
+                    );
+                    groups
+                })
                 .await;
 
             let _ = this.update(cx, |dialog, cx| {
@@ -1742,6 +1783,10 @@ fn merged_details(items: &[PropertyItem]) -> Vec<PropertyDetailGroup> {
     merge_detail_groups(items.iter().map(|item| item.details.as_slice()))
 }
 
+fn detail_count(groups: &[PropertyDetailGroup]) -> usize {
+    groups.iter().map(|group| group.details.len()).sum()
+}
+
 fn merge_detail_groups<'a>(
     groups_by_item: impl IntoIterator<Item = &'a [PropertyDetailGroup]>,
 ) -> Vec<PropertyDetailGroup> {
@@ -1998,7 +2043,17 @@ fn collect_exif_detail_groups(target: &PropertyTarget) -> Vec<PropertyDetailGrou
 }
 
 fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
-    if !ffmpeg_sidecar::ffprobe::ffprobe_is_installed() {
+    let availability_started = Instant::now();
+    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "video ffprobe availability path={} installed={}",
+            path.display(),
+            ffprobe_installed
+        ),
+    );
+    if !ffprobe_installed {
         return video_metadata_unavailable_groups(
             "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer.",
         );
@@ -2008,15 +2063,45 @@ fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
         Ok(output) => output,
         Err(error) => return video_metadata_unavailable_groups(format!("ffprobe failed: {error}")),
     };
+    let parse_started = Instant::now();
     let probe: serde_json::Value = match serde_json::from_slice(&output) {
-        Ok(probe) => probe,
+        Ok(probe) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "video ffprobe json parsed path={} stdout_bytes={}",
+                    path.display(),
+                    output.len()
+                ),
+            );
+            probe
+        }
         Err(error) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "video ffprobe json parse failed path={} stdout_bytes={} error={}",
+                    path.display(),
+                    output.len(),
+                    error
+                ),
+            );
             return video_metadata_unavailable_groups(format!(
                 "ffprobe returned unreadable metadata: {error}"
             ));
         }
     };
+    let grouping_started = Instant::now();
     let groups = video_detail_groups_from_probe(&probe);
+    crate::debug_options::log_property_timing(
+        grouping_started.elapsed(),
+        format_args!(
+            "video metadata grouped path={} groups={} details={}",
+            path.display(),
+            groups.len(),
+            detail_count(&groups)
+        ),
+    );
     if groups.is_empty() {
         return video_metadata_unavailable_groups("No video metadata was reported.");
     }
@@ -2058,18 +2143,56 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = command
-        .output()
-        .map_err(|error| format!("could not start ffprobe: {error}"))?;
+    let started = Instant::now();
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "video ffprobe command failed path={} error={}",
+                    path.display(),
+                    error
+                ),
+            );
+            return Err(format!("could not start ffprobe: {error}"));
+        }
+    };
     if output.status.success() {
+        crate::debug_options::log_property_timing(
+            started.elapsed(),
+            format_args!(
+                "video ffprobe command succeeded path={} stdout_bytes={}",
+                path.display(),
+                output.stdout.len()
+            ),
+        );
         return Ok(output.stdout);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
-        Err(format!("exited with {}", output.status))
+        let error = format!("exited with {}", output.status);
+        crate::debug_options::log_property_timing(
+            started.elapsed(),
+            format_args!(
+                "video ffprobe command failed path={} error={}",
+                path.display(),
+                error
+            ),
+        );
+        Err(error)
     } else {
-        Err(format!("exited with {}: {stderr}", output.status))
+        let error = format!("exited with {}: {stderr}", output.status);
+        crate::debug_options::log_property_timing(
+            started.elapsed(),
+            format_args!(
+                "video ffprobe command failed path={} error={}",
+                path.display(),
+                error
+            ),
+        );
+        Err(error)
     }
 }
 
@@ -2939,19 +3062,57 @@ fn title_case_words(text: &str) -> String {
 }
 
 fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
-    let Ok(file) = fs::File::open(path) else {
-        return Vec::new();
+    let open_started = Instant::now();
+    let file = match fs::File::open(path) {
+        Ok(file) => {
+            crate::debug_options::log_property_timing(
+                open_started.elapsed(),
+                format_args!("exif file opened path={}", path.display()),
+            );
+            file
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                open_started.elapsed(),
+                format_args!(
+                    "exif file open failed path={} error={}",
+                    path.display(),
+                    error
+                ),
+            );
+            return Vec::new();
+        }
     };
     let mut reader = BufReader::new(file);
-    let Ok(exif) = exif::Reader::new()
+    let read_started = Instant::now();
+    let exif = match exif::Reader::new()
         .continue_on_error(true)
         .read_from_container(&mut reader)
         .or_else(|error| error.distill_partial_result(|_| {}))
-    else {
-        return Vec::new();
+    {
+        Ok(exif) => {
+            crate::debug_options::log_property_timing(
+                read_started.elapsed(),
+                format_args!("exif container read path={}", path.display()),
+            );
+            exif
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                read_started.elapsed(),
+                format_args!(
+                    "exif container read failed path={} error={}",
+                    path.display(),
+                    error
+                ),
+            );
+            return Vec::new();
+        }
     };
 
+    let grouping_started = Instant::now();
     let fields: Vec<_> = exif.fields().collect();
+    let field_count = fields.len();
     let mut tag_counts = BTreeMap::new();
     for field in &fields {
         *tag_counts.entry(exif_tag_name(field.tag)).or_insert(0usize) += 1;
@@ -2993,13 +3154,24 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
         });
     }
 
-    PROPERTY_DETAIL_GROUP_ORDER
+    let groups: Vec<_> = PROPERTY_DETAIL_GROUP_ORDER
         .iter()
         .filter_map(|kind| {
             let details = groups.remove(kind)?;
             (!details.is_empty()).then(|| property_detail_group(*kind, details))
         })
-        .collect()
+        .collect();
+    crate::debug_options::log_property_timing(
+        grouping_started.elapsed(),
+        format_args!(
+            "exif details grouped path={} fields={} groups={} details={}",
+            path.display(),
+            field_count,
+            groups.len(),
+            detail_count(&groups)
+        ),
+    );
+    groups
 }
 
 fn exif_detail_value_label(field: &exif::Field, exif: &exif::Exif) -> String {
