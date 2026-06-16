@@ -9,11 +9,13 @@ use std::{
 use filetime::{FileTime, set_file_times};
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, FocusHandle, Focusable, Image,
-    IntoElement, Render, SharedString, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
+    IntoElement, Render, SharedString, Task, TextRun, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use thousands::Separable;
 
+#[cfg(not(target_os = "windows"))]
+use crate::explorer::open_with::OpenWithOutcome;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
     entry::{DirectoryLinkKind, EntryKind},
@@ -22,7 +24,7 @@ use crate::explorer::{
         copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
         folder_icon_sized, image_icon,
     },
-    open_with::{DefaultApplication, OpenWithOutcome, default_application_for_file},
+    open_with::{DefaultApplication, default_application_for_file},
     view::ExplorerView,
 };
 use crate::settings::SettingsState;
@@ -32,6 +34,8 @@ const PROPERTIES_HEIGHT: f32 = 520.0;
 const PROPERTIES_PADDING: f32 = 10.0;
 const PROPERTIES_PANEL_PADDING: f32 = 20.0;
 const PROPERTIES_TAB_HEIGHT: f32 = 22.0;
+const PROPERTIES_TAB_HORIZONTAL_PADDING: f32 = 12.0;
+const PROPERTIES_BORDER_WIDTH: f32 = 1.0;
 const PROPERTIES_ROW_HEIGHT: f32 = 24.0;
 const PROPERTIES_BUTTON_HEIGHT: f32 = 28.0;
 const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
@@ -171,9 +175,11 @@ pub(super) struct PropertiesDialog {
     snapshot_state: PropertySnapshotState,
     snapshot_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
+    #[cfg(not(target_os = "windows"))]
     default_app_task: Option<Task<()>>,
     draft: EditablePropertyDraft,
     apply_error: Option<String>,
+    #[cfg(not(target_os = "windows"))]
     default_app_error: Option<String>,
     completed: bool,
 }
@@ -232,9 +238,11 @@ impl PropertiesDialog {
             snapshot_state: PropertySnapshotState::Loading,
             snapshot_task: None,
             apply_task: None,
+            #[cfg(not(target_os = "windows"))]
             default_app_task: None,
             draft: EditablePropertyDraft::default(),
             apply_error: None,
+            #[cfg(not(target_os = "windows"))]
             default_app_error: None,
             completed: false,
         };
@@ -353,7 +361,7 @@ impl PropertiesDialog {
         self.apply_task = Some(task);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn change_default_app(
         &mut self,
         snapshot: &PropertySnapshot,
@@ -427,7 +435,7 @@ impl PropertiesDialog {
         cx.notify();
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn refresh_after_default_app_change(
         &mut self,
         path: PathBuf,
@@ -497,7 +505,8 @@ impl Render for PropertiesDialog {
                     .flex_col()
                     .size_full()
                     .p(px(PROPERTIES_PADDING))
-                    .child(self.render_tabs(cx))
+                    .child(self.render_tabs(window, cx))
+                    .child(self.render_tab_panel_border(window))
                     .child(self.render_body(window, cx))
                     .child(self.render_buttons(window, cx)),
             )
@@ -511,12 +520,43 @@ impl Focusable for PropertiesDialog {
 }
 
 impl PropertiesDialog {
-    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tabs(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = div().flex().flex_row().h(px(PROPERTIES_TAB_HEIGHT));
         for &(tab, label) in PROPERTY_TABS {
-            tabs = tabs.child(tab_button(label, tab, self.active_tab, cx));
+            tabs = tabs.child(tab_button(
+                label,
+                tab,
+                self.active_tab,
+                property_tab_width(label, &self.font, window),
+                cx,
+            ));
         }
         tabs.into_any_element()
+    }
+
+    fn render_tab_panel_border(&self, window: &Window) -> AnyElement {
+        let mut border = div().flex().flex_row().h(px(PROPERTIES_BORDER_WIDTH));
+        for &(tab, label) in PROPERTY_TABS {
+            let color = if self.active_tab == tab {
+                0xffffff
+            } else {
+                PROPERTIES_BORDER
+            };
+            border = border.child(
+                div()
+                    .w(px(property_tab_width(label, &self.font, window)))
+                    .h(px(PROPERTIES_BORDER_WIDTH))
+                    .bg(rgb(color)),
+            );
+        }
+        border
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(PROPERTIES_BORDER_WIDTH))
+                    .bg(rgb(PROPERTIES_BORDER)),
+            )
+            .into_any_element()
     }
 
     fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -535,6 +575,7 @@ impl PropertiesDialog {
             .flex_1()
             .min_h(px(0.0))
             .border_1()
+            .border_t_0()
             .border_color(rgb(PROPERTIES_BORDER))
             .bg(rgb(0xffffff))
             .p(px(PROPERTIES_PANEL_PADDING))
@@ -603,6 +644,7 @@ impl PropertiesDialog {
         body = body
             .child(separator())
             .child(self.render_attributes_row(snapshot, cx));
+        #[cfg(not(target_os = "windows"))]
         if let Some(error) = self.default_app_error.as_ref() {
             body = body.child(error_message(error));
         }
@@ -624,9 +666,15 @@ impl PropertiesDialog {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(32.0)) // Refactor so item name is inline with the rest of the values below it
             .pb(px(8.0))
-            .child(self.render_item_icon(snapshot, cx))
+            .child(
+                div()
+                    .w(px(PROPERTIES_LABEL_WIDTH))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .child(self.render_item_icon(snapshot, cx)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -659,9 +707,10 @@ impl PropertiesDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let snapshot_for_click = snapshot.clone();
-        let enabled = self.default_app_task.is_none();
-        div()
+        #[cfg(target_os = "windows")]
+        let _ = window;
+
+        let row = div()
             .flex()
             .flex_row()
             .items_center()
@@ -692,8 +741,13 @@ impl PropertiesDialog {
                                 .unwrap_or_else(|| "Unknown application".to_owned()),
                         )),
                     ),
-            )
-            .child(
+            );
+
+        #[cfg(not(target_os = "windows"))]
+        let row = {
+            let snapshot_for_click = snapshot.clone();
+            let enabled = self.default_app_task.is_none();
+            row.child(
                 property_button(
                     "properties-change-default-app",
                     "Change...",
@@ -707,7 +761,9 @@ impl PropertiesDialog {
                     }))
                 }),
             )
-            .into_any_element()
+        };
+
+        row.into_any_element()
     }
 
     fn render_default_app_icon(
@@ -1674,6 +1730,7 @@ fn single_file_default_app_path(snapshot: &PropertySnapshot) -> Option<&Path> {
         .flatten()
 }
 
+#[cfg(not(target_os = "windows"))]
 fn default_app_change_error(
     path: &Path,
     before: &Option<PropertyDefaultApp>,
@@ -1710,6 +1767,7 @@ fn default_app_change_error(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn property_path_display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -1817,6 +1875,7 @@ fn tab_button(
     label: &'static str,
     tab: PropertyTab,
     active: PropertyTab,
+    width: f32,
     cx: &mut Context<PropertiesDialog>,
 ) -> AnyElement {
     let id = match tab {
@@ -1825,8 +1884,9 @@ fn tab_button(
     };
     div()
         .id(id)
+        .w(px(width))
         .h(px(PROPERTIES_TAB_HEIGHT))
-        .px(px(12.0))
+        .px(px(PROPERTIES_TAB_HORIZONTAL_PADDING))
         .flex()
         .items_center()
         .border_1()
@@ -1840,6 +1900,25 @@ fn tab_button(
         .child(label)
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_active_tab(tab, cx)))
         .into_any_element()
+}
+
+fn property_tab_width(label: &str, font: &gpui::Font, window: &Window) -> f32 {
+    let run = TextRun {
+        len: label.len(),
+        font: font.clone(),
+        color: rgb(0x000000).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    f32::from(
+        window
+            .text_system()
+            .layout_line(label, px(12.0), &[run], None)
+            .width,
+    ) + PROPERTIES_TAB_HORIZONTAL_PADDING * 2.0
+        + PROPERTIES_BORDER_WIDTH * 2.0
 }
 
 fn centered_message(message: impl Into<String>) -> AnyElement {
@@ -2196,6 +2275,7 @@ mod tests {
         assert_eq!(property_size_label(2048), "2.0 KB (2,048 bytes)");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn default_app_change_error_reports_unverified_changes() {
         let temp = TempDir::new();
