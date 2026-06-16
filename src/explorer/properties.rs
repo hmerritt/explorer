@@ -16,7 +16,7 @@ use filetime::{FileTime, set_file_times};
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable,
     Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage, Task, TextRun,
+    Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage, Task, TextRun,
     TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
     WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
@@ -275,22 +275,11 @@ enum PropertyFramesState {
     Failed(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PropertyFrameThumbnail {
     label: String,
-    image: Arc<Image>,
+    image: Arc<RenderImage>,
     aspect_ratio: f32,
-}
-
-impl From<VideoFramePng> for PropertyFrameThumbnail {
-    fn from(value: VideoFramePng) -> Self {
-        let aspect_ratio = video_frame_png_aspect_ratio(&value.png);
-        Self {
-            label: value.label,
-            image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, value.png)),
-            aspect_ratio,
-        }
-    }
 }
 
 pub(super) struct PropertiesDialog {
@@ -589,13 +578,15 @@ impl PropertiesDialog {
                     .background_executor()
                     .spawn({
                         let path = path.clone();
-                        async move { extract_video_frame_png(&path, request) }
+                        async move {
+                            extract_video_frame_png(&path, request)
+                                .and_then(prepare_video_frame_thumbnail)
+                        }
                     })
                     .await;
 
                 match frame {
-                    Ok(frame) => {
-                        let thumbnail = PropertyFrameThumbnail::from(frame);
+                    Ok(thumbnail) => {
                         let should_continue = this
                             .update(cx, |dialog, cx| {
                                 if dialog.frames_generation != generation {
@@ -614,6 +605,11 @@ impl PropertiesDialog {
                         if !should_continue {
                             return;
                         }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(
+                                VIDEO_FRAME_PUBLISH_INTERVAL_MS,
+                            ))
+                            .await;
                     }
                     Err(error) => errors.push(error),
                 }
@@ -2289,7 +2285,9 @@ const VIDEO_FRAME_MEDIUM_INSET_SECONDS: f64 = 1.0;
 const VIDEO_FRAME_LONG_INSET_SECONDS: f64 = 5.0;
 const VIDEO_FRAME_EOF_SEEK_INSET_SECONDS: f64 = 0.05;
 const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+#[cfg(test)]
 const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
+const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
 
 fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
@@ -2542,6 +2540,36 @@ fn extract_video_frame_png(
     }
 }
 
+fn prepare_video_frame_thumbnail(frame: VideoFramePng) -> Result<PropertyFrameThumbnail, String> {
+    let mut image = image::load_from_memory_with_format(&frame.png, image::ImageFormat::Png)
+        .map_err(|error| {
+            format!(
+                "{}: ffmpeg returned unreadable PNG data: {error}",
+                frame.label
+            )
+        })?
+        .into_rgba8();
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "{}: ffmpeg returned a PNG image with no dimensions",
+            frame.label
+        ));
+    }
+
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(PropertyFrameThumbnail {
+        label: frame.label,
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        aspect_ratio: width as f32 / height as f32,
+    })
+}
+
+#[cfg(test)]
 fn video_frame_png_aspect_ratio(png: &[u8]) -> f32 {
     image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .ok()
@@ -5572,11 +5600,43 @@ mod tests {
     }
 
     #[test]
+    fn video_frame_thumbnail_preparation_preserves_png_dimensions() {
+        let mut bytes = Vec::new();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let thumbnail = prepare_video_frame_thumbnail(VideoFramePng {
+            label: "0:00.000".to_owned(),
+            png: bytes,
+        })
+        .unwrap();
+
+        let size = thumbnail.image.size(0);
+        assert_eq!(thumbnail.label, "0:00.000");
+        assert_eq!(thumbnail.aspect_ratio, 2.0);
+        assert_eq!(size.width.0, 4);
+        assert_eq!(size.height.0, 2);
+    }
+
+    #[test]
     fn video_frame_png_aspect_ratio_falls_back_for_invalid_png() {
         assert_eq!(
             video_frame_png_aspect_ratio(b"not a png"),
             VIDEO_FRAME_FALLBACK_ASPECT_RATIO
         );
+    }
+
+    #[test]
+    fn video_frame_thumbnail_preparation_rejects_invalid_png() {
+        let error = prepare_video_frame_thumbnail(VideoFramePng {
+            label: "0:00.000".to_owned(),
+            png: b"not a png".to_vec(),
+        })
+        .unwrap_err();
+
+        assert!(error.contains("unreadable PNG data"));
     }
 
     #[test]
