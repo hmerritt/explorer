@@ -56,8 +56,8 @@ const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
 const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
 const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
-const PROPERTIES_FRAME_TILE_WIDTH: f32 = 160.0;
-const PROPERTIES_FRAME_IMAGE_HEIGHT: f32 = 90.0;
+const PROPERTIES_FRAME_LIST_GAP: f32 = 16.0;
+const PROPERTIES_FRAME_LABEL_GAP: f32 = 4.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
@@ -269,21 +269,25 @@ enum PropertyDetailsState {
 
 enum PropertyFramesState {
     NotStarted,
-    Loading,
+    Loading(Vec<PropertyFrameThumbnail>),
     Ready(Vec<PropertyFrameThumbnail>),
     Failed(String),
 }
 
+#[derive(Clone)]
 struct PropertyFrameThumbnail {
     label: String,
     image: Arc<Image>,
+    aspect_ratio: f32,
 }
 
 impl From<VideoFramePng> for PropertyFrameThumbnail {
     fn from(value: VideoFramePng) -> Self {
+        let aspect_ratio = video_frame_png_aspect_ratio(&value.png);
         Self {
             label: value.label,
             image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, value.png)),
+            aspect_ratio,
         }
     }
 }
@@ -543,47 +547,121 @@ impl PropertiesDialog {
             return;
         };
 
-        self.frames_state = PropertyFramesState::Loading;
+        self.frames_state = PropertyFramesState::Loading(Vec::new());
         let generation = self.frames_generation;
         let task = cx.spawn(async move |this, cx| {
-            let result = cx
+            let started = Instant::now();
+            let requests = cx
                 .background_executor()
-                .spawn(async move {
-                    let started = Instant::now();
-                    let result = collect_video_frame_pngs(&path);
-                    match &result {
-                        Ok(frames) => crate::debug_options::log_property_timing(
-                            started.elapsed(),
-                            format_args!(
-                                "video frames ready path={} frames={}",
-                                path.display(),
-                                frames.len()
-                            ),
-                        ),
-                        Err(error) => crate::debug_options::log_property_timing(
-                            started.elapsed(),
-                            format_args!(
-                                "video frames failed path={} error={}",
-                                path.display(),
-                                error
-                            ),
-                        ),
-                    }
-                    result
+                .spawn({
+                    let path = path.clone();
+                    async move { prepare_video_frame_requests(&path) }
                 })
                 .await;
+
+            let requests = match requests {
+                Ok(requests) => requests,
+                Err(error) => {
+                    crate::debug_options::log_property_timing(
+                        started.elapsed(),
+                        format_args!(
+                            "video frames failed path={} error={}",
+                            path.display(),
+                            error
+                        ),
+                    );
+                    let _ = this.update(cx, |dialog, cx| {
+                        if dialog.frames_generation == generation {
+                            dialog.frames_task = None;
+                            dialog.frames_state = PropertyFramesState::Failed(error);
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
+
+            let mut errors = Vec::new();
+            let mut frame_count = 0usize;
+            for request in requests {
+                let frame = cx
+                    .background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move { extract_video_frame_png(&path, request) }
+                    })
+                    .await;
+
+                match frame {
+                    Ok(frame) => {
+                        let thumbnail = PropertyFrameThumbnail::from(frame);
+                        let should_continue = this
+                            .update(cx, |dialog, cx| {
+                                if dialog.frames_generation != generation {
+                                    return false;
+                                }
+                                let PropertyFramesState::Loading(frames) = &mut dialog.frames_state
+                                else {
+                                    return false;
+                                };
+                                frames.push(thumbnail);
+                                frame_count = frames.len();
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !should_continue {
+                            return;
+                        }
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+
+            let failed = frame_count == 0;
+            let error = failed.then(|| {
+                format!(
+                    "ffmpeg failed to extract video frames: {}",
+                    frame_extraction_error_summary(&errors)
+                )
+            });
+            if let Some(error) = error.as_ref() {
+                crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "video frames failed path={} error={}",
+                        path.display(),
+                        error
+                    ),
+                );
+            } else {
+                crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "video frames ready path={} frames={}",
+                        path.display(),
+                        frame_count
+                    ),
+                );
+            }
 
             let _ = this.update(cx, |dialog, cx| {
                 if dialog.frames_generation == generation {
                     dialog.frames_task = None;
-                    dialog.frames_state = match result {
-                        Ok(frames) => PropertyFramesState::Ready(
-                            frames
-                                .into_iter()
-                                .map(PropertyFrameThumbnail::from)
-                                .collect(),
-                        ),
-                        Err(error) => PropertyFramesState::Failed(error),
+                    dialog.frames_state = if let Some(error) = error {
+                        PropertyFramesState::Failed(error)
+                    } else {
+                        let frames = match std::mem::replace(
+                            &mut dialog.frames_state,
+                            PropertyFramesState::NotStarted,
+                        ) {
+                            PropertyFramesState::Loading(frames)
+                            | PropertyFramesState::Ready(frames) => frames,
+                            PropertyFramesState::NotStarted | PropertyFramesState::Failed(_) => {
+                                Vec::new()
+                            }
+                        };
+                        PropertyFramesState::Ready(frames)
                     };
                     cx.notify();
                 }
@@ -1340,13 +1418,32 @@ impl PropertiesDialog {
             }));
 
         match &self.frames_state {
-            PropertyFramesState::NotStarted | PropertyFramesState::Loading => {
+            PropertyFramesState::NotStarted => {
                 body = body.child(
                     div()
                         .min_w(px(0.0))
                         .w_full()
                         .text_color(rgb(PROPERTIES_MUTED_TEXT))
                         .truncate()
+                        .child("Generating video frames..."),
+                );
+            }
+            PropertyFramesState::Loading(frames) if frames.is_empty() => {
+                body = body.child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .truncate()
+                        .child("Generating video frames..."),
+                );
+            }
+            PropertyFramesState::Loading(frames) => {
+                body = body.child(frame_thumbnail_list(frames)).child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
                         .child("Generating video frames..."),
                 );
             }
@@ -1370,17 +1467,7 @@ impl PropertiesDialog {
                             .child("No video frames are available."),
                     );
                 } else {
-                    let mut grid = div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(8.0))
-                        .w_full()
-                        .min_w(px(0.0));
-                    for (index, frame) in frames.iter().enumerate() {
-                        grid = grid.child(frame_thumbnail_tile(index, frame));
-                    }
-                    body = body.child(grid);
+                    body = body.child(frame_thumbnail_list(frames));
                 }
             }
         }
@@ -2210,6 +2297,7 @@ const VIDEO_FRAME_LONG_INSET_SECONDS: f64 = 5.0;
 const VIDEO_FRAME_EOF_SEEK_INSET_SECONDS: f64 = 0.05;
 const VIDEO_FRAME_EXTRACT_WIDTH: u32 = 320;
 const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
 fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
@@ -2418,7 +2506,7 @@ struct VideoFramePng {
     png: Vec<u8>,
 }
 
-fn collect_video_frame_pngs(path: &Path) -> Result<Vec<VideoFramePng>, String> {
+fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, String> {
     let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
     if !ffprobe_installed {
         return Err(
@@ -2444,30 +2532,33 @@ fn collect_video_frame_pngs(path: &Path) -> Result<Vec<VideoFramePng>, String> {
         return Err("Video duration is not long enough to extract frames.".to_owned());
     }
 
-    let mut frames = Vec::new();
-    let mut errors = Vec::new();
-    for request in requests {
-        let label = video_frame_timestamp_label(request.label_seconds);
-        match ffmpeg_frame_png_output(path, request.seek_seconds) {
-            Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => {
-                frames.push(VideoFramePng { label, png });
-            }
-            Ok(png) => errors.push(format!(
-                "{label}: ffmpeg returned {} bytes, but not a PNG image",
-                png.len()
-            )),
-            Err(error) => errors.push(format!("{label}: {error}")),
-        }
-    }
+    Ok(requests)
+}
 
-    if frames.is_empty() {
-        return Err(format!(
-            "ffmpeg failed to extract video frames: {}",
-            frame_extraction_error_summary(&errors)
-        ));
+fn extract_video_frame_png(
+    path: &Path,
+    request: VideoFrameRequest,
+) -> Result<VideoFramePng, String> {
+    let label = video_frame_timestamp_label(request.label_seconds);
+    match ffmpeg_frame_png_output(path, request.seek_seconds) {
+        Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => Ok(VideoFramePng { label, png }),
+        Ok(png) => Err(format!(
+            "{label}: ffmpeg returned {} bytes, but not a PNG image",
+            png.len()
+        )),
+        Err(error) => Err(format!("{label}: {error}")),
     }
+}
 
-    Ok(frames)
+fn video_frame_png_aspect_ratio(png: &[u8]) -> f32 {
+    image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()
+        .and_then(|image| {
+            let width = image.width();
+            let height = image.height();
+            (width > 0 && height > 0).then_some(width as f32 / height as f32)
+        })
+        .unwrap_or(VIDEO_FRAME_FALLBACK_ASPECT_RATIO)
 }
 
 fn ffprobe_duration_seconds_from_probe(probe: &serde_json::Value) -> Option<f64> {
@@ -4540,39 +4631,57 @@ fn details_scrollbar_metrics_for_dimensions(
     ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
 }
 
-fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElement {
-    div()
-        .id(frame_thumbnail_id(index))
-        .w(px(PROPERTIES_FRAME_TILE_WIDTH))
-        .flex_shrink_0()
+fn frame_thumbnail_list(frames: &[PropertyFrameThumbnail]) -> AnyElement {
+    let mut list = div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .mb(px(4.0))
+        .gap(px(PROPERTIES_FRAME_LIST_GAP))
+        .w_full()
+        .min_w(px(0.0));
+    for (index, frame) in frames.iter().enumerate() {
+        list = list.child(frame_thumbnail_tile(index, frame));
+    }
+    list.into_any_element()
+}
+
+fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElement {
+    let mut image = div()
+        .w_full()
+        .border_1()
+        .border_color(rgb(PROPERTIES_BORDER))
+        .bg(rgb(0xf6f6f6))
+        .overflow_hidden()
         .child(
-            div()
-                .w_full()
-                .h(px(PROPERTIES_FRAME_IMAGE_HEIGHT))
-                .border_1()
-                .border_color(rgb(PROPERTIES_BORDER))
-                .bg(rgb(0xf6f6f6))
-                .overflow_hidden()
-                .child(
-                    gpui::img(frame.image.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Contain),
-                ),
-        )
+            gpui::img(frame.image.clone())
+                .size_full()
+                .object_fit(ObjectFit::Contain),
+        );
+    image.style().aspect_ratio = Some(frame.aspect_ratio);
+
+    div()
+        .id(frame_thumbnail_id(index))
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .gap(px(PROPERTIES_FRAME_LABEL_GAP))
+        .child(image)
         .child(
             div()
                 .w_full()
                 .min_w(px(0.0))
                 .text_size(px(11.0))
                 .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .truncate()
-                .child(SharedString::from(frame.label.clone())),
+                .child(SharedString::from(frame_thumbnail_label(
+                    index,
+                    &frame.label,
+                ))),
         )
         .into_any_element()
+}
+
+fn frame_thumbnail_label(index: usize, timestamp: &str) -> String {
+    format!("#{} {timestamp}", index + 1)
 }
 
 fn frame_thumbnail_id(index: usize) -> (&'static str, usize) {
@@ -4875,7 +4984,7 @@ fn property_button(
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use std::{collections::HashSet, time::Duration};
+    use std::{collections::HashSet, io::Cursor, time::Duration};
 
     #[test]
     fn snapshot_formats_single_file_core_fields() {
@@ -5453,6 +5562,31 @@ mod tests {
         assert_seconds(safe_video_frame_seek_seconds(10.0, 10.0), 9.95);
         assert_seconds(safe_video_frame_seek_seconds(3.0, 10.0), 3.0);
         assert_seconds(safe_video_frame_seek_seconds(1.0, 0.02), 0.0);
+    }
+
+    #[test]
+    fn frame_thumbnail_labels_include_index_and_timestamp() {
+        assert_eq!(frame_thumbnail_label(0, "0:00.000"), "#1 0:00.000");
+        assert_eq!(frame_thumbnail_label(11, "1:02:03.456"), "#12 1:02:03.456");
+    }
+
+    #[test]
+    fn video_frame_png_aspect_ratio_uses_png_dimensions() {
+        let mut bytes = Vec::new();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        assert_eq!(video_frame_png_aspect_ratio(&bytes), 2.0);
+    }
+
+    #[test]
+    fn video_frame_png_aspect_ratio_falls_back_for_invalid_png() {
+        assert_eq!(
+            video_frame_png_aspect_ratio(b"not a png"),
+            VIDEO_FRAME_FALLBACK_ASPECT_RATIO
+        );
     }
 
     #[test]

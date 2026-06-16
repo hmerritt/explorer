@@ -2,6 +2,7 @@
 
 ## 1
 
+- Improve the "frames" tab for videos: Remove the "#n" prefix before the frame timestamp. Just show the timestamp. Extract full-resolution frames, as they are in the video, instead of a reduced size thumbnail.
 - Ability to paste an image that is currently in the clipboard and save it as a file in the current directory. auto-name the file 'image.<extension>' and instantly enter rename
 - Improve readme - add screenshots / branding
 - Large icons grid view (alternate to the current Details view)
