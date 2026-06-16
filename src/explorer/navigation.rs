@@ -265,14 +265,7 @@ impl ExplorerView {
         modifiers: SelectionModifiers,
         cx: Option<&mut Context<Self>>,
     ) -> Option<EntryAction> {
-        self.cancel_pending_click_rename();
-
-        if let Some(ix) = self.entry_index_by_path(&entry.path) {
-            self.apply_click_selection(ix, modifiers);
-        } else {
-            self.clear_selection();
-        }
-        self.open_error = None;
+        self.apply_entry_click_selection(entry, modifiers);
 
         if click_count != 2 {
             return None;
@@ -292,6 +285,26 @@ impl ExplorerView {
         } else {
             Some(EntryAction::OpenFile(entry.path.clone()))
         }
+    }
+
+    pub(super) fn handle_entry_properties_click(
+        &mut self,
+        entry: &FileEntry,
+        modifiers: SelectionModifiers,
+    ) {
+        self.apply_entry_click_selection(entry, modifiers);
+        self.entry_click_sequence = None;
+    }
+
+    fn apply_entry_click_selection(&mut self, entry: &FileEntry, modifiers: SelectionModifiers) {
+        self.cancel_pending_click_rename();
+
+        if let Some(ix) = self.entry_index_by_path(&entry.path) {
+            self.apply_click_selection(ix, modifiers);
+        } else {
+            self.clear_selection();
+        }
+        self.open_error = None;
     }
 
     pub(super) fn handle_entry_middle_click(
@@ -497,6 +510,42 @@ mod tests {
         assert_eq!(view.path, child);
         assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn properties_click_selects_file_without_opening_it() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![
+            FileEntry::test("first.txt", false, Some(1), None),
+            FileEntry::test("second.txt", false, Some(1), None),
+        ];
+        view.select_single_index(0);
+
+        let entry = view.entries[1].clone();
+        view.handle_entry_properties_click(&entry, SelectionModifiers::default());
+
+        assert_eq!(view.path, PathBuf::from("root"));
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("second.txt")]);
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn properties_click_selects_directory_without_navigating() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![
+            FileEntry::test("first", true, None, None),
+            FileEntry::test("second", true, None, None),
+        ];
+        view.select_single_index(0);
+
+        let entry = view.entries[1].clone();
+        view.handle_entry_properties_click(&entry, SelectionModifiers::default());
+
+        assert_eq!(view.path, PathBuf::from("root"));
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("second")]);
+        assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
     }
 

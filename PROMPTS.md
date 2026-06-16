@@ -4,7 +4,6 @@
 
 - Improve readme - add screenshots / branding
 - Large icons grid view (alternate to the current Details view)
-- Alt-double-click opens Properties dialog opens a "Details" window, for both files/folders.
 
 ## 2
 
@@ -72,6 +71,8 @@ Major remaining Windows Explorer parity areas:
     - Lines of text
     - Blanks
 - Code file
+    - https://crates.io/crates/tokei
+    - https://docs.rs/tokei/latest/tokei/index.html
     - Language
     - Lines
     - Lines of Code

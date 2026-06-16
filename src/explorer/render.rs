@@ -1560,6 +1560,17 @@ impl ExplorerView {
 
                 let click_count =
                     this.normalize_entry_click_count(&clicked_entry, event.click_count());
+                if is_alt_entry_double_click(event, click_count) {
+                    this.handle_entry_properties_click(
+                        &clicked_entry,
+                        selection_modifiers_for_click(event),
+                    );
+                    this.open_selected_properties(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
                 if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click_with_watcher(
                     &clicked_entry,
                     click_count,
@@ -1781,6 +1792,17 @@ impl ExplorerView {
 
                 let click_count =
                     this.normalize_entry_click_count(&name_click_entry, event.click_count());
+                if is_alt_entry_double_click(event, click_count) {
+                    this.handle_entry_properties_click(
+                        &name_click_entry,
+                        selection_modifiers_for_click(event),
+                    );
+                    this.open_selected_properties(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
                 if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
                     &name_click_entry,
                     click_count,
@@ -4548,6 +4570,15 @@ fn is_normal_entry_click(event: &ClickEvent) -> bool {
     }
 }
 
+fn is_alt_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
+    match event {
+        ClickEvent::Mouse(event) => {
+            event.down.button == MouseButton::Left && click_count == 2 && event.up.modifiers.alt
+        }
+        ClickEvent::Keyboard(_) => false,
+    }
+}
+
 fn add_item_drag(
     cell: Div,
     id: impl Into<gpui::ElementId>,
@@ -4695,11 +4726,11 @@ mod tests {
         available_filename_text_width, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
         context_menu_width_for_natural_width, drop_indicator_target_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, is_normal_entry_click,
-        open_current_folder_context_menu_from_event, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, text_cell_width,
+        filename_text_width, folder_status_summary, is_alt_entry_double_click,
+        is_normal_entry_click, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -5321,6 +5352,78 @@ mod tests {
         });
 
         assert!(!is_normal_entry_click(&middle));
+    }
+
+    #[test]
+    fn alt_entry_double_click_detects_left_mouse_double_click() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent {
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                ..MouseUpEvent::default()
+            },
+        });
+
+        assert!(is_alt_entry_double_click(&event, 2));
+    }
+
+    #[test]
+    fn alt_entry_double_click_rejects_plain_double_click() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+
+        assert!(!is_alt_entry_double_click(&event, 2));
+    }
+
+    #[test]
+    fn alt_entry_double_click_rejects_single_click() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent {
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                ..MouseUpEvent::default()
+            },
+        });
+
+        assert!(!is_alt_entry_double_click(&event, 1));
+    }
+
+    #[test]
+    fn alt_entry_double_click_rejects_non_left_clicks() {
+        for button in [MouseButton::Middle, MouseButton::Right] {
+            let event = ClickEvent::Mouse(MouseClickEvent {
+                down: MouseDownEvent {
+                    button,
+                    ..MouseDownEvent::default()
+                },
+                up: MouseUpEvent {
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                    ..MouseUpEvent::default()
+                },
+            });
+
+            assert!(!is_alt_entry_double_click(&event, 2));
+        }
     }
 
     #[test]
