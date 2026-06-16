@@ -41,6 +41,7 @@ use crate::explorer::{
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     view::ExplorerView,
 };
+use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::SettingsState;
 
 const PROPERTIES_WIDTH: f32 = 408.0;
@@ -1417,35 +1418,12 @@ impl PropertiesDialog {
                 cx.notify();
             }));
 
+        let loading_frames = matches!(self.frames_state, PropertyFramesState::Loading(_));
         match &self.frames_state {
-            PropertyFramesState::NotStarted => {
-                body = body.child(
-                    div()
-                        .min_w(px(0.0))
-                        .w_full()
-                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                        .truncate()
-                        .child("Generating video frames..."),
-                );
-            }
-            PropertyFramesState::Loading(frames) if frames.is_empty() => {
-                body = body.child(
-                    div()
-                        .min_w(px(0.0))
-                        .w_full()
-                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                        .truncate()
-                        .child("Generating video frames..."),
-                );
-            }
+            PropertyFramesState::NotStarted => {}
+            PropertyFramesState::Loading(frames) if frames.is_empty() => {}
             PropertyFramesState::Loading(frames) => {
-                body = body.child(frame_thumbnail_list(frames)).child(
-                    div()
-                        .min_w(px(0.0))
-                        .w_full()
-                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                        .child("Generating video frames..."),
-                );
+                body = body.child(frame_thumbnail_list(frames));
             }
             PropertyFramesState::Failed(error) => {
                 body = body.child(
@@ -1472,7 +1450,22 @@ impl PropertiesDialog {
             }
         }
 
-        body.into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .when(loading_frames, |this| {
+                this.child(linear_indeterminate(
+                    "properties-frames-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
+            })
+            .into_any_element()
     }
 
     fn details_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
@@ -2295,7 +2288,6 @@ const VIDEO_FRAME_LONG_THRESHOLD_SECONDS: f64 = 600.0;
 const VIDEO_FRAME_MEDIUM_INSET_SECONDS: f64 = 1.0;
 const VIDEO_FRAME_LONG_INSET_SECONDS: f64 = 5.0;
 const VIDEO_FRAME_EOF_SEEK_INSET_SECONDS: f64 = 0.05;
-const VIDEO_FRAME_EXTRACT_WIDTH: u32 = 320;
 const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 
@@ -2671,8 +2663,6 @@ fn ffmpeg_frame_png_output(path: &Path, seek_seconds: f64) -> Result<Vec<u8>, St
         .arg("0:v:0")
         .arg("-frames:v")
         .arg("1")
-        .arg("-vf")
-        .arg(format!("scale={VIDEO_FRAME_EXTRACT_WIDTH}:-2"))
         .arg("-f")
         .arg("image2pipe")
         .arg("-vcodec")
@@ -4680,8 +4670,8 @@ fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElem
         .into_any_element()
 }
 
-fn frame_thumbnail_label(index: usize, timestamp: &str) -> String {
-    format!("#{} {timestamp}", index + 1)
+fn frame_thumbnail_label(_index: usize, timestamp: &str) -> String {
+    timestamp.to_owned()
 }
 
 fn frame_thumbnail_id(index: usize) -> (&'static str, usize) {
@@ -5565,9 +5555,9 @@ mod tests {
     }
 
     #[test]
-    fn frame_thumbnail_labels_include_index_and_timestamp() {
-        assert_eq!(frame_thumbnail_label(0, "0:00.000"), "#1 0:00.000");
-        assert_eq!(frame_thumbnail_label(11, "1:02:03.456"), "#12 1:02:03.456");
+    fn frame_thumbnail_labels_use_timestamp_only() {
+        assert_eq!(frame_thumbnail_label(0, "0:00.000"), "0:00.000");
+        assert_eq!(frame_thumbnail_label(11, "1:02:03.456"), "1:02:03.456");
     }
 
     #[test]
