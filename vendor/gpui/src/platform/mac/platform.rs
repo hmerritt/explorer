@@ -1103,36 +1103,35 @@ impl Platform for MacPlatform {
         let state = self.0.lock();
         let pasteboard = state.pasteboard;
 
-        // First, see if it's a string.
         unsafe {
             let types: id = pasteboard.types();
-            let string_type: id = ns_string("public.utf8-plain-text");
+            let string_item = self.read_string_item_from_clipboard(&state, pasteboard, types);
 
-            if msg_send![types, containsObject: string_type] {
-                let data = pasteboard.dataForType(string_type);
-                if data == nil {
-                    return None;
-                } else if data.bytes().is_null() {
-                    // https://developer.apple.com/documentation/foundation/nsdata/1410616-bytes?language=objc
-                    // "If the length of the NSData object is 0, this property returns nil."
-                    return Some(self.read_string_from_clipboard(&state, &[]));
-                } else {
-                    let bytes =
-                        slice::from_raw_parts(data.bytes() as *mut u8, data.length() as usize);
+            if string_item
+                .as_ref()
+                .is_some_and(|item| item.metadata().is_some())
+            {
+                return string_item;
+            }
 
-                    return Some(self.read_string_from_clipboard(&state, bytes));
+            let mut entries = Vec::new();
+            for format in ImageFormat::iter() {
+                if let Some(item) = try_clipboard_image(pasteboard, format) {
+                    entries.extend(item.into_entries());
+                    break;
                 }
             }
 
-            // If it wasn't a string, try the various supported image types.
-            for format in ImageFormat::iter() {
-                if let Some(item) = try_clipboard_image(pasteboard, format) {
-                    return Some(item);
-                }
+            if let Some(item) = string_item {
+                entries.extend(item.into_entries());
+            }
+
+            if !entries.is_empty() {
+                return Some(ClipboardItem { entries });
             }
         }
 
-        // If it wasn't a string or a supported image type, give up.
+        // If it didn't contain a string or a supported image type, give up.
         None
     }
 
@@ -1243,6 +1242,35 @@ impl Platform for MacPlatform {
 }
 
 impl MacPlatform {
+    unsafe fn read_string_item_from_clipboard(
+        &self,
+        state: &MacPlatformState,
+        pasteboard: id,
+        types: id,
+    ) -> Option<ClipboardItem> {
+        unsafe {
+            let string_type: id = ns_string("public.utf8-plain-text");
+
+            if !msg_send![types, containsObject: string_type] {
+                return None;
+            }
+
+            let data = pasteboard.dataForType(string_type);
+            if data == nil {
+                return None;
+            }
+
+            if data.bytes().is_null() {
+                // https://developer.apple.com/documentation/foundation/nsdata/1410616-bytes?language=objc
+                // "If the length of the NSData object is 0, this property returns nil."
+                Some(self.read_string_from_clipboard(state, &[]))
+            } else {
+                let bytes = slice::from_raw_parts(data.bytes() as *mut u8, data.length() as usize);
+                Some(self.read_string_from_clipboard(state, bytes))
+            }
+        }
+    }
+
     unsafe fn read_string_from_clipboard(
         &self,
         state: &MacPlatformState,
@@ -1661,7 +1689,7 @@ impl UTType {
 
 #[cfg(test)]
 mod tests {
-    use crate::ClipboardItem;
+    use crate::{ClipboardEntry, ClipboardItem, ClipboardString, Image, ImageFormat};
 
     use super::*;
 
@@ -1699,6 +1727,111 @@ mod tests {
             platform.read_from_clipboard(),
             Some(ClipboardItem::new_string(text_from_other_app.to_string()))
         );
+    }
+
+    #[test]
+    fn image_only_clipboard_round_trips() {
+        let platform = build_platform();
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3, 4]);
+        let item = ClipboardItem::new_image(&image);
+
+        platform.write_to_clipboard(item.clone());
+
+        assert_eq!(platform.read_from_clipboard(), Some(item));
+    }
+
+    #[test]
+    fn text_only_pasteboard_reads_text() {
+        let platform = build_platform();
+        let text = "text from other app";
+
+        unsafe {
+            let pasteboard = platform.0.lock().pasteboard;
+            pasteboard.clearContents();
+            set_pasteboard_data(pasteboard, NSPasteboardTypeString, text.as_bytes());
+        }
+
+        assert_eq!(
+            platform.read_from_clipboard(),
+            Some(ClipboardItem::new_string(text.to_string()))
+        );
+    }
+
+    #[test]
+    fn png_and_text_pasteboard_reads_image_and_text() {
+        assert_image_and_text_pasteboard_reads_both(
+            ImageFormat::Png,
+            unsafe { NSPasteboardTypePNG },
+            &[1, 2, 3],
+        );
+    }
+
+    #[test]
+    fn tiff_and_text_pasteboard_reads_image_and_text() {
+        assert_image_and_text_pasteboard_reads_both(
+            ImageFormat::Tiff,
+            unsafe { NSPasteboardTypeTIFF },
+            &[4, 5, 6],
+        );
+    }
+
+    #[test]
+    fn metadata_string_clipboard_round_trips_as_single_string_entry() {
+        let platform = build_platform();
+        let item = ClipboardItem {
+            entries: vec![ClipboardEntry::String(
+                ClipboardString::new("metadata text".to_string()).with_json_metadata(vec![3, 4]),
+            )],
+        };
+
+        platform.write_to_clipboard(item.clone());
+
+        let read = platform.read_from_clipboard().expect("clipboard item");
+        assert_eq!(read, item);
+        assert_eq!(read.entries.len(), 1);
+        assert!(read.metadata().is_some());
+    }
+
+    fn assert_image_and_text_pasteboard_reads_both(
+        image_format: ImageFormat,
+        pasteboard_type: id,
+        image_bytes: &[u8],
+    ) {
+        let platform = build_platform();
+        let text = "https://example.com/image";
+
+        unsafe {
+            let pasteboard = platform.0.lock().pasteboard;
+            pasteboard.clearContents();
+            set_pasteboard_data(pasteboard, pasteboard_type, image_bytes);
+            set_pasteboard_data(pasteboard, NSPasteboardTypeString, text.as_bytes());
+        }
+
+        let item = platform.read_from_clipboard().expect("clipboard item");
+
+        assert_eq!(item.text(), Some(text.to_string()));
+        assert_eq!(item.entries.len(), 2);
+        assert!(matches!(
+            &item.entries[0],
+            ClipboardEntry::Image(image)
+                if image.format == image_format && image.bytes == image_bytes
+        ));
+        assert!(matches!(
+            &item.entries[1],
+            ClipboardEntry::String(string)
+                if string.text == text && string.metadata.is_none()
+        ));
+    }
+
+    unsafe fn set_pasteboard_data(pasteboard: id, pasteboard_type: id, bytes: &[u8]) {
+        unsafe {
+            let data = NSData::dataWithBytes_length_(
+                nil,
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as u64,
+            );
+            pasteboard.setData_forType(data, pasteboard_type);
+        }
     }
 
     fn build_platform() -> MacPlatform {
