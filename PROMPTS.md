@@ -1,5 +1,19 @@
 ## Todo
 
+New special Properties tab for Video files:
+
+New tab "frames", ffprobe generate thumbnails throughout the video
+
+evenly spaced, e.g. 20 frames throughout the video, no matter how long the video is, space the timestamps evenly from beginning to end.
+
+Add logic to change start/end inset depending on video length (longer videos should inset more than shorter ones - aka films are usually black for the first ~5 seconds
+
+- <1 minute, inset 0 frames (so begin on the first frame, end on the last)
+- <10 minutes, inset 1 second
+- > =10, inset 5 seconds
+
+For completeness, also show first and last frame (as additional frames to the 20, so 22 in total)
+
 ## 1
 
 - Improve readme - add screenshots / branding

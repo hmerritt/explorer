@@ -436,37 +436,27 @@ impl PropertiesDialog {
         let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
             return;
         };
-        if !snapshot
-            .target
-            .paths
-            .iter()
-            .any(|path| path_may_have_media_details(path))
-        {
+        if single_file_media_path(&snapshot.target, snapshot.item_kind).is_none() {
             self.details_state = PropertyDetailsState::Ready(Vec::new());
             return;
         }
 
         self.details_state = PropertyDetailsState::Loading;
         let target = snapshot.target.clone();
+        let item_kind = snapshot.item_kind;
         let generation = self.details_generation;
         let task = cx.spawn(async move |this, cx| {
             let groups = cx
                 .background_executor()
                 .spawn(async move {
                     let path_count = target.paths.len();
-                    let candidate_count = target
-                        .paths
-                        .iter()
-                        .filter(|path| path_may_have_media_details(path))
-                        .count();
                     let started = Instant::now();
-                    let groups = collect_media_detail_groups(&target);
+                    let groups = collect_single_file_media_detail_groups(&target, item_kind);
                     crate::debug_options::log_property_timing(
                         started.elapsed(),
                         format_args!(
-                            "details ready paths={} media_candidates={} groups={} details={}",
+                            "details ready paths={} groups={} details={}",
                             path_count,
-                            candidate_count,
                             groups.len(),
                             detail_count(&groups)
                         ),
@@ -2011,14 +2001,22 @@ const VIDEO_METADATA_EXTENSIONS: &[&str] = &[
     "mpe", "mpv", "m2v", "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
 ];
 
-fn collect_media_detail_groups(target: &PropertyTarget) -> Vec<PropertyDetailGroup> {
-    let groups_by_item: Vec<_> = target
-        .paths
-        .iter()
-        .filter(|path| path_may_have_media_details(path))
-        .map(|path| media_details(path))
-        .collect();
-    merge_detail_groups(groups_by_item.iter().map(Vec::as_slice))
+fn single_file_media_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
+    if !matches!(item_kind, PropertyItemKind::SingleFile) {
+        return None;
+    }
+    let path = target.paths.first()?;
+    path_may_have_media_details(path).then_some(path.as_path())
+}
+
+fn collect_single_file_media_detail_groups(
+    target: &PropertyTarget,
+    item_kind: PropertyItemKind,
+) -> Vec<PropertyDetailGroup> {
+    let Some(path) = single_file_media_path(target, item_kind) else {
+        return Vec::new();
+    };
+    media_details(path)
 }
 
 fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
@@ -2030,17 +2028,6 @@ fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
         groups.extend(video_details(path));
     }
     groups
-}
-
-#[cfg(test)]
-fn collect_exif_detail_groups(target: &PropertyTarget) -> Vec<PropertyDetailGroup> {
-    let groups_by_item: Vec<_> = target
-        .paths
-        .iter()
-        .filter(|path| path_may_have_exif(path))
-        .map(|path| exif_details(path))
-        .collect();
-    merge_detail_groups(groups_by_item.iter().map(Vec::as_slice))
 }
 
 const EXIF_VALUE_TOO_BIG_LABEL: &str = "<value too big to display>";
@@ -2209,6 +2196,13 @@ struct VideoDetailBuilder {
 }
 
 impl VideoDetailBuilder {
+    fn push_heading(&mut self, kind: PropertyDetailGroupKind, name: impl Into<String>) {
+        self.groups.entry(kind).or_default().push(PropertyDetail {
+            name: name.into(),
+            value: String::new(),
+        });
+    }
+
     fn push(
         &mut self,
         kind: PropertyDetailGroupKind,
@@ -2347,56 +2341,73 @@ fn add_stream_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Valu
         return;
     };
 
+    let counts = ffprobe_stream_counts(probe);
     let mut video_count = 0usize;
     let mut audio_count = 0usize;
     let mut subtitle_count = 0usize;
     let mut other_count = 0usize;
-    for (index, stream) in streams.iter().enumerate() {
-        let Some(stream) = stream.as_object() else {
+    for (index, stream_value) in streams.iter().enumerate() {
+        let Some(stream) = stream_value.as_object() else {
             continue;
         };
         let base_path = format!("streams.{index}");
         let codec_type = builder
             .scalar_field(stream, &base_path, "codec_type")
             .unwrap_or_else(|| "stream".to_owned());
-        let (kind, label) = match codec_type.as_str() {
+        match codec_type.as_str() {
             "video" => {
                 video_count += 1;
-                (
-                    PropertyDetailGroupKind::Video,
-                    format!("Video {video_count}"),
-                )
+                builder
+                    .stream_labels
+                    .insert(index, format!("Video {video_count}"));
+                if counts.video > 1 {
+                    builder.push_heading(PropertyDetailGroupKind::Video, format!("#{video_count}"));
+                }
+                add_video_stream_details(builder, stream, &base_path, None);
             }
             "audio" => {
                 audio_count += 1;
-                (
-                    PropertyDetailGroupKind::Audio,
-                    format!("Audio {audio_count}"),
-                )
+                builder
+                    .stream_labels
+                    .insert(index, format!("Audio {audio_count}"));
+                if counts.audio > 1 {
+                    builder.push_heading(PropertyDetailGroupKind::Audio, format!("#{audio_count}"));
+                }
+                add_audio_stream_details(builder, stream, &base_path, None);
             }
             "subtitle" => {
                 subtitle_count += 1;
-                (
-                    PropertyDetailGroupKind::Subtitles,
-                    format!("Subtitle {subtitle_count}"),
-                )
+                builder
+                    .stream_labels
+                    .insert(index, format!("Subtitle {subtitle_count}"));
+                if counts.subtitles > 1 {
+                    builder.push_heading(
+                        PropertyDetailGroupKind::Subtitles,
+                        format!("#{subtitle_count}"),
+                    );
+                }
+                add_subtitle_stream_details(builder, stream, &base_path, None);
             }
             _ => {
                 other_count += 1;
-                (
+                let label = format!("Stream {other_count}");
+                builder.stream_labels.insert(index, label.clone());
+                add_basic_stream_details(
+                    builder,
+                    stream,
+                    &base_path,
                     PropertyDetailGroupKind::Misc,
-                    format!("Stream {other_count}"),
-                )
+                    &label,
+                );
             }
-        };
-        builder.stream_labels.insert(index, label.clone());
-
-        match codec_type.as_str() {
-            "video" => add_video_stream_details(builder, stream, &base_path, &label),
-            "audio" => add_audio_stream_details(builder, stream, &base_path, &label),
-            "subtitle" => add_subtitle_stream_details(builder, stream, &base_path, &label),
-            _ => add_basic_stream_details(builder, stream, &base_path, kind, &label),
         }
+    }
+}
+
+fn stream_detail_name(prefix: Option<&str>, name: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{prefix} {name}"),
+        None => name.to_owned(),
     }
 }
 
@@ -2404,13 +2415,13 @@ fn add_video_stream_details(
     builder: &mut VideoDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
-    label: &str,
+    label: Option<&str>,
 ) {
     let codec_name = builder.scalar_field(stream, base_path, "codec_name");
     let codec_long_name = builder.scalar_field(stream, base_path, "codec_long_name");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Codec"),
+        stream_detail_name(label, "Codec"),
         metadata_name_label(codec_long_name, codec_name),
     );
 
@@ -2418,7 +2429,7 @@ fn add_video_stream_details(
     let height = builder.integer_field(stream, base_path, "height");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Resolution"),
+        stream_detail_name(label, "Resolution"),
         resolution_label(width, height),
     );
 
@@ -2426,7 +2437,7 @@ fn add_video_stream_details(
     let raw_frame_rate = builder.scalar_field(stream, base_path, "r_frame_rate");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Frame rate"),
+        stream_detail_name(label, "Frame rate"),
         avg_frame_rate
             .as_deref()
             .and_then(format_frame_rate_label)
@@ -2437,7 +2448,7 @@ fn add_video_stream_details(
     let sample_aspect_ratio = builder.scalar_field(stream, base_path, "sample_aspect_ratio");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Aspect ratio"),
+        stream_detail_name(label, "Aspect ratio"),
         aspect_ratio_label(
             display_aspect_ratio.as_deref(),
             sample_aspect_ratio.as_deref(),
@@ -2452,55 +2463,55 @@ fn add_video_stream_details(
         .and_then(format_bit_rate_label);
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Bit rate"),
+        stream_detail_name(label, "Bit rate"),
         bit_rate,
     );
     let profile = builder.scalar_field(stream, base_path, "profile");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Profile"),
+        stream_detail_name(label, "Profile"),
         profile,
     );
     let level = builder.scalar_field(stream, base_path, "level");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Level"),
+        stream_detail_name(label, "Level"),
         level,
     );
     let pixel_format = builder.scalar_field(stream, base_path, "pix_fmt");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Pixel format"),
+        stream_detail_name(label, "Pixel format"),
         pixel_format,
     );
     let chroma_location = builder.scalar_field(stream, base_path, "chroma_location");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Chroma location"),
+        stream_detail_name(label, "Chroma location"),
         chroma_location,
     );
     let color_range = builder.scalar_field(stream, base_path, "color_range");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Color range"),
+        stream_detail_name(label, "Color range"),
         color_range,
     );
     let color_matrix = builder.scalar_field(stream, base_path, "color_space");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Color matrix"),
+        stream_detail_name(label, "Color matrix"),
         color_matrix,
     );
     let color_primaries = builder.scalar_field(stream, base_path, "color_primaries");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Color primaries"),
+        stream_detail_name(label, "Color primaries"),
         color_primaries,
     );
     let color_transfer = builder.scalar_field(stream, base_path, "color_transfer");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Color transfer"),
+        stream_detail_name(label, "Color transfer"),
         color_transfer,
     );
     let duration = builder
@@ -2509,25 +2520,25 @@ fn add_video_stream_details(
         .and_then(format_duration_label);
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Duration"),
+        stream_detail_name(label, "Duration"),
         duration,
     );
     let frames = builder.scalar_field(stream, base_path, "nb_frames");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Frames"),
+        stream_detail_name(label, "Frames"),
         frames,
     );
     let language = builder.tag_field(stream, base_path, "language");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Language"),
+        stream_detail_name(label, "Language"),
         language,
     );
     let title = builder.tag_field(stream, base_path, "title");
     builder.push(
         PropertyDetailGroupKind::Video,
-        format!("{label} Title"),
+        stream_detail_name(label, "Title"),
         title,
     );
 }
@@ -2536,13 +2547,13 @@ fn add_audio_stream_details(
     builder: &mut VideoDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
-    label: &str,
+    label: Option<&str>,
 ) {
     let codec_name = builder.scalar_field(stream, base_path, "codec_name");
     let codec_long_name = builder.scalar_field(stream, base_path, "codec_long_name");
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Codec"),
+        stream_detail_name(label, "Codec"),
         metadata_name_label(codec_long_name, codec_name),
     );
     let channels = builder
@@ -2550,13 +2561,13 @@ fn add_audio_stream_details(
         .map(channels_label);
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Channels"),
+        stream_detail_name(label, "Channels"),
         channels,
     );
     let channel_layout = builder.scalar_field(stream, base_path, "channel_layout");
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Channel layout"),
+        stream_detail_name(label, "Channel layout"),
         channel_layout,
     );
     let sample_rate = builder
@@ -2565,7 +2576,7 @@ fn add_audio_stream_details(
         .and_then(format_sample_rate_label);
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Sample rate"),
+        stream_detail_name(label, "Sample rate"),
         sample_rate,
     );
     let bit_rate = builder
@@ -2574,7 +2585,7 @@ fn add_audio_stream_details(
         .and_then(format_bit_rate_label);
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Bit rate"),
+        stream_detail_name(label, "Bit rate"),
         bit_rate,
     );
     let duration = builder
@@ -2583,19 +2594,19 @@ fn add_audio_stream_details(
         .and_then(format_duration_label);
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Duration"),
+        stream_detail_name(label, "Duration"),
         duration,
     );
     let language = builder.tag_field(stream, base_path, "language");
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Language"),
+        stream_detail_name(label, "Language"),
         language,
     );
     let title = builder.tag_field(stream, base_path, "title");
     builder.push(
         PropertyDetailGroupKind::Audio,
-        format!("{label} Title"),
+        stream_detail_name(label, "Title"),
         title,
     );
 }
@@ -2604,31 +2615,31 @@ fn add_subtitle_stream_details(
     builder: &mut VideoDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
-    label: &str,
+    label: Option<&str>,
 ) {
     let codec_name = builder.scalar_field(stream, base_path, "codec_name");
     let codec_long_name = builder.scalar_field(stream, base_path, "codec_long_name");
     builder.push(
         PropertyDetailGroupKind::Subtitles,
-        format!("{label} Codec"),
+        stream_detail_name(label, "Codec"),
         metadata_name_label(codec_long_name, codec_name),
     );
     let language = builder.tag_field(stream, base_path, "language");
     builder.push(
         PropertyDetailGroupKind::Subtitles,
-        format!("{label} Language"),
+        stream_detail_name(label, "Language"),
         language,
     );
     let title = builder.tag_field(stream, base_path, "title");
     builder.push(
         PropertyDetailGroupKind::Subtitles,
-        format!("{label} Title"),
+        stream_detail_name(label, "Title"),
         title,
     );
     let disposition = disposition_label(builder, stream, base_path);
     builder.push(
         PropertyDetailGroupKind::Subtitles,
-        format!("{label} Disposition"),
+        stream_detail_name(label, "Disposition"),
         disposition,
     );
 }
@@ -3032,7 +3043,11 @@ fn metadata_child_label(parent: &str, key: &str) -> String {
         "disposition" => "Disposition".to_owned(),
         _ => humanized_metadata_key(key),
     };
-    format!("{parent} {key}")
+    if parent.is_empty() {
+        key
+    } else {
+        format!("{parent} {key}")
+    }
 }
 
 fn humanized_metadata_key(name: &str) -> String {
@@ -4621,91 +4636,54 @@ mod tests {
             Some("1 Video, 1 Audio, 1 Subtitle")
         );
 
-        assert_detail_contains(
-            &groups,
-            PropertyDetailGroupKind::Video,
-            "Video 1 Codec",
-            "H.264",
-        );
+        assert_detail_contains(&groups, PropertyDetailGroupKind::Video, "Codec", "H.264");
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Resolution"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Resolution"),
             Some("1920 x 1080")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Frame rate"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Frame rate"),
             Some("29.97 fps (30000/1001)")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Aspect ratio"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Aspect ratio"),
             Some("16:9")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Video, "Video 1 Level"),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Level"),
             Some("31")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Chroma location"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Chroma location"),
             Some("left")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Color matrix"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Color matrix"),
             Some("bt709")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Color primaries"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Color primaries"),
             Some("bt709")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Color transfer"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Video, "Color transfer"),
             Some("bt709")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Video, "#1"),
+            None
         );
 
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Audio,
-                "Audio 1 Sample rate"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Sample rate"),
             Some("48,000 Hz")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Audio, "Audio 1 Channels"),
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Channels"),
             Some("2 channels")
         );
         assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Subtitles,
-                "Subtitle 1 Disposition"
-            ),
+            detail_value(&groups, PropertyDetailGroupKind::Subtitles, "Disposition"),
             Some("Default")
         );
         assert_detail_contains(
@@ -4741,6 +4719,61 @@ mod tests {
     }
 
     #[test]
+    fn video_probe_multiple_streams_use_numbered_subgroups() {
+        let groups = video_detail_groups_from_probe(&sample_multi_stream_ffprobe_json());
+
+        assert_eq!(
+            detail_rows(&groups, PropertyDetailGroupKind::Video),
+            vec![
+                ("#1", ""),
+                ("Codec", "H.264"),
+                ("Resolution", "1920 x 1080"),
+                ("Aspect ratio", "16:9"),
+                ("#2", ""),
+                ("Codec", "H.265"),
+                ("Resolution", "3840 x 2160"),
+                ("Aspect ratio", "16:9"),
+            ]
+        );
+        assert_eq!(
+            detail_rows(&groups, PropertyDetailGroupKind::Audio),
+            vec![
+                ("#1", ""),
+                ("Codec", "AAC"),
+                ("Channels", "2 channels"),
+                ("#2", ""),
+                ("Codec", "Opus"),
+                ("Channels", "6 channels"),
+            ]
+        );
+        assert_eq!(
+            detail_rows(&groups, PropertyDetailGroupKind::Subtitles),
+            vec![
+                ("#1", ""),
+                ("Codec", "SubRip"),
+                ("#2", ""),
+                ("Codec", "ASS")
+            ]
+        );
+        assert_eq!(
+            detail_value(
+                &groups,
+                PropertyDetailGroupKind::Misc,
+                "Video 1 Bits Per Raw Sample"
+            ),
+            Some("8")
+        );
+        assert_eq!(
+            detail_value(
+                &groups,
+                PropertyDetailGroupKind::Misc,
+                "Video 2 Bits Per Raw Sample"
+            ),
+            Some("10")
+        );
+    }
+
+    #[test]
     fn unavailable_video_metadata_returns_nonfatal_group() {
         let groups = video_metadata_unavailable_groups("ffprobe missing");
 
@@ -4755,35 +4788,6 @@ mod tests {
         assert!(path_may_have_video_metadata(Path::new("movie.mp4")));
         assert!(path_may_have_video_metadata(Path::new("clip.mkv")));
         assert!(!path_may_have_video_metadata(Path::new("note.txt")));
-    }
-
-    #[test]
-    fn multiselect_video_details_use_existing_mixed_value_behavior() {
-        let first = video_detail_groups_from_probe(&sample_ffprobe_json(
-            "60.0", "1000000", "Same", 1920, 1080,
-        ));
-        let second = video_detail_groups_from_probe(&sample_ffprobe_json(
-            "60.0", "2000000", "Same", 1280, 720,
-        ));
-
-        let groups = merge_detail_groups([first.as_slice(), second.as_slice()]);
-
-        assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Embedded title"),
-            Some("Same")
-        );
-        assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Bit rate"),
-            Some("")
-        );
-        assert_eq!(
-            detail_value(
-                &groups,
-                PropertyDetailGroupKind::Video,
-                "Video 1 Resolution"
-            ),
-            Some("")
-        );
     }
 
     #[test]
@@ -4833,7 +4837,7 @@ mod tests {
             None
         );
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_eq!(
             detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
@@ -4856,7 +4860,7 @@ mod tests {
         )
         .unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_eq!(
             detail_value(
@@ -4895,7 +4899,7 @@ mod tests {
         let value = "A".repeat(EXIF_NON_STANDARD_VALUE_CHAR_LIMIT);
         fs::write(&file, jpeg_with_exif(&custom_ascii_tag_tiff(&value))).unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_eq!(
             detail_value(
@@ -4914,7 +4918,7 @@ mod tests {
         let value = "A".repeat(EXIF_NON_STANDARD_VALUE_CHAR_LIMIT + 1);
         fs::write(&file, jpeg_with_exif(&custom_ascii_tag_tiff(&value))).unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_eq!(
             detail_value(
@@ -4933,7 +4937,7 @@ mod tests {
         let make = "C".repeat(EXIF_STANDARD_VALUE_CHAR_LIMIT + 1);
         fs::write(&file, jpeg_with_exif(&exif_tiff(&make, "TestCam", None))).unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_eq!(
             detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
@@ -4947,7 +4951,7 @@ mod tests {
         let file = temp.path().join("photo.jpg");
         fs::write(&file, jpeg_with_exif(&grouped_exif_tiff())).unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_detail_contains(
             &exif_groups,
@@ -4981,7 +4985,7 @@ mod tests {
         )
         .unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_detail_contains(
             &exif_groups,
@@ -5043,7 +5047,7 @@ mod tests {
         )
         .unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert!(detail_group(&exif_groups, PropertyDetailGroupKind::Exifmeta).is_none());
         assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "User Comment");
@@ -5063,7 +5067,7 @@ mod tests {
         )
         .unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+        let exif_groups = exif_details(&file);
 
         assert_detail_contains(
             &exif_groups,
@@ -5084,43 +5088,21 @@ mod tests {
     }
 
     #[test]
-    fn multiselect_exifmeta_details_use_existing_mixed_value_behavior() {
+    fn multiple_file_properties_do_not_collect_media_metadata() {
         let temp = TempDir::new();
         let first = temp.path().join("a.jpg");
         let second = temp.path().join("b.jpg");
-        fs::write(
-            &first,
-            jpeg_with_exif(&exifmeta_tiff(
-                "exifmeta-v0.1.0\n{\"FilmMaker\":\"Kodak\",\"FilmName\":\"Same\"}",
-            )),
-        )
-        .unwrap();
-        fs::write(
-            &second,
-            jpeg_with_exif(&exifmeta_tiff(
-                "exifmeta-v0.2.0\n{\"FilmMaker\":\"Fuji\",\"FilmName\":\"Same\"}",
-            )),
-        )
-        .unwrap();
+        fs::write(&first, jpeg_with_exif(&exif_tiff("Canon", "A", None))).unwrap();
+        fs::write(&second, jpeg_with_exif(&exif_tiff("Nikon", "B", None))).unwrap();
 
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget {
-            paths: vec![first, second],
-        });
+        let groups = collect_single_file_media_detail_groups(
+            &PropertyTarget {
+                paths: vec![first, second],
+            },
+            PropertyItemKind::MultipleFiles,
+        );
 
-        assert_eq!(
-            detail_value(
-                &exif_groups,
-                PropertyDetailGroupKind::Exifmeta,
-                "Film Maker"
-            ),
-            Some("")
-        );
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Exifmeta,
-            "Film Name",
-            "Same",
-        );
+        assert!(groups.is_empty());
     }
 
     #[test]
@@ -5140,30 +5122,6 @@ mod tests {
             PropertyDetailGroupKind::File,
             "Size",
             "12 bytes",
-        );
-    }
-
-    #[test]
-    fn multiselect_exif_details_use_existing_mixed_value_behavior() {
-        let temp = TempDir::new();
-        let first = temp.path().join("a.jpg");
-        let second = temp.path().join("b.jpg");
-        fs::write(&first, jpeg_with_exif(&exif_tiff("Canon", "Same", None))).unwrap();
-        fs::write(&second, jpeg_with_exif(&exif_tiff("Nikon", "Same", None))).unwrap();
-
-        let exif_groups = collect_exif_detail_groups(&PropertyTarget {
-            paths: vec![first, second],
-        });
-
-        assert_eq!(
-            detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
-            Some("")
-        );
-        assert_detail_contains(
-            &exif_groups,
-            PropertyDetailGroupKind::Camera,
-            "Model",
-            "Same",
         );
     }
 
@@ -5337,6 +5295,18 @@ mod tests {
             .map(|detail| detail.value.as_str())
     }
 
+    fn detail_rows(
+        groups: &[PropertyDetailGroup],
+        kind: PropertyDetailGroupKind,
+    ) -> Vec<(&str, &str)> {
+        detail_group(groups, kind)
+            .unwrap_or_else(|| panic!("missing {kind:?} group"))
+            .details
+            .iter()
+            .map(|detail| (detail.name.as_str(), detail.value.as_str()))
+            .collect()
+    }
+
     fn assert_group_has_detail(
         groups: &[PropertyDetailGroup],
         kind: PropertyDetailGroupKind,
@@ -5452,6 +5422,58 @@ mod tests {
                     }
                 }
             ]
+        })
+    }
+
+    fn sample_multi_stream_ffprobe_json() -> serde_json::Value {
+        serde_json::json!({
+            "format": {
+                "nb_streams": 6,
+                "format_name": "matroska,webm",
+                "format_long_name": "Matroska / WebM"
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "H.264",
+                    "codec_long_name": "H.264",
+                    "width": 1920,
+                    "height": 1080,
+                    "bits_per_raw_sample": "8"
+                },
+                {
+                    "codec_type": "video",
+                    "codec_name": "H.265",
+                    "codec_long_name": "H.265",
+                    "width": 3840,
+                    "height": 2160,
+                    "bits_per_raw_sample": "10"
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "AAC",
+                    "codec_long_name": "AAC",
+                    "channels": 2
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "Opus",
+                    "codec_long_name": "Opus",
+                    "channels": 6
+                },
+                {
+                    "codec_type": "subtitle",
+                    "codec_name": "SubRip",
+                    "codec_long_name": "SubRip"
+                },
+                {
+                    "codec_type": "subtitle",
+                    "codec_name": "ASS",
+                    "codec_long_name": "ASS"
+                }
+            ],
+            "programs": [],
+            "chapters": []
         })
     }
 
