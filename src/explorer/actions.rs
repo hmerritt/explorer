@@ -316,10 +316,10 @@ impl ExplorerView {
     pub(super) fn handle_paste_clipboard(
         &mut self,
         _: &PasteClipboard,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.paste_clipboard_files(cx);
+        self.paste_clipboard(window, cx);
         cx.notify();
     }
 

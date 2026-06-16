@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::ClipboardItem;
+use gpui::{ClipboardEntry, ClipboardItem, Image};
 use serde::{Deserialize, Serialize};
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
@@ -63,6 +63,19 @@ pub(super) fn file_clipboard_from_item(item: &ClipboardItem) -> Option<FileClipb
     })
 }
 
+pub(super) fn image_clipboard_from_item(item: &ClipboardItem) -> Option<&Image> {
+    item.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some(image),
+        ClipboardEntry::String(_) => None,
+    })
+}
+
+pub(super) fn clipboard_item_can_paste(item: Option<&ClipboardItem>) -> bool {
+    item.is_some_and(|item| {
+        file_clipboard_from_item(item).is_some() || image_clipboard_from_item(item).is_some()
+    })
+}
+
 fn clipboard_text(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -74,6 +87,7 @@ fn clipboard_text(paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Image, ImageFormat};
 
     #[test]
     fn copy_clipboard_metadata_round_trips() {
@@ -105,5 +119,31 @@ mod tests {
         let item = ClipboardItem::new_string("plain text".to_owned());
 
         assert_eq!(file_clipboard_from_item(&item), None);
+    }
+
+    #[test]
+    fn image_clipboard_item_is_detected_as_paste_payload() {
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
+        let item = ClipboardItem::new_image(&image);
+
+        assert_eq!(
+            image_clipboard_from_item(&item).map(|image| image.bytes()),
+            Some([1, 2, 3].as_slice())
+        );
+        assert!(clipboard_item_can_paste(Some(&item)));
+    }
+
+    #[test]
+    fn paste_payload_accepts_files_but_rejects_plain_text_and_empty_clipboard() {
+        let explorer_item = clipboard_item_for_files(&FileClipboard::new(
+            FileClipboardOperation::Copy,
+            vec![PathBuf::from("a.txt")],
+        ))
+        .expect("clipboard item");
+        let plain_item = ClipboardItem::new_string("plain text".to_owned());
+
+        assert!(clipboard_item_can_paste(Some(&explorer_item)));
+        assert!(!clipboard_item_can_paste(Some(&plain_item)));
+        assert!(!clipboard_item_can_paste(None));
     }
 }

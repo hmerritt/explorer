@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -11,11 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Context, Window};
+use gpui::{Context, Image, ImageFormat, Window};
 
 use crate::explorer::{
     clipboard::{
         FileClipboard, FileClipboardOperation, clipboard_item_for_files, file_clipboard_from_item,
+        image_clipboard_from_item,
     },
     filesystem::{
         ConflictChoice, FileOperationError, FileOperationJob, FileOperationSummary,
@@ -119,15 +120,22 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn paste_clipboard_files(&mut self, cx: &mut Context<Self>) {
-        let Some(clipboard) = cx
-            .read_from_clipboard()
-            .as_ref()
-            .and_then(file_clipboard_from_item)
-        else {
+    pub(super) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
             return;
         };
 
+        if let Some(clipboard) = file_clipboard_from_item(&item) {
+            self.paste_file_clipboard(clipboard, cx);
+            return;
+        }
+
+        if let Some(image) = image_clipboard_from_item(&item) {
+            self.paste_clipboard_image(image, window, cx);
+        }
+    }
+
+    fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
         match clipboard.operation {
             FileClipboardOperation::Copy => {
                 self.handle_prepared_file_command_result_and_open_dialog(
@@ -138,6 +146,27 @@ impl ExplorerView {
             FileClipboardOperation::Cut => {
                 let result = prepare_move_paths_to_directory(&clipboard.paths, &self.path);
                 self.handle_prepared_file_command_result_and_open_dialog(result, cx);
+            }
+        }
+    }
+
+    fn paste_clipboard_image(
+        &mut self,
+        image: &Image,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match create_clipboard_image_file_in_directory(&self.path, image) {
+            Ok(path) => {
+                self.open_error = None;
+                self.reload_with_entry_metadata_resolution(cx);
+                self.select_single_path(&path);
+                self.start_rename_for_path(&path, window, cx);
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload_with_entry_metadata_resolution(cx);
             }
         }
     }
@@ -517,6 +546,63 @@ fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<Path
     }
 }
 
+fn create_clipboard_image_file_in_directory(
+    parent: &Path,
+    image: &Image,
+) -> Result<PathBuf, String> {
+    let extension = image_format_extension(image.format());
+    let mut index = 1usize;
+
+    loop {
+        let name = clipboard_image_file_name(extension, index);
+        let path = parent.join(&name);
+
+        if path.exists() {
+            index = next_new_item_index(index, &name)?;
+            continue;
+        }
+
+        match write_new_file(&path, image.bytes()) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                index = next_new_item_index(index, &name)?;
+            }
+            Err(error) => {
+                return Err(format!("Could not create image \"{name}\": {error}"));
+            }
+        }
+    }
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    if let Err(error) = file.write_all(bytes) {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn image_format_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+    }
+}
+
+fn clipboard_image_file_name(extension: &str, index: usize) -> String {
+    if index == 1 {
+        format!("image.{extension}")
+    } else {
+        format!("image ({index}).{extension}")
+    }
+}
+
 fn next_new_item_index(index: usize, name: &str) -> Result<usize, String> {
     index
         .checked_add(1)
@@ -539,6 +625,7 @@ mod tests {
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
+    use gpui::{Image, ImageFormat};
     use std::fs;
 
     #[test]
@@ -630,6 +717,48 @@ mod tests {
 
         assert_eq!(path.file_name().unwrap(), "New file (2)");
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn image_format_extensions_match_clipboard_formats() {
+        assert_eq!(image_format_extension(ImageFormat::Png), "png");
+        assert_eq!(image_format_extension(ImageFormat::Jpeg), "jpg");
+        assert_eq!(image_format_extension(ImageFormat::Webp), "webp");
+        assert_eq!(image_format_extension(ImageFormat::Gif), "gif");
+        assert_eq!(image_format_extension(ImageFormat::Svg), "svg");
+        assert_eq!(image_format_extension(ImageFormat::Bmp), "bmp");
+        assert_eq!(image_format_extension(ImageFormat::Tiff), "tiff");
+    }
+
+    #[test]
+    fn clipboard_image_file_name_uses_windows_style_suffixes() {
+        assert_eq!(clipboard_image_file_name("png", 1), "image.png");
+        assert_eq!(clipboard_image_file_name("png", 2), "image (2).png");
+    }
+
+    #[test]
+    fn clipboard_image_file_uses_base_name_in_empty_directory() {
+        let temp = TempDir::new();
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
+
+        let path = create_clipboard_image_file_in_directory(temp.path(), &image).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "image.png");
+        assert_eq!(fs::read(path).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn clipboard_image_file_uses_first_free_suffix() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("image.png"), b"base").expect("create base image");
+        fs::write(temp.path().join("image (3).png"), b"third").expect("create third image");
+        let image = Image::from_bytes(ImageFormat::Png, vec![4, 5, 6]);
+
+        let path = create_clipboard_image_file_in_directory(temp.path(), &image).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "image (2).png");
+        assert_eq!(fs::read(path).unwrap(), vec![4, 5, 6]);
+        assert_eq!(fs::read(temp.path().join("image.png")).unwrap(), b"base");
     }
 
     #[test]

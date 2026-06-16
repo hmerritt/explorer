@@ -7,12 +7,11 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement,
-    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, Window, canvas, div, prelude::*, px, rgb, transparent_black,
-    uniform_list,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, Entity,
+    ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ListHorizontalSizingBehavior,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun,
+    Window, canvas, div, prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -24,7 +23,7 @@ use crate::explorer::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
     },
-    clipboard::file_clipboard_from_item,
+    clipboard::clipboard_item_can_paste,
     columns::file_column_label,
     constants::{
         COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT,
@@ -405,7 +404,7 @@ impl ExplorerView {
         let can_rename = self.can_start_selected_rename();
         let can_extract = self.selected_archive_paths().is_some();
         let clipboard = cx.read_from_clipboard();
-        let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+        let can_paste = clipboard_item_can_paste(clipboard.as_ref());
 
         div()
             .flex()
@@ -474,7 +473,7 @@ impl ExplorerView {
                     this.close_context_menu();
                     this.open_utility_menu = None;
                     if this.commit_active_rename_before_interaction(window, cx) {
-                        this.paste_clipboard_files(cx);
+                        this.paste_clipboard(window, cx);
                     }
                     cx.stop_propagation();
                     cx.notify();
@@ -2762,10 +2761,6 @@ fn render_open_error(error: &str) -> Div {
         .child(SharedString::from(error.to_owned()))
 }
 
-fn clipboard_has_file_clipboard(item: Option<&ClipboardItem>) -> bool {
-    item.and_then(file_clipboard_from_item).is_some()
-}
-
 fn local_context_menu_origin(
     window_position: Point<Pixels>,
     view_origin: Point<Pixels>,
@@ -2905,7 +2900,7 @@ fn open_current_folder_context_menu_from_event(
     cx: &mut Context<ExplorerView>,
 ) {
     let clipboard = cx.read_from_clipboard();
-    let can_paste = clipboard_has_file_clipboard(clipboard.as_ref());
+    let can_paste = clipboard_item_can_paste(clipboard.as_ref());
     let origin = local_context_menu_origin(event.position, this.view_origin);
     if this.open_folder_context_menu(origin, can_paste, window, cx) {
         cx.notify();
@@ -4668,8 +4663,8 @@ mod tests {
     use std::{collections::BTreeSet, fs, path::PathBuf};
 
     use gpui::{
-        AppContext, ClickEvent, ClipboardItem, ExternalPaths, KeyboardClickEvent, Modifiers,
-        MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
+        AppContext, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
+        KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
     };
 
     use crate::explorer::context_menu::{
@@ -4677,7 +4672,10 @@ mod tests {
     };
     use crate::explorer::{
         DirectoryKind,
-        clipboard::{FileClipboard, FileClipboardOperation, clipboard_item_for_files},
+        clipboard::{
+            FileClipboard, FileClipboardOperation, clipboard_item_can_paste,
+            clipboard_item_for_files,
+        },
         constants::{
             COLUMN_NAME_MIN_WIDTH, COLUMN_TYPE_WIDTH, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
@@ -4694,14 +4692,14 @@ mod tests {
         CONTEXT_MENU_MAX_WIDTH, CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY,
         DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
         RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, clipboard_has_file_clipboard,
-        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
-        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        drop_indicator_target_width, entry_row_hover_enabled, filename_text_width,
-        folder_status_summary, is_normal_entry_click, open_current_folder_context_menu_from_event,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
+        available_filename_text_width, context_menu_action_width_for_text_width,
+        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
+        context_menu_width_for_natural_width, drop_indicator_target_width, entry_row_hover_enabled,
+        filename_text_width, folder_status_summary, is_normal_entry_click,
+        open_current_folder_context_menu_from_event, recursive_result_text_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -4753,17 +4751,20 @@ mod tests {
     }
 
     #[test]
-    fn paste_button_availability_requires_explorer_file_clipboard() {
+    fn paste_button_availability_accepts_file_and_image_clipboard_payloads() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
             vec![PathBuf::from("a.txt")],
         ))
         .expect("clipboard item");
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
+        let image_item = ClipboardItem::new_image(&image);
         let plain_item = ClipboardItem::new_string("a.txt".to_owned());
 
-        assert!(clipboard_has_file_clipboard(Some(&explorer_item)));
-        assert!(!clipboard_has_file_clipboard(Some(&plain_item)));
-        assert!(!clipboard_has_file_clipboard(None));
+        assert!(clipboard_item_can_paste(Some(&explorer_item)));
+        assert!(clipboard_item_can_paste(Some(&image_item)));
+        assert!(!clipboard_item_can_paste(Some(&plain_item)));
+        assert!(!clipboard_item_can_paste(None));
     }
 
     #[gpui::test]

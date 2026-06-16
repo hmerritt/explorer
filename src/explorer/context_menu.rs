@@ -363,7 +363,7 @@ impl ExplorerView {
             }
             ContextMenuCommand::CutSelected => self.cut_selected_to_clipboard(cx),
             ContextMenuCommand::CopySelected => self.copy_selected_to_clipboard(cx),
-            ContextMenuCommand::Paste => self.paste_clipboard_files(cx),
+            ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
             ContextMenuCommand::DeleteSelected => self.trash_selected_paths(cx),
             ContextMenuCommand::RenameSelected => {
                 self.start_rename_selected(window, cx);

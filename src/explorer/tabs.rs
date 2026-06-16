@@ -1484,13 +1484,18 @@ fn reorder_tab_ids(
 mod tests {
     use super::*;
     use crate::explorer::{
-        actions::{MoveDown, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit},
+        actions::{
+            MoveDown, PasteClipboard, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
+        },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
     use crate::settings::{ExplorerSettings, SettingsState};
-    use gpui::{AppContext, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext};
+    use gpui::{
+        AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, ScrollDelta,
+        ScrollWheelEvent, TestAppContext,
+    };
     use std::fs;
 
     #[test]
@@ -2146,6 +2151,43 @@ mod tests {
                 clipboard,
                 Some(FileClipboard::new(FileClipboardOperation::Copy, vec![path]))
             );
+        });
+    }
+
+    #[gpui::test]
+    fn paste_clipboard_image_saves_file_selects_it_and_starts_rename(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = active_test_view(&tabs, cx);
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3, 4]);
+
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_image(&image)));
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        let path = temp.path().join("image.png");
+        assert_eq!(fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["image.png"]);
+            assert!(view.rename_is_active_for_path(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn paste_clipboard_image_uses_first_free_image_name(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["image.png"]);
+        let view = active_test_view(&tabs, cx);
+        let image = Image::from_bytes(ImageFormat::Png, vec![5, 6, 7]);
+
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_image(&image)));
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        let path = temp.path().join("image (2).png");
+        assert_eq!(fs::read(&path).unwrap(), vec![5, 6, 7]);
+        assert_eq!(fs::read(temp.path().join("image.png")).unwrap(), b"file");
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["image (2).png"]);
+            assert!(view.rename_is_active_for_path(&path));
         });
     }
 
