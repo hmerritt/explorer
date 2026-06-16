@@ -2,18 +2,14 @@
 
 ## 1
 
-- EXIF reader for Properties > Details tab for images
-- Drag file view headers width + drag re-ordering (not Name, keep this dynamic, fixed first)
-
-- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
-- File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Improve readme - add screenshots / branding
+- Large icons grid view (alternate to the current Details view)
 
 ## 2
 
 - [Windows-only] detext WSL Linux install, show drive for it
-- Large icons grid view (alternate to the current Details view)
 - UI refinement and improvements (tighten everything up, make it look nice)
+- Codebase support. When git is detected, scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
@@ -34,6 +30,64 @@
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 - Add UI button to calc folder sizes (button disapears once pressed, it's a one-time button that must be pressed per-directory as-and-when it is needed) Only show when "show_folder_size: false"
+
+## Left to implement
+
+Major remaining Windows Explorer parity areas:
+
+2. **View modes and folder presentation**
+   The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
+
+3. **Context menus and shell verbs**
+   No full right-click model yet: Properties, Copy as path, Send to, Share, Pin, New item templates, terminal/open here, app-specific verbs, and empty-folder/background context menus.
+
+4. **Navigation shell surfaces**
+   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion.
+
+5. **File operation parity**
+   Current copy/move/delete is strong, but Explorer has much more: pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, shortcut creation via Alt-drag, and more exact same-volume/network behavior.
+
+6. **Keyboard and mouse completeness**
+   Implemented keys cover common navigation and rename, but Explorer has a large set left: context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window.
+
+7. **Shell integration and platform associations**
+   Opening files uses the default app, but there is no full file association management, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.
+
+## Properties > Details tab:
+
+- Update Properties contextmenu icon (in all cases) to: assets\icons\utility\properties.svg
+- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
+- Open With "Custom" needs a rework (it doesn't work)
+- Details tab visible scrollbar (thin)
+- Image metadata
+    - Remove quotes from string EXIF values, just show the text without the quotes
+    - Support for exifmeta custom tags
+    - Edit metadata values
+- Video metadata
+    - Frame Rate
+    - Resolution
+    - Codec
+    - Format
+    - Levels
+    - Chroma Loc
+    - Colormatrix
+    - Primaries
+    - Transfer
+    - colour
+- Audio metadata
+    - Channels
+    - Format
+    - Sample Rate
+- Text file
+    - Lines
+    - Lines of text
+    - Blanks
+- Code file
+    - Language
+    - Lines
+    - Lines of Code
+    - Blanks
+-
 
 ## File move/copy/sync engine
 
@@ -70,28 +124,3 @@ Destination is split into blocks.
 Compute weak rolling checksum plus strong hash per block.
 Scan source and emit “reuse destination block” or “write literal bytes.”
 Best for sync/update scenarios, not ordinary Explorer copy.
-
-## Left to implement
-
-Major remaining Windows Explorer parity areas:
-
-2. **View modes and folder presentation**
-   The app is mostly one Details-style list. Still missing large/medium/small icons, tiles, content view, list view, grouping, column resizing/reordering/choosing, sort direction UI, per-folder view persistence, preview pane, details pane, and thumbnail generation.
-
-3. **Context menus and shell verbs**
-   No full right-click model yet: Properties, Copy as path, Send to, Share, Pin, New item templates, terminal/open here, app-specific verbs, and empty-folder/background context menus.
-
-4. **Properties and metadata**
-   Missing file/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
-
-5. **Navigation shell surfaces**
-   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion.
-
-6. **File operation parity**
-   Current copy/move/delete is strong, but Explorer has much more: pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, shortcut creation via Alt-drag, and more exact same-volume/network behavior.
-
-7. **Keyboard and mouse completeness**
-   Implemented keys cover common navigation and rename, but Explorer has a large set left: Alt+Enter properties, context-menu key/Shift+F10, F10/menu behavior, Ctrl+N new window.
-
-8. **Shell integration and platform associations**
-   Opening files uses the default app, but there is no full file association management, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.

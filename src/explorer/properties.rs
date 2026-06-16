@@ -45,6 +45,7 @@ const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
+const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PropertyTarget {
@@ -73,7 +74,7 @@ pub(super) struct PropertySnapshot {
     pub(super) permission_summary: MixedValue<String>,
     pub(super) default_app: Option<PropertyDefaultApp>,
     pub(super) shortcut: Option<ShortcutDetails>,
-    pub(super) details: Vec<PropertyDetail>,
+    pub(super) details: Vec<PropertyDetailGroup>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +144,45 @@ pub(super) struct ShortcutDetails {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PropertyDetailGroup {
+    pub(super) kind: PropertyDetailGroupKind,
+    pub(super) title: String,
+    pub(super) details: Vec<PropertyDetail>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum PropertyDetailGroupKind {
+    File,
+    Camera,
+    Exposure,
+    Gps,
+    Misc,
+    NonStandard,
+}
+
+impl PropertyDetailGroupKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Camera => "camera",
+            Self::Exposure => "exposure",
+            Self::Gps => "gps",
+            Self::Misc => "misc",
+            Self::NonStandard => "non-standard",
+        }
+    }
+}
+
+const PROPERTY_DETAIL_GROUP_ORDER: &[PropertyDetailGroupKind] = &[
+    PropertyDetailGroupKind::File,
+    PropertyDetailGroupKind::Camera,
+    PropertyDetailGroupKind::Exposure,
+    PropertyDetailGroupKind::Gps,
+    PropertyDetailGroupKind::Misc,
+    PropertyDetailGroupKind::NonStandard,
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PropertyDetail {
     pub(super) name: String,
     pub(super) value: String,
@@ -166,6 +206,13 @@ enum PropertySnapshotState {
     Failed(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PropertyDetailsState {
+    NotStarted,
+    Loading,
+    Ready(Vec<PropertyDetailGroup>),
+}
+
 pub(super) struct PropertiesDialog {
     target: PropertyTarget,
     explorer: WeakEntity<ExplorerView>,
@@ -174,7 +221,10 @@ pub(super) struct PropertiesDialog {
     focus_handle: FocusHandle,
     active_tab: PropertyTab,
     snapshot_state: PropertySnapshotState,
+    details_state: PropertyDetailsState,
+    details_generation: u64,
     snapshot_task: Option<Task<()>>,
+    details_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
     #[cfg(not(target_os = "windows"))]
     default_app_task: Option<Task<()>>,
@@ -237,7 +287,10 @@ impl PropertiesDialog {
             focus_handle,
             active_tab: PropertyTab::General,
             snapshot_state: PropertySnapshotState::Loading,
+            details_state: PropertyDetailsState::NotStarted,
+            details_generation: 0,
             snapshot_task: None,
+            details_task: None,
             apply_task: None,
             #[cfg(not(target_os = "windows"))]
             default_app_task: None,
@@ -258,25 +311,80 @@ impl PropertiesDialog {
 
     fn start_snapshot_task(&mut self, cx: &mut Context<Self>) {
         self.snapshot_state = PropertySnapshotState::Loading;
+        self.reset_details_state();
         let target = self.target.clone();
+        let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { collect_property_snapshot(target) })
+                .spawn(
+                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
+                )
                 .await;
 
             let _ = this.update(cx, |dialog, cx| {
-                dialog.snapshot_state = match result {
+                match result {
                     Ok(snapshot) => {
-                        dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
-                        PropertySnapshotState::Ready(snapshot)
+                        dialog.set_ready_snapshot(snapshot, cx);
                     }
-                    Err(error) => PropertySnapshotState::Failed(error),
-                };
+                    Err(error) => dialog.snapshot_state = PropertySnapshotState::Failed(error),
+                }
                 cx.notify();
             });
         });
         self.snapshot_task = Some(task);
+    }
+
+    fn reset_details_state(&mut self) {
+        self.details_generation = self.details_generation.wrapping_add(1);
+        self.details_state = PropertyDetailsState::NotStarted;
+        self.details_task = None;
+    }
+
+    fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
+        self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
+        self.snapshot_state = PropertySnapshotState::Ready(snapshot);
+        self.reset_details_state();
+        if self.active_tab == PropertyTab::Details {
+            self.start_details_task(cx);
+        }
+    }
+
+    fn start_details_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.details_state, PropertyDetailsState::NotStarted) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        if !snapshot
+            .target
+            .paths
+            .iter()
+            .any(|path| path_may_have_exif(path))
+        {
+            self.details_state = PropertyDetailsState::Ready(Vec::new());
+            return;
+        }
+
+        self.details_state = PropertyDetailsState::Loading;
+        let target = snapshot.target.clone();
+        let generation = self.details_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let groups = cx
+                .background_executor()
+                .spawn(async move { collect_exif_detail_groups(&target) })
+                .await;
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.details_generation == generation {
+                    dialog.details_task = None;
+                    dialog.details_state = PropertyDetailsState::Ready(groups);
+                    cx.notify();
+                }
+            });
+        });
+        self.details_task = Some(task);
     }
 
     fn handle_cancel(&mut self, _: &DialogCancel, window: &mut Window, cx: &mut Context<Self>) {
@@ -324,12 +432,14 @@ impl PropertiesDialog {
         self.apply_error = None;
         let target = snapshot.target.clone();
         let explorer = self.explorer.clone();
+        let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let outcome = apply_property_draft(&target.paths, &plan);
-                    let snapshot = collect_property_snapshot(target).ok();
+                    let snapshot =
+                        collect_property_snapshot_with_date_format(target, &date_format).ok();
                     (outcome, snapshot)
                 })
                 .await;
@@ -343,8 +453,7 @@ impl PropertiesDialog {
                     dialog.apply_error = Some(outcome.errors.join("\n"));
                 }
                 if let Some(snapshot) = snapshot {
-                    dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
-                    dialog.snapshot_state = PropertySnapshotState::Ready(snapshot);
+                    dialog.set_ready_snapshot(snapshot, cx);
                 }
                 let _ = explorer.update(cx, |explorer, cx| {
                     explorer.refresh_with_entry_metadata_resolution(cx);
@@ -401,6 +510,7 @@ impl PropertiesDialog {
         self.default_app_error = None;
         let before = snapshot.default_app.clone();
         let target = snapshot.target.clone();
+        let date_format = self.date_format.clone();
         let window_handle = HasWindowHandle::window_handle(window)
             .ok()
             .map(|handle| handle.as_raw());
@@ -417,7 +527,9 @@ impl PropertiesDialog {
             .await;
             let snapshot = cx
                 .background_executor()
-                .spawn(async move { collect_property_snapshot(target) })
+                .spawn(
+                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
+                )
                 .await
                 .ok();
 
@@ -426,8 +538,7 @@ impl PropertiesDialog {
                 dialog.default_app_error =
                     default_app_change_error(&path_for_result, &before, &result, snapshot.as_ref());
                 if let Some(snapshot) = snapshot {
-                    dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
-                    dialog.snapshot_state = PropertySnapshotState::Ready(snapshot);
+                    dialog.set_ready_snapshot(snapshot, cx);
                 }
                 cx.notify();
             });
@@ -445,10 +556,13 @@ impl PropertiesDialog {
         cx: &mut Context<Self>,
     ) {
         let target = self.target.clone();
+        let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
             let snapshot = cx
                 .background_executor()
-                .spawn(async move { collect_property_snapshot(target) })
+                .spawn(
+                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
+                )
                 .await
                 .ok();
 
@@ -457,8 +571,7 @@ impl PropertiesDialog {
                 dialog.default_app_error =
                     default_app_change_error(&path, &before, &result, snapshot.as_ref());
                 if let Some(snapshot) = snapshot {
-                    dialog.draft = EditablePropertyDraft::from_snapshot(&snapshot);
-                    dialog.snapshot_state = PropertySnapshotState::Ready(snapshot);
+                    dialog.set_ready_snapshot(snapshot, cx);
                 }
                 cx.notify();
             });
@@ -470,6 +583,9 @@ impl PropertiesDialog {
     fn set_active_tab(&mut self, tab: PropertyTab, cx: &mut Context<Self>) {
         if self.active_tab != tab {
             self.active_tab = tab;
+            if tab == PropertyTab::Details {
+                self.start_details_task(cx);
+            }
             cx.notify();
         }
     }
@@ -833,6 +949,8 @@ impl PropertiesDialog {
     }
 
     fn render_details(&self, snapshot: &PropertySnapshot) -> AnyElement {
+        let groups = detail_groups_for_render(snapshot, &self.details_state);
+        let loading_details = matches!(self.details_state, PropertyDetailsState::Loading);
         let mut body = div()
             .flex()
             .flex_col()
@@ -851,11 +969,23 @@ impl PropertiesDialog {
                     .child(div().flex_1().min_w(px(0.0)).child("Value")),
             );
 
-        for detail in &snapshot.details {
-            body = body.child(detail_row(&detail.name, &detail.value));
+        for group in &groups {
+            body = body.child(detail_group_header(&group.title));
+            for detail in &group.details {
+                body = body.child(detail_row(&detail.name, &detail.value));
+            }
         }
 
-        if snapshot.details.is_empty() {
+        if loading_details {
+            body = body.child(
+                div()
+                    .pt(px(12.0))
+                    .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .child("Loading image metadata..."),
+            );
+        }
+
+        if groups.is_empty() && !loading_details {
             body.child(
                 div()
                     .pt(px(12.0))
@@ -992,14 +1122,22 @@ fn properties_window_title(paths: &[PathBuf]) -> String {
     }
 }
 
+#[cfg(test)]
 fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot, String> {
+    collect_property_snapshot_with_date_format(target, crate::settings::DEFAULT_DATE_FORMAT)
+}
+
+fn collect_property_snapshot_with_date_format(
+    target: PropertyTarget,
+    date_format: &str,
+) -> Result<PropertySnapshot, String> {
     if target.paths.is_empty() {
         return Err("No items selected.".to_owned());
     }
 
     let mut items = Vec::new();
     for path in &target.paths {
-        items.push(collect_property_item(path));
+        items.push(collect_property_item(path, date_format));
     }
 
     let title = property_title(&target.paths);
@@ -1098,10 +1236,10 @@ struct PropertyItem {
     unix_mode: Option<u32>,
     permission_summary: Option<String>,
     shortcut: Option<ShortcutDetails>,
-    details: Vec<PropertyDetail>,
+    details: Vec<PropertyDetailGroup>,
 }
 
-fn collect_property_item(path: &Path) -> PropertyItem {
+fn collect_property_item(path: &Path, date_format: &str) -> PropertyItem {
     let link_metadata = fs::symlink_metadata(path).ok();
     let metadata = fs::metadata(path).ok().or_else(|| link_metadata.clone());
     let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
@@ -1140,7 +1278,14 @@ fn collect_property_item(path: &Path) -> PropertyItem {
         .map(|metadata| metadata.permissions().readonly());
     let hidden = Some(path_is_hidden(path, metadata.as_ref()));
     let shortcut = shortcut_details(path, entry.as_ref());
-    let details = metadata_details(path, entry.as_ref(), metadata.as_ref());
+    let details = metadata_details(
+        path,
+        entry.as_ref(),
+        metadata.as_ref(),
+        size,
+        size_on_disk,
+        date_format,
+    );
 
     PropertyItem {
         path: path.to_path_buf(),
@@ -1279,36 +1424,96 @@ fn property_tree_summary_from_metadata(
     summary
 }
 
-fn merged_details(items: &[PropertyItem]) -> Vec<PropertyDetail> {
-    let mut values: BTreeMap<String, MixedValue<String>> = BTreeMap::new();
-    for item in items {
-        for detail in &item.details {
-            let entry = values.remove(&detail.name).unwrap_or(MixedValue::None);
-            values.insert(
-                detail.name.clone(),
-                mix_value(entry, Some(detail.value.clone())),
-            );
+fn merged_details(items: &[PropertyItem]) -> Vec<PropertyDetailGroup> {
+    merge_detail_groups(items.iter().map(|item| item.details.as_slice()))
+}
+
+fn merge_detail_groups<'a>(
+    groups_by_item: impl IntoIterator<Item = &'a [PropertyDetailGroup]>,
+) -> Vec<PropertyDetailGroup> {
+    let mut values: BTreeMap<PropertyDetailGroupKind, Vec<(String, MixedValue<String>)>> =
+        BTreeMap::new();
+
+    for groups in groups_by_item {
+        for group in groups {
+            let group_values = values.entry(group.kind).or_default();
+            for detail in &group.details {
+                if let Some((_, value)) = group_values
+                    .iter_mut()
+                    .find(|(name, _)| name == &detail.name)
+                {
+                    let current = std::mem::replace(value, MixedValue::None);
+                    *value = mix_value(current, Some(detail.value.clone()));
+                } else {
+                    group_values.push((
+                        detail.name.clone(),
+                        mix_value(MixedValue::None, Some(detail.value.clone())),
+                    ));
+                }
+            }
         }
     }
-    values
-        .into_iter()
-        .map(|(name, value)| PropertyDetail {
-            name,
-            value: mixed_string_label(&value),
+
+    PROPERTY_DETAIL_GROUP_ORDER
+        .iter()
+        .filter_map(|kind| {
+            let details: Vec<_> = values
+                .remove(kind)?
+                .into_iter()
+                .map(|(name, value)| PropertyDetail {
+                    name,
+                    value: mixed_string_label(&value),
+                })
+                .collect();
+            (!details.is_empty()).then(|| property_detail_group(*kind, details))
         })
         .collect()
+}
+
+fn property_detail_group(
+    kind: PropertyDetailGroupKind,
+    details: Vec<PropertyDetail>,
+) -> PropertyDetailGroup {
+    PropertyDetailGroup {
+        kind,
+        title: kind.title().to_owned(),
+        details,
+    }
 }
 
 fn metadata_details(
     path: &Path,
     entry: Option<&crate::explorer::FileEntry>,
     metadata: Option<&fs::Metadata>,
-) -> Vec<PropertyDetail> {
+    size: Option<u64>,
+    size_on_disk: Option<u64>,
+    date_format: &str,
+) -> Vec<PropertyDetailGroup> {
     let mut details = Vec::new();
-    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+    details.push(PropertyDetail {
+        name: "Name".to_owned(),
+        value: path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+    });
+    if let Some(size) = size {
         details.push(PropertyDetail {
-            name: "Extension".to_owned(),
-            value: extension.to_owned(),
+            name: "Size".to_owned(),
+            value: property_size_label(size),
+        });
+    }
+    if let Some(size_on_disk) = size_on_disk {
+        details.push(PropertyDetail {
+            name: "Size on disk".to_owned(),
+            value: property_size_label(size_on_disk),
+        });
+    }
+    if metadata.is_some_and(|metadata| metadata.is_file()) {
+        details.push(PropertyDetail {
+            name: "MIME Type".to_owned(),
+            value: mime_type_label(path),
         });
     }
     if let Some(entry) = entry {
@@ -1317,10 +1522,57 @@ fn metadata_details(
             value: entry.type_label(),
         });
     }
-    if let Some(metadata) = metadata {
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
         details.push(PropertyDetail {
-            name: "Bytes".to_owned(),
-            value: metadata.len().to_string(),
+            name: "Extension".to_owned(),
+            value: extension.to_owned(),
+        });
+    }
+    if let Some(permissions) = permission_summary(metadata) {
+        details.push(PropertyDetail {
+            name: "Permissions".to_owned(),
+            value: permissions,
+        });
+    }
+    if let Some(parent) = path.parent() {
+        details.push(PropertyDetail {
+            name: "Directory".to_owned(),
+            value: parent.display().to_string(),
+        });
+    }
+    push_time_detail(
+        &mut details,
+        "Accessed",
+        metadata,
+        date_format,
+        |metadata| metadata.accessed().ok(),
+    );
+    push_time_detail(
+        &mut details,
+        "Modified",
+        metadata,
+        date_format,
+        |metadata| metadata.modified().ok(),
+    );
+    push_time_detail(&mut details, "Created", metadata, date_format, |metadata| {
+        metadata.created().ok()
+    });
+    if let Some(owner) = owner_name(metadata) {
+        details.push(PropertyDetail {
+            name: "Owner".to_owned(),
+            value: owner,
+        });
+    }
+    if let Some(group) = group_name(metadata) {
+        details.push(PropertyDetail {
+            name: "Group".to_owned(),
+            value: group,
+        });
+    }
+    if let Some(mode) = unix_mode(metadata) {
+        details.push(PropertyDetail {
+            name: "Mode".to_owned(),
+            value: unix_mode_detail_label(mode),
         });
     }
     if let Ok((width, height)) = image::image_dimensions(path) {
@@ -1329,11 +1581,58 @@ fn metadata_details(
             value: format!("{width} x {height}"),
         });
     }
-    details.extend(exif_details(path));
-    details
+
+    vec![property_detail_group(
+        PropertyDetailGroupKind::File,
+        details,
+    )]
 }
 
-fn exif_details(path: &Path) -> Vec<PropertyDetail> {
+fn push_time_detail(
+    details: &mut Vec<PropertyDetail>,
+    name: &'static str,
+    metadata: Option<&fs::Metadata>,
+    date_format: &str,
+    timestamp: impl FnOnce(&fs::Metadata) -> Option<SystemTime>,
+) {
+    let Some(value) = metadata
+        .and_then(timestamp)
+        .map(|timestamp| format_timestamp(Some(timestamp), date_format))
+        .and_then(non_empty_property_value)
+    else {
+        return;
+    };
+
+    details.push(PropertyDetail {
+        name: name.to_owned(),
+        value,
+    });
+}
+
+fn mime_type_label(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first_raw()
+        .unwrap_or("application/octet-stream")
+        .to_owned()
+}
+
+fn path_may_have_exif(path: &Path) -> bool {
+    mime_guess::from_path(path)
+        .first_raw()
+        .is_some_and(|mime| mime.starts_with("image/"))
+}
+
+fn collect_exif_detail_groups(target: &PropertyTarget) -> Vec<PropertyDetailGroup> {
+    let groups_by_item: Vec<_> = target
+        .paths
+        .iter()
+        .filter(|path| path_may_have_exif(path))
+        .map(|path| exif_details(path))
+        .collect();
+    merge_detail_groups(groups_by_item.iter().map(Vec::as_slice))
+}
+
+fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
     let Ok(file) = fs::File::open(path) else {
         return Vec::new();
     };
@@ -1349,32 +1648,171 @@ fn exif_details(path: &Path) -> Vec<PropertyDetail> {
     let fields: Vec<_> = exif.fields().collect();
     let mut tag_counts = BTreeMap::new();
     for field in &fields {
-        *tag_counts.entry(field.tag.to_string()).or_insert(0usize) += 1;
+        *tag_counts.entry(exif_tag_name(field.tag)).or_insert(0usize) += 1;
     }
 
     let mut used_names = BTreeMap::new();
-    fields
-        .into_iter()
-        .map(|field| {
-            let tag = field.tag.to_string();
-            let base_name = if tag_counts.get(&tag).copied().unwrap_or(0) > 1 {
-                format!("{tag} (IFD {})", field.ifd_num.index())
-            } else {
-                tag
-            };
-            let occurrence = used_names.entry(base_name.clone()).or_insert(0usize);
-            *occurrence += 1;
-            let name = if *occurrence == 1 {
-                base_name
-            } else {
-                format!("{base_name} #{}", *occurrence)
-            };
-            PropertyDetail {
-                name,
-                value: field.display_value().with_unit(&exif).to_string(),
-            }
+    let mut groups: BTreeMap<PropertyDetailGroupKind, Vec<PropertyDetail>> = BTreeMap::new();
+    for field in fields {
+        let kind = exif_detail_group_kind(field);
+        let tag = exif_tag_name(field.tag);
+        let base_name = if tag_counts.get(&tag).copied().unwrap_or(0) > 1 {
+            format!("{tag} (IFD {})", field.ifd_num.index())
+        } else {
+            tag
+        };
+        let occurrence = used_names
+            .entry((kind, base_name.clone()))
+            .or_insert(0usize);
+        *occurrence += 1;
+        let name = if *occurrence == 1 {
+            base_name
+        } else {
+            format!("{base_name} #{}", *occurrence)
+        };
+
+        groups.entry(kind).or_default().push(PropertyDetail {
+            name,
+            value: field.display_value().with_unit(&exif).to_string(),
+        });
+    }
+
+    PROPERTY_DETAIL_GROUP_ORDER
+        .iter()
+        .filter_map(|kind| {
+            let details = groups.remove(kind)?;
+            (!details.is_empty()).then(|| property_detail_group(*kind, details))
         })
         .collect()
+}
+
+fn exif_tag_name(tag: exif::Tag) -> String {
+    if tag.description().is_none() {
+        return format!("Tag({:?}, 0x{:04X})", tag.context(), tag.number());
+    }
+
+    named_exif_tag_label(tag)
+        .map(str::to_owned)
+        .unwrap_or_else(|| humanized_exif_tag_name(&tag.to_string()))
+}
+
+fn named_exif_tag_label(tag: exif::Tag) -> Option<&'static str> {
+    [
+        (exif::Tag::FileSource, "File Source"),
+        (exif::Tag::FocalLength, "Focal Length"),
+        (
+            exif::Tag::FocalLengthIn35mmFilm,
+            "Focal Length In 35mm Film",
+        ),
+        (exif::Tag::LensSpecification, "Lens Specification"),
+        (exif::Tag::LensMake, "Lens Make"),
+        (exif::Tag::LensModel, "Lens Model"),
+        (exif::Tag::LensSerialNumber, "Lens Serial Number"),
+        (exif::Tag::ExposureTime, "Exposure Time"),
+        (exif::Tag::FNumber, "F Number"),
+        (
+            exif::Tag::PhotographicSensitivity,
+            "Photographic Sensitivity",
+        ),
+        (exif::Tag::ISOSpeed, "ISO Speed"),
+        (exif::Tag::MaxApertureValue, "Max Aperture Value"),
+        (exif::Tag::ExposureProgram, "Exposure Program"),
+        (exif::Tag::ShutterSpeedValue, "Shutter Speed Value"),
+        (exif::Tag::ApertureValue, "Aperture Value"),
+        (exif::Tag::BrightnessValue, "Brightness Value"),
+        (exif::Tag::ExposureBiasValue, "Exposure Bias Value"),
+        (exif::Tag::SubjectDistance, "Subject Distance"),
+        (exif::Tag::MeteringMode, "Metering Mode"),
+        (exif::Tag::LightSource, "Light Source"),
+        (exif::Tag::ExposureMode, "Exposure Mode"),
+        (exif::Tag::WhiteBalance, "White Balance"),
+        (exif::Tag::DigitalZoomRatio, "Digital Zoom Ratio"),
+        (exif::Tag::SceneCaptureType, "Scene Capture Type"),
+        (exif::Tag::SubjectDistanceRange, "Subject Distance Range"),
+    ]
+    .into_iter()
+    .find_map(|(candidate, label)| (candidate == tag).then_some(label))
+}
+
+fn humanized_exif_tag_name(name: &str) -> String {
+    let chars: Vec<_> = name.chars().collect();
+    let mut text = String::with_capacity(name.len() + name.len() / 4);
+    for (ix, ch) in chars.iter().copied().enumerate() {
+        if ix > 0 && exif_tag_name_boundary(chars[ix - 1], ch, chars.get(ix + 1).copied()) {
+            text.push(' ');
+        }
+        text.push(ch);
+    }
+    text
+}
+
+fn exif_tag_name_boundary(previous: char, current: char, next: Option<char>) -> bool {
+    if current.is_ascii_digit() {
+        return !previous.is_ascii_digit();
+    }
+    if !current.is_ascii_uppercase() {
+        return false;
+    }
+    previous.is_ascii_lowercase()
+        || previous.is_ascii_digit()
+        || previous.is_ascii_uppercase() && next.is_some_and(|next| next.is_ascii_lowercase())
+}
+
+fn exif_detail_group_kind(field: &exif::Field) -> PropertyDetailGroupKind {
+    if field.tag.context() == exif::Context::Gps {
+        PropertyDetailGroupKind::Gps
+    } else if field.tag.description().is_none() {
+        PropertyDetailGroupKind::NonStandard
+    } else if camera_exif_tag(field.tag) {
+        PropertyDetailGroupKind::Camera
+    } else if exposure_exif_tag(field.tag) {
+        PropertyDetailGroupKind::Exposure
+    } else {
+        PropertyDetailGroupKind::Misc
+    }
+}
+
+fn camera_exif_tag(tag: exif::Tag) -> bool {
+    [
+        exif::Tag::FileSource,
+        exif::Tag::FocalLength,
+        exif::Tag::FocalLengthIn35mmFilm,
+        exif::Tag::LensSpecification,
+        exif::Tag::LensMake,
+        exif::Tag::LensModel,
+        exif::Tag::LensSerialNumber,
+        exif::Tag::Make,
+        exif::Tag::Model,
+    ]
+    .contains(&tag)
+}
+
+fn exposure_exif_tag(tag: exif::Tag) -> bool {
+    [
+        exif::Tag::ExposureTime,
+        exif::Tag::FNumber,
+        exif::Tag::PhotographicSensitivity,
+        exif::Tag::ISOSpeed,
+        exif::Tag::MaxApertureValue,
+        exif::Tag::ExposureProgram,
+        exif::Tag::ShutterSpeedValue,
+        exif::Tag::ApertureValue,
+        exif::Tag::BrightnessValue,
+        exif::Tag::ExposureBiasValue,
+        exif::Tag::SubjectDistance,
+        exif::Tag::MeteringMode,
+        exif::Tag::LightSource,
+        exif::Tag::Flash,
+        exif::Tag::ExposureMode,
+        exif::Tag::WhiteBalance,
+        exif::Tag::DigitalZoomRatio,
+        exif::Tag::SceneCaptureType,
+        exif::Tag::Contrast,
+        exif::Tag::Saturation,
+        exif::Tag::Sharpness,
+        exif::Tag::SubjectDistanceRange,
+    ]
+    .contains(&tag)
 }
 
 fn shortcut_details(
@@ -1529,6 +1967,16 @@ fn unix_mode(metadata: Option<&fs::Metadata>) -> Option<u32> {
 #[cfg(not(unix))]
 fn unix_mode(_: Option<&fs::Metadata>) -> Option<u32> {
     None
+}
+
+#[cfg(unix)]
+fn unix_mode_detail_label(mode: u32) -> String {
+    format!("{mode:o} ({})", unix_mode_string(mode))
+}
+
+#[cfg(not(unix))]
+fn unix_mode_detail_label(mode: u32) -> String {
+    mode.to_string()
 }
 
 #[cfg(unix)]
@@ -1917,6 +2365,18 @@ fn property_size_label(size: u64) -> String {
     }
 }
 
+fn detail_groups_for_render(
+    snapshot: &PropertySnapshot,
+    details_state: &PropertyDetailsState,
+) -> Vec<PropertyDetailGroup> {
+    let mut groups = snapshot.details.clone();
+    if let PropertyDetailsState::Ready(exif_groups) = details_state {
+        groups.extend(exif_groups.iter().cloned());
+    }
+    groups.sort_by_key(|group| group.kind);
+    groups
+}
+
 fn tab_button(
     label: &'static str,
     tab: PropertyTab,
@@ -2024,6 +2484,23 @@ fn detail_row(label: &str, value: &str) -> AnyElement {
                 .truncate()
                 .child(SharedString::from(value.to_owned())),
         )
+        .into_any_element()
+}
+
+fn detail_group_header(title: &str) -> AnyElement {
+    div()
+        .mt(px(10.0))
+        .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(
+            div()
+                .mr(px(8.0))
+                .text_color(rgb(PROPERTIES_GROUP_TITLE))
+                .child(SharedString::from(title.to_owned())),
+        )
+        .child(div().flex_1().h(px(1.0)).bg(rgb(PROPERTIES_GROUP_TITLE)))
         .into_any_element()
 }
 
@@ -2322,21 +2799,51 @@ mod tests {
     }
 
     #[test]
-    fn image_details_include_exif_fields() {
+    fn file_group_is_created_for_all_file_types() {
+        let temp = TempDir::new();
+        let file = temp.path().join("note.txt");
+        let image = temp.path().join("photo.jpg");
+        let folder = temp.path().join("folder");
+        fs::write(&file, b"not an image").unwrap();
+        fs::write(&image, jpeg_with_exif(&exif_tiff("Canon", "TestCam", None))).unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        for path in [file, image, folder] {
+            let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![path] }).unwrap();
+            assert!(detail_group(&snapshot.details, PropertyDetailGroupKind::File).is_some());
+        }
+    }
+
+    #[test]
+    fn snapshot_excludes_exif_until_details_load() {
         let temp = TempDir::new();
         let file = temp.path().join("photo.jpg");
         fs::write(&file, jpeg_with_exif(&exif_tiff("Canon", "TestCam", None))).unwrap();
 
-        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
-
-        assert_detail_contains(&snapshot.details, "Make", "Canon");
-        assert_detail_contains(&snapshot.details, "Model", "TestCam");
-        assert!(
-            snapshot
-                .details
-                .iter()
-                .any(|detail| detail.name == "Orientation")
+        let snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![file.clone()],
+        })
+        .unwrap();
+        assert_eq!(
+            detail_value(&snapshot.details, PropertyDetailGroupKind::Camera, "Make"),
+            None
         );
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Make",
+            "Canon",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Model",
+            "TestCam",
+        );
+        assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "Orientation");
     }
 
     #[test]
@@ -2349,10 +2856,48 @@ mod tests {
         )
         .unwrap();
 
-        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
 
-        assert_detail_contains(&snapshot.details, "Make (IFD 0)", "Canon");
-        assert_detail_contains(&snapshot.details, "Make (IFD 1)", "Thumb");
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Make (IFD 0)",
+            "Canon",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Make (IFD 1)",
+            "Thumb",
+        );
+    }
+
+    #[test]
+    fn exif_details_are_grouped_by_standard_category() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        fs::write(&file, jpeg_with_exif(&grouped_exif_tiff())).unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Make",
+            "Canon",
+        );
+        assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Exposure, "ISO Speed");
+        assert_group_has_detail(
+            &exif_groups,
+            PropertyDetailGroupKind::Gps,
+            "GPS Latitude Ref",
+        );
+        assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "Orientation");
+        assert_group_has_detail(
+            &exif_groups,
+            PropertyDetailGroupKind::NonStandard,
+            "Tag(Tiff, 0xFDE8)",
+        );
     }
 
     #[test]
@@ -2363,8 +2908,16 @@ mod tests {
 
         let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
 
-        assert!(snapshot.details.iter().all(|detail| detail.name != "Make"));
-        assert!(snapshot.details.iter().any(|detail| detail.name == "Bytes"));
+        assert_eq!(
+            detail_value(&snapshot.details, PropertyDetailGroupKind::Camera, "Make"),
+            None
+        );
+        assert_detail_contains(
+            &snapshot.details,
+            PropertyDetailGroupKind::File,
+            "Size",
+            "12 bytes",
+        );
     }
 
     #[test]
@@ -2375,13 +2928,20 @@ mod tests {
         fs::write(&first, jpeg_with_exif(&exif_tiff("Canon", "Same", None))).unwrap();
         fs::write(&second, jpeg_with_exif(&exif_tiff("Nikon", "Same", None))).unwrap();
 
-        let snapshot = collect_property_snapshot(PropertyTarget {
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget {
             paths: vec![first, second],
-        })
-        .unwrap();
+        });
 
-        assert_eq!(detail_value(&snapshot.details, "Make"), Some(""));
-        assert_detail_contains(&snapshot.details, "Model", "Same");
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
+            Some("")
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Camera,
+            "Model",
+            "Same",
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -2531,15 +3091,42 @@ mod tests {
         );
     }
 
-    fn detail_value<'a>(details: &'a [PropertyDetail], name: &str) -> Option<&'a str> {
-        details
+    fn detail_group(
+        groups: &[PropertyDetailGroup],
+        kind: PropertyDetailGroupKind,
+    ) -> Option<&PropertyDetailGroup> {
+        groups.iter().find(|group| group.kind == kind)
+    }
+
+    fn detail_value<'a>(
+        groups: &'a [PropertyDetailGroup],
+        kind: PropertyDetailGroupKind,
+        name: &str,
+    ) -> Option<&'a str> {
+        detail_group(groups, kind)?
+            .details
             .iter()
             .find(|detail| detail.name == name)
             .map(|detail| detail.value.as_str())
     }
 
-    fn assert_detail_contains(details: &[PropertyDetail], name: &str, needle: &str) {
-        let value = detail_value(details, name).unwrap_or_else(|| panic!("missing detail {name}"));
+    fn assert_group_has_detail(
+        groups: &[PropertyDetailGroup],
+        kind: PropertyDetailGroupKind,
+        name: &str,
+    ) {
+        let _ = detail_value(groups, kind, name)
+            .unwrap_or_else(|| panic!("missing {kind:?} detail {name}"));
+    }
+
+    fn assert_detail_contains(
+        groups: &[PropertyDetailGroup],
+        kind: PropertyDetailGroupKind,
+        name: &str,
+        needle: &str,
+    ) {
+        let value = detail_value(groups, kind, name)
+            .unwrap_or_else(|| panic!("missing {kind:?} detail {name}"));
         assert!(
             value.contains(needle),
             "expected {name} value {value:?} to contain {needle:?}"
@@ -2605,6 +3192,49 @@ mod tests {
             tiff.extend_from_slice(&0u32.to_le_bytes());
             tiff.extend_from_slice(&thumbnail_make);
         }
+
+        tiff
+    }
+
+    fn grouped_exif_tiff() -> Vec<u8> {
+        let make = ascii_exif_value("Canon");
+        let model = ascii_exif_value("TestCam");
+        let ifd0_entry_count = 6u16;
+        let ifd0_start = 8usize;
+        let ifd0_end = ifd0_start + 2 + usize::from(ifd0_entry_count) * 12 + 4;
+        let make_offset = ifd0_end;
+        let model_offset = make_offset + make.len();
+        let exif_ifd_offset = model_offset + model.len();
+        let gps_ifd_offset = exif_ifd_offset + 2 + 12 + 4;
+
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&(ifd0_start as u32).to_le_bytes());
+        tiff.extend_from_slice(&ifd0_entry_count.to_le_bytes());
+        push_ifd_entry(&mut tiff, 0x010f, 2, make.len() as u32, make_offset as u32);
+        push_ifd_entry(
+            &mut tiff,
+            0x0110,
+            2,
+            model.len() as u32,
+            model_offset as u32,
+        );
+        push_ifd_entry(&mut tiff, 0x0112, 3, 1, 1);
+        push_ifd_entry(&mut tiff, 0x8769, 4, 1, exif_ifd_offset as u32);
+        push_ifd_entry(&mut tiff, 0x8825, 4, 1, gps_ifd_offset as u32);
+        push_ifd_entry(&mut tiff, 0xfde8, 3, 1, 42);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&make);
+        tiff.extend_from_slice(&model);
+
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        push_ifd_entry(&mut tiff, 0x8833, 3, 1, 200);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        push_ifd_entry(&mut tiff, 0x0001, 2, 2, u32::from_le_bytes([b'N', 0, 0, 0]));
+        tiff.extend_from_slice(&0u32.to_le_bytes());
 
         tiff
     }
