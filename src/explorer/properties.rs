@@ -298,6 +298,8 @@ pub(super) struct PropertiesDialog {
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
+    frames_scrollbar_hovered: bool,
+    frames_scrollbar_drag: Option<ScrollbarDrag>,
     snapshot_task: Option<Task<()>>,
     details_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
@@ -371,6 +373,8 @@ impl PropertiesDialog {
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
+            frames_scrollbar_hovered: false,
+            frames_scrollbar_drag: None,
             snapshot_task: None,
             details_task: None,
             frames_task: None,
@@ -452,6 +456,7 @@ impl PropertiesDialog {
         self.frames_generation = self.frames_generation.wrapping_add(1);
         self.frames_state = PropertyFramesState::NotStarted;
         self.frames_task = None;
+        self.frames_scrollbar_drag = None;
         let offset = self.frames_scroll_handle.offset();
         self.frames_scroll_handle
             .set_offset(point(offset.x, px(0.0)));
@@ -1409,6 +1414,7 @@ impl PropertiesDialog {
             .w_full()
             .id("properties-frames-body")
             .overflow_y_scroll()
+            .scrollbar_width(px(0.0))
             .track_scroll(&self.frames_scroll_handle)
             .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
                 cx.notify();
@@ -1446,6 +1452,20 @@ impl PropertiesDialog {
             }
         }
 
+        let has_scrollbar = self.frames_scrollbar_metrics().is_some();
+        let content = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .when(has_scrollbar, |this| {
+                this.child(self.render_frames_scrollbar(cx))
+            });
+
         div()
             .flex()
             .flex_col()
@@ -1454,7 +1474,7 @@ impl PropertiesDialog {
             .min_w(px(0.0))
             .w_full()
             .overflow_hidden()
-            .child(body)
+            .child(content)
             .when(loading_frames, |this| {
                 this.child(linear_indeterminate(
                     "properties-frames-linear-progress",
@@ -1503,6 +1523,47 @@ impl PropertiesDialog {
 
         let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
         self.set_details_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
+    }
+
+    fn frames_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        let viewport_height = f32::from(self.frames_scroll_handle.bounds().size.height);
+        let scroll_max = f32::from(self.frames_scroll_handle.max_offset().height);
+        let scroll_top = -f32::from(self.frames_scroll_handle.offset().y);
+        frames_scrollbar_metrics_for_dimensions(viewport_height, scroll_max, scroll_top)
+    }
+
+    fn set_frames_scroll_top(&self, scroll_top: f32) {
+        let scroll_top = self
+            .frames_scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
+        let offset = self.frames_scroll_handle.offset();
+        self.frames_scroll_handle
+            .set_offset(point(offset.x, px(-scroll_top)));
+    }
+
+    fn handle_frames_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_frames_scroll_top(metrics.scroll_by(-PROPERTIES_ROW_HEIGHT));
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_frames_scroll_top(metrics.scroll_by(PROPERTIES_ROW_HEIGHT));
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.frames_scrollbar_drag = Some(ScrollbarDrag {
+                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+            });
+        } else if local_y < metrics.thumb_top {
+            self.set_frames_scroll_top(metrics.scroll_by(-metrics.viewport_height));
+        } else {
+            self.set_frames_scroll_top(metrics.scroll_by(metrics.viewport_height));
+        }
+    }
+
+    fn handle_frames_scrollbar_drag(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        let Some(drag) = self.frames_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
+        self.set_frames_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
     }
 
     fn render_details_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1612,6 +1673,123 @@ impl PropertiesDialog {
 
                     let _ = entity.update(cx, |this, cx| {
                         if this.details_scrollbar_drag.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    fn render_frames_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(metrics) = self.frames_scrollbar_metrics() else {
+            return div().into_any_element();
+        };
+
+        let hovered_or_dragged =
+            self.frames_scrollbar_hovered || self.frames_scrollbar_drag.is_some();
+        let thumb_width = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
+        let thumb_color = if self.frames_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("properties-frames-scrollbar")
+            .relative()
+            .w(px(SCROLLBAR_GUTTER_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.frames_scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
+                    .child(scrollbar_arrow_button(
+                        bottom_arrow_top,
+                        ScrollbarArrow::Down,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(metrics.thumb_top))
+                    .right(px(thumb_right))
+                    .w(px(thumb_width))
+                    .h(px(metrics.thumb_height))
+                    .rounded(px(thumb_width / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_frames_scrollbar_hit_layer(cx))
+            .into_any_element()
+    }
+
+    fn render_frames_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(metrics) = this.frames_scrollbar_metrics() {
+                                this.handle_frames_scrollbar_mouse_down(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.frames_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            if let Some(metrics) = this.frames_scrollbar_metrics() {
+                                this.handle_frames_scrollbar_drag(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.frames_scrollbar_drag.take().is_some() {
                             cx.notify();
                         }
                     });
@@ -4649,6 +4827,18 @@ fn details_scrollbar_metrics_for_dimensions(
     ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
 }
 
+fn frames_scrollbar_metrics_for_dimensions(
+    viewport_height: f32,
+    scroll_max: f32,
+    scroll_top: f32,
+) -> Option<ScrollbarMetrics> {
+    if scroll_max <= 0.0 {
+        return None;
+    }
+
+    ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
+}
+
 fn frame_thumbnail_list(frames: &[PropertyFrameThumbnail]) -> AnyElement {
     let mut list = div()
         .flex()
@@ -5307,6 +5497,18 @@ mod tests {
 
         let metrics =
             details_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0).expect("overflow metrics");
+        assert_eq!(metrics.viewport_height, 100.0);
+        assert_eq!(metrics.content_height, 150.0);
+        assert_eq!(metrics.scroll_max, 50.0);
+        assert_eq!(metrics.scroll_top, 50.0);
+    }
+
+    #[test]
+    fn frames_scrollbar_metrics_only_exist_for_overflow() {
+        assert!(frames_scrollbar_metrics_for_dimensions(100.0, 0.0, 0.0).is_none());
+
+        let metrics =
+            frames_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0).expect("overflow metrics");
         assert_eq!(metrics.viewport_height, 100.0);
         assert_eq!(metrics.content_height, 150.0);
         assert_eq!(metrics.scroll_max, 50.0);
