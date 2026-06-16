@@ -59,10 +59,10 @@ use crate::explorer::{
     formatting::{format_size, format_timestamp},
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
-        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, RENAME_ICON,
-        directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon, drive_icon,
-        drive_windows_icon, executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized,
-        folder_icon, folder_icon_sized, image_icon, nav_icon_font,
+        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON,
+        RENAME_ICON, directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
+        drive_icon, drive_windows_icon, executable_icon_sized, file_icon, file_icon_for_path,
+        file_icon_sized, folder_icon, folder_icon_sized, image_icon, nav_icon_font,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
@@ -3581,6 +3581,10 @@ fn context_menu_icon_element(
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
         ContextMenuIcon::New => gpui::img(NEW_ITEM_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::Properties => gpui::img(PROPERTIES_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),

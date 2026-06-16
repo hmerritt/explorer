@@ -71,6 +71,7 @@ pub(super) enum ContextMenuIcon {
     Delete,
     Rename,
     New,
+    Properties,
     File,
     NativeFile,
     Folder,
@@ -709,7 +710,7 @@ fn entry_context_menu_items_with_custom(
         ContextMenuItem::Separator,
         ContextMenuItem::Action {
             id: "context-menu-entry-properties".to_owned(),
-            icon: Some(ContextMenuIcon::File),
+            icon: Some(ContextMenuIcon::Properties),
             label: "Properties".to_owned(),
             command: ContextMenuCommand::PropertiesSelected,
             enabled: selected_count > 0,
@@ -1491,7 +1492,7 @@ mod tests {
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
                     id: "context-menu-entry-properties".to_owned(),
-                    icon: Some(ContextMenuIcon::File),
+                    icon: Some(ContextMenuIcon::Properties),
                     label: "Properties".to_owned(),
                     command: ContextMenuCommand::PropertiesSelected,
                     enabled: true,
@@ -1724,7 +1725,7 @@ mod tests {
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
                     id: "context-menu-entry-properties".to_owned(),
-                    icon: Some(ContextMenuIcon::File),
+                    icon: Some(ContextMenuIcon::Properties),
                     label: "Properties".to_owned(),
                     command: ContextMenuCommand::PropertiesSelected,
                     enabled: true,
@@ -1773,7 +1774,7 @@ mod tests {
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
                     id: "context-menu-entry-properties".to_owned(),
-                    icon: Some(ContextMenuIcon::File),
+                    icon: Some(ContextMenuIcon::Properties),
                     label: "Properties".to_owned(),
                     command: ContextMenuCommand::PropertiesSelected,
                     enabled: true,
@@ -1790,10 +1791,10 @@ mod tests {
             items.last(),
             Some(ContextMenuItem::Action {
                 id,
+                icon: Some(ContextMenuIcon::Properties),
                 label,
                 command: ContextMenuCommand::PropertiesSelected,
                 enabled: true,
-                ..
             }) if id == "context-menu-entry-properties" && label == "Properties"
         ));
     }
