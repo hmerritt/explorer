@@ -1368,6 +1368,7 @@ fn try_clipboard_image(pasteboard: id, format: ImageFormat) -> Option<ClipboardI
                     data.bytes() as *mut u8,
                     data.length() as usize,
                 ));
+                let (format, bytes) = normalize_clipboard_image(format, bytes)?;
                 let id = hash(&bytes);
 
                 Some(ClipboardItem {
@@ -1377,6 +1378,19 @@ fn try_clipboard_image(pasteboard: id, format: ImageFormat) -> Option<ClipboardI
         } else {
             None
         }
+    }
+}
+
+fn normalize_clipboard_image(format: ImageFormat, bytes: Vec<u8>) -> Option<(ImageFormat, Vec<u8>)> {
+    if format == ImageFormat::Tiff {
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Tiff).ok()?;
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .ok()?;
+        Some((ImageFormat::Png, png))
+    } else {
+        Some((format, bytes))
     }
 }
 
@@ -1759,7 +1773,7 @@ mod tests {
 
     #[test]
     fn png_and_text_pasteboard_reads_image_and_text() {
-        assert_image_and_text_pasteboard_reads_both(
+        assert_image_and_text_pasteboard_preserves_image(
             ImageFormat::Png,
             unsafe { NSPasteboardTypePNG },
             &[1, 2, 3],
@@ -1767,12 +1781,53 @@ mod tests {
     }
 
     #[test]
-    fn tiff_and_text_pasteboard_reads_image_and_text() {
-        assert_image_and_text_pasteboard_reads_both(
-            ImageFormat::Tiff,
-            unsafe { NSPasteboardTypeTIFF },
-            &[4, 5, 6],
-        );
+    fn tiff_only_pasteboard_reads_png_image() {
+        let platform = build_platform();
+        let tiff_bytes = tiff_fixture_bytes();
+
+        unsafe {
+            let pasteboard = platform.0.lock().pasteboard;
+            pasteboard.clearContents();
+            set_pasteboard_data(pasteboard, NSPasteboardTypeTIFF, &tiff_bytes);
+        }
+
+        let item = platform.read_from_clipboard().expect("clipboard item");
+
+        assert_eq!(item.entries.len(), 1);
+        let ClipboardEntry::Image(image) = &item.entries[0] else {
+            panic!("expected image entry");
+        };
+        assert_eq!(image.format, ImageFormat::Png);
+        assert_decodable_png(&image.bytes);
+    }
+
+    #[test]
+    fn tiff_and_text_pasteboard_reads_png_image_and_text() {
+        let platform = build_platform();
+        let tiff_bytes = tiff_fixture_bytes();
+        let text = "https://example.com/image";
+
+        unsafe {
+            let pasteboard = platform.0.lock().pasteboard;
+            pasteboard.clearContents();
+            set_pasteboard_data(pasteboard, NSPasteboardTypeTIFF, &tiff_bytes);
+            set_pasteboard_data(pasteboard, NSPasteboardTypeString, text.as_bytes());
+        }
+
+        let item = platform.read_from_clipboard().expect("clipboard item");
+
+        assert_eq!(item.text(), Some(text.to_string()));
+        assert_eq!(item.entries.len(), 2);
+        let ClipboardEntry::Image(image) = &item.entries[0] else {
+            panic!("expected image entry");
+        };
+        assert_eq!(image.format, ImageFormat::Png);
+        assert_decodable_png(&image.bytes);
+        assert!(matches!(
+            &item.entries[1],
+            ClipboardEntry::String(string)
+                if string.text == text && string.metadata.is_none()
+        ));
     }
 
     #[test]
@@ -1792,7 +1847,7 @@ mod tests {
         assert!(read.metadata().is_some());
     }
 
-    fn assert_image_and_text_pasteboard_reads_both(
+    fn assert_image_and_text_pasteboard_preserves_image(
         image_format: ImageFormat,
         pasteboard_type: id,
         image_bytes: &[u8],
@@ -1821,6 +1876,21 @@ mod tests {
             ClipboardEntry::String(string)
                 if string.text == text && string.metadata.is_none()
         ));
+    }
+
+    fn tiff_fixture_bytes() -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]));
+        let image = image::DynamicImage::ImageRgba8(image);
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Tiff)
+            .expect("encode tiff fixture");
+        bytes
+    }
+
+    fn assert_decodable_png(bytes: &[u8]) {
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .expect("decode png bytes");
     }
 
     unsafe fn set_pasteboard_data(pasteboard: id, pasteboard_type: id, bytes: &[u8]) {
