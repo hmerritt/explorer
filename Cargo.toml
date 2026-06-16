@@ -21,6 +21,7 @@ ar = "0.9.0"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
 decompress = "0.6.0"
 filetime = "0.2.29"
+ffmpeg-sidecar = { version = "2.5.2", default-features = false }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
 globset = "0.4.18"
 futures = "0.3"
