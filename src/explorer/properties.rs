@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::BufReader,
     path::{Path, PathBuf},
     sync::Arc,
     time::SystemTime,
@@ -1328,7 +1329,52 @@ fn metadata_details(
             value: format!("{width} x {height}"),
         });
     }
+    details.extend(exif_details(path));
     details
+}
+
+fn exif_details(path: &Path) -> Vec<PropertyDetail> {
+    let Ok(file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    let Ok(exif) = exif::Reader::new()
+        .continue_on_error(true)
+        .read_from_container(&mut reader)
+        .or_else(|error| error.distill_partial_result(|_| {}))
+    else {
+        return Vec::new();
+    };
+
+    let fields: Vec<_> = exif.fields().collect();
+    let mut tag_counts = BTreeMap::new();
+    for field in &fields {
+        *tag_counts.entry(field.tag.to_string()).or_insert(0usize) += 1;
+    }
+
+    let mut used_names = BTreeMap::new();
+    fields
+        .into_iter()
+        .map(|field| {
+            let tag = field.tag.to_string();
+            let base_name = if tag_counts.get(&tag).copied().unwrap_or(0) > 1 {
+                format!("{tag} (IFD {})", field.ifd_num.index())
+            } else {
+                tag
+            };
+            let occurrence = used_names.entry(base_name.clone()).or_insert(0usize);
+            *occurrence += 1;
+            let name = if *occurrence == 1 {
+                base_name
+            } else {
+                format!("{base_name} #{}", *occurrence)
+            };
+            PropertyDetail {
+                name,
+                value: field.display_value().with_unit(&exif).to_string(),
+            }
+        })
+        .collect()
 }
 
 fn shortcut_details(
@@ -2275,6 +2321,69 @@ mod tests {
         assert_eq!(property_size_label(2048), "2.0 KB (2,048 bytes)");
     }
 
+    #[test]
+    fn image_details_include_exif_fields() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        fs::write(&file, jpeg_with_exif(&exif_tiff("Canon", "TestCam", None))).unwrap();
+
+        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
+
+        assert_detail_contains(&snapshot.details, "Make", "Canon");
+        assert_detail_contains(&snapshot.details, "Model", "TestCam");
+        assert!(
+            snapshot
+                .details
+                .iter()
+                .any(|detail| detail.name == "Orientation")
+        );
+    }
+
+    #[test]
+    fn duplicate_exif_tags_include_ifd_in_detail_name() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        fs::write(
+            &file,
+            jpeg_with_exif(&exif_tiff("Canon", "TestCam", Some("Thumb"))),
+        )
+        .unwrap();
+
+        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
+
+        assert_detail_contains(&snapshot.details, "Make (IFD 0)", "Canon");
+        assert_detail_contains(&snapshot.details, "Make (IFD 1)", "Thumb");
+    }
+
+    #[test]
+    fn non_image_details_do_not_include_exif_fields() {
+        let temp = TempDir::new();
+        let file = temp.path().join("note.txt");
+        fs::write(&file, b"not an image").unwrap();
+
+        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
+
+        assert!(snapshot.details.iter().all(|detail| detail.name != "Make"));
+        assert!(snapshot.details.iter().any(|detail| detail.name == "Bytes"));
+    }
+
+    #[test]
+    fn multiselect_exif_details_use_existing_mixed_value_behavior() {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.jpg");
+        let second = temp.path().join("b.jpg");
+        fs::write(&first, jpeg_with_exif(&exif_tiff("Canon", "Same", None))).unwrap();
+        fs::write(&second, jpeg_with_exif(&exif_tiff("Nikon", "Same", None))).unwrap();
+
+        let snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![first, second],
+        })
+        .unwrap();
+
+        assert_eq!(detail_value(&snapshot.details, "Make"), Some(""));
+        assert_detail_contains(&snapshot.details, "Model", "Same");
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn default_app_change_error_reports_unverified_changes() {
@@ -2420,5 +2529,96 @@ mod tests {
             fs::metadata(file).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    fn detail_value<'a>(details: &'a [PropertyDetail], name: &str) -> Option<&'a str> {
+        details
+            .iter()
+            .find(|detail| detail.name == name)
+            .map(|detail| detail.value.as_str())
+    }
+
+    fn assert_detail_contains(details: &[PropertyDetail], name: &str, needle: &str) {
+        let value = detail_value(details, name).unwrap_or_else(|| panic!("missing detail {name}"));
+        assert!(
+            value.contains(needle),
+            "expected {name} value {value:?} to contain {needle:?}"
+        );
+    }
+
+    fn jpeg_with_exif(tiff: &[u8]) -> Vec<u8> {
+        let app1_len = 2 + 6 + tiff.len();
+        let mut jpeg = Vec::new();
+        jpeg.extend_from_slice(&[0xff, 0xd8, 0xff, 0xe1]);
+        jpeg.extend_from_slice(&(app1_len as u16).to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(tiff);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        jpeg
+    }
+
+    fn exif_tiff(make: &str, model: &str, thumbnail_make: Option<&str>) -> Vec<u8> {
+        let make = ascii_exif_value(make);
+        let model = ascii_exif_value(model);
+        let thumbnail_make = thumbnail_make.map(ascii_exif_value);
+        let ifd0_entry_count = 3u16;
+        let ifd0_start = 8usize;
+        let ifd0_end = ifd0_start + 2 + usize::from(ifd0_entry_count) * 12 + 4;
+        let make_offset = ifd0_end;
+        let model_offset = make_offset + make.len();
+        let ifd1_offset = model_offset + model.len();
+
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&(ifd0_start as u32).to_le_bytes());
+        tiff.extend_from_slice(&ifd0_entry_count.to_le_bytes());
+        push_ifd_entry(&mut tiff, 0x010f, 2, make.len() as u32, make_offset as u32);
+        push_ifd_entry(
+            &mut tiff,
+            0x0110,
+            2,
+            model.len() as u32,
+            model_offset as u32,
+        );
+        push_ifd_entry(&mut tiff, 0x0112, 3, 1, 1);
+        tiff.extend_from_slice(
+            &thumbnail_make
+                .as_ref()
+                .map(|_| ifd1_offset as u32)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        tiff.extend_from_slice(&make);
+        tiff.extend_from_slice(&model);
+
+        if let Some(thumbnail_make) = thumbnail_make {
+            let thumbnail_value_offset = ifd1_offset + 2 + 12 + 4;
+            tiff.extend_from_slice(&1u16.to_le_bytes());
+            push_ifd_entry(
+                &mut tiff,
+                0x010f,
+                2,
+                thumbnail_make.len() as u32,
+                thumbnail_value_offset as u32,
+            );
+            tiff.extend_from_slice(&0u32.to_le_bytes());
+            tiff.extend_from_slice(&thumbnail_make);
+        }
+
+        tiff
+    }
+
+    fn ascii_exif_value(value: &str) -> Vec<u8> {
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
+    fn push_ifd_entry(tiff: &mut Vec<u8>, tag: u16, field_type: u16, count: u32, value: u32) {
+        tiff.extend_from_slice(&tag.to_le_bytes());
+        tiff.extend_from_slice(&field_type.to_le_bytes());
+        tiff.extend_from_slice(&count.to_le_bytes());
+        tiff.extend_from_slice(&value.to_le_bytes());
     }
 }

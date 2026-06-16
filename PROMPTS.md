@@ -2,6 +2,10 @@
 
 ## 1
 
+- EXIF reader for Properties > Details tab for images
+- Drag file view headers width + drag re-ordering (not Name, keep this dynamic, fixed first)
+
+- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - File/folder Properties dialogs, attributes, permissions, owner/group/security, timestamps editing, size on disk, target details for links, file type association details, and richer media/document metadata columns.
 - Improve readme - add screenshots / branding
 
@@ -10,8 +14,6 @@
 - [Windows-only] detext WSL Linux install, show drive for it
 - Large icons grid view (alternate to the current Details view)
 - UI refinement and improvements (tighten everything up, make it look nice)
-- Drag file view headers width + ordering (not Name, keep this dynamic, fixed first)
-- EXIF reader for Properties > Details tab for images
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
