@@ -275,6 +275,15 @@ enum PropertyFramesState {
     Failed(String),
 }
 
+fn property_frames_state_label(state: &PropertyFramesState) -> &'static str {
+    match state {
+        PropertyFramesState::NotStarted => "not-started",
+        PropertyFramesState::Loading(_) => "loading",
+        PropertyFramesState::Ready(_) => "ready",
+        PropertyFramesState::Failed(_) => "failed",
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PropertyFrameThumbnail {
     label: String,
@@ -528,14 +537,25 @@ impl PropertiesDialog {
 
     fn start_frames_task(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.frames_state, PropertyFramesState::NotStarted) {
+            crate::debug_options::log_property_marker(format_args!(
+                "video frames start skipped state={}",
+                property_frames_state_label(&self.frames_state)
+            ));
             return;
         }
         let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            crate::debug_options::log_property_marker(format_args!(
+                "video frames start skipped state=snapshot-not-ready"
+            ));
             return;
         };
         let Some(path) =
             single_file_video_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
         else {
+            crate::debug_options::log_property_marker(format_args!(
+                "video frames unavailable target_kind={:?}",
+                snapshot.item_kind
+            ));
             self.frames_state = PropertyFramesState::Failed(
                 "Video frames are not available for this item.".to_owned(),
             );
@@ -544,6 +564,11 @@ impl PropertiesDialog {
 
         self.frames_state = PropertyFramesState::Loading(Vec::new());
         let generation = self.frames_generation;
+        crate::debug_options::log_property_marker(format_args!(
+            "video frames task started path={} generation={}",
+            path.display(),
+            generation
+        ));
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let requests = cx
@@ -578,6 +603,7 @@ impl PropertiesDialog {
 
             let mut errors = Vec::new();
             let mut frame_count = 0usize;
+            let request_count = requests.len();
             for request in requests {
                 let frame = cx
                     .background_executor()
@@ -595,10 +621,28 @@ impl PropertiesDialog {
                         let should_continue = this
                             .update(cx, |dialog, cx| {
                                 if dialog.frames_generation != generation {
+                                    crate::debug_options::log_property_marker(format_args!(
+                                        "video frames cancelled path={} generation={} current_generation={} successes={} failures={} attempts={}",
+                                        path.display(),
+                                        generation,
+                                        dialog.frames_generation,
+                                        frame_count,
+                                        errors.len(),
+                                        frame_count + errors.len()
+                                    ));
                                     return false;
                                 }
                                 let PropertyFramesState::Loading(frames) = &mut dialog.frames_state
                                 else {
+                                    crate::debug_options::log_property_marker(format_args!(
+                                        "video frames cancelled path={} generation={} state={} successes={} failures={} attempts={}",
+                                        path.display(),
+                                        generation,
+                                        property_frames_state_label(&dialog.frames_state),
+                                        frame_count,
+                                        errors.len(),
+                                        frame_count + errors.len()
+                                    ));
                                     return false;
                                 };
                                 frames.push(thumbnail);
@@ -631,8 +675,11 @@ impl PropertiesDialog {
                 crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "video frames failed path={} error={}",
+                        "video frames failed path={} attempts={} successes={} failures={} error={}",
                         path.display(),
+                        request_count,
+                        frame_count,
+                        errors.len(),
                         error
                     ),
                 );
@@ -640,9 +687,11 @@ impl PropertiesDialog {
                 crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "video frames ready path={} frames={}",
+                        "video frames ready path={} attempts={} successes={} failures={}",
                         path.display(),
-                        frame_count
+                        request_count,
+                        frame_count,
+                        errors.len()
                     ),
                 );
             }
@@ -878,6 +927,15 @@ impl PropertiesDialog {
             if tab == PropertyTab::Details {
                 self.start_details_task(cx);
             } else if tab == PropertyTab::Frames {
+                if let Some(snapshot) = snapshot {
+                    if let Some(path) = single_file_video_path(&snapshot.target, snapshot.item_kind)
+                    {
+                        crate::debug_options::log_property_marker(format_args!(
+                            "frames tab selected path={}",
+                            path.display()
+                        ));
+                    }
+                }
                 self.start_frames_task(cx);
             }
             cx.notify();
@@ -2677,14 +2735,32 @@ struct VideoFramePng {
 }
 
 fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, String> {
+    let availability_started = Instant::now();
     let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "video frames ffprobe availability path={} installed={}",
+            path.display(),
+            ffprobe_installed
+        ),
+    );
     if !ffprobe_installed {
         return Err(
             "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
                 .to_owned(),
         );
     }
+    let availability_started = Instant::now();
     let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "video frames ffmpeg availability path={} installed={}",
+            path.display(),
+            ffmpeg_installed
+        ),
+    );
     if !ffmpeg_installed {
         return Err(
             "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
@@ -2693,11 +2769,40 @@ fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, S
     }
 
     let output = ffprobe_json_output(path).map_err(|error| format!("ffprobe failed: {error}"))?;
-    let probe: serde_json::Value = serde_json::from_slice(&output)
-        .map_err(|error| format!("ffprobe returned unreadable metadata: {error}"))?;
+    let parse_started = Instant::now();
+    let probe: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(probe) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "video frames ffprobe json parsed path={} stdout_bytes={}",
+                    path.display(),
+                    output.len()
+                ),
+            );
+            probe
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "video frames ffprobe json parse failed path={} stdout_bytes={} error={}",
+                    path.display(),
+                    output.len(),
+                    error
+                ),
+            );
+            return Err(format!("ffprobe returned unreadable metadata: {error}"));
+        }
+    };
     let duration = ffprobe_duration_seconds_from_probe(&probe)
         .ok_or_else(|| "Video duration is not available.".to_owned())?;
     let requests = video_frame_requests(duration);
+    crate::debug_options::log_property_marker(format_args!(
+        "video frames planned path={} {}",
+        path.display(),
+        video_frame_request_debug_summary(duration, &requests)
+    ));
     if requests.is_empty() {
         return Err("Video duration is not long enough to extract frames.".to_owned());
     }
@@ -2710,13 +2815,51 @@ fn extract_video_frame_png(
     request: VideoFrameRequest,
 ) -> Result<VideoFramePng, String> {
     let label = video_frame_timestamp_label(request.label_seconds);
-    match ffmpeg_frame_png_output(path, request.seek_seconds) {
-        Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => Ok(VideoFramePng { label, png }),
-        Ok(png) => Err(format!(
-            "{label}: ffmpeg returned {} bytes, but not a PNG image",
-            png.len()
-        )),
-        Err(error) => Err(format!("{label}: {error}")),
+    let seek = request.seek_seconds;
+    let started = Instant::now();
+    match ffmpeg_frame_png_output(path, seek) {
+        Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "video frame extracted path={} label={} seek={} stdout_bytes={}",
+                    path.display(),
+                    label,
+                    ffmpeg_seek_argument(seek),
+                    png.len()
+                ),
+            );
+            Ok(VideoFramePng { label, png })
+        }
+        Ok(png) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "video frame rejected path={} label={} seek={} stdout_bytes={} error=not-png",
+                    path.display(),
+                    label,
+                    ffmpeg_seek_argument(seek),
+                    png.len()
+                ),
+            );
+            Err(format!(
+                "{label}: ffmpeg returned {} bytes, but not a PNG image",
+                png.len()
+            ))
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "video frame failed path={} label={} seek={} error={}",
+                    path.display(),
+                    label,
+                    ffmpeg_seek_argument(seek),
+                    error
+                ),
+            );
+            Err(format!("{label}: {error}"))
+        }
     }
 }
 
@@ -2824,6 +2967,26 @@ fn video_frame_requests(duration_seconds: f64) -> Vec<VideoFrameRequest> {
             seek_seconds: safe_video_frame_seek_seconds(label_seconds, duration_seconds),
         })
         .collect()
+}
+
+fn video_frame_request_debug_summary(
+    duration_seconds: f64,
+    requests: &[VideoFrameRequest],
+) -> String {
+    let duration = ffmpeg_seek_argument(duration_seconds);
+    let Some(first) = requests.first() else {
+        return format!("duration={duration} requests=0");
+    };
+    let last = requests.last().unwrap_or(first);
+    format!(
+        "duration={} requests={} first_label={} first_seek={} last_label={} last_seek={}",
+        duration,
+        requests.len(),
+        video_frame_timestamp_label(first.label_seconds),
+        ffmpeg_seek_argument(first.seek_seconds),
+        video_frame_timestamp_label(last.label_seconds),
+        ffmpeg_seek_argument(last.seek_seconds)
+    )
 }
 
 fn video_frame_inset_seconds(duration_seconds: f64) -> f64 {
@@ -5741,6 +5904,24 @@ mod tests {
         assert_seconds(requests[20].label_seconds, 595.0);
         assert_seconds(requests[21].label_seconds, 600.0);
         assert_seconds(requests[21].seek_seconds, 599.95);
+    }
+
+    #[test]
+    fn video_frame_request_debug_summary_includes_request_boundaries() {
+        let requests = video_frame_requests(60.0);
+
+        assert_eq!(
+            video_frame_request_debug_summary(60.0, &requests),
+            "duration=60.000 requests=22 first_label=0:00.000 first_seek=0.000 last_label=1:00.000 last_seek=59.950"
+        );
+    }
+
+    #[test]
+    fn video_frame_request_debug_summary_handles_empty_requests() {
+        assert_eq!(
+            video_frame_request_debug_summary(0.0, &[]),
+            "duration=0.000 requests=0"
+        );
     }
 
     #[test]

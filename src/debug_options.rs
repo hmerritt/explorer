@@ -278,6 +278,12 @@ pub(crate) fn log_property_timing(elapsed: Duration, message: fmt::Arguments<'_>
     }
 }
 
+pub(crate) fn log_property_marker(message: fmt::Arguments<'_>) {
+    if properties_timings_enabled() {
+        eprintln!("[properties] {:<11} {message}", "-");
+    }
+}
+
 fn format_timing_duration(elapsed: Duration) -> String {
     format!("{:<11.3}ms", elapsed.as_secs_f64() * 1000.0)
 }

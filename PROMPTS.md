@@ -60,7 +60,9 @@ Major remaining Windows Explorer parity areas:
 - Image metadata
     - Edit metadata values
 - Video metadata
-    - Copy frames
+    - Frames tab, add a context menu to each frame with:
+        - Copy
+        - Save
 - Audio metadata
     - Channels
     - Format
