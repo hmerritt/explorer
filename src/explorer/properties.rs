@@ -15,10 +15,10 @@ use std::os::windows::process::CommandExt;
 use filetime::{FileTime, set_file_times};
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable,
-    Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-    ScrollHandle, ScrollWheelEvent, SharedString, Task, TextRun, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, point,
-    prelude::*, px, rgb, size,
+    Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    Render, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage, Task, TextRun,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
 use thousands::Separable;
 
@@ -56,6 +56,8 @@ const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
 const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
 const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
+const PROPERTIES_FRAME_TILE_WIDTH: f32 = 160.0;
+const PROPERTIES_FRAME_IMAGE_HEIGHT: f32 = 90.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
@@ -242,11 +244,13 @@ pub(super) struct PropertyDetail {
 enum PropertyTab {
     General,
     Details,
+    Frames,
 }
 
 const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
     (PropertyTab::General, "General"),
     (PropertyTab::Details, "Details"),
+    (PropertyTab::Frames, "Frames"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -263,6 +267,27 @@ enum PropertyDetailsState {
     Ready(Vec<PropertyDetailGroup>),
 }
 
+enum PropertyFramesState {
+    NotStarted,
+    Loading,
+    Ready(Vec<PropertyFrameThumbnail>),
+    Failed(String),
+}
+
+struct PropertyFrameThumbnail {
+    label: String,
+    image: Arc<Image>,
+}
+
+impl From<VideoFramePng> for PropertyFrameThumbnail {
+    fn from(value: VideoFramePng) -> Self {
+        Self {
+            label: value.label,
+            image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, value.png)),
+        }
+    }
+}
+
 pub(super) struct PropertiesDialog {
     target: PropertyTarget,
     explorer: WeakEntity<ExplorerView>,
@@ -276,8 +301,12 @@ pub(super) struct PropertiesDialog {
     details_scroll_handle: ScrollHandle,
     details_scrollbar_hovered: bool,
     details_scrollbar_drag: Option<ScrollbarDrag>,
+    frames_state: PropertyFramesState,
+    frames_generation: u64,
+    frames_scroll_handle: ScrollHandle,
     snapshot_task: Option<Task<()>>,
     details_task: Option<Task<()>>,
+    frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
     #[cfg(not(target_os = "windows"))]
     default_app_task: Option<Task<()>>,
@@ -345,8 +374,12 @@ impl PropertiesDialog {
             details_scroll_handle: ScrollHandle::new(),
             details_scrollbar_hovered: false,
             details_scrollbar_drag: None,
+            frames_state: PropertyFramesState::NotStarted,
+            frames_generation: 0,
+            frames_scroll_handle: ScrollHandle::new(),
             snapshot_task: None,
             details_task: None,
+            frames_task: None,
             apply_task: None,
             #[cfg(not(target_os = "windows"))]
             default_app_task: None,
@@ -368,6 +401,7 @@ impl PropertiesDialog {
     fn start_snapshot_task(&mut self, cx: &mut Context<Self>) {
         self.snapshot_state = PropertySnapshotState::Loading;
         self.reset_details_state();
+        self.reset_frames_state();
         let target = self.target.clone();
         let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -420,12 +454,29 @@ impl PropertiesDialog {
         self.set_details_scroll_top(0.0);
     }
 
+    fn reset_frames_state(&mut self) {
+        self.frames_generation = self.frames_generation.wrapping_add(1);
+        self.frames_state = PropertyFramesState::NotStarted;
+        self.frames_task = None;
+        let offset = self.frames_scroll_handle.offset();
+        self.frames_scroll_handle
+            .set_offset(point(offset.x, px(0.0)));
+    }
+
     fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
         self.reset_details_state();
-        if self.active_tab == PropertyTab::Details {
-            self.start_details_task(cx);
+        self.reset_frames_state();
+        if let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state {
+            if !property_tab_is_visible(self.active_tab, Some(snapshot)) {
+                self.active_tab = PropertyTab::General;
+            }
+        }
+        match self.active_tab {
+            PropertyTab::Details => self.start_details_task(cx),
+            PropertyTab::Frames => self.start_frames_task(cx),
+            PropertyTab::General => {}
         }
     }
 
@@ -474,6 +525,71 @@ impl PropertiesDialog {
             });
         });
         self.details_task = Some(task);
+    }
+
+    fn start_frames_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.frames_state, PropertyFramesState::NotStarted) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        let Some(path) =
+            single_file_video_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
+        else {
+            self.frames_state = PropertyFramesState::Failed(
+                "Video frames are not available for this item.".to_owned(),
+            );
+            return;
+        };
+
+        self.frames_state = PropertyFramesState::Loading;
+        let generation = self.frames_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let started = Instant::now();
+                    let result = collect_video_frame_pngs(&path);
+                    match &result {
+                        Ok(frames) => crate::debug_options::log_property_timing(
+                            started.elapsed(),
+                            format_args!(
+                                "video frames ready path={} frames={}",
+                                path.display(),
+                                frames.len()
+                            ),
+                        ),
+                        Err(error) => crate::debug_options::log_property_timing(
+                            started.elapsed(),
+                            format_args!(
+                                "video frames failed path={} error={}",
+                                path.display(),
+                                error
+                            ),
+                        ),
+                    }
+                    result
+                })
+                .await;
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.frames_generation == generation {
+                    dialog.frames_task = None;
+                    dialog.frames_state = match result {
+                        Ok(frames) => PropertyFramesState::Ready(
+                            frames
+                                .into_iter()
+                                .map(PropertyFrameThumbnail::from)
+                                .collect(),
+                        ),
+                        Err(error) => PropertyFramesState::Failed(error),
+                    };
+                    cx.notify();
+                }
+            });
+        });
+        self.frames_task = Some(task);
     }
 
     fn handle_cancel(&mut self, _: &DialogCancel, window: &mut Window, cx: &mut Context<Self>) {
@@ -670,10 +786,19 @@ impl PropertiesDialog {
     }
 
     fn set_active_tab(&mut self, tab: PropertyTab, cx: &mut Context<Self>) {
+        let snapshot = match &self.snapshot_state {
+            PropertySnapshotState::Ready(snapshot) => Some(snapshot),
+            PropertySnapshotState::Loading | PropertySnapshotState::Failed(_) => None,
+        };
+        if !property_tab_is_visible(tab, snapshot) {
+            return;
+        }
         if self.active_tab != tab {
             self.active_tab = tab;
             if tab == PropertyTab::Details {
                 self.start_details_task(cx);
+            } else if tab == PropertyTab::Frames {
+                self.start_frames_task(cx);
             }
             cx.notify();
         }
@@ -728,7 +853,8 @@ impl Focusable for PropertiesDialog {
 impl PropertiesDialog {
     fn render_tabs(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = div().flex().flex_row().h(px(PROPERTIES_TAB_HEIGHT));
-        for &(tab, label) in PROPERTY_TABS {
+        let snapshot = self.ready_snapshot();
+        for (tab, label) in property_tabs_for_snapshot(snapshot) {
             tabs = tabs.child(tab_button(
                 label,
                 tab,
@@ -742,7 +868,8 @@ impl PropertiesDialog {
 
     fn render_tab_panel_border(&self, window: &Window) -> AnyElement {
         let mut border = div().flex().flex_row().h(px(PROPERTIES_BORDER_WIDTH));
-        for &(tab, label) in PROPERTY_TABS {
+        let snapshot = self.ready_snapshot();
+        for (tab, label) in property_tabs_for_snapshot(snapshot) {
             let color = if self.active_tab == tab {
                 0xffffff
             } else {
@@ -772,6 +899,7 @@ impl PropertiesDialog {
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
                 PropertyTab::General => self.render_general(&snapshot, window, cx),
                 PropertyTab::Details => self.render_details(&snapshot, cx),
+                PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
         };
 
@@ -789,6 +917,13 @@ impl PropertiesDialog {
             .p(px(PROPERTIES_PANEL_PADDING))
             .child(body)
             .into_any_element()
+    }
+
+    fn ready_snapshot(&self) -> Option<&PropertySnapshot> {
+        match &self.snapshot_state {
+            PropertySnapshotState::Ready(snapshot) => Some(snapshot),
+            PropertySnapshotState::Loading | PropertySnapshotState::Failed(_) => None,
+        }
     }
 
     fn render_general(
@@ -1184,6 +1319,73 @@ impl PropertiesDialog {
                 this.child(self.render_details_scrollbar(cx))
             })
             .into_any_element()
+    }
+
+    fn render_frames(&mut self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+        if single_file_video_path(&snapshot.target, snapshot.item_kind).is_none() {
+            return centered_message("Video frames are not available for this item.");
+        }
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .w_full()
+            .id("properties-frames-body")
+            .overflow_y_scroll()
+            .track_scroll(&self.frames_scroll_handle)
+            .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                cx.notify();
+            }));
+
+        match &self.frames_state {
+            PropertyFramesState::NotStarted | PropertyFramesState::Loading => {
+                body = body.child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .truncate()
+                        .child("Generating video frames..."),
+                );
+            }
+            PropertyFramesState::Failed(error) => {
+                body = body.child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child(SharedString::from(error.clone())),
+                );
+            }
+            PropertyFramesState::Ready(frames) => {
+                if frames.is_empty() {
+                    body = body.child(
+                        div()
+                            .min_w(px(0.0))
+                            .w_full()
+                            .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                            .truncate()
+                            .child("No video frames are available."),
+                    );
+                } else {
+                    let mut grid = div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.0))
+                        .w_full()
+                        .min_w(px(0.0));
+                    for (index, frame) in frames.iter().enumerate() {
+                        grid = grid.child(frame_thumbnail_tile(index, frame));
+                    }
+                    body = body.child(grid);
+                }
+            }
+        }
+
+        body.into_any_element()
     }
 
     fn details_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
@@ -2000,6 +2202,22 @@ const VIDEO_METADATA_EXTENSIONS: &[&str] = &[
     "yuv", "rm", "asf", "amv", "m2ts", "mts", "ts", "mp4", "m4p", "m4v", "mpg", "mp2", "mpeg",
     "mpe", "mpv", "m2v", "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
 ];
+const VIDEO_FRAME_COUNT: usize = 20;
+const VIDEO_FRAME_SHORT_THRESHOLD_SECONDS: f64 = 60.0;
+const VIDEO_FRAME_LONG_THRESHOLD_SECONDS: f64 = 600.0;
+const VIDEO_FRAME_MEDIUM_INSET_SECONDS: f64 = 1.0;
+const VIDEO_FRAME_LONG_INSET_SECONDS: f64 = 5.0;
+const VIDEO_FRAME_EOF_SEEK_INSET_SECONDS: f64 = 0.05;
+const VIDEO_FRAME_EXTRACT_WIDTH: u32 = 320;
+const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
+    if !matches!(item_kind, PropertyItemKind::SingleFile) {
+        return None;
+    }
+    let path = target.paths.first()?;
+    path_may_have_video_metadata(path).then_some(path.as_path())
+}
 
 fn single_file_media_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
@@ -2185,6 +2403,247 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
             ),
         );
         Err(error)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct VideoFrameRequest {
+    label_seconds: f64,
+    seek_seconds: f64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VideoFramePng {
+    label: String,
+    png: Vec<u8>,
+}
+
+fn collect_video_frame_pngs(path: &Path) -> Result<Vec<VideoFramePng>, String> {
+    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    if !ffprobe_installed {
+        return Err(
+            "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
+                .to_owned(),
+        );
+    }
+    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    if !ffmpeg_installed {
+        return Err(
+            "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
+                .to_owned(),
+        );
+    }
+
+    let output = ffprobe_json_output(path).map_err(|error| format!("ffprobe failed: {error}"))?;
+    let probe: serde_json::Value = serde_json::from_slice(&output)
+        .map_err(|error| format!("ffprobe returned unreadable metadata: {error}"))?;
+    let duration = ffprobe_duration_seconds_from_probe(&probe)
+        .ok_or_else(|| "Video duration is not available.".to_owned())?;
+    let requests = video_frame_requests(duration);
+    if requests.is_empty() {
+        return Err("Video duration is not long enough to extract frames.".to_owned());
+    }
+
+    let mut frames = Vec::new();
+    let mut errors = Vec::new();
+    for request in requests {
+        let label = video_frame_timestamp_label(request.label_seconds);
+        match ffmpeg_frame_png_output(path, request.seek_seconds) {
+            Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => {
+                frames.push(VideoFramePng { label, png });
+            }
+            Ok(png) => errors.push(format!(
+                "{label}: ffmpeg returned {} bytes, but not a PNG image",
+                png.len()
+            )),
+            Err(error) => errors.push(format!("{label}: {error}")),
+        }
+    }
+
+    if frames.is_empty() {
+        return Err(format!(
+            "ffmpeg failed to extract video frames: {}",
+            frame_extraction_error_summary(&errors)
+        ));
+    }
+
+    Ok(frames)
+}
+
+fn ffprobe_duration_seconds_from_probe(probe: &serde_json::Value) -> Option<f64> {
+    let format_duration = probe
+        .get("format")
+        .and_then(|format| format.as_object())
+        .and_then(|format| format.get("duration"))
+        .and_then(ffprobe_seconds_value);
+    if format_duration.is_some() {
+        return format_duration;
+    }
+
+    probe
+        .get("streams")
+        .and_then(|streams| streams.as_array())
+        .and_then(|streams| {
+            streams.iter().find_map(|stream| {
+                let stream = stream.as_object()?;
+                let codec_type = stream
+                    .get("codec_type")
+                    .and_then(ffprobe_scalar_value_label);
+                if codec_type.as_deref() != Some("video") {
+                    return None;
+                }
+                stream.get("duration").and_then(ffprobe_seconds_value)
+            })
+        })
+}
+
+fn ffprobe_seconds_value(value: &serde_json::Value) -> Option<f64> {
+    ffprobe_scalar_value_label(value)
+        .as_deref()
+        .and_then(parse_positive_f64)
+}
+
+fn video_frame_requests(duration_seconds: f64) -> Vec<VideoFrameRequest> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return Vec::new();
+    }
+
+    let inset = video_frame_inset_seconds(duration_seconds);
+    let mut label_seconds = Vec::new();
+    if inset <= 0.0 {
+        label_seconds.extend(evenly_spaced_seconds(
+            0.0,
+            duration_seconds,
+            VIDEO_FRAME_COUNT,
+        ));
+    } else {
+        label_seconds.push(0.0);
+        label_seconds.extend(evenly_spaced_seconds(
+            inset,
+            duration_seconds - inset,
+            VIDEO_FRAME_COUNT,
+        ));
+        label_seconds.push(duration_seconds);
+    }
+
+    label_seconds
+        .into_iter()
+        .map(|label_seconds| VideoFrameRequest {
+            label_seconds,
+            seek_seconds: safe_video_frame_seek_seconds(label_seconds, duration_seconds),
+        })
+        .collect()
+}
+
+fn video_frame_inset_seconds(duration_seconds: f64) -> f64 {
+    if duration_seconds < VIDEO_FRAME_SHORT_THRESHOLD_SECONDS {
+        0.0
+    } else if duration_seconds < VIDEO_FRAME_LONG_THRESHOLD_SECONDS {
+        VIDEO_FRAME_MEDIUM_INSET_SECONDS
+    } else {
+        VIDEO_FRAME_LONG_INSET_SECONDS
+    }
+}
+
+fn evenly_spaced_seconds(start: f64, end: f64, count: usize) -> Vec<f64> {
+    match count {
+        0 => Vec::new(),
+        1 => vec![start],
+        _ => {
+            let step = (end - start) / (count - 1) as f64;
+            (0..count)
+                .map(|index| start + step * index as f64)
+                .collect()
+        }
+    }
+}
+
+fn safe_video_frame_seek_seconds(label_seconds: f64, duration_seconds: f64) -> f64 {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return 0.0;
+    }
+    let max_seek = (duration_seconds - VIDEO_FRAME_EOF_SEEK_INSET_SECONDS).max(0.0);
+    label_seconds.clamp(0.0, max_seek)
+}
+
+fn ffmpeg_frame_png_output(path: &Path, seek_seconds: f64) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-nostdin")
+        .arg("-ss")
+        .arg(ffmpeg_seek_argument(seek_seconds))
+        .arg("-i")
+        .arg(path)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-vf")
+        .arg(format!("scale={VIDEO_FRAME_EXTRACT_WIDTH}:-2"))
+        .arg("-f")
+        .arg("image2pipe")
+        .arg("-vcodec")
+        .arg("png")
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not start ffmpeg: {error}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = command_error_output_label(&output.stderr);
+    if stderr.is_empty() {
+        Err(format!("ffmpeg exited with {}", output.status))
+    } else {
+        Err(format!("ffmpeg exited with {}: {stderr}", output.status))
+    }
+}
+
+fn ffmpeg_seek_argument(seconds: f64) -> String {
+    format!("{:.3}", seconds.max(0.0))
+}
+
+fn video_frame_timestamp_label(seconds: f64) -> String {
+    let total_millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    let hours = total_millis / 3_600_000;
+    let minutes = (total_millis % 3_600_000) / 60_000;
+    let seconds = (total_millis % 60_000) / 1000;
+    let millis = total_millis % 1000;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}.{millis:03}")
+    } else {
+        format!("{minutes}:{seconds:02}.{millis:03}")
+    }
+}
+
+fn command_error_output_label(stderr: &[u8]) -> String {
+    let label = String::from_utf8_lossy(stderr).trim().to_owned();
+    if label.chars().count() <= 300 {
+        label
+    } else {
+        let mut truncated: String = label.chars().take(300).collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+fn frame_extraction_error_summary(errors: &[String]) -> String {
+    match errors {
+        [] => "no frame data was returned".to_owned(),
+        [error] => error.clone(),
+        [first, ..] => format!("{first} ({} frame attempts failed)", errors.len()),
     }
 }
 
@@ -4048,6 +4507,27 @@ fn detail_groups_for_render(
     groups
 }
 
+fn property_tabs_for_snapshot(
+    snapshot: Option<&PropertySnapshot>,
+) -> Vec<(PropertyTab, &'static str)> {
+    PROPERTY_TABS
+        .iter()
+        .copied()
+        .filter(|(tab, _)| property_tab_is_visible(*tab, snapshot))
+        .collect()
+}
+
+fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>) -> bool {
+    match tab {
+        PropertyTab::General | PropertyTab::Details => true,
+        PropertyTab::Frames => snapshot.is_some_and(snapshot_has_frames_tab),
+    }
+}
+
+fn snapshot_has_frames_tab(snapshot: &PropertySnapshot) -> bool {
+    single_file_video_path(&snapshot.target, snapshot.item_kind).is_some()
+}
+
 fn details_scrollbar_metrics_for_dimensions(
     viewport_height: f32,
     scroll_max: f32,
@@ -4060,6 +4540,45 @@ fn details_scrollbar_metrics_for_dimensions(
     ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
 }
 
+fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElement {
+    div()
+        .id(frame_thumbnail_id(index))
+        .w(px(PROPERTIES_FRAME_TILE_WIDTH))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .mb(px(4.0))
+        .child(
+            div()
+                .w_full()
+                .h(px(PROPERTIES_FRAME_IMAGE_HEIGHT))
+                .border_1()
+                .border_color(rgb(PROPERTIES_BORDER))
+                .bg(rgb(0xf6f6f6))
+                .overflow_hidden()
+                .child(
+                    gpui::img(frame.image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .text_size(px(11.0))
+                .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                .truncate()
+                .child(SharedString::from(frame.label.clone())),
+        )
+        .into_any_element()
+}
+
+fn frame_thumbnail_id(index: usize) -> (&'static str, usize) {
+    ("properties-frame-thumbnail", index)
+}
+
 fn tab_button(
     label: &'static str,
     tab: PropertyTab,
@@ -4070,6 +4589,7 @@ fn tab_button(
     let id = match tab {
         PropertyTab::General => "properties-tab-general",
         PropertyTab::Details => "properties-tab-details",
+        PropertyTab::Frames => "properties-tab-frames",
     };
     div()
         .id(id)
@@ -4475,10 +4995,77 @@ mod tests {
     }
 
     #[test]
-    fn properties_dialog_exposes_only_general_and_details_tabs() {
+    fn properties_dialog_defines_general_details_and_frames_tabs() {
         assert_eq!(
             PROPERTY_TABS,
             &[
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Frames, "Frames")
+            ]
+        );
+    }
+
+    #[test]
+    fn frames_tab_is_visible_only_for_single_video_files() {
+        let temp = TempDir::new();
+        let video = temp.path().join("movie.mp4");
+        let image = temp.path().join("photo.jpg");
+        let folder = temp.path().join("folder");
+        let other = temp.path().join("other.txt");
+        let missing_path = temp.path().join("missing.mp4");
+        fs::write(&video, b"not real video").unwrap();
+        fs::write(&image, b"not real image").unwrap();
+        fs::write(&other, b"other").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let video = collect_property_snapshot(PropertyTarget { paths: vec![video] }).unwrap();
+        let image = collect_property_snapshot(PropertyTarget { paths: vec![image] }).unwrap();
+        let folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+        let missing = collect_property_snapshot(PropertyTarget {
+            paths: vec![missing_path],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![video.target.paths[0].clone(), other],
+        })
+        .unwrap();
+
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&video)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Frames, "Frames")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&image)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&folder)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&missing)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&mixed)),
+            vec![
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details")
             ]
@@ -4788,6 +5375,84 @@ mod tests {
         assert!(path_may_have_video_metadata(Path::new("movie.mp4")));
         assert!(path_may_have_video_metadata(Path::new("clip.mkv")));
         assert!(!path_may_have_video_metadata(Path::new("note.txt")));
+    }
+
+    #[test]
+    fn video_frame_requests_use_no_inset_below_one_minute() {
+        let requests = video_frame_requests(59.0);
+
+        assert_eq!(requests.len(), 20);
+        assert_seconds(requests[0].label_seconds, 0.0);
+        assert_seconds(requests[0].seek_seconds, 0.0);
+        assert_seconds(requests[19].label_seconds, 59.0);
+        assert_seconds(requests[19].seek_seconds, 58.95);
+    }
+
+    #[test]
+    fn video_frame_requests_add_boundary_frames_with_medium_inset() {
+        let requests = video_frame_requests(60.0);
+
+        assert_eq!(requests.len(), 22);
+        assert_seconds(requests[0].label_seconds, 0.0);
+        assert_seconds(requests[1].label_seconds, 1.0);
+        assert_seconds(requests[20].label_seconds, 59.0);
+        assert_seconds(requests[21].label_seconds, 60.0);
+        assert_seconds(requests[21].seek_seconds, 59.95);
+    }
+
+    #[test]
+    fn video_frame_requests_add_boundary_frames_with_long_inset() {
+        let requests = video_frame_requests(600.0);
+
+        assert_eq!(requests.len(), 22);
+        assert_seconds(requests[0].label_seconds, 0.0);
+        assert_seconds(requests[1].label_seconds, 5.0);
+        assert_seconds(requests[20].label_seconds, 595.0);
+        assert_seconds(requests[21].label_seconds, 600.0);
+        assert_seconds(requests[21].seek_seconds, 599.95);
+    }
+
+    #[test]
+    fn video_frame_duration_uses_format_duration_then_video_stream_duration() {
+        assert_seconds(
+            ffprobe_duration_seconds_from_probe(&sample_ffprobe_json(
+                "5025.678",
+                "4898900",
+                "Studio Cut",
+                1920,
+                1080,
+            ))
+            .unwrap(),
+            5025.678,
+        );
+
+        let probe = serde_json::json!({
+            "format": {
+                "format_name": "matroska"
+            },
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "duration": "45.0"
+                },
+                {
+                    "codec_type": "video",
+                    "duration": "123.456"
+                }
+            ]
+        });
+
+        assert_seconds(
+            ffprobe_duration_seconds_from_probe(&probe).unwrap(),
+            123.456,
+        );
+    }
+
+    #[test]
+    fn final_frame_seek_is_clamped_before_eof() {
+        assert_seconds(safe_video_frame_seek_seconds(10.0, 10.0), 9.95);
+        assert_seconds(safe_video_frame_seek_seconds(3.0, 10.0), 3.0);
+        assert_seconds(safe_video_frame_seek_seconds(1.0, 0.02), 0.0);
     }
 
     #[test]
@@ -5327,6 +5992,13 @@ mod tests {
         assert!(
             value.contains(needle),
             "expected {name} value {value:?} to contain {needle:?}"
+        );
+    }
+
+    fn assert_seconds(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.000_001,
+            "expected {actual} to equal {expected}"
         );
     }
 
