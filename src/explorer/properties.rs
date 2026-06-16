@@ -17,7 +17,6 @@ use thousands::Separable;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
     entry::{DirectoryLinkKind, EntryKind},
-    folder_size::calculate_folder_size,
     formatting::{format_size, format_timestamp},
     icons::{
         copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
@@ -37,7 +36,7 @@ const PROPERTIES_ROW_HEIGHT: f32 = 24.0;
 const PROPERTIES_BUTTON_HEIGHT: f32 = 28.0;
 const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
 const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
-const PROPERTIES_ITEM_ICON_SIZE: f32 = 48.0;
+const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
 const PROPERTIES_BORDER: u32 = 0xd0d0d0;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
@@ -58,6 +57,7 @@ pub(super) struct PropertySnapshot {
     pub(super) size: u64,
     pub(super) size_on_disk: u64,
     pub(super) contains: Option<PropertyContains>,
+    pub(super) selection_counts: Option<PropertyContains>,
     pub(super) created: MixedValue<SystemTime>,
     pub(super) modified: MixedValue<SystemTime>,
     pub(super) accessed: MixedValue<SystemTime>,
@@ -548,76 +548,108 @@ impl PropertiesDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let type_label = type_of_file_label(snapshot);
+        let location = location_label(snapshot);
         let created = mixed_time_label(&snapshot.created, &self.date_format);
         let modified = mixed_time_label(&snapshot.modified, &self.date_format);
         let accessed = mixed_time_label(&snapshot.accessed, &self.date_format);
+        let has_dates = non_empty_property_value(created.clone()).is_some()
+            || non_empty_property_value(modified.clone()).is_some()
+            || non_empty_property_value(accessed.clone()).is_some();
 
-        div()
+        let mut body = div()
             .flex()
             .flex_col()
             .flex_1()
             .id("properties-general-body")
             .overflow_y_scroll()
             .child(self.render_title_row(snapshot, cx))
-            .child(separator())
-            .child(property_row("Type of file:", type_of_file_label(snapshot)))
-            .when(single_file_default_app_path(snapshot).is_some(), |this| {
-                this.child(self.render_open_with_row(snapshot, window, cx))
-            })
-            .child(separator())
-            .child(property_row(
-                "Location:",
-                mixed_string_label(&snapshot.location),
-            ))
+            .child(separator());
+
+        if let Some(type_label) = non_empty_property_value(type_label) {
+            body = body.child(property_row("Type:", type_label));
+        }
+        if single_file_default_app_path(snapshot).is_some() {
+            body = body.child(self.render_open_with_row(snapshot, window, cx));
+        }
+
+        body = body.child(separator());
+        if let Some(location) = location {
+            body = body.child(property_row("Location:", location));
+        }
+        body = body
             .child(property_row("Size:", property_size_label(snapshot.size)))
             .child(property_row(
                 "Size on disk:",
                 property_size_label(snapshot.size_on_disk),
-            ))
-            .when_some(snapshot.contains.as_ref(), |this, contains| {
-                this.child(property_row(
-                    "Contains:",
-                    format!("{} Files, {} Folders", contains.files, contains.folders),
-                ))
-            })
+            ));
+        if let Some(contains) = snapshot.contains.as_ref() {
+            body = body.child(property_row("Contains:", contains_label(contains)));
+        }
+
+        if has_dates {
+            body = body.child(separator());
+            if let Some(created) = non_empty_property_value(created) {
+                body = body.child(property_row("Created:", created));
+            }
+            if let Some(modified) = non_empty_property_value(modified) {
+                body = body.child(property_row("Modified:", modified));
+            }
+            if let Some(accessed) = non_empty_property_value(accessed) {
+                body = body.child(property_row("Accessed:", accessed));
+            }
+        }
+
+        body = body
             .child(separator())
-            .child(property_row("Created:", created))
-            .child(property_row("Modified:", modified))
-            .child(property_row("Accessed:", accessed))
-            .child(separator())
-            .child(self.render_attributes_row(snapshot, cx))
-            .when_some(self.default_app_error.as_ref(), |this, error| {
-                this.child(error_message(error))
-            })
-            .when_some(self.apply_error.as_ref(), |this, error| {
-                this.child(error_message(error))
-            })
-            .into_any_element()
+            .child(self.render_attributes_row(snapshot, cx));
+        if let Some(error) = self.default_app_error.as_ref() {
+            body = body.child(error_message(error));
+        }
+        if let Some(error) = self.apply_error.as_ref() {
+            body = body.child(error_message(error));
+        }
+
+        body.into_any_element()
     }
 
     fn render_title_row(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+        let title: AnyElement = if let Some(counts) = snapshot.selection_counts.as_ref() {
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(34.0))
+                .flex()
+                .items_center()
+                .truncate()
+                .text_size(px(12.0))
+                .child(SharedString::from(selection_count_label(counts)))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(34.0))
+                .border_1()
+                .border_color(rgb(PROPERTIES_BORDER))
+                .bg(rgb(0xffffff))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .truncate()
+                .text_size(px(12.0))
+                .child(SharedString::from(snapshot.title.clone()))
+                .into_any_element()
+        };
+
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(14.0))
+            .gap(px(32.0)) // Refactor so item name is inline with the rest of the values below it
             .pb(px(8.0))
             .child(self.render_item_icon(snapshot, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h(px(34.0))
-                    .border_1()
-                    .border_color(rgb(PROPERTIES_BORDER))
-                    .bg(rgb(0xffffff))
-                    .px(px(6.0))
-                    .flex()
-                    .items_center()
-                    .truncate()
-                    .text_size(px(12.0))
-                    .child(SharedString::from(snapshot.title.clone())),
-            )
+            .child(title)
             .into_any_element()
     }
 
@@ -945,7 +977,14 @@ fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot,
         .iter()
         .map(|item| item.size_on_disk.unwrap_or(0))
         .sum();
-    let contains = contains_summary(&items);
+    let contains = if items.len() == 1 {
+        items[0].contains.clone()
+    } else {
+        None
+    };
+    let selection_counts = (items.len() > 1)
+        .then(|| selection_counts_summary(&items))
+        .flatten();
     let shortcut = (items.len() == 1)
         .then(|| items[0].shortcut.clone())
         .flatten();
@@ -962,6 +1001,7 @@ fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot,
         size,
         size_on_disk,
         contains,
+        selection_counts,
         created,
         modified,
         accessed,
@@ -976,6 +1016,23 @@ fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot,
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PropertyTreeSummary {
+    files: usize,
+    folders: usize,
+    size: u64,
+    size_on_disk: u64,
+}
+
+impl PropertyTreeSummary {
+    fn add(&mut self, other: Self) {
+        self.files += other.files;
+        self.folders += other.folders;
+        self.size = self.size.saturating_add(other.size);
+        self.size_on_disk = self.size_on_disk.saturating_add(other.size_on_disk);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PropertyItem {
     path: PathBuf,
@@ -986,6 +1043,7 @@ struct PropertyItem {
     size: Option<u64>,
     size_on_disk: Option<u64>,
     contains: Option<PropertyContains>,
+    selection_counts: Option<PropertyContains>,
     created: Option<SystemTime>,
     modified: Option<SystemTime>,
     accessed: Option<SystemTime>,
@@ -1010,19 +1068,29 @@ fn collect_property_item(path: &Path) -> PropertyItem {
             metadata.clone(),
         )
     });
-    let size = if is_dir {
-        calculate_folder_size(path, &std::sync::atomic::AtomicBool::new(false)).ok()
-    } else {
-        metadata.as_ref().map(|metadata| metadata.len())
-    };
-    let size_on_disk = metadata.as_ref().map(|metadata| {
-        size_on_disk(path, metadata).unwrap_or_else(|| size.unwrap_or(metadata.len()))
-    });
+    let tree_summary = collect_property_tree_summary(path);
+    let size = tree_summary
+        .map(|summary| summary.size)
+        .or_else(|| metadata.as_ref().map(|metadata| metadata.len()));
+    let size_on_disk = tree_summary
+        .map(|summary| summary.size_on_disk)
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .map(|metadata| size_on_disk(path, metadata).unwrap_or_else(|| metadata.len()))
+        });
     let contains = if is_dir {
-        count_directory_children(path)
+        tree_summary.map(|summary| PropertyContains {
+            files: summary.files,
+            folders: summary.folders.saturating_sub(1),
+        })
     } else {
         None
     };
+    let selection_counts = tree_summary.map(|summary| PropertyContains {
+        files: summary.files,
+        folders: summary.folders,
+    });
     let readonly = metadata
         .as_ref()
         .map(|metadata| metadata.permissions().readonly());
@@ -1039,6 +1107,7 @@ fn collect_property_item(path: &Path) -> PropertyItem {
         size,
         size_on_disk,
         contains,
+        selection_counts,
         created: metadata
             .as_ref()
             .and_then(|metadata| metadata.created().ok()),
@@ -1094,18 +1163,18 @@ fn property_item_kind(items: &[PropertyItem]) -> PropertyItemKind {
     }
 }
 
-fn contains_summary(items: &[PropertyItem]) -> Option<PropertyContains> {
+fn selection_counts_summary(items: &[PropertyItem]) -> Option<PropertyContains> {
     let mut files = 0;
     let mut folders = 0;
-    let mut has_directory = false;
+    let mut has_counts = false;
     for item in items {
-        if let Some(contains) = &item.contains {
-            has_directory = true;
-            files += contains.files;
-            folders += contains.folders;
+        if let Some(counts) = &item.selection_counts {
+            has_counts = true;
+            files += counts.files;
+            folders += counts.folders;
         }
     }
-    has_directory.then_some(PropertyContains { files, folders })
+    has_counts.then_some(PropertyContains { files, folders })
 }
 
 fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp> {
@@ -1119,18 +1188,51 @@ fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp>
     default_application_for_file(&item.path).map(PropertyDefaultApp::from)
 }
 
-fn count_directory_children(path: &Path) -> Option<PropertyContains> {
-    let entries = fs::read_dir(path).ok()?;
-    let mut files = 0;
-    let mut folders = 0;
-    for entry in entries.flatten() {
-        match entry.file_type() {
-            Ok(file_type) if file_type.is_dir() => folders += 1,
-            Ok(_) => files += 1,
-            Err(_) => {}
+fn collect_property_tree_summary(path: &Path) -> Option<PropertyTreeSummary> {
+    let link_metadata = fs::symlink_metadata(path).ok()?;
+    let metadata = fs::metadata(path)
+        .ok()
+        .unwrap_or_else(|| link_metadata.clone());
+    Some(property_tree_summary_from_metadata(
+        path,
+        &link_metadata,
+        &metadata,
+    ))
+}
+
+fn property_tree_summary_from_metadata(
+    path: &Path,
+    link_metadata: &fs::Metadata,
+    metadata: &fs::Metadata,
+) -> PropertyTreeSummary {
+    let mut summary = PropertyTreeSummary::default();
+    let is_dir = metadata.is_dir();
+    let is_directory_link = metadata_is_directory_link(link_metadata);
+
+    if is_dir {
+        summary.folders += 1;
+        if !is_directory_link {
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    if let Some(child) = collect_property_tree_summary(&entry.path()) {
+                        summary.add(child);
+                    }
+                }
+            }
+            return summary;
         }
+    } else {
+        summary.files += 1;
     }
-    Some(PropertyContains { files, folders })
+
+    let size_metadata = if is_directory_link {
+        link_metadata
+    } else {
+        metadata
+    };
+    summary.size = size_metadata.len();
+    summary.size_on_disk = size_on_disk(path, size_metadata).unwrap_or_else(|| size_metadata.len());
+    summary
 }
 
 fn merged_details(items: &[PropertyItem]) -> Vec<PropertyDetail> {
@@ -1232,14 +1334,50 @@ fn path_is_hidden(path: &Path, metadata: Option<&fs::Metadata>) -> bool {
     }
 }
 
-fn size_on_disk(_: &Path, metadata: &fs::Metadata) -> Option<u64> {
+#[cfg(not(target_os = "windows"))]
+fn metadata_is_directory_link(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_directory_link(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
+fn size_on_disk(path: &Path, metadata: &fs::Metadata) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         return Some(metadata.blocks().saturating_mul(512));
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, SetLastError};
+        use windows::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
+        use windows::core::PCWSTR;
+
+        let mut high = 0;
+        let encoded = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        unsafe {
+            SetLastError(ERROR_SUCCESS);
+            let low = GetCompressedFileSizeW(PCWSTR::from_raw(encoded.as_ptr()), Some(&mut high));
+            if low == INVALID_FILE_SIZE && GetLastError() != ERROR_SUCCESS {
+                return Some(metadata.len());
+            }
+            return Some(((high as u64) << 32) | low as u64);
+        }
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         Some(metadata.len())
     }
@@ -1593,6 +1731,9 @@ fn property_path_display_name(path: &Path) -> String {
 }
 
 fn type_of_file_label(snapshot: &PropertySnapshot) -> String {
+    if snapshot.item_count > 1 && matches!(snapshot.type_label, MixedValue::Mixed) {
+        return "Multiple Types".to_owned();
+    }
     let label = mixed_string_label(&snapshot.type_label);
     if matches!(snapshot.item_kind, PropertyItemKind::SingleFile) {
         if let Some(path) = snapshot.target.paths.first() {
@@ -1635,6 +1776,45 @@ fn file_type_suffix(path: &Path) -> Option<String> {
         .and_then(|extension| extension.to_str())
         .filter(|extension| !extension.is_empty())
         .map(|extension| format!(".{extension}"))
+}
+
+fn location_label(snapshot: &PropertySnapshot) -> Option<String> {
+    match &snapshot.location {
+        MixedValue::Single(location) if !location.is_empty() && snapshot.item_count > 1 => {
+            Some(format!("All in {location}"))
+        }
+        MixedValue::Single(location) if !location.is_empty() => Some(location.clone()),
+        MixedValue::None | MixedValue::Mixed | MixedValue::Single(_) => None,
+    }
+}
+
+fn selection_count_label(counts: &PropertyContains) -> String {
+    match (counts.files, counts.folders) {
+        (0, 0) => count_label(0, "File", "Files"),
+        (0, folders) => count_label(folders, "Folder", "Folders"),
+        (files, 0) => count_label(files, "File", "Files"),
+        _ => contains_label(counts),
+    }
+}
+
+fn contains_label(contains: &PropertyContains) -> String {
+    format!(
+        "{}, {}",
+        count_label(contains.files, "File", "Files"),
+        count_label(contains.folders, "Folder", "Folders")
+    )
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    format!(
+        "{} {}",
+        count.separate_with_commas(),
+        if count == 1 { singular } else { plural }
+    )
+}
+
+fn non_empty_property_value(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn property_size_label(size: u64) -> String {
@@ -1851,9 +2031,12 @@ mod tests {
     fn snapshot_includes_folder_contains_count() {
         let temp = TempDir::new();
         let folder = temp.path().join("folder");
+        let child = folder.join("child");
         fs::create_dir(&folder).unwrap();
         fs::write(folder.join("a.txt"), b"a").unwrap();
-        fs::create_dir(folder.join("child")).unwrap();
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("b.txt"), b"bb").unwrap();
+        fs::create_dir(child.join("grandchild")).unwrap();
 
         let snapshot = collect_property_snapshot(PropertyTarget {
             paths: vec![folder],
@@ -1864,9 +2047,50 @@ mod tests {
         assert_eq!(
             snapshot.contains,
             Some(PropertyContains {
-                files: 1,
-                folders: 1
+                files: 2,
+                folders: 2
             })
+        );
+        assert_eq!(snapshot.size, 3);
+        assert!(snapshot.size_on_disk >= snapshot.size);
+        assert!(snapshot.selection_counts.is_none());
+    }
+
+    #[test]
+    fn multiselect_counts_selected_roots_and_descendants() {
+        let temp = TempDir::new();
+        let file = temp.path().join("root.txt");
+        let folder = temp.path().join("folder");
+        let nested = folder.join("nested");
+        fs::write(&file, b"a").unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("inside.txt"), b"bb").unwrap();
+        fs::create_dir(&nested).unwrap();
+
+        let snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![file, folder],
+        })
+        .unwrap();
+
+        assert_eq!(snapshot.item_kind, PropertyItemKind::MultipleItems);
+        assert_eq!(
+            snapshot.selection_counts,
+            Some(PropertyContains {
+                files: 2,
+                folders: 2
+            })
+        );
+        assert!(snapshot.contains.is_none());
+        assert_eq!(snapshot.size, 3);
+        assert!(snapshot.size_on_disk >= snapshot.size);
+        assert_eq!(
+            selection_count_label(snapshot.selection_counts.as_ref().unwrap()),
+            "2 Files, 2 Folders"
+        );
+        assert_eq!(type_of_file_label(&snapshot), "Multiple Types");
+        assert_eq!(
+            location_label(&snapshot),
+            Some(format!("All in {}", temp.path().display()))
         );
     }
 
@@ -1886,6 +2110,19 @@ mod tests {
         assert_eq!(snapshot.item_kind, PropertyItemKind::MultipleFiles);
         assert_eq!(snapshot.type_label, MixedValue::Mixed);
         assert_eq!(mixed_string_label(&snapshot.type_label), "");
+    }
+
+    #[test]
+    fn blank_property_values_are_omitted() {
+        assert_eq!(non_empty_property_value(String::new()), None);
+        assert_eq!(
+            non_empty_property_value(mixed_time_label(&MixedValue::Mixed, "")),
+            None
+        );
+        assert_eq!(
+            non_empty_property_value("Modified today".to_owned()),
+            Some("Modified today".to_owned())
+        );
     }
 
     #[test]
