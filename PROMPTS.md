@@ -59,6 +59,8 @@ Major remaining Windows Explorer parity areas:
 - Open With "Custom" needs a rework (it doesn't work)
 - Image metadata
     - Edit metadata values
+- Video metadata
+    - New tab "screens", ffprobe thumbnails throughout the video
 - Audio metadata
     - Channels
     - Format

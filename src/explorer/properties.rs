@@ -1,6 +1,7 @@
+use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     io::BufReader,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -2042,6 +2043,10 @@ fn collect_exif_detail_groups(target: &PropertyTarget) -> Vec<PropertyDetailGrou
     merge_detail_groups(groups_by_item.iter().map(Vec::as_slice))
 }
 
+const EXIF_VALUE_TOO_BIG_LABEL: &str = "<value too big to display>";
+const EXIF_NON_STANDARD_VALUE_CHAR_LIMIT: usize = 1024;
+const EXIF_STANDARD_VALUE_CHAR_LIMIT: usize = 5120;
+
 fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
     let availability_started = Instant::now();
     let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
@@ -3175,23 +3180,102 @@ fn exif_details(path: &Path) -> Vec<PropertyDetailGroup> {
 }
 
 fn exif_detail_value_label(field: &exif::Field, exif: &exif::Exif) -> String {
+    let char_limit = exif_detail_value_char_limit(field.tag);
     match &field.value {
-        exif::Value::Ascii(values) => exif_ascii_value_label(values),
-        _ => field.display_value().with_unit(exif).to_string(),
+        exif::Value::Ascii(values) => exif_ascii_value_label(values, char_limit),
+        _ => bounded_exif_value_label(field, exif, char_limit),
     }
 }
 
-fn exif_ascii_value_label(values: &[Vec<u8>]) -> String {
-    values
-        .iter()
-        .filter_map(|bytes| {
-            let value = String::from_utf8_lossy(bytes)
-                .trim_end_matches('\0')
-                .to_owned();
-            (!value.is_empty()).then_some(value)
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+fn exif_detail_value_char_limit(tag: exif::Tag) -> Option<usize> {
+    if tag == exif::Tag::UserComment {
+        None
+    } else if tag.description().is_none() {
+        Some(EXIF_NON_STANDARD_VALUE_CHAR_LIMIT)
+    } else {
+        Some(EXIF_STANDARD_VALUE_CHAR_LIMIT)
+    }
+}
+
+fn exif_ascii_value_label(values: &[Vec<u8>], char_limit: Option<usize>) -> String {
+    let mut label = BoundedExifValueString::new(char_limit);
+    for bytes in values {
+        let value = String::from_utf8_lossy(bytes);
+        let value = value.trim_end_matches('\0');
+        if value.is_empty() {
+            continue;
+        }
+
+        if !label.is_empty() && label.write_str(", ").is_err() {
+            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+        }
+        if label.write_str(value).is_err() {
+            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+        }
+    }
+
+    label.into_string()
+}
+
+fn bounded_exif_value_label(
+    field: &exif::Field,
+    exif: &exif::Exif,
+    char_limit: Option<usize>,
+) -> String {
+    if let Some(char_limit) = char_limit {
+        let mut label = BoundedExifValueString::new(Some(char_limit));
+        if fmt::write(
+            &mut label,
+            format_args!("{}", field.display_value().with_unit(exif)),
+        )
+        .is_err()
+        {
+            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+        }
+        label.into_string()
+    } else {
+        field.display_value().with_unit(exif).to_string()
+    }
+}
+
+struct BoundedExifValueString {
+    value: String,
+    char_limit: Option<usize>,
+    char_count: usize,
+}
+
+impl BoundedExifValueString {
+    fn new(char_limit: Option<usize>) -> Self {
+        Self {
+            value: String::new(),
+            char_limit,
+            char_count: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    fn into_string(self) -> String {
+        self.value
+    }
+}
+
+impl fmt::Write for BoundedExifValueString {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let char_count = value.chars().count();
+        if self
+            .char_limit
+            .is_some_and(|limit| self.char_count + char_count > limit)
+        {
+            return Err(fmt::Error);
+        }
+
+        self.value.push_str(value);
+        self.char_count += char_count;
+        Ok(())
+    }
 }
 
 fn exifmeta_details(field: &exif::Field) -> Option<Vec<PropertyDetail>> {
@@ -4795,10 +4879,66 @@ mod tests {
     #[test]
     fn exif_ascii_values_render_without_quotes() {
         assert_eq!(
-            exif_ascii_value_label(&[b"Canon\0".to_vec(), b"".to_vec(), b"TestCam\0\0".to_vec()]),
+            exif_ascii_value_label(
+                &[b"Canon\0".to_vec(), b"".to_vec(), b"TestCam\0\0".to_vec()],
+                None
+            ),
             "Canon, TestCam"
         );
-        assert_eq!(exif_ascii_value_label(&[b"\0".to_vec()]), "");
+        assert_eq!(exif_ascii_value_label(&[b"\0".to_vec()], None), "");
+    }
+
+    #[test]
+    fn non_standard_exif_ascii_values_at_limit_render_normally() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        let value = "A".repeat(EXIF_NON_STANDARD_VALUE_CHAR_LIMIT);
+        fs::write(&file, jpeg_with_exif(&custom_ascii_tag_tiff(&value))).unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_eq!(
+            detail_value(
+                &exif_groups,
+                PropertyDetailGroupKind::NonStandard,
+                "Tag(Tiff, 0xFDE8)"
+            ),
+            Some(value.as_str())
+        );
+    }
+
+    #[test]
+    fn non_standard_exif_ascii_values_over_limit_are_replaced() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        let value = "A".repeat(EXIF_NON_STANDARD_VALUE_CHAR_LIMIT + 1);
+        fs::write(&file, jpeg_with_exif(&custom_ascii_tag_tiff(&value))).unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_eq!(
+            detail_value(
+                &exif_groups,
+                PropertyDetailGroupKind::NonStandard,
+                "Tag(Tiff, 0xFDE8)"
+            ),
+            Some(EXIF_VALUE_TOO_BIG_LABEL)
+        );
+    }
+
+    #[test]
+    fn standard_exif_ascii_values_over_limit_are_replaced() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        let make = "C".repeat(EXIF_STANDARD_VALUE_CHAR_LIMIT + 1);
+        fs::write(&file, jpeg_with_exif(&exif_tiff(&make, "TestCam", None))).unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
+            Some(EXIF_VALUE_TOO_BIG_LABEL)
+        );
     }
 
     #[test]
@@ -4907,6 +5047,40 @@ mod tests {
 
         assert!(detail_group(&exif_groups, PropertyDetailGroupKind::Exifmeta).is_none());
         assert_group_has_detail(&exif_groups, PropertyDetailGroupKind::Misc, "User Comment");
+    }
+
+    #[test]
+    fn long_exifmeta_user_comment_still_renders_as_own_group() {
+        let temp = TempDir::new();
+        let file = temp.path().join("photo.jpg");
+        let location = "River ".repeat(EXIF_STANDARD_VALUE_CHAR_LIMIT + 1);
+        fs::write(
+            &file,
+            jpeg_with_exif(&exifmeta_tiff(&format!(
+                "exifmeta-v0.1.0\n{{\"FilmMaker\":\"Kodak\",\"LocationExact\":{}}}",
+                serde_json::to_string(&location).unwrap()
+            ))),
+        )
+        .unwrap();
+
+        let exif_groups = collect_exif_detail_groups(&PropertyTarget { paths: vec![file] });
+
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Film Maker",
+            "Kodak",
+        );
+        assert_detail_contains(
+            &exif_groups,
+            PropertyDetailGroupKind::Exifmeta,
+            "Location Exact",
+            "River",
+        );
+        assert_eq!(
+            detail_value(&exif_groups, PropertyDetailGroupKind::Misc, "User Comment"),
+            None
+        );
     }
 
     #[test]
@@ -5340,6 +5514,31 @@ mod tests {
             tiff.extend_from_slice(&0u32.to_le_bytes());
             tiff.extend_from_slice(&thumbnail_make);
         }
+
+        tiff
+    }
+
+    fn custom_ascii_tag_tiff(value: &str) -> Vec<u8> {
+        let value = ascii_exif_value(value);
+        let ifd0_entry_count = 1u16;
+        let ifd0_start = 8usize;
+        let ifd0_end = ifd0_start + 2 + usize::from(ifd0_entry_count) * 12 + 4;
+        let value_offset = ifd0_end;
+
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42u16.to_le_bytes());
+        tiff.extend_from_slice(&(ifd0_start as u32).to_le_bytes());
+        tiff.extend_from_slice(&ifd0_entry_count.to_le_bytes());
+        push_ifd_entry(
+            &mut tiff,
+            0xfde8,
+            2,
+            value.len() as u32,
+            value_offset as u32,
+        );
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff.extend_from_slice(&value);
 
         tiff
     }
