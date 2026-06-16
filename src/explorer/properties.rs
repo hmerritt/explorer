@@ -9,9 +9,11 @@ use std::{
 
 use filetime::{FileTime, set_file_times};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, ClickEvent, Context, FocusHandle, Focusable, Image,
-    IntoElement, Render, SharedString, Task, TextRun, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
+    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable,
+    Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
+    ScrollHandle, ScrollWheelEvent, SharedString, Task, TextRun, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, point,
+    prelude::*, px, rgb, size,
 };
 use thousands::Separable;
 
@@ -19,6 +21,11 @@ use thousands::Separable;
 use crate::explorer::open_with::OpenWithOutcome;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
+    constants::{
+        SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
+        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
+        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+    },
     entry::{DirectoryLinkKind, EntryKind},
     formatting::{format_size, format_timestamp},
     icons::{
@@ -26,6 +33,7 @@ use crate::explorer::{
         folder_icon_sized, image_icon,
     },
     open_with::{DefaultApplication, default_application_for_file},
+    scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     view::ExplorerView,
 };
 use crate::settings::SettingsState;
@@ -46,6 +54,25 @@ const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
+const PROPERTIES_ROW_TYPE_ID: &str = "properties-property-row-type";
+const PROPERTIES_ROW_LOCATION_ID: &str = "properties-property-row-location";
+const PROPERTIES_ROW_SIZE_ID: &str = "properties-property-row-size";
+const PROPERTIES_ROW_SIZE_ON_DISK_ID: &str = "properties-property-row-size-on-disk";
+const PROPERTIES_ROW_CONTAINS_ID: &str = "properties-property-row-contains";
+const PROPERTIES_ROW_CREATED_ID: &str = "properties-property-row-created";
+const PROPERTIES_ROW_MODIFIED_ID: &str = "properties-property-row-modified";
+const PROPERTIES_ROW_ACCESSED_ID: &str = "properties-property-row-accessed";
+#[cfg(test)]
+const PROPERTIES_GENERAL_PROPERTY_ROW_IDS: &[&str] = &[
+    PROPERTIES_ROW_TYPE_ID,
+    PROPERTIES_ROW_LOCATION_ID,
+    PROPERTIES_ROW_SIZE_ID,
+    PROPERTIES_ROW_SIZE_ON_DISK_ID,
+    PROPERTIES_ROW_CONTAINS_ID,
+    PROPERTIES_ROW_CREATED_ID,
+    PROPERTIES_ROW_MODIFIED_ID,
+    PROPERTIES_ROW_ACCESSED_ID,
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PropertyTarget {
@@ -223,6 +250,9 @@ pub(super) struct PropertiesDialog {
     snapshot_state: PropertySnapshotState,
     details_state: PropertyDetailsState,
     details_generation: u64,
+    details_scroll_handle: ScrollHandle,
+    details_scrollbar_hovered: bool,
+    details_scrollbar_drag: Option<ScrollbarDrag>,
     snapshot_task: Option<Task<()>>,
     details_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
@@ -289,6 +319,9 @@ impl PropertiesDialog {
             snapshot_state: PropertySnapshotState::Loading,
             details_state: PropertyDetailsState::NotStarted,
             details_generation: 0,
+            details_scroll_handle: ScrollHandle::new(),
+            details_scrollbar_hovered: false,
+            details_scrollbar_drag: None,
             snapshot_task: None,
             details_task: None,
             apply_task: None,
@@ -339,6 +372,8 @@ impl PropertiesDialog {
         self.details_generation = self.details_generation.wrapping_add(1);
         self.details_state = PropertyDetailsState::NotStarted;
         self.details_task = None;
+        self.details_scrollbar_drag = None;
+        self.set_details_scroll_top(0.0);
     }
 
     fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
@@ -676,13 +711,13 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let body = match &self.snapshot_state {
+    fn render_body(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let body = match self.snapshot_state.clone() {
             PropertySnapshotState::Loading => centered_message("Loading properties..."),
             PropertySnapshotState::Failed(error) => centered_message(error),
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
-                PropertyTab::General => self.render_general(snapshot, window, cx),
-                PropertyTab::Details => self.render_details(snapshot),
+                PropertyTab::General => self.render_general(&snapshot, window, cx),
+                PropertyTab::Details => self.render_details(&snapshot, cx),
             },
         };
 
@@ -695,6 +730,8 @@ impl PropertiesDialog {
             .border_t_0()
             .border_color(rgb(PROPERTIES_BORDER))
             .bg(rgb(0xffffff))
+            .min_w(px(0.0))
+            .overflow_hidden()
             .p(px(PROPERTIES_PANEL_PADDING))
             .child(body)
             .into_any_element()
@@ -719,13 +756,19 @@ impl PropertiesDialog {
             .flex()
             .flex_col()
             .flex_1()
+            .min_w(px(0.0))
             .id("properties-general-body")
             .overflow_y_scroll()
             .child(self.render_title_row(snapshot, cx))
             .child(separator());
 
         if let Some(type_label) = non_empty_property_value(type_label) {
-            body = body.child(property_row("Type:", type_label));
+            body = body.child(property_row(
+                PROPERTIES_ROW_TYPE_ID,
+                "Type:",
+                type_label,
+                cx,
+            ));
         }
         if single_file_default_app_path(snapshot).is_some() {
             body = body.child(self.render_open_with_row(snapshot, window, cx));
@@ -733,28 +776,60 @@ impl PropertiesDialog {
 
         body = body.child(separator());
         if let Some(location) = location {
-            body = body.child(property_row("Location:", location));
+            body = body.child(property_row(
+                PROPERTIES_ROW_LOCATION_ID,
+                "Location:",
+                location,
+                cx,
+            ));
         }
         body = body
-            .child(property_row("Size:", property_size_label(snapshot.size)))
             .child(property_row(
+                PROPERTIES_ROW_SIZE_ID,
+                "Size:",
+                property_size_label(snapshot.size),
+                cx,
+            ))
+            .child(property_row(
+                PROPERTIES_ROW_SIZE_ON_DISK_ID,
                 "Size on disk:",
                 property_size_label(snapshot.size_on_disk),
+                cx,
             ));
         if let Some(contains) = snapshot.contains.as_ref() {
-            body = body.child(property_row("Contains:", contains_label(contains)));
+            body = body.child(property_row(
+                PROPERTIES_ROW_CONTAINS_ID,
+                "Contains:",
+                contains_label(contains),
+                cx,
+            ));
         }
 
         if has_dates {
             body = body.child(separator());
             if let Some(created) = non_empty_property_value(created) {
-                body = body.child(property_row("Created:", created));
+                body = body.child(property_row(
+                    PROPERTIES_ROW_CREATED_ID,
+                    "Created:",
+                    created,
+                    cx,
+                ));
             }
             if let Some(modified) = non_empty_property_value(modified) {
-                body = body.child(property_row("Modified:", modified));
+                body = body.child(property_row(
+                    PROPERTIES_ROW_MODIFIED_ID,
+                    "Modified:",
+                    modified,
+                    cx,
+                ));
             }
             if let Some(accessed) = non_empty_property_value(accessed) {
-                body = body.child(property_row("Accessed:", accessed));
+                body = body.child(property_row(
+                    PROPERTIES_ROW_ACCESSED_ID,
+                    "Accessed:",
+                    accessed,
+                    cx,
+                ));
             }
         }
 
@@ -827,11 +902,22 @@ impl PropertiesDialog {
         #[cfg(target_os = "windows")]
         let _ = window;
 
+        let default_app_label = snapshot
+            .default_app
+            .as_ref()
+            .map(|default_app| default_app.name.clone())
+            .unwrap_or_else(|| "Unknown application".to_owned());
+        let copied_default_app_label = default_app_label.clone();
         let row = div()
+            .id("properties-open-with-row")
             .flex()
             .flex_row()
             .items_center()
             .min_h(px(34.0))
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                copy_property_to_clipboard("Opens with:", &copied_default_app_label, cx);
+                cx.stop_propagation();
+            }))
             .child(
                 div()
                     .w(px(PROPERTIES_LABEL_WIDTH))
@@ -850,13 +936,10 @@ impl PropertiesDialog {
                         this.child(self.render_default_app_icon(default_app, cx))
                     })
                     .child(
-                        div().min_w(px(0.0)).truncate().child(SharedString::from(
-                            snapshot
-                                .default_app
-                                .as_ref()
-                                .map(|default_app| default_app.name.clone())
-                                .unwrap_or_else(|| "Unknown application".to_owned()),
-                        )),
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(SharedString::from(default_app_label)),
                     ),
             );
 
@@ -920,11 +1003,18 @@ impl PropertiesDialog {
         snapshot: &PropertySnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let attributes_label = property_attributes_label(snapshot, &self.draft);
+        let copied_attributes_label = attributes_label.clone();
         div()
+            .id("properties-attributes-row")
             .flex()
             .flex_row()
             .items_center()
             .min_h(px(PROPERTIES_ROW_HEIGHT))
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                copy_property_to_clipboard("Attributes:", &copied_attributes_label, cx);
+                cx.stop_propagation();
+            }))
             .child(
                 div()
                     .w(px(PROPERTIES_LABEL_WIDTH))
@@ -936,31 +1026,50 @@ impl PropertiesDialog {
                 self.draft
                     .readonly
                     .or(mixed_bool_value(&snapshot.attributes.readonly)),
-                cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_readonly(cx)),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_readonly(cx);
+                    cx.stop_propagation();
+                }),
             ))
             .child(attribute_inline(
                 "Hidden",
                 self.draft
                     .hidden
                     .or(mixed_bool_value(&snapshot.attributes.hidden)),
-                cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_hidden(cx)),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_hidden(cx);
+                    cx.stop_propagation();
+                }),
             ))
             .into_any_element()
     }
 
-    fn render_details(&self, snapshot: &PropertySnapshot) -> AnyElement {
+    fn render_details(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let groups = detail_groups_for_render(snapshot, &self.details_state);
         let loading_details = matches!(self.details_state, PropertyDetailsState::Loading);
         let mut body = div()
             .flex()
             .flex_col()
             .flex_1()
+            .min_w(px(0.0))
+            .w_full()
             .id("properties-details-body")
             .overflow_y_scroll()
+            .scrollbar_width(px(0.0))
+            .track_scroll(&self.details_scroll_handle)
+            .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                cx.notify();
+            }))
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .w_full()
+                    .min_w(px(0.0))
                     .min_h(px(26.0))
                     .border_b_1()
                     .border_color(rgb(PROPERTIES_BORDER))
@@ -969,33 +1078,216 @@ impl PropertiesDialog {
                     .child(div().flex_1().min_w(px(0.0)).child("Value")),
             );
 
+        let mut detail_row_index = 0;
         for group in &groups {
             body = body.child(detail_group_header(&group.title));
             for detail in &group.details {
-                body = body.child(detail_row(&detail.name, &detail.value));
+                body = body.child(detail_row(
+                    detail_row_index,
+                    &detail.name,
+                    &detail.value,
+                    cx,
+                ));
+                detail_row_index += 1;
             }
         }
 
         if loading_details {
             body = body.child(
                 div()
+                    .min_w(px(0.0))
+                    .w_full()
                     .pt(px(12.0))
                     .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .truncate()
                     .child("Loading image metadata..."),
             );
         }
 
         if groups.is_empty() && !loading_details {
-            body.child(
+            body = body.child(
                 div()
+                    .min_w(px(0.0))
+                    .w_full()
                     .pt(px(12.0))
                     .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .truncate()
                     .child("No additional metadata is available."),
-            )
-            .into_any_element()
-        } else {
-            body.into_any_element()
+            );
         }
+
+        let has_scrollbar = self.details_scrollbar_metrics().is_some();
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .when(has_scrollbar, |this| {
+                this.child(self.render_details_scrollbar(cx))
+            })
+            .into_any_element()
+    }
+
+    fn details_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        let viewport_height = f32::from(self.details_scroll_handle.bounds().size.height);
+        let scroll_max = f32::from(self.details_scroll_handle.max_offset().height);
+        let scroll_top = -f32::from(self.details_scroll_handle.offset().y);
+        details_scrollbar_metrics_for_dimensions(viewport_height, scroll_max, scroll_top)
+    }
+
+    fn set_details_scroll_top(&self, scroll_top: f32) {
+        let scroll_top = self
+            .details_scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
+        let offset = self.details_scroll_handle.offset();
+        self.details_scroll_handle
+            .set_offset(point(offset.x, px(-scroll_top)));
+    }
+
+    fn handle_details_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_details_scroll_top(metrics.scroll_by(-PROPERTIES_ROW_HEIGHT));
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_details_scroll_top(metrics.scroll_by(PROPERTIES_ROW_HEIGHT));
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.details_scrollbar_drag = Some(ScrollbarDrag {
+                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+            });
+        } else if local_y < metrics.thumb_top {
+            self.set_details_scroll_top(metrics.scroll_by(-metrics.viewport_height));
+        } else {
+            self.set_details_scroll_top(metrics.scroll_by(metrics.viewport_height));
+        }
+    }
+
+    fn handle_details_scrollbar_drag(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
+        let Some(drag) = self.details_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
+        self.set_details_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
+    }
+
+    fn render_details_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(metrics) = self.details_scrollbar_metrics() else {
+            return div().into_any_element();
+        };
+
+        let hovered_or_dragged =
+            self.details_scrollbar_hovered || self.details_scrollbar_drag.is_some();
+        let thumb_width = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
+        let thumb_color = if self.details_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("properties-details-scrollbar")
+            .relative()
+            .w(px(SCROLLBAR_GUTTER_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.details_scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
+                    .child(scrollbar_arrow_button(
+                        bottom_arrow_top,
+                        ScrollbarArrow::Down,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(metrics.thumb_top))
+                    .right(px(thumb_right))
+                    .w(px(thumb_width))
+                    .h(px(metrics.thumb_height))
+                    .rounded(px(thumb_width / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_details_scrollbar_hit_layer(cx))
+            .into_any_element()
+    }
+
+    fn render_details_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, _, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if let Some(metrics) = this.details_scrollbar_metrics() {
+                                this.handle_details_scrollbar_mouse_down(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.details_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            if let Some(metrics) = this.details_scrollbar_metrics() {
+                                this.handle_details_scrollbar_drag(local_y, metrics);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.details_scrollbar_drag.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 
     fn render_buttons(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1103,7 +1395,7 @@ fn properties_window_options(title: String, cx: &App) -> WindowOptions {
         }),
         kind: WindowKind::Floating,
         is_movable: true,
-        is_resizable: false,
+        is_resizable: true,
         is_minimizable: false,
         window_decorations: Some(WindowDecorations::Server),
         ..Default::default()
@@ -2377,6 +2669,18 @@ fn detail_groups_for_render(
     groups
 }
 
+fn details_scrollbar_metrics_for_dimensions(
+    viewport_height: f32,
+    scroll_max: f32,
+    scroll_top: f32,
+) -> Option<ScrollbarMetrics> {
+    if scroll_max <= 0.0 {
+        return None;
+    }
+
+    ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
+}
+
 fn tab_button(
     label: &'static str,
     tab: PropertyTab,
@@ -2438,14 +2742,37 @@ fn centered_message(message: impl Into<String>) -> AnyElement {
         .into_any_element()
 }
 
-fn property_row(label: impl Into<String>, value: impl Into<String>) -> AnyElement {
+fn property_copy_text(label: &str, value: &str) -> String {
+    let label = label.trim().trim_end_matches(':').trim_end();
+    format!("{label}: {value}")
+}
+
+fn copy_property_to_clipboard(label: &str, value: &str, cx: &mut Context<PropertiesDialog>) {
+    cx.write_to_clipboard(ClipboardItem::new_string(property_copy_text(label, value)));
+}
+
+fn property_row(
+    id: &'static str,
+    label: impl Into<String>,
+    value: impl Into<String>,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
     let label = label.into();
     let value = value.into();
+    let copied_label = label.clone();
+    let copied_value = value.clone();
     div()
+        .id(id)
         .flex()
         .flex_row()
         .items_center()
+        .w_full()
+        .min_w(px(0.0))
         .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            copy_property_to_clipboard(&copied_label, &copied_value, cx);
+            cx.stop_propagation();
+        }))
         .child(
             div()
                 .w(px(PROPERTIES_LABEL_WIDTH))
@@ -2463,12 +2790,26 @@ fn property_row(label: impl Into<String>, value: impl Into<String>) -> AnyElemen
         .into_any_element()
 }
 
-fn detail_row(label: &str, value: &str) -> AnyElement {
+fn detail_row(
+    index: usize,
+    label: &str,
+    value: &str,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    let copied_label = label.to_owned();
+    let copied_value = value.to_owned();
     div()
+        .id(detail_row_id(index))
         .flex()
         .flex_row()
         .items_center()
+        .w_full()
+        .min_w(px(0.0))
         .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            copy_property_to_clipboard(&copied_label, &copied_value, cx);
+            cx.stop_propagation();
+        }))
         .child(
             div()
                 .w(px(154.0))
@@ -2487,9 +2828,42 @@ fn detail_row(label: &str, value: &str) -> AnyElement {
         .into_any_element()
 }
 
+fn detail_row_id(index: usize) -> (&'static str, usize) {
+    ("properties-detail-row", index)
+}
+
+fn property_attributes_label(snapshot: &PropertySnapshot, draft: &EditablePropertyDraft) -> String {
+    let readonly = draft
+        .readonly
+        .or(mixed_bool_value(&snapshot.attributes.readonly));
+    let hidden = draft
+        .hidden
+        .or(mixed_bool_value(&snapshot.attributes.hidden));
+    let mut labels = Vec::new();
+    push_attribute_copy_label(&mut labels, "Read-only", readonly);
+    push_attribute_copy_label(&mut labels, "Hidden", hidden);
+
+    if labels.is_empty() {
+        "None".to_owned()
+    } else {
+        labels.join(", ")
+    }
+}
+
+fn push_attribute_copy_label(labels: &mut Vec<String>, label: &'static str, value: Option<bool>) {
+    match value {
+        Some(true) => labels.push(label.to_owned()),
+        Some(false) => {}
+        None => labels.push(format!("{label}: Mixed")),
+    }
+}
+
 fn detail_group_header(title: &str) -> AnyElement {
     div()
         .mt(px(10.0))
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .min_h(px(PROPERTIES_ROW_HEIGHT))
         .flex()
         .flex_row()
@@ -2497,10 +2871,17 @@ fn detail_group_header(title: &str) -> AnyElement {
         .child(
             div()
                 .mr(px(8.0))
+                .flex_shrink_0()
                 .text_color(rgb(PROPERTIES_GROUP_TITLE))
                 .child(SharedString::from(title.to_owned())),
         )
-        .child(div().flex_1().h(px(1.0)).bg(rgb(PROPERTIES_GROUP_TITLE)))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .h(px(1.0))
+                .bg(rgb(PROPERTIES_GROUP_TITLE)),
+        )
         .into_any_element()
 }
 
@@ -2595,7 +2976,7 @@ fn property_button(
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     #[test]
     fn snapshot_formats_single_file_core_fields() {
@@ -2796,6 +3177,42 @@ mod tests {
     fn size_label_includes_raw_bytes_for_scaled_units() {
         assert_eq!(property_size_label(99), "99 bytes");
         assert_eq!(property_size_label(2048), "2.0 KB (2,048 bytes)");
+    }
+
+    #[test]
+    fn property_copy_text_formats_key_value_rows() {
+        assert_eq!(property_copy_text("Size:", "2 KB"), "Size: 2 KB");
+        assert_eq!(
+            property_copy_text("Dimensions", "1920 x 1080"),
+            "Dimensions: 1920 x 1080"
+        );
+    }
+
+    #[test]
+    fn general_property_row_ids_are_unique() {
+        let unique_ids: HashSet<_> = PROPERTIES_GENERAL_PROPERTY_ROW_IDS
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(unique_ids.len(), PROPERTIES_GENERAL_PROPERTY_ROW_IDS.len());
+    }
+
+    #[test]
+    fn detail_row_ids_are_unique_for_repeated_names() {
+        let ids: HashSet<_> = (0..4).map(detail_row_id).collect();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn details_scrollbar_metrics_only_exist_for_overflow() {
+        assert!(details_scrollbar_metrics_for_dimensions(100.0, 0.0, 0.0).is_none());
+
+        let metrics =
+            details_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0).expect("overflow metrics");
+        assert_eq!(metrics.viewport_height, 100.0);
+        assert_eq!(metrics.content_height, 150.0);
+        assert_eq!(metrics.scroll_max, 50.0);
+        assert_eq!(metrics.scroll_top, 50.0);
     }
 
     #[test]

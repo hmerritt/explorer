@@ -55,10 +55,8 @@ Major remaining Windows Explorer parity areas:
 
 ## Properties > Details tab:
 
-- Update Properties contextmenu icon (in all cases) to: assets\icons\utility\properties.svg
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - Open With "Custom" needs a rework (it doesn't work)
-- Details tab visible scrollbar (thin)
 - Image metadata
     - Remove quotes from string EXIF values, just show the text without the quotes
     - Support for exifmeta custom tags
