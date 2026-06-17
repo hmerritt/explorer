@@ -3,6 +3,7 @@
 ## 1
 
 - Improve readme - add screenshots / branding
+- Regression: Shortcuts no longer use the shortcut item and instead use folder icon. Let's fix this
 - Large icons grid view image thumbnail extraction improvements:
     - Add debug timings for this
     - Currently once a folder has begun extraction, it is never canceled when the user navigates away (and this blocks other folders from extracting images until the previous one finishes). Stop extraction process if user navigates away from directory.

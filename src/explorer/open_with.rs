@@ -196,9 +196,6 @@ impl ExplorerView {
             return;
         }
 
-        #[cfg(not(target_os = "linux"))]
-        let _ = cx;
-
         #[cfg(target_os = "linux")]
         {
             use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -241,14 +238,20 @@ impl ExplorerView {
         #[cfg(target_os = "windows")]
         {
             let parent = windows_parent_hwnd(window);
-            for path in paths {
-                let result = windows_open_file(&path, &intent, parent);
-                let completed = matches!(result, Ok(OpenWithOutcome::Opened));
-                self.handle_open_with_result(&path, result);
-                if !completed {
-                    break;
-                }
-            }
+            let task = cx.spawn(async move |this, cx| {
+                let results = open_paths_until_not_opened(paths, |path| {
+                    windows_open_file(path, &intent, parent)
+                });
+
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.open_with_task = None;
+                    for (path, result) in results {
+                        explorer.handle_open_with_result(&path, result);
+                    }
+                    cx.notify();
+                });
+            });
+            self.open_with_task = Some(task);
         }
 
         #[cfg(target_os = "macos")]
@@ -277,6 +280,23 @@ impl ExplorerView {
             Err(error) => self.open_error = Some(format_open_error(path, &error)),
         }
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn open_paths_until_not_opened(
+    paths: Vec<PathBuf>,
+    mut open_path: impl FnMut(&Path) -> io::Result<OpenWithOutcome>,
+) -> Vec<(PathBuf, io::Result<OpenWithOutcome>)> {
+    let mut results = Vec::new();
+    for path in paths {
+        let result = open_path(&path);
+        let completed = matches!(result, Ok(OpenWithOutcome::Opened));
+        results.push((path, result));
+        if !completed {
+            break;
+        }
+    }
+    results
 }
 
 #[cfg(target_os = "windows")]
@@ -829,6 +849,98 @@ unsafe fn mac_path_from_url(url: cocoa::base::id) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_result_name(result: &io::Result<OpenWithOutcome>) -> &'static str {
+        match result {
+            Ok(OpenWithOutcome::Opened) => "opened",
+            Ok(OpenWithOutcome::Cancelled) => "cancelled",
+            Err(_) => "error",
+        }
+    }
+
+    fn attempted_path_names(results: &[(PathBuf, io::Result<OpenWithOutcome>)]) -> Vec<String> {
+        results
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn open_result_names(results: &[(PathBuf, io::Result<OpenWithOutcome>)]) -> Vec<&'static str> {
+        results
+            .iter()
+            .map(|(_, result)| open_result_name(result))
+            .collect()
+    }
+
+    #[test]
+    fn open_paths_until_not_opened_records_all_successful_attempts() {
+        let results = open_paths_until_not_opened(
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            |_| Ok(OpenWithOutcome::Opened),
+        );
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
+        assert_eq!(open_result_names(&results), vec!["opened", "opened"]);
+    }
+
+    #[test]
+    fn open_paths_until_not_opened_stops_after_first_error() {
+        let results = open_paths_until_not_opened(
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            |path| {
+                if path == Path::new("a.txt") {
+                    Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+                } else {
+                    Ok(OpenWithOutcome::Opened)
+                }
+            },
+        );
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt"]);
+        assert_eq!(open_result_names(&results), vec!["error"]);
+    }
+
+    #[test]
+    fn open_paths_until_not_opened_stops_after_later_error() {
+        let results = open_paths_until_not_opened(
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt"),
+            ],
+            |path| {
+                if path == Path::new("b.txt") {
+                    Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+                } else {
+                    Ok(OpenWithOutcome::Opened)
+                }
+            },
+        );
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
+        assert_eq!(open_result_names(&results), vec!["opened", "error"]);
+    }
+
+    #[test]
+    fn open_paths_until_not_opened_stops_after_cancelled_result() {
+        let results = open_paths_until_not_opened(
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt"),
+            ],
+            |path| {
+                if path == Path::new("b.txt") {
+                    Ok(OpenWithOutcome::Cancelled)
+                } else {
+                    Ok(OpenWithOutcome::Opened)
+                }
+            },
+        );
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
+        assert_eq!(open_result_names(&results), vec!["opened", "cancelled"]);
+    }
 
     #[test]
     fn cancelled_open_does_not_replace_existing_error() {
