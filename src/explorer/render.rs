@@ -108,6 +108,10 @@ const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
 const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
 const CODEBASE_MAKEUP_BAR_WIDTH: f32 = 200.0;
+const CODEBASE_MAKEUP_BAR_HEIGHT: f32 = 8.0;
+const CODEBASE_MAKEUP_BAR_RADIUS: f32 = 6.0;
+const CODEBASE_MAKEUP_SEPARATOR_WIDTH: f32 = 2.0;
+const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileColumnHeaderDrag {
@@ -5342,27 +5346,55 @@ fn render_codebase_makeup_status(summary: &CodebaseSummary) -> AnyElement {
 }
 
 fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
-    let widths = language_segment_widths(
-        &summary.languages,
-        summary.total_code,
-        CODEBASE_MAKEUP_BAR_WIDTH,
-    );
+    let separator_count = summary.languages.len().saturating_sub(1);
+    let separator_width = CODEBASE_MAKEUP_SEPARATOR_WIDTH * separator_count as f32;
+    let language_width = (CODEBASE_MAKEUP_BAR_WIDTH - separator_width).max(0.0);
+    let widths = language_segment_widths(&summary.languages, summary.total_code, language_width);
     let mut bar = div()
         .flex()
         .flex_row()
-        .h_full()
+        .h(px(CODEBASE_MAKEUP_BAR_HEIGHT))
         .w(px(CODEBASE_MAKEUP_BAR_WIDTH))
         .flex_shrink_0()
-        .overflow_hidden();
+        .overflow_hidden()
+        .rounded(px(CODEBASE_MAKEUP_BAR_RADIUS));
 
-    for (language, width) in summary.languages.iter().zip(widths) {
-        bar = bar.child(
-            div()
-                .h_full()
-                .w(px(width))
-                .flex_shrink_0()
-                .bg(rgb(language.color)),
-        );
+    let segment_count = summary.languages.len();
+
+    for (ix, (language, width)) in summary.languages.iter().zip(widths).enumerate() {
+        let mut segment = div()
+            .h_full()
+            .w(px(width))
+            .flex_shrink_0()
+            .bg(rgb(language.color));
+
+        if segment_count == 1 {
+            segment = segment.rounded(px(CODEBASE_MAKEUP_BAR_RADIUS));
+        } else {
+            if ix == 0 {
+                segment = segment
+                    .rounded_tl(px(CODEBASE_MAKEUP_BAR_RADIUS))
+                    .rounded_bl(px(CODEBASE_MAKEUP_BAR_RADIUS));
+            }
+
+            if ix + 1 == segment_count {
+                segment = segment
+                    .rounded_tr(px(CODEBASE_MAKEUP_BAR_RADIUS))
+                    .rounded_br(px(CODEBASE_MAKEUP_BAR_RADIUS));
+            }
+        }
+
+        bar = bar.child(segment);
+
+        if ix + 1 < segment_count {
+            bar = bar.child(
+                div()
+                    .h_full()
+                    .w(px(CODEBASE_MAKEUP_SEPARATOR_WIDTH))
+                    .flex_shrink_0()
+                    .bg(rgb(CODEBASE_MAKEUP_SEPARATOR_COLOR)),
+            );
+        }
     }
 
     bar
