@@ -990,6 +990,10 @@ impl PropertiesDialog {
         result: std::io::Result<DefaultAppChangeOutcome>,
         cx: &mut Context<Self>,
     ) {
+        if default_app_change_refreshes_file_type_icons(&result) {
+            super::app_icons::invalidate_native_file_type_icons_for_path(&path, cx);
+        }
+
         let target = self.target.clone();
         let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -1075,6 +1079,9 @@ impl PropertiesDialog {
                 dialog.default_app_task = None;
                 dialog.default_app_error =
                     default_app_change_error(&path, &before, &result, snapshot.as_ref());
+                if default_app_change_refreshes_file_type_icons(&result) {
+                    super::app_icons::invalidate_native_file_type_icons_for_path(&path, cx);
+                }
                 if let Some(snapshot) = snapshot {
                     dialog.set_ready_snapshot(snapshot, cx);
                 }
@@ -5317,6 +5324,12 @@ fn default_app_change_error(
     }
 }
 
+fn default_app_change_refreshes_file_type_icons(
+    result: &std::io::Result<DefaultAppChangeOutcome>,
+) -> bool {
+    matches!(result, Ok(DefaultAppChangeOutcome::Changed))
+}
+
 fn property_path_display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -7181,6 +7194,19 @@ mod tests {
             .unwrap()
             .contains("Could not change the default app")
         );
+    }
+
+    #[test]
+    fn default_app_change_refreshes_file_type_icons_only_after_changed_result() {
+        assert!(default_app_change_refreshes_file_type_icons(&Ok(
+            DefaultAppChangeOutcome::Changed
+        )));
+        assert!(!default_app_change_refreshes_file_type_icons(&Ok(
+            DefaultAppChangeOutcome::Cancelled
+        )));
+        assert!(!default_app_change_refreshes_file_type_icons(&Err(
+            std::io::Error::other("denied")
+        )));
     }
 
     #[test]

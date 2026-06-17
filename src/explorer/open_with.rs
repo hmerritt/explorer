@@ -21,8 +21,20 @@ pub(super) enum OpenFileIntent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OpenWithOutcome {
-    Opened,
+    Opened { default_app_may_have_changed: bool },
     Cancelled,
+}
+
+impl OpenWithOutcome {
+    fn opened(default_app_may_have_changed: bool) -> Self {
+        Self::Opened {
+            default_app_may_have_changed,
+        }
+    }
+
+    fn is_opened(self) -> bool {
+        matches!(self, Self::Opened { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,7 +240,7 @@ impl ExplorerView {
                 .ok()
                 .map(|handle| handle.as_raw());
             let task = cx.spawn(async move |this, cx| {
-                let mut result = Ok(OpenWithOutcome::Opened);
+                let mut result = Ok(OpenWithOutcome::opened(false));
                 let mut result_path = paths.first().cloned();
                 for path in &paths {
                     result_path = Some(path.clone());
@@ -239,7 +251,7 @@ impl ExplorerView {
                         display_handle.as_ref(),
                     )
                     .await;
-                    if !matches!(result, Ok(OpenWithOutcome::Opened)) {
+                    if !result.as_ref().is_ok_and(|outcome| outcome.is_opened()) {
                         break;
                     }
                 }
@@ -248,7 +260,9 @@ impl ExplorerView {
                 let _ = this.update(cx, |explorer, cx| {
                     explorer.open_with_task = None;
                     if let (Some(path), result) = result {
-                        explorer.handle_open_with_result(&path, result);
+                        if explorer.handle_open_with_result(&path, result) {
+                            refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                        }
                     }
                     cx.notify();
                 });
@@ -267,7 +281,9 @@ impl ExplorerView {
                 let _ = this.update(cx, |explorer, cx| {
                     explorer.open_with_task = None;
                     for (path, result) in results {
-                        explorer.handle_open_with_result(&path, result);
+                        if explorer.handle_open_with_result(&path, result) {
+                            refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                        }
                     }
                     cx.notify();
                 });
@@ -278,11 +294,12 @@ impl ExplorerView {
         #[cfg(target_os = "macos")]
         {
             let _ = window;
-            let _ = cx;
             for path in paths {
                 let result = mac_open_file(&path, &intent);
-                let completed = matches!(result, Ok(OpenWithOutcome::Opened));
-                self.handle_open_with_result(&path, result);
+                let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                if self.handle_open_with_result(&path, result) {
+                    refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                }
                 if !completed {
                     break;
                 }
@@ -294,13 +311,31 @@ impl ExplorerView {
         &mut self,
         path: &Path,
         result: io::Result<OpenWithOutcome>,
-    ) {
+    ) -> bool {
         match result {
-            Ok(OpenWithOutcome::Opened) => self.open_error = None,
-            Ok(OpenWithOutcome::Cancelled) => {}
-            Err(error) => self.open_error = Some(format_open_error(path, &error)),
+            Ok(OpenWithOutcome::Opened {
+                default_app_may_have_changed,
+            }) => {
+                self.open_error = None;
+                default_app_may_have_changed
+            }
+            Ok(OpenWithOutcome::Cancelled) => false,
+            Err(error) => {
+                self.open_error = Some(format_open_error(path, &error));
+                false
+            }
         }
     }
+}
+
+fn refresh_file_type_icons_after_default_app_may_have_changed(
+    path: &Path,
+    cx: &mut impl gpui::BorrowAppContext,
+) {
+    #[cfg(target_os = "windows")]
+    windows_notify_association_changed();
+
+    super::app_icons::invalidate_native_file_type_icons_for_path(path, cx);
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -311,7 +346,7 @@ fn open_paths_until_not_opened(
     let mut results = Vec::new();
     for path in paths {
         let result = open_path(&path);
-        let completed = matches!(result, Ok(OpenWithOutcome::Opened));
+        let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
         results.push((path, result));
         if !completed {
             break;
@@ -339,7 +374,7 @@ fn windows_open_file(
 ) -> io::Result<OpenWithOutcome> {
     match intent {
         OpenFileIntent::Default => match open::that_detached(path) {
-            Ok(()) => Ok(OpenWithOutcome::Opened),
+            Ok(()) => Ok(OpenWithOutcome::opened(false)),
             Err(error) if windows_error_is_no_association(&error) => {
                 windows_choose_application(path, parent)
             }
@@ -359,7 +394,7 @@ fn windows_open_with_outcome_from_shell_result(
     result: io::Result<bool>,
 ) -> io::Result<OpenWithOutcome> {
     if result? {
-        Ok(OpenWithOutcome::Opened)
+        Ok(OpenWithOutcome::opened(true))
     } else {
         Ok(OpenWithOutcome::Cancelled)
     }
@@ -468,6 +503,15 @@ fn windows_show_open_with_picker(
 
     let mut request = windows_open_with_execute_request(path, parent);
     windows_shell_execute_result(unsafe { ShellExecuteExW(request.execute_info_mut()) })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_notify_association_changed() {
+    use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+
+    unsafe {
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -625,10 +669,10 @@ async fn linux_open_file(
         .and_then(|request| request.response());
 
     match result {
-        Ok(()) => Ok(OpenWithOutcome::Opened),
+        Ok(()) => Ok(OpenWithOutcome::opened(false)),
         Err(Error::Response(ResponseError::Cancelled)) => Ok(OpenWithOutcome::Cancelled),
         Err(error) if matches!(intent, OpenFileIntent::Default) => open::that_detached(path)
-            .map(|_| OpenWithOutcome::Opened)
+            .map(|_| OpenWithOutcome::opened(false))
             .map_err(|fallback| {
                 io::Error::other(format!(
                     "desktop portal failed ({error}); fallback opener failed ({fallback})"
@@ -912,7 +956,7 @@ fn mac_open_file(path: &Path, intent: &OpenFileIntent) -> io::Result<OpenWithOut
         OpenFileIntent::Default
             if mac_is_application_bundle(path) || mac_has_default_application(path) =>
         {
-            open::that_detached(path).map(|_| OpenWithOutcome::Opened)
+            open::that_detached(path).map(|_| OpenWithOutcome::opened(false))
         }
         OpenFileIntent::Default | OpenFileIntent::ChooseApplication => {
             let Some(application) = mac_choose_application()? else {
@@ -1029,7 +1073,7 @@ fn mac_open_with_application(path: &Path, application: &Path) -> io::Result<Open
                 configuration: configuration
                 completionHandler: nil
             ];
-            Ok(OpenWithOutcome::Opened)
+            Ok(OpenWithOutcome::opened(false))
         })();
         let _: () = msg_send![pool, drain];
         result
@@ -1216,7 +1260,7 @@ mod tests {
 
     fn open_result_name(result: &io::Result<OpenWithOutcome>) -> &'static str {
         match result {
-            Ok(OpenWithOutcome::Opened) => "opened",
+            Ok(OpenWithOutcome::Opened { .. }) => "opened",
             Ok(OpenWithOutcome::Cancelled) => "cancelled",
             Err(_) => "error",
         }
@@ -1255,7 +1299,7 @@ mod tests {
     fn open_paths_until_not_opened_records_all_successful_attempts() {
         let results = open_paths_until_not_opened(
             vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
-            |_| Ok(OpenWithOutcome::Opened),
+            |_| Ok(OpenWithOutcome::opened(false)),
         );
 
         assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
@@ -1270,7 +1314,7 @@ mod tests {
                 if path == Path::new("a.txt") {
                     Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
                 } else {
-                    Ok(OpenWithOutcome::Opened)
+                    Ok(OpenWithOutcome::opened(false))
                 }
             },
         );
@@ -1291,7 +1335,7 @@ mod tests {
                 if path == Path::new("b.txt") {
                     Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
                 } else {
-                    Ok(OpenWithOutcome::Opened)
+                    Ok(OpenWithOutcome::opened(false))
                 }
             },
         );
@@ -1312,7 +1356,7 @@ mod tests {
                 if path == Path::new("b.txt") {
                     Ok(OpenWithOutcome::Cancelled)
                 } else {
-                    Ok(OpenWithOutcome::Opened)
+                    Ok(OpenWithOutcome::opened(false))
                 }
             },
         );
@@ -1326,7 +1370,9 @@ mod tests {
         let mut view = ExplorerView::new(PathBuf::from("."));
         view.open_error = Some("existing".to_owned());
 
-        view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::Cancelled));
+        assert!(
+            !view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::Cancelled))
+        );
 
         assert_eq!(view.open_error.as_deref(), Some("existing"));
     }
@@ -1336,7 +1382,21 @@ mod tests {
         let mut view = ExplorerView::new(PathBuf::from("."));
         view.open_error = Some("existing".to_owned());
 
-        view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::Opened));
+        assert!(
+            !view
+                .handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::opened(false)))
+        );
+
+        assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn successful_picker_open_requests_file_type_icon_refresh() {
+        let mut view = ExplorerView::new(PathBuf::from("."));
+
+        assert!(
+            view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::opened(true)))
+        );
 
         assert_eq!(view.open_error, None);
     }
@@ -1345,10 +1405,10 @@ mod tests {
     fn failed_open_sets_existing_error_message() {
         let mut view = ExplorerView::new(PathBuf::from("."));
 
-        view.handle_open_with_result(
+        assert!(!view.handle_open_with_result(
             Path::new("file.txt"),
             Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
-        );
+        ));
 
         assert_eq!(
             view.open_error.as_deref(),
@@ -1383,7 +1443,7 @@ mod tests {
     fn windows_open_with_shell_result_true_maps_to_opened() {
         assert_eq!(
             windows_open_with_outcome_from_shell_result(Ok(true)).unwrap(),
-            OpenWithOutcome::Opened
+            OpenWithOutcome::opened(true)
         );
     }
 

@@ -3,12 +3,14 @@
 ## 1
 
 - Improve readme - add screenshots / branding
+- Open With "Custom" needs a rework (it doesn't work)
 - Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2
 
 - Settings option to hide drives (WSL ones you may not want)
 - UI refinement and improvements (tighten everything up, make it look nice)
+- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
@@ -53,8 +55,6 @@ Major remaining Windows Explorer parity areas:
 
 ## Properties > Details tab:
 
-- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
-- Open With "Custom" needs a rework (it doesn't work)
 - Image metadata
     - Rotate images Left/Right
     - Edit metadata values

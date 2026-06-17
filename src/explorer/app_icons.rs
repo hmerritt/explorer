@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
@@ -9,7 +9,7 @@ use std::{
 };
 
 use futures::AsyncReadExt;
-use gpui::{App, Context, Global, Image};
+use gpui::{App, BorrowAppContext, Context, Global, Image};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -55,6 +55,9 @@ impl NativeIconSize {
         }
     }
 }
+
+const NATIVE_ICON_SIZES: [NativeIconSize; 2] =
+    [NativeIconSize::Details, NativeIconSize::LargeIcons];
 
 pub(super) struct NativeIconCache {
     inner: RefCell<NativeIconCacheInner>,
@@ -137,6 +140,7 @@ struct NativeIconCacheInner {
     states: HashMap<String, NativeIconState>,
     pending: VecDeque<String>,
     loader_running: bool,
+    next_load_id: u64,
     store: DiskIconStore,
 }
 
@@ -146,6 +150,7 @@ enum NativeIconState {
         queued_at: Instant,
     },
     Loading {
+        load_id: u64,
         icon: Option<Arc<Image>>,
     },
     Ready(Arc<Image>),
@@ -154,6 +159,7 @@ enum NativeIconState {
 
 struct NativeIconLoadJob {
     request: NativeIconRequest,
+    load_id: u64,
     queued_at: Instant,
     cache_dir: Option<PathBuf>,
     stale_hash: Option<String>,
@@ -184,6 +190,7 @@ impl NativeIconCacheInner {
             states: HashMap::new(),
             pending: VecDeque::new(),
             loader_running: false,
+            next_load_id: 0,
             store,
         }
     }
@@ -223,11 +230,19 @@ impl NativeIconCacheInner {
 
             let stale_hash = self.store.icon_hash(&request.key).map(ToOwned::to_owned);
             let cache_dir = self.store.cache_dir().map(Path::to_path_buf);
-            self.states
-                .insert(key, NativeIconState::Loading { icon: None });
+            let load_id = self.next_load_id;
+            self.next_load_id = self.next_load_id.wrapping_add(1);
+            self.states.insert(
+                key,
+                NativeIconState::Loading {
+                    load_id,
+                    icon: None,
+                },
+            );
 
             return Some(NativeIconLoadJob {
                 request,
+                load_id,
                 queued_at,
                 cache_dir,
                 stale_hash,
@@ -238,16 +253,22 @@ impl NativeIconCacheInner {
         None
     }
 
-    fn publish_stale_icon(&mut self, key: &str, bytes: Vec<u8>) -> bool {
+    fn publish_stale_icon(&mut self, key: &str, load_id: u64, bytes: Vec<u8>) -> bool {
         let Some(icon) = valid_png_bytes(bytes).map(image_from_png_bytes) else {
             return false;
         };
         let Some(NativeIconState::Loading {
-            icon: current_icon, ..
+            load_id: current_load_id,
+            icon: current_icon,
+            ..
         }) = self.states.get_mut(key)
         else {
             return false;
         };
+
+        if *current_load_id != load_id {
+            return false;
+        }
 
         if current_icon.is_some() {
             return false;
@@ -257,12 +278,22 @@ impl NativeIconCacheInner {
         true
     }
 
-    fn finish_request(&mut self, request: NativeIconRequest, bytes: Option<Vec<u8>>) -> bool {
+    fn finish_request(
+        &mut self,
+        request: NativeIconRequest,
+        load_id: u64,
+        bytes: Option<Vec<u8>>,
+    ) -> bool {
         let stale_icon = match self.states.remove(&request.key) {
-            Some(NativeIconState::Loading { icon, .. }) => icon,
-            Some(NativeIconState::Ready(icon)) => Some(icon),
-            Some(NativeIconState::Failed(icon)) => icon,
-            Some(NativeIconState::Pending { .. }) | None => None,
+            Some(NativeIconState::Loading {
+                load_id: current_load_id,
+                icon,
+            }) if current_load_id == load_id => icon,
+            Some(state) => {
+                self.states.insert(request.key, state);
+                return false;
+            }
+            None => return false,
         };
 
         let state =
@@ -276,6 +307,28 @@ impl NativeIconCacheInner {
 
         self.states.insert(request.key, state);
         true
+    }
+
+    fn invalidate_requests(&mut self, requests: &[NativeIconRequest]) -> bool {
+        let keys = requests
+            .iter()
+            .map(|request| request.key.clone())
+            .collect::<HashSet<_>>();
+        if keys.is_empty() {
+            return false;
+        }
+
+        let mut changed = false;
+        let before_pending_len = self.pending.len();
+        self.pending.retain(|key| !keys.contains(key));
+        changed |= self.pending.len() != before_pending_len;
+
+        for key in &keys {
+            changed |= self.states.remove(key).is_some();
+        }
+        changed |= self.store.remove_mappings(keys.iter().map(String::as_str));
+
+        changed
     }
 }
 
@@ -360,6 +413,20 @@ impl NativeIconState {
             Self::Pending { .. } | Self::Loading { icon: None, .. } | Self::Failed(None) => None,
         }
     }
+}
+
+pub(super) fn invalidate_native_file_type_icons_for_path(
+    path: &Path,
+    cx: &mut impl BorrowAppContext,
+) {
+    let requests = native_file_type_icon_requests_for_path(path);
+    if requests.is_empty() {
+        return;
+    }
+
+    cx.update_global::<NativeIconCache, _>(|cache, _| {
+        cache.inner.borrow_mut().invalidate_requests(&requests);
+    });
 }
 
 impl ExplorerView {
@@ -465,9 +532,13 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
 
                 if let Some(bytes) = stale_bytes {
                     let stale_publish_started = timings.now();
+                    let load_id = job.load_id;
                     let published = cx
                         .update_global::<NativeIconCache, _>(|cache, _| {
-                            cache.inner.borrow_mut().publish_stale_icon(&key, bytes)
+                            cache
+                                .inner
+                                .borrow_mut()
+                                .publish_stale_icon(&key, load_id, bytes)
                         })
                         .ok()
                         .unwrap_or(false);
@@ -486,7 +557,10 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
 
             let fresh_commit_started = timings.now();
             let _committed = cx.update_global::<NativeIconCache, _>(|cache, _| {
-                cache.inner.borrow_mut().finish_request(job.request, icon);
+                cache
+                    .inner
+                    .borrow_mut()
+                    .finish_request(job.request, job.load_id, icon);
             });
             timings.record_fresh_commit(fresh_commit_started);
             timings.record_request_total(request_started);
@@ -867,6 +941,21 @@ fn native_icon_request_for_path(path: &Path, size: NativeIconSize) -> Option<Nat
     None
 }
 
+fn native_file_type_icon_requests_for_path(path: &Path) -> Vec<NativeIconRequest> {
+    #[cfg(target_os = "macos")]
+    {
+        return mac_file_type_icon_requests_for_path(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_file_type_icon_requests_for_path(path);
+    }
+
+    #[allow(unreachable_code)]
+    Vec::new()
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(test, allow(dead_code))]
 fn linux_native_icon_request(request: LinuxIconRequest, size: NativeIconSize) -> NativeIconRequest {
@@ -885,6 +974,22 @@ fn linux_native_icon_request(request: LinuxIconRequest, size: NativeIconSize) ->
         size,
         source: PlatformIconRequest::Linux(request),
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_file_type_icon_requests_for_path(path: &Path) -> Vec<NativeIconRequest> {
+    let extension = lowercase_extension(path).unwrap_or_default();
+    NATIVE_ICON_SIZES
+        .into_iter()
+        .map(|size| {
+            mac_native_icon_request(
+                MacIconRequest::FileType {
+                    extension: extension.clone(),
+                },
+                size,
+            )
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -968,6 +1073,26 @@ fn windows_icon_request_for_entry(
 }
 
 #[cfg(any(target_os = "windows", test))]
+fn windows_file_type_icon_requests_for_path(path: &Path) -> Vec<NativeIconRequest> {
+    let extension = lowercase_extension(path).unwrap_or_default();
+    if windows_extension_uses_path_icon(&extension) {
+        return Vec::new();
+    }
+
+    NATIVE_ICON_SIZES
+        .into_iter()
+        .map(|size| {
+            windows_native_icon_request(
+                WindowsIconRequest::Extension {
+                    extension: extension.clone(),
+                },
+                size,
+            )
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn windows_native_icon_request(
     request: WindowsIconRequest,
     size: NativeIconSize,
@@ -1010,8 +1135,13 @@ fn windows_entry_uses_path_icon(entry: &FileEntry) -> bool {
         return false;
     };
 
+    windows_extension_uses_path_icon(&extension)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_extension_uses_path_icon(extension: &str) -> bool {
     matches!(
-        extension.as_str(),
+        extension,
         "exe"
             | "com"
             | "scr"
@@ -1887,6 +2017,21 @@ impl DiskIconStore {
         self.manifest.mappings.insert(key.to_owned(), hash);
         let _ = save_disk_manifest(cache_dir, &self.manifest);
     }
+
+    fn remove_mappings<'a>(&mut self, keys: impl IntoIterator<Item = &'a str>) -> bool {
+        let mut changed = false;
+        for key in keys {
+            changed |= self.manifest.mappings.remove(key).is_some();
+        }
+
+        if changed {
+            if let Some(cache_dir) = self.cache_dir.as_deref() {
+                let _ = save_disk_manifest(cache_dir, &self.manifest);
+            }
+        }
+
+        changed
+    }
 }
 
 fn load_disk_manifest(cache_dir: Option<&Path>) -> Option<DiskIconManifest> {
@@ -2157,6 +2302,14 @@ mod tests {
 
     fn cache_with_dir(cache_dir: Option<PathBuf>) -> NativeIconCacheInner {
         NativeIconCacheInner::new(DiskIconStore::load(cache_dir))
+    }
+
+    fn start_load_job(
+        cache: &mut NativeIconCacheInner,
+        request: NativeIconRequest,
+    ) -> NativeIconLoadJob {
+        cache.icon_for_request(request);
+        cache.next_load_job().expect("load job")
     }
 
     #[test]
@@ -2503,10 +2656,9 @@ mod tests {
         let mut cache = cache_with_dir(None);
         let request = test_request("key");
 
-        cache.icon_for_request(request.clone());
-        cache.next_load_job().expect("load job");
-        assert!(cache.publish_stale_icon("key", one_pixel_png_bytes()));
-        assert!(cache.finish_request(request, None));
+        let job = start_load_job(&mut cache, request.clone());
+        assert!(cache.publish_stale_icon("key", job.load_id, one_pixel_png_bytes()));
+        assert!(cache.finish_request(request, job.load_id, None));
 
         assert!(cache.icon_for_request(test_request("key")).0.is_some());
         assert!(cache.pending.is_empty());
@@ -2517,12 +2669,132 @@ mod tests {
         let mut cache = cache_with_dir(None);
         let request = test_request("key");
 
-        cache.icon_for_request(request.clone());
-        cache.next_load_job().expect("load job");
-        assert!(cache.finish_request(request, Some(one_pixel_png_bytes())));
+        let job = start_load_job(&mut cache, request.clone());
+        assert!(cache.finish_request(request, job.load_id, Some(one_pixel_png_bytes())));
 
         assert!(cache.icon_for_request(test_request("key")).0.is_some());
         assert!(cache.pending.is_empty());
+    }
+
+    #[test]
+    fn invalidating_file_type_icons_removes_ready_states_and_disk_mappings() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("cache");
+        let mut cache = cache_with_dir(Some(cache_dir));
+        let requests = windows_file_type_icon_requests_for_path(Path::new("Report.TXT"));
+
+        assert_eq!(requests.len(), NATIVE_ICON_SIZES.len());
+        for request in &requests {
+            let job = start_load_job(&mut cache, request.clone());
+            assert!(cache.finish_request(
+                request.clone(),
+                job.load_id,
+                Some(one_pixel_png_bytes())
+            ));
+            assert!(matches!(
+                cache.states.get(&request.key),
+                Some(NativeIconState::Ready(_))
+            ));
+            assert!(cache.store.icon_hash(&request.key).is_some());
+        }
+
+        assert!(
+            cache.invalidate_requests(&windows_file_type_icon_requests_for_path(Path::new(
+                "notes.txt"
+            )))
+        );
+
+        for request in &requests {
+            assert!(!cache.states.contains_key(&request.key));
+            assert_eq!(cache.store.icon_hash(&request.key), None);
+        }
+    }
+
+    #[test]
+    fn invalidated_disk_mapping_is_not_republished_as_stale_icon() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("cache");
+        let mut cache = cache_with_dir(Some(cache_dir));
+        let request = windows_file_type_icon_requests_for_path(Path::new("notes.txt"))
+            .into_iter()
+            .find(|request| request.size == NativeIconSize::Details)
+            .expect("details file type request");
+
+        cache
+            .store
+            .write_mapping(&request.key, &one_pixel_png_bytes());
+        assert!(cache.store.icon_hash(&request.key).is_some());
+
+        assert!(cache.invalidate_requests(std::slice::from_ref(&request)));
+        cache.icon_for_request(request.clone());
+        let job = cache.next_load_job().expect("load job");
+
+        assert_eq!(job.stale_hash, None);
+    }
+
+    #[test]
+    fn invalidating_loading_file_type_icon_prevents_old_job_from_overwriting_new_request() {
+        let mut cache = cache_with_dir(None);
+        let request = windows_file_type_icon_requests_for_path(Path::new("notes.txt"))
+            .into_iter()
+            .find(|request| request.size == NativeIconSize::Details)
+            .expect("details file type request");
+        let requests = windows_file_type_icon_requests_for_path(Path::new("other.txt"));
+
+        let old_job = start_load_job(&mut cache, request.clone());
+        assert!(cache.invalidate_requests(&requests));
+        let new_job = start_load_job(&mut cache, request.clone());
+
+        assert_ne!(old_job.load_id, new_job.load_id);
+        assert!(!cache.publish_stale_icon(&request.key, old_job.load_id, one_pixel_png_bytes()));
+        assert!(!cache.finish_request(
+            request.clone(),
+            old_job.load_id,
+            Some(one_pixel_png_bytes())
+        ));
+        assert!(matches!(
+            cache.states.get(&request.key),
+            Some(NativeIconState::Loading { load_id, .. }) if *load_id == new_job.load_id
+        ));
+
+        assert!(cache.finish_request(
+            request.clone(),
+            new_job.load_id,
+            Some(one_pixel_png_bytes())
+        ));
+        assert!(matches!(
+            cache.states.get(&request.key),
+            Some(NativeIconState::Ready(_))
+        ));
+    }
+
+    #[test]
+    fn windows_path_icon_extensions_do_not_create_file_type_invalidation_requests() {
+        assert!(windows_file_type_icon_requests_for_path(Path::new("app.exe")).is_empty());
+        assert!(windows_file_type_icon_requests_for_path(Path::new("shortcut.lnk")).is_empty());
+    }
+
+    #[test]
+    fn mac_file_type_invalidation_requests_include_both_native_icon_sizes() {
+        let requests = mac_file_type_icon_requests_for_path(Path::new("Report.TXT"));
+
+        assert_eq!(requests.len(), NATIVE_ICON_SIZES.len());
+        assert!(requests.iter().any(|request| {
+            request.size == NativeIconSize::Details
+                && matches!(
+                    request.source,
+                    PlatformIconRequest::Mac(MacIconRequest::FileType { ref extension })
+                        if extension == "txt"
+                )
+        }));
+        assert!(requests.iter().any(|request| {
+            request.size == NativeIconSize::LargeIcons
+                && matches!(
+                    request.source,
+                    PlatformIconRequest::Mac(MacIconRequest::FileType { ref extension })
+                        if extension == "txt"
+                )
+        }));
     }
 
     #[test]
@@ -2531,9 +2803,12 @@ mod tests {
         let details = sized_test_request("shared", NativeIconSize::Details);
         let large = sized_test_request("shared", NativeIconSize::LargeIcons);
 
-        cache.icon_for_request(large.clone());
-        cache.next_load_job().expect("large load job");
-        assert!(cache.finish_request(large.clone(), Some(one_pixel_png_bytes())));
+        let large_job = start_load_job(&mut cache, large.clone());
+        assert!(cache.finish_request(
+            large.clone(),
+            large_job.load_id,
+            Some(one_pixel_png_bytes())
+        ));
 
         assert!(cache.icon_for_request(large).0.is_some());
         let (details_icon, _) = cache.icon_for_request(details.clone());
@@ -2549,9 +2824,12 @@ mod tests {
         let details = sized_test_request("shared", NativeIconSize::Details);
         let large = sized_test_request("shared", NativeIconSize::LargeIcons);
 
-        cache.icon_for_request(details.clone());
-        cache.next_load_job().expect("details load job");
-        assert!(cache.finish_request(details.clone(), Some(one_pixel_png_bytes())));
+        let details_job = start_load_job(&mut cache, details.clone());
+        assert!(cache.finish_request(
+            details.clone(),
+            details_job.load_id,
+            Some(one_pixel_png_bytes())
+        ));
 
         assert!(cache.icon_for_request(details).0.is_some());
         let (large_icon, _) = cache.icon_for_request(large.clone());
