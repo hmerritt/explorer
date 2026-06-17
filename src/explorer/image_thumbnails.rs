@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{App, Context, Global, Image};
 
 use crate::{
@@ -24,8 +25,7 @@ use crate::{
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
-const IMAGE_THUMBNAIL_LOAD_INTERVAL: Duration = Duration::from_millis(16);
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v1";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v2";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
@@ -82,6 +82,12 @@ struct ImageThumbnailLoadJob {
     cache_dir: Option<PathBuf>,
     generation: u64,
     cancel: Arc<AtomicBool>,
+}
+
+struct ImageThumbnailCacheWriteJob {
+    cache_dir: PathBuf,
+    key: String,
+    bytes: Vec<u8>,
 }
 
 impl ImageThumbnailCacheInner {
@@ -269,37 +275,44 @@ impl ExplorerView {
 fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64) {
     cx.spawn(async move |_, cx| {
         let mut timings = ImageThumbnailTimingBatch::start();
+        let concurrency = image_thumbnail_loader_concurrency();
+        let mut in_flight = FuturesUnordered::new();
 
         loop {
-            let job = cx
-                .update(|cx| {
-                    cx.try_global::<ImageThumbnailCache>()
-                        .and_then(|cache| cache.inner.borrow_mut().next_load_job(generation))
-                })
-                .ok()
-                .flatten();
-            let Some(job) = job else {
+            while in_flight.len() < concurrency {
+                let job = cx
+                    .update(|cx| {
+                        cx.try_global::<ImageThumbnailCache>()
+                            .and_then(|cache| cache.inner.borrow_mut().next_load_job(generation))
+                    })
+                    .ok()
+                    .flatten();
+                let Some(job) = job else {
+                    break;
+                };
+
+                let request_started = timings.now();
+                timings.record_request();
+                timings.record_queue_wait(job.queued_at.elapsed());
+
+                let timings_enabled = timings.enabled();
+                let load_task = cx.background_executor().spawn(async move {
+                    let thumbnail = load_or_create_thumbnail_png_with_timings(
+                        &job.request,
+                        job.cache_dir.as_deref(),
+                        &job.cancel,
+                        timings_enabled,
+                    );
+                    (job, request_started, thumbnail)
+                });
+                in_flight.push(load_task);
+            }
+
+            let Some((job, request_started, thumbnail)) = in_flight.next().await else {
                 break;
             };
-
-            let request_started = timings.now();
-            timings.record_request();
-            timings.record_queue_wait(job.queued_at.elapsed());
-
-            let request = job.request.clone();
-            let cache_dir = job.cache_dir.clone();
-            let cancel = job.cancel.clone();
-            let timings_enabled = timings.enabled();
-            let load_task = cx.background_executor().spawn(async move {
-                load_or_create_thumbnail_png_with_timings(
-                    &request,
-                    cache_dir.as_deref(),
-                    &cancel,
-                    timings_enabled,
-                )
-            });
-            let thumbnail = load_task.await;
             timings.record_load_result(&thumbnail);
+            let cache_write = thumbnail.cache_write_job(&job);
 
             let commit_started = timings.now();
             let finished = cx
@@ -317,18 +330,29 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
             }
             timings.record_request_total(request_started);
 
-            if !finished {
-                continue;
+            if finished && let Some(cache_write) = cache_write {
+                let write_task = cx.background_executor().spawn(async move {
+                    write_cached_thumbnail(
+                        Some(&cache_write.cache_dir),
+                        &cache_write.key,
+                        &cache_write.bytes,
+                    )
+                });
+                write_task.detach();
+                timings.record_cache_write_scheduled();
             }
-
-            cx.background_executor()
-                .timer(IMAGE_THUMBNAIL_LOAD_INTERVAL)
-                .await;
         }
 
         timings.finish();
     })
     .detach();
+}
+
+fn image_thumbnail_loader_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(2, 8)
 }
 
 #[cfg(test)]
@@ -403,25 +427,11 @@ fn load_or_create_thumbnail_png_with_timings(
         );
     }
 
-    let cache_write_started = timings_enabled.then(Instant::now);
-    let cache_write_attempted = write_cached_thumbnail(cache_dir, &request.key, &bytes);
-    let cache_write_elapsed = cache_write_attempted
-        .then(|| cache_write_started.map(|started| started.elapsed()))
-        .flatten();
-    if cancel.load(Ordering::Relaxed) {
-        return ImageThumbnailLoadResult::cancelled_after_cache_write(
-            cache_read_elapsed,
-            extract_elapsed,
-            cache_write_elapsed,
-            extraction_timings,
-        );
-    }
-
     ImageThumbnailLoadResult::generated(
         bytes,
         cache_read_elapsed,
         extract_elapsed,
-        cache_write_elapsed,
+        None,
         extraction_timings,
     )
 }
@@ -531,21 +541,16 @@ impl ImageThumbnailLoadResult {
         }
     }
 
-    fn cancelled_after_cache_write(
-        cache_read_elapsed: Option<Duration>,
-        extract_elapsed: Option<Duration>,
-        cache_write_elapsed: Option<Duration>,
-        extraction_timings: ImageThumbnailExtractionTimings,
-    ) -> Self {
-        Self {
-            bytes: None,
-            cache_hit: Some(false),
-            cache_read_elapsed,
-            extract_elapsed,
-            cache_write_elapsed,
-            extraction_timings,
-            outcome: ImageThumbnailLoadOutcome::Cancelled,
+    fn cache_write_job(&self, job: &ImageThumbnailLoadJob) -> Option<ImageThumbnailCacheWriteJob> {
+        if self.outcome != ImageThumbnailLoadOutcome::Generated {
+            return None;
         }
+
+        Some(ImageThumbnailCacheWriteJob {
+            cache_dir: job.cache_dir.clone()?,
+            key: job.request.key.clone(),
+            bytes: self.bytes.clone()?,
+        })
     }
 }
 
@@ -560,9 +565,12 @@ struct ImageThumbnailTimingBatch {
     failed: usize,
     cancelled: usize,
     discarded: usize,
+    cache_writes_scheduled: usize,
     queue_wait: ImageThumbnailStageTimingStats,
     cache_read: ImageThumbnailStageTimingStats,
     extract: ImageThumbnailStageTimingStats,
+    embedded_thumbnail_scan: ImageThumbnailStageTimingStats,
+    embedded_thumbnail_decode: ImageThumbnailStageTimingStats,
     source_read: ImageThumbnailStageTimingStats,
     format_detect: ImageThumbnailStageTimingStats,
     raster_decode: ImageThumbnailStageTimingStats,
@@ -658,6 +666,14 @@ impl ImageThumbnailTimingBatch {
     }
 
     fn record_extraction_timings(&mut self, timings: &ImageThumbnailExtractionTimings) {
+        record_image_thumbnail_stage_if_some(
+            &mut self.embedded_thumbnail_scan,
+            timings.embedded_thumbnail_scan,
+        );
+        record_image_thumbnail_stage_if_some(
+            &mut self.embedded_thumbnail_decode,
+            timings.embedded_thumbnail_decode,
+        );
         record_image_thumbnail_stage_if_some(&mut self.source_read, timings.source_read);
         record_image_thumbnail_stage_if_some(&mut self.format_detect, timings.format_detect);
         record_image_thumbnail_stage_if_some(&mut self.raster_decode, timings.raster_decode);
@@ -675,6 +691,12 @@ impl ImageThumbnailTimingBatch {
     fn record_discarded(&mut self) {
         if self.enabled {
             self.discarded += 1;
+        }
+    }
+
+    fn record_cache_write_scheduled(&mut self) {
+        if self.enabled {
+            self.cache_writes_scheduled += 1;
         }
     }
 
@@ -708,7 +730,7 @@ impl ImageThumbnailTimingBatch {
         }
 
         let mut lines = vec![format!(
-            "image_thumbnails total={} requests={} cache_hits={} cache_misses={} generated={} failed={} cancelled={} discarded={}",
+            "image_thumbnails total={} requests={} cache_hits={} cache_misses={} generated={} failed={} cancelled={} discarded={} cache_writes_scheduled={}",
             format_image_thumbnail_timing_duration(batch_total),
             self.requests,
             self.cache_hits,
@@ -716,11 +738,22 @@ impl ImageThumbnailTimingBatch {
             self.generated,
             self.failed,
             self.cancelled,
-            self.discarded
+            self.discarded,
+            self.cache_writes_scheduled
         )];
         push_image_thumbnail_stage_line(&mut lines, "queue_wait", &self.queue_wait);
         push_image_thumbnail_stage_line(&mut lines, "cache_read", &self.cache_read);
         push_image_thumbnail_stage_line(&mut lines, "extract", &self.extract);
+        push_image_thumbnail_stage_line(
+            &mut lines,
+            "embedded_thumbnail_scan",
+            &self.embedded_thumbnail_scan,
+        );
+        push_image_thumbnail_stage_line(
+            &mut lines,
+            "embedded_thumbnail_decode",
+            &self.embedded_thumbnail_decode,
+        );
         push_image_thumbnail_stage_line(&mut lines, "source_read", &self.source_read);
         push_image_thumbnail_stage_line(&mut lines, "format_detect", &self.format_detect);
         push_image_thumbnail_stage_line(&mut lines, "raster_decode", &self.raster_decode);
@@ -1047,6 +1080,7 @@ mod tests {
         batch.failed = 1;
         batch.cancelled = 1;
         batch.discarded = 1;
+        batch.cache_writes_scheduled = 2;
 
         let lines = batch.format_lines(Duration::from_millis(15));
         let summary = lines.first().expect("summary line");
@@ -1059,6 +1093,7 @@ mod tests {
         assert!(summary.contains("failed=1"));
         assert!(summary.contains("cancelled=1"));
         assert!(summary.contains("discarded=1"));
+        assert!(summary.contains("cache_writes_scheduled=2"));
     }
 
     #[test]
@@ -1071,6 +1106,8 @@ mod tests {
             Some(Duration::from_millis(10)),
             None,
             ImageThumbnailExtractionTimings {
+                embedded_thumbnail_scan: Some(Duration::from_millis(11)),
+                embedded_thumbnail_decode: Some(Duration::from_millis(12)),
                 source_read: Some(Duration::from_millis(1)),
                 format_detect: Some(Duration::from_millis(2)),
                 raster_decode: Some(Duration::from_millis(3)),
@@ -1088,6 +1125,8 @@ mod tests {
 
         for stage in [
             "extract",
+            "embedded_thumbnail_scan",
+            "embedded_thumbnail_decode",
             "source_read",
             "format_detect",
             "raster_decode",
@@ -1125,6 +1164,11 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            &request.key,
+            &generated
+        ));
         let cached = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
 
         assert_eq!(generated, cached);
@@ -1143,6 +1187,30 @@ mod tests {
         assert!(thumbnail_file_path(Some(dir), "ABC").is_none());
         assert!(thumbnail_file_path(Some(dir), "").is_none());
         assert!(thumbnail_file_path(Some(dir), "0123456789abcdef").is_some());
+    }
+
+    #[test]
+    fn cache_can_start_multiple_loading_jobs_for_generation() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let first = request("first", "folder");
+        let second = request("second", "folder");
+        push_pending(&mut cache, first.clone());
+        push_pending(&mut cache, second.clone());
+        let generation = cache.start_loader().unwrap();
+
+        let first_job = cache.next_load_job(generation).unwrap();
+        let second_job = cache.next_load_job(generation).unwrap();
+
+        assert_eq!(first_job.request, first);
+        assert_eq!(second_job.request, second);
+        assert!(matches!(
+            cache.states.get(&first_job.request.key),
+            Some(ImageThumbnailState::Loading { .. })
+        ));
+        assert!(matches!(
+            cache.states.get(&second_job.request.key),
+            Some(ImageThumbnailState::Loading { .. })
+        ));
     }
 
     #[test]
@@ -1190,6 +1258,30 @@ mod tests {
         assert!(job.cancel.load(Ordering::Relaxed));
         assert_ne!(next_generation, generation);
         assert!(!cache.states.contains_key(&old.key));
+        let next_job = cache.next_load_job(next_generation).unwrap();
+        assert_eq!(next_job.request, current);
+    }
+
+    #[test]
+    fn cancel_directory_signals_multiple_loading_requests() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let old_one = request("old-one", "old");
+        let old_two = request("old-two", "old");
+        let current = request("current", "current");
+        push_pending(&mut cache, old_one.clone());
+        push_pending(&mut cache, old_two.clone());
+        push_pending(&mut cache, current.clone());
+        let generation = cache.start_loader().unwrap();
+        let first_job = cache.next_load_job(generation).unwrap();
+        let second_job = cache.next_load_job(generation).unwrap();
+
+        let next_generation = cache.cancel_directory(Path::new("old")).unwrap();
+
+        assert!(first_job.cancel.load(Ordering::Relaxed));
+        assert!(second_job.cancel.load(Ordering::Relaxed));
+        assert_ne!(next_generation, generation);
+        assert!(!cache.states.contains_key(&old_one.key));
+        assert!(!cache.states.contains_key(&old_two.key));
         let next_job = cache.next_load_job(next_generation).unwrap();
         assert_eq!(next_job.request, current);
     }

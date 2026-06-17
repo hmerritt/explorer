@@ -84,6 +84,11 @@ name = "archive_extraction"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "image_thumbnails"
+harness = false
+required-features = ["benchmarks"]
+
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 decompress = { path = "vendor/decompress" }

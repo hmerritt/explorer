@@ -3,8 +3,8 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Large icons grid view image thumbnail extraction improvements:
-    - It is very slow, lets optimise the pipeline. Add multithreaded extraction (multiple items at once) in addition to other optimisations
+- Video files thumbnails
+- Currently native icons are fetched to accomodate Large Icon view. There are scaling issues with Details view where these larger icons look bad when scaled down. I would like to implement separate native-icon cache for Details/Large Icons sizes.
 
 ## 2
 

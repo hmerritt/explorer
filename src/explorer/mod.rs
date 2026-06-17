@@ -75,6 +75,7 @@ pub mod benchmark_support {
         execute_prepared_archive_extraction, extract_archives, extract_archives_with_progress,
         list_archive, load_entries, plan_archives, prepare_archive_extraction,
     };
+    pub use super::image_preview::benchmark_support::*;
     pub use super::recursive_search::benchmark_support::*;
 
     pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {
