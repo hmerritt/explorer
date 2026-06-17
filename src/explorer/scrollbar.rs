@@ -26,6 +26,7 @@ pub(super) struct HorizontalScrollbarDrag {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ScrollbarMetrics {
+    pub(super) viewport_width: f32,
     pub(super) viewport_height: f32,
     pub(super) content_height: f32,
     pub(super) scroll_top: f32,
@@ -37,7 +38,12 @@ pub(super) struct ScrollbarMetrics {
 }
 
 impl ScrollbarMetrics {
-    pub(super) fn new(viewport_height: f32, content_height: f32, scroll_top: f32) -> Option<Self> {
+    pub(super) fn new(
+        viewport_width: f32,
+        viewport_height: f32,
+        content_height: f32,
+        scroll_top: f32,
+    ) -> Option<Self> {
         if viewport_height <= 0.0 || content_height <= viewport_height {
             return None;
         }
@@ -60,6 +66,7 @@ impl ScrollbarMetrics {
         };
 
         Some(Self {
+            viewport_width,
             viewport_height,
             content_height,
             scroll_top,
@@ -207,11 +214,12 @@ impl ExplorerView {
     pub(super) fn scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
         let scroll_state = self.scroll_handle.0.borrow();
         let item_size = scroll_state.last_item_size?;
+        let viewport_width = f32::from(item_size.item.width);
         let viewport_height = f32::from(item_size.item.height);
         let content_height = f32::from(item_size.contents.height);
         let scroll_top = -f32::from(scroll_state.base_handle.offset().y);
 
-        ScrollbarMetrics::new(viewport_height, content_height, scroll_top)
+        ScrollbarMetrics::new(viewport_width, viewport_height, content_height, scroll_top)
     }
 
     pub(super) fn scrollbar_is_hovered_or_dragged(&self) -> bool {
@@ -610,26 +618,26 @@ mod tests {
 
     #[test]
     fn scrollbar_metrics_hide_without_overflow() {
-        assert!(ScrollbarMetrics::new(200.0, 200.0, 0.0).is_none());
-        assert!(ScrollbarMetrics::new(200.0, 180.0, 0.0).is_none());
+        assert!(ScrollbarMetrics::new(200.0, 200.0, 200.0, 0.0).is_none());
+        assert!(ScrollbarMetrics::new(200.0, 200.0, 180.0, 0.0).is_none());
     }
 
     #[test]
     fn scrollbar_thumb_is_proportional_and_respects_minimum_height() {
-        let proportional = ScrollbarMetrics::new(200.0, 400.0, 0.0).unwrap();
+        let proportional = ScrollbarMetrics::new(200.0, 200.0, 400.0, 0.0).unwrap();
         assert_approx_eq(proportional.thumb_height, 84.0);
 
-        let minimum = ScrollbarMetrics::new(100.0, 10_000.0, 0.0).unwrap();
+        let minimum = ScrollbarMetrics::new(100.0, 100.0, 10_000.0, 0.0).unwrap();
         assert_approx_eq(minimum.thumb_height, SCROLLBAR_MIN_THUMB_HEIGHT);
     }
 
     #[test]
     fn scrollbar_thumb_top_clamps_to_scroll_bounds() {
-        let top = ScrollbarMetrics::new(200.0, 1_000.0, -50.0).unwrap();
+        let top = ScrollbarMetrics::new(200.0, 200.0, 1_000.0, -50.0).unwrap();
         assert_approx_eq(top.scroll_top, 0.0);
         assert_approx_eq(top.thumb_top, SCROLLBAR_ARROW_HEIGHT);
 
-        let bottom = ScrollbarMetrics::new(200.0, 1_000.0, 900.0).unwrap();
+        let bottom = ScrollbarMetrics::new(200.0, 200.0, 1_000.0, 900.0).unwrap();
         assert_approx_eq(bottom.scroll_top, 800.0);
         assert_approx_eq(
             bottom.thumb_bottom(),
@@ -639,7 +647,7 @@ mod tests {
 
     #[test]
     fn scrollbar_drag_positions_map_to_scroll_offsets() {
-        let metrics = ScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        let metrics = ScrollbarMetrics::new(200.0, 200.0, 1_000.0, 0.0).unwrap();
         let bottom_thumb_top = metrics.track_top + metrics.track_height - metrics.thumb_height;
         let middle_thumb_top = metrics.track_top + (bottom_thumb_top - metrics.track_top) / 2.0;
 
@@ -656,11 +664,11 @@ mod tests {
 
     #[test]
     fn scrollbar_line_and_page_deltas_clamp_at_bounds() {
-        let top = ScrollbarMetrics::new(200.0, 1_000.0, 0.0).unwrap();
+        let top = ScrollbarMetrics::new(200.0, 200.0, 1_000.0, 0.0).unwrap();
         assert_approx_eq(top.scroll_by(-ROW_HEIGHT), 0.0);
         assert_approx_eq(top.scroll_by(200.0), 200.0);
 
-        let bottom = ScrollbarMetrics::new(200.0, 1_000.0, 800.0).unwrap();
+        let bottom = ScrollbarMetrics::new(200.0, 200.0, 1_000.0, 800.0).unwrap();
         assert_approx_eq(bottom.scroll_by(ROW_HEIGHT), bottom.scroll_max);
         assert_approx_eq(bottom.scroll_by(-200.0), 600.0);
     }

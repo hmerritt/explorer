@@ -5249,7 +5249,12 @@ fn details_scrollbar_metrics_for_dimensions(
         return None;
     }
 
-    ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
+    ScrollbarMetrics::new(
+        0.0,
+        viewport_height,
+        viewport_height + scroll_max,
+        scroll_top,
+    )
 }
 
 fn frames_scrollbar_metrics_for_dimensions(
@@ -5261,7 +5266,12 @@ fn frames_scrollbar_metrics_for_dimensions(
         return None;
     }
 
-    ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
+    ScrollbarMetrics::new(
+        0.0,
+        viewport_height,
+        viewport_height + scroll_max,
+        scroll_top,
+    )
 }
 
 fn property_image_preview(preview: &PropertyImagePreview) -> AnyElement {

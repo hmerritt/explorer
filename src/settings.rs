@@ -289,10 +289,19 @@ pub struct ViewSettings {
     pub file_columns: FileColumnSettings,
     #[serde(default = "default_font")]
     pub font: String,
+    pub mode: FileViewMode,
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
     pub show_hidden: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileViewMode {
+    #[default]
+    Details,
+    LargeIcons,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -355,6 +364,7 @@ impl Default for ViewSettings {
             date_format: default_date_format(),
             file_columns: default_file_columns(),
             font: default_font(),
+            mode: FileViewMode::Details,
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
@@ -1656,6 +1666,7 @@ mod tests {
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
+        assert_eq!(settings.view.mode, FileViewMode::Details);
         assert!(settings.view.native_icons);
         assert_eq!(
             settings.view.file_columns.order,
@@ -1705,6 +1716,7 @@ mod tests {
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
+        assert_eq!(settings.view.mode, FileViewMode::Details);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert!(settings.contextmenu.items.is_empty());
@@ -1721,6 +1733,14 @@ mod tests {
         assert_eq!(normalized_sidebar_width(99), SIDEBAR_MIN_WIDTH);
         assert_eq!(normalized_sidebar_width(100), SIDEBAR_MIN_WIDTH);
         assert_eq!(normalized_sidebar_width(250), 250);
+    }
+
+    #[test]
+    fn view_mode_deserializes_large_icons() {
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"view":{"mode":"large_icons"}}"#)
+            .expect("deserialize settings");
+
+        assert_eq!(settings.view.mode, FileViewMode::LargeIcons);
     }
 
     #[gpui::test]
@@ -2537,6 +2557,7 @@ mod tests {
         assert_eq!(object["future_option"]["a"], 2);
         assert_eq!(object["future_option"]["z"], 1);
         assert_eq!(object["view"]["future_view"], 7);
+        assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["native_icons"], true);
         assert_eq!(object["view"]["show_extensions"], true);
         assert_eq!(object["show_hidden_files"], true);

@@ -29,7 +29,9 @@ use crate::explorer::{
     selection::SelectionState,
     watcher::DirectoryWatcher,
 };
-use crate::settings::{ExplorerSettings, FileColumnKind, FileColumnSettings, SidebarLocation};
+use crate::settings::{
+    ExplorerSettings, FileColumnKind, FileColumnSettings, FileViewMode, SidebarLocation,
+};
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -74,6 +76,7 @@ pub struct ExplorerView {
     pub(super) show_file_name_extensions: bool,
     pub(super) show_folder_size: bool,
     pub(super) resolve_icons: bool,
+    pub(super) view_mode: FileViewMode,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
@@ -233,6 +236,7 @@ impl ExplorerView {
             show_file_name_extensions: settings.view.show_extensions,
             show_folder_size: settings.view.show_folder_sizes,
             resolve_icons: settings.view.native_icons,
+            view_mode: settings.view.mode,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
@@ -258,6 +262,11 @@ impl ExplorerView {
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
+        if self.view_mode != settings.view.mode {
+            self.scroll_to_top();
+            self.horizontal_scrollbar_drag = None;
+        }
+        self.view_mode = settings.view.mode;
 
         self.sidebar_items = settings.sidebar.items.clone();
         if self.sidebar_resize_drag.is_none() {
@@ -925,6 +934,7 @@ mod tests {
         assert!(view.show_file_name_extensions);
         assert!(!view.show_folder_size);
         assert!(view.resolve_icons);
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         assert_eq!(
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
@@ -965,6 +975,23 @@ mod tests {
         );
 
         assert!(!view.resolve_icons);
+    }
+
+    #[test]
+    fn view_uses_configured_view_mode() {
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                view: crate::settings::ViewSettings {
+                    mode: crate::settings::FileViewMode::LargeIcons,
+                    ..crate::settings::ViewSettings::default()
+                },
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
     }
 
     #[test]
@@ -1082,6 +1109,34 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert!(!view.resolve_icons);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_updates_view_mode(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            mode: crate::settings::FileViewMode::LargeIcons,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
         });
     }
 

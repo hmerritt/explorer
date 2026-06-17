@@ -5,8 +5,15 @@ use std::{
 
 use gpui::{Modifiers, ScrollStrategy};
 
-use crate::explorer::entry::FileEntry;
-use crate::explorer::view::ExplorerView;
+use crate::{
+    explorer::{
+        constants::LARGE_ICON_TILE_HEIGHT,
+        entry::FileEntry,
+        mouse_selection::{large_icon_grid_columns, large_icon_grid_row_for_index},
+        view::ExplorerView,
+    },
+    settings::FileViewMode,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SelectionState {
@@ -213,11 +220,33 @@ impl ExplorerView {
     }
 
     pub(super) fn scroll_index_into_view(&self, ix: usize) {
+        if self.view_mode == FileViewMode::LargeIcons {
+            self.scroll_large_icon_index_into_view(ix);
+            return;
+        }
+
         let row_height = self.entry_row_height();
         let row_top = ix as f32 * row_height;
         let row_bottom = row_top + row_height;
 
         if let Some(metrics) = self.scrollbar_metrics() {
+            let viewport_bottom = metrics.scroll_top + metrics.viewport_height;
+            if row_top < metrics.scroll_top {
+                self.set_scroll_offset(row_top);
+            } else if row_bottom > viewport_bottom {
+                self.set_scroll_offset(row_bottom - metrics.viewport_height);
+            }
+        } else {
+            self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
+        }
+    }
+
+    fn scroll_large_icon_index_into_view(&self, ix: usize) {
+        if let Some(metrics) = self.scrollbar_metrics() {
+            let columns = large_icon_grid_columns(metrics.viewport_width);
+            let row = large_icon_grid_row_for_index(ix, columns);
+            let row_top = row as f32 * LARGE_ICON_TILE_HEIGHT;
+            let row_bottom = row_top + LARGE_ICON_TILE_HEIGHT;
             let viewport_bottom = metrics.scroll_top + metrics.viewport_height;
             if row_top < metrics.scroll_top {
                 self.set_scroll_offset(row_top);

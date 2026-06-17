@@ -2,8 +2,13 @@ use std::collections::BTreeSet;
 
 use gpui::{Bounds, MouseButton, Pixels, Point, px, size};
 
-use crate::explorer::{
-    constants::SCROLLBAR_GUTTER_WIDTH, selection::SelectionModifiers, view::ExplorerView,
+use crate::{
+    explorer::{
+        constants::{LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, SCROLLBAR_GUTTER_WIDTH},
+        selection::SelectionModifiers,
+        view::ExplorerView,
+    },
+    settings::FileViewMode,
 };
 
 const DRAG_ACTIVATION_DISTANCE: f32 = 3.0;
@@ -73,6 +78,16 @@ impl ExplorerView {
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
         let viewport_width = f32::from(viewport_size.width);
+        if self.view_mode == FileViewMode::LargeIcons {
+            return large_icon_pointer_drag_intent_at(
+                f32::from(local_position.x),
+                f32::from(local_position.y),
+                scroll_top,
+                viewport_width,
+                self.entries.len(),
+            );
+        }
+
         let name_column_width =
             self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
         pointer_drag_intent_at_with_offsets(
@@ -218,11 +233,19 @@ impl ExplorerView {
         let viewport_width = f32::from(viewport_size.width);
         let selection_box =
             content_selection_box_for_drag(drag).clipped_horizontally(viewport_width);
-        let box_indices = row_indices_intersecting_content_box_with_row_height(
-            selection_box,
-            self.entries.len(),
-            self.entry_row_height(),
-        );
+        let box_indices = if self.view_mode == FileViewMode::LargeIcons {
+            large_icon_grid_indices_intersecting_content_box(
+                selection_box,
+                viewport_width,
+                self.entries.len(),
+            )
+        } else {
+            row_indices_intersecting_content_box_with_row_height(
+                selection_box,
+                self.entries.len(),
+                self.entry_row_height(),
+            )
+        };
 
         let selected_indices = if drag.modifiers.toggle {
             toggle_indices(drag.initial_selection.clone(), &box_indices)
@@ -327,6 +350,73 @@ pub(super) fn row_indices_intersecting_content_box_with_row_height(
             let row_top = *ix as f32 * row_height;
             let row_bottom = row_top + row_height;
             row_top < selection_box.bottom() && row_bottom > selection_box.top
+        })
+        .collect()
+}
+
+pub(super) fn large_icon_grid_columns(viewport_width: f32) -> usize {
+    (viewport_width / LARGE_ICON_TILE_WIDTH).floor().max(1.0) as usize
+}
+
+pub(super) fn large_icon_grid_row_count(entry_count: usize, columns: usize) -> usize {
+    if entry_count == 0 {
+        0
+    } else {
+        entry_count.div_ceil(columns.max(1))
+    }
+}
+
+pub(super) fn large_icon_grid_row_for_index(ix: usize, columns: usize) -> usize {
+    ix / columns.max(1)
+}
+
+pub(super) fn large_icon_grid_index_bounds(ix: usize, columns: usize) -> (f32, f32, f32, f32) {
+    let columns = columns.max(1);
+    let column = ix % columns;
+    let row = large_icon_grid_row_for_index(ix, columns);
+
+    (
+        column as f32 * LARGE_ICON_TILE_WIDTH,
+        row as f32 * LARGE_ICON_TILE_HEIGHT,
+        LARGE_ICON_TILE_WIDTH,
+        LARGE_ICON_TILE_HEIGHT,
+    )
+}
+
+pub(super) fn large_icon_grid_indices_intersecting_content_box(
+    selection_box: SelectionBox,
+    viewport_width: f32,
+    entry_count: usize,
+) -> BTreeSet<usize> {
+    if selection_box.is_empty() || entry_count == 0 {
+        return BTreeSet::new();
+    }
+
+    let columns = large_icon_grid_columns(viewport_width);
+    let row_count = large_icon_grid_row_count(entry_count, columns);
+    if row_count == 0 {
+        return BTreeSet::new();
+    }
+
+    let first_row = (selection_box.top / LARGE_ICON_TILE_HEIGHT)
+        .floor()
+        .max(0.0) as usize;
+    let last_row = ((selection_box.bottom() / LARGE_ICON_TILE_HEIGHT).ceil() as usize)
+        .saturating_sub(1)
+        .min(row_count - 1);
+
+    (first_row..=last_row)
+        .flat_map(|row| {
+            let start = row * columns;
+            let end = (start + columns).min(entry_count);
+            start..end
+        })
+        .filter(|ix| {
+            let (left, top, width, height) = large_icon_grid_index_bounds(*ix, columns);
+            left < selection_box.left + selection_box.width
+                && left + width > selection_box.left
+                && top < selection_box.bottom()
+                && top + height > selection_box.top
         })
         .collect()
 }
@@ -449,6 +539,52 @@ fn row_index_at_content_y(content_y: f32, entry_count: usize, row_height: f32) -
     (ix < entry_count).then_some(ix)
 }
 
+fn large_icon_pointer_drag_intent_at(
+    local_x: f32,
+    local_y: f32,
+    scroll_top: f32,
+    viewport_width: f32,
+    entry_count: usize,
+) -> Option<PointerDragIntent> {
+    if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
+        return None;
+    }
+
+    if large_icon_grid_index_at_content_point(
+        local_x,
+        local_y + scroll_top,
+        viewport_width,
+        entry_count,
+    )
+    .is_some()
+    {
+        Some(PointerDragIntent::ItemDrag)
+    } else {
+        Some(PointerDragIntent::RubberBand)
+    }
+}
+
+fn large_icon_grid_index_at_content_point(
+    content_x: f32,
+    content_y: f32,
+    viewport_width: f32,
+    entry_count: usize,
+) -> Option<usize> {
+    if content_x < 0.0 || content_y < 0.0 || entry_count == 0 {
+        return None;
+    }
+
+    let columns = large_icon_grid_columns(viewport_width);
+    let column = (content_x / LARGE_ICON_TILE_WIDTH).floor() as usize;
+    let row = (content_y / LARGE_ICON_TILE_HEIGHT).floor() as usize;
+    if column >= columns {
+        return None;
+    }
+
+    let ix = row * columns + column;
+    (ix < entry_count).then_some(ix)
+}
+
 pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels> {
     Bounds::new(
         gpui::point(px(selection_box.left), px(selection_box.top)),
@@ -459,7 +595,9 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explorer::constants::{ROW_HEIGHT, effective_name_column_width};
+    use crate::explorer::constants::{
+        LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, ROW_HEIGHT, effective_name_column_width,
+    };
     use crate::explorer::context_menu::ContextMenuState;
     use crate::explorer::test_support::{selected_names, test_view_with_entries};
     use crate::settings::FileColumnKind;
@@ -494,6 +632,56 @@ mod tests {
             row_indices_intersecting_box(SelectionBox::new(0.0, 0.0, 20.0, 30.0), 56.0, 5);
 
         assert_eq!(indices, BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn large_icon_grid_columns_use_tile_width_with_minimum_one() {
+        assert_eq!(large_icon_grid_columns(0.0), 1);
+        assert_eq!(large_icon_grid_columns(LARGE_ICON_TILE_WIDTH - 1.0), 1);
+        assert_eq!(large_icon_grid_columns(LARGE_ICON_TILE_WIDTH * 3.0), 3);
+    }
+
+    #[test]
+    fn large_icon_grid_row_count_rounds_up_partial_rows() {
+        assert_eq!(large_icon_grid_row_count(0, 3), 0);
+        assert_eq!(large_icon_grid_row_count(1, 3), 1);
+        assert_eq!(large_icon_grid_row_count(4, 3), 2);
+    }
+
+    #[test]
+    fn large_icon_grid_intersections_use_tile_rectangles() {
+        let box_over_second_column = SelectionBox::new(
+            LARGE_ICON_TILE_WIDTH + 1.0,
+            1.0,
+            LARGE_ICON_TILE_WIDTH * 2.0 - 1.0,
+            LARGE_ICON_TILE_HEIGHT - 1.0,
+        );
+
+        let indices = large_icon_grid_indices_intersecting_content_box(
+            box_over_second_column,
+            LARGE_ICON_TILE_WIDTH * 3.0,
+            6,
+        );
+
+        assert_eq!(indices, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn large_icon_grid_intersections_span_rows() {
+        let selection_box = SelectionBox::new(
+            LARGE_ICON_TILE_WIDTH - 1.0,
+            LARGE_ICON_TILE_HEIGHT - 1.0,
+            LARGE_ICON_TILE_WIDTH + 1.0,
+            LARGE_ICON_TILE_HEIGHT + 1.0,
+        );
+
+        let indices = large_icon_grid_indices_intersecting_content_box(
+            selection_box,
+            LARGE_ICON_TILE_WIDTH * 2.0,
+            4,
+        );
+
+        assert_eq!(indices, BTreeSet::from([0, 1, 2, 3]));
     }
 
     #[test]

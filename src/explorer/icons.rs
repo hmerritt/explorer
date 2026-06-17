@@ -85,6 +85,30 @@ png_icon!(MS_WORD_FILE_ICON, "files", "ms-word.png");
 png_icon!(PROGRAM_FILE_ICON, "files", "program.png");
 png_icon!(TEXT_FILE_ICON, "files", "text.png");
 png_icon!(VIDEO_FILE_ICON, "files", "video.png");
+png_icon!(LARGE_AUDIO_FILE_ICON, "files/large", "audio.png");
+png_icon!(
+    LARGE_CONFIGURATION_FILE_ICON,
+    "files/large",
+    "configuration.png"
+);
+png_icon!(LARGE_DISC_FILE_ICON, "files/large", "disc.png");
+png_icon!(LARGE_DOCUMENT_FILE_ICON, "files/large", "document.png");
+png_icon!(LARGE_EXECUTABLE_FILE_ICON, "files/large", "executable.png");
+png_icon!(LARGE_FONT_FILE_ICON, "files/large", "font.png");
+png_icon!(LARGE_GENERIC_FILE_ICON, "files/large", "generic.png");
+png_icon!(LARGE_IMAGE_FILE_ICON, "files/large", "image.png");
+png_icon!(LARGE_MS_ACCESS_FILE_ICON, "files/large", "ms-access.png");
+png_icon!(LARGE_MS_EXCEL_FILE_ICON, "files/large", "ms-excel.png");
+png_icon!(
+    LARGE_MS_POWERPOINT_FILE_ICON,
+    "files/large",
+    "ms-powerpoint.png"
+);
+png_icon!(LARGE_MS_PROJECT_FILE_ICON, "files/large", "ms-project.png");
+png_icon!(LARGE_MS_WORD_FILE_ICON, "files/large", "ms-word.png");
+png_icon!(LARGE_PROGRAM_FILE_ICON, "files/large", "program.png");
+png_icon!(LARGE_TEXT_FILE_ICON, "files/large", "text.png");
+png_icon!(LARGE_VIDEO_FILE_ICON, "files/large", "video.png");
 png_icon!(DELETE_FILE_DIALOG_ICON, "files/large", "delete.png");
 png_icon!(COPY_FILE_DIALOG_ICON, "files/large", "copy.png");
 png_icon!(DELETE_FOLDER_DIALOG_ICON, "folders", "delete.png");
@@ -185,24 +209,40 @@ impl FileIconKind {
         }
     }
 
-    fn image(self) -> Arc<Image> {
+    fn image(self, large: bool) -> Arc<Image> {
         match self {
             Self::Archive => ARCHIVE_FILE_ICON.clone(),
+            Self::Audio if large => LARGE_AUDIO_FILE_ICON.clone(),
             Self::Audio => AUDIO_FILE_ICON.clone(),
+            Self::Configuration if large => LARGE_CONFIGURATION_FILE_ICON.clone(),
             Self::Configuration => CONFIGURATION_FILE_ICON.clone(),
+            Self::Disc if large => LARGE_DISC_FILE_ICON.clone(),
             Self::Disc => DISC_FILE_ICON.clone(),
+            Self::Document if large => LARGE_DOCUMENT_FILE_ICON.clone(),
             Self::Document => DOCUMENT_FILE_ICON.clone(),
+            Self::Executable if large => LARGE_EXECUTABLE_FILE_ICON.clone(),
             Self::Executable => EXECUTABLE_FILE_ICON.clone(),
+            Self::Font if large => LARGE_FONT_FILE_ICON.clone(),
             Self::Font => FONT_FILE_ICON.clone(),
+            Self::Generic if large => LARGE_GENERIC_FILE_ICON.clone(),
             Self::Generic => GENERIC_FILE_ICON.clone(),
+            Self::Image if large => LARGE_IMAGE_FILE_ICON.clone(),
             Self::Image => IMAGE_FILE_ICON.clone(),
+            Self::MsAccess if large => LARGE_MS_ACCESS_FILE_ICON.clone(),
             Self::MsAccess => MS_ACCESS_FILE_ICON.clone(),
+            Self::MsExcel if large => LARGE_MS_EXCEL_FILE_ICON.clone(),
             Self::MsExcel => MS_EXCEL_FILE_ICON.clone(),
+            Self::MsPowerpoint if large => LARGE_MS_POWERPOINT_FILE_ICON.clone(),
             Self::MsPowerpoint => MS_POWERPOINT_FILE_ICON.clone(),
+            Self::MsProject if large => LARGE_MS_PROJECT_FILE_ICON.clone(),
             Self::MsProject => MS_PROJECT_FILE_ICON.clone(),
+            Self::MsWord if large => LARGE_MS_WORD_FILE_ICON.clone(),
             Self::MsWord => MS_WORD_FILE_ICON.clone(),
+            Self::Program if large => LARGE_PROGRAM_FILE_ICON.clone(),
             Self::Program => PROGRAM_FILE_ICON.clone(),
+            Self::Text if large => LARGE_TEXT_FILE_ICON.clone(),
             Self::Text => TEXT_FILE_ICON.clone(),
+            Self::Video if large => LARGE_VIDEO_FILE_ICON.clone(),
             Self::Video => VIDEO_FILE_ICON.clone(),
         }
     }
@@ -260,6 +300,10 @@ pub(super) fn file_icon_for_path_sized(path: &Path, size: f32) -> Div {
     sized_file_icon(FileIconKind::for_path(path), size)
 }
 
+pub(super) fn large_file_icon_for_path_sized(path: &Path, size: f32) -> Div {
+    sized_large_file_icon(FileIconKind::for_path(path), size)
+}
+
 pub(super) fn copy_file_dialog_icon_sized(size: f32) -> Div {
     div()
         .w(px(size))
@@ -273,7 +317,15 @@ fn sized_file_icon(kind: FileIconKind, size: f32) -> Div {
         .w(px(size))
         .h(px(size))
         .flex_shrink_0()
-        .child(image_icon(kind.image(), size, size))
+        .child(image_icon(kind.image(false), size, size))
+}
+
+fn sized_large_file_icon(kind: FileIconKind, size: f32) -> Div {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .child(image_icon(kind.image(true), size, size))
 }
 
 pub(super) fn folder_sidebar_icon() -> AnyElement {
@@ -405,6 +457,26 @@ mod tests {
         assert!(!COPY_FILE_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_FOLDER_DIALOG_ICON_BYTES.is_empty());
         assert!(!DELETE_MIXED_DIALOG_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn large_file_icons_use_bundled_png_assets() {
+        assert!(!LARGE_AUDIO_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_CONFIGURATION_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_DISC_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_DOCUMENT_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_EXECUTABLE_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_FONT_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_GENERIC_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_IMAGE_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_MS_ACCESS_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_MS_EXCEL_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_MS_POWERPOINT_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_MS_PROJECT_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_MS_WORD_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_PROGRAM_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_TEXT_FILE_ICON_BYTES.is_empty());
+        assert!(!LARGE_VIDEO_FILE_ICON_BYTES.is_empty());
     }
 
     #[test]

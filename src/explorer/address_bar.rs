@@ -76,6 +76,7 @@ impl AddressBarState {
 
     pub(super) fn suggestions_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
         ScrollbarMetrics::new(
+            0.0,
             ADDRESS_SUGGESTION_VISIBLE_ROWS as f32 * ADDRESS_SUGGESTION_ROW_HEIGHT,
             self.suggestions_content_height(),
             self.suggestions_scroll_top,
