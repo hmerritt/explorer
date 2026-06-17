@@ -341,11 +341,11 @@ fn windows_open_file(
         OpenFileIntent::Default => match open::that_detached(path) {
             Ok(()) => Ok(OpenWithOutcome::Opened),
             Err(error) if windows_error_is_no_association(&error) => {
-                windows_choose_application(path, parent, false)
+                windows_choose_application(path, parent)
             }
             Err(error) => Err(error),
         },
-        OpenFileIntent::ChooseApplication => windows_choose_application(path, parent, false),
+        OpenFileIntent::ChooseApplication => windows_choose_application(path, parent),
     }
 }
 
@@ -355,84 +355,127 @@ fn windows_error_is_no_association(error: &io::Error) -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_OAIF_ALLOW_REGISTRATION: i32 = 1;
-#[cfg(any(target_os = "windows", test))]
-const WINDOWS_OAIF_REGISTER_EXT: i32 = 2;
-#[cfg(any(target_os = "windows", test))]
-const WINDOWS_OAIF_EXEC: i32 = 4;
-#[cfg(any(target_os = "windows", test))]
-const WINDOWS_OAIF_FORCE_REGISTRATION: i32 = 8;
+fn windows_open_with_outcome_from_shell_result(
+    result: io::Result<bool>,
+) -> io::Result<OpenWithOutcome> {
+    if result? {
+        Ok(OpenWithOutcome::Opened)
+    } else {
+        Ok(OpenWithOutcome::Cancelled)
+    }
+}
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_open_with_dialog_flag_bits(execute: bool, register_default: bool) -> i32 {
-    let mut flags = 0;
-    if execute {
-        flags |= WINDOWS_OAIF_EXEC;
+fn windows_default_app_change_outcome_from_shell_result(
+    result: io::Result<bool>,
+) -> io::Result<DefaultAppChangeOutcome> {
+    if result? {
+        Ok(DefaultAppChangeOutcome::Changed)
+    } else {
+        Ok(DefaultAppChangeOutcome::Cancelled)
     }
-    if register_default {
-        flags |= WINDOWS_OAIF_ALLOW_REGISTRATION
-            | WINDOWS_OAIF_REGISTER_EXT
-            | WINDOWS_OAIF_FORCE_REGISTRATION;
-    }
-    flags
 }
 
 #[cfg(target_os = "windows")]
-fn windows_open_with_dialog_flags(
-    execute: bool,
-    register_default: bool,
-) -> windows::Win32::UI::Shell::OPEN_AS_INFO_FLAGS {
-    windows::Win32::UI::Shell::OPEN_AS_INFO_FLAGS(windows_open_with_dialog_flag_bits(
-        execute,
-        register_default,
-    ))
-}
+const WINDOWS_ERROR_CANCELLED: u32 = 1223;
+#[cfg(target_os = "windows")]
+const WINDOWS_OPEN_WITH_CLASS: &str = "Unknown";
+#[cfg(target_os = "windows")]
+const WINDOWS_OPEN_WITH_VERB: &str = "OpenWithSetDefaultOn";
 
 #[cfg(target_os = "windows")]
-fn windows_show_open_with_dialog(
-    path: &Path,
-    parent: Option<windows::Win32::Foundation::HWND>,
-    execute: bool,
-    register_default: bool,
-) -> io::Result<bool> {
+fn windows_null_terminated_wide(value: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::{
-        Win32::{
-            Foundation::ERROR_CANCELLED,
-            UI::Shell::{OPENASINFO, SHOpenWithDialog},
-        },
-        core::{HRESULT, PCWSTR},
-    };
 
-    let path = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let info = OPENASINFO {
-        pcszFile: PCWSTR::from_raw(path.as_ptr()),
-        pcszClass: PCWSTR::null(),
-        oaifInFlags: windows_open_with_dialog_flags(execute, register_default),
-    };
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
 
-    match unsafe { SHOpenWithDialog(parent, &info) } {
+#[cfg(target_os = "windows")]
+fn windows_shell_execute_result(result: windows::core::Result<()>) -> io::Result<bool> {
+    match result {
         Ok(()) => Ok(true),
-        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => Ok(false),
+        Err(error)
+            if error.code() == windows::core::HRESULT::from_win32(WINDOWS_ERROR_CANCELLED) =>
+        {
+            Ok(false)
+        }
         Err(error) => Err(io::Error::other(error)),
     }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsShellExecuteRequest {
+    _verb: Vec<u16>,
+    _class: Vec<u16>,
+    _file: Vec<u16>,
+    execute_info: windows::Win32::UI::Shell::SHELLEXECUTEINFOW,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsShellExecuteRequest {
+    #[cfg(test)]
+    fn execute_info(&self) -> &windows::Win32::UI::Shell::SHELLEXECUTEINFOW {
+        &self.execute_info
+    }
+
+    fn execute_info_mut(&mut self) -> &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW {
+        &mut self.execute_info
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open_with_execute_request(
+    path: &Path,
+    parent: Option<windows::Win32::Foundation::HWND>,
+) -> WindowsShellExecuteRequest {
+    use std::{ffi::OsStr, mem::size_of};
+    use windows::{
+        Win32::UI::{
+            Shell::{SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW},
+            WindowsAndMessaging::SW_SHOWNORMAL,
+        },
+        core::PCWSTR,
+    };
+
+    let verb = windows_null_terminated_wide(OsStr::new(WINDOWS_OPEN_WITH_VERB));
+    let class = windows_null_terminated_wide(OsStr::new(WINDOWS_OPEN_WITH_CLASS));
+    let file = windows_null_terminated_wide(path.as_os_str());
+    let execute_info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI,
+        hwnd: parent.unwrap_or_default(),
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpClass: PCWSTR(class.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+
+    WindowsShellExecuteRequest {
+        _verb: verb,
+        _class: class,
+        _file: file,
+        execute_info,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_show_open_with_picker(
+    path: &Path,
+    parent: Option<windows::Win32::Foundation::HWND>,
+) -> io::Result<bool> {
+    use windows::Win32::UI::Shell::ShellExecuteExW;
+
+    let mut request = windows_open_with_execute_request(path, parent);
+    windows_shell_execute_result(unsafe { ShellExecuteExW(request.execute_info_mut()) })
 }
 
 #[cfg(target_os = "windows")]
 fn windows_choose_application(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
-    register_default: bool,
 ) -> io::Result<OpenWithOutcome> {
-    if windows_show_open_with_dialog(path, parent, true, register_default)? {
-        Ok(OpenWithOutcome::Opened)
-    } else {
-        Ok(OpenWithOutcome::Cancelled)
-    }
+    windows_open_with_outcome_from_shell_result(windows_show_open_with_picker(path, parent))
 }
 
 #[cfg(target_os = "windows")]
@@ -440,11 +483,10 @@ fn windows_change_default_application_for_file(
     path: &Path,
     window: &Window,
 ) -> io::Result<DefaultAppChangeOutcome> {
-    if windows_show_open_with_dialog(path, windows_parent_hwnd(window), false, true)? {
-        Ok(DefaultAppChangeOutcome::Changed)
-    } else {
-        Ok(DefaultAppChangeOutcome::Cancelled)
-    }
+    windows_default_app_change_outcome_from_shell_result(windows_show_open_with_picker(
+        path,
+        windows_parent_hwnd(window),
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -1338,23 +1380,142 @@ mod tests {
     }
 
     #[test]
-    fn windows_open_with_flags_for_file_open_execute_without_registration() {
-        let flags = windows_open_with_dialog_flag_bits(true, false);
-
-        assert_ne!(flags & WINDOWS_OAIF_EXEC, 0);
-        assert_eq!(flags & WINDOWS_OAIF_ALLOW_REGISTRATION, 0);
-        assert_eq!(flags & WINDOWS_OAIF_REGISTER_EXT, 0);
-        assert_eq!(flags & WINDOWS_OAIF_FORCE_REGISTRATION, 0);
+    fn windows_open_with_shell_result_true_maps_to_opened() {
+        assert_eq!(
+            windows_open_with_outcome_from_shell_result(Ok(true)).unwrap(),
+            OpenWithOutcome::Opened
+        );
     }
 
     #[test]
-    fn windows_default_app_change_flags_register_without_execute() {
-        let flags = windows_open_with_dialog_flag_bits(false, true);
+    fn windows_open_with_shell_result_false_maps_to_cancelled() {
+        assert_eq!(
+            windows_open_with_outcome_from_shell_result(Ok(false)).unwrap(),
+            OpenWithOutcome::Cancelled
+        );
+    }
 
-        assert_eq!(flags & WINDOWS_OAIF_EXEC, 0);
-        assert_ne!(flags & WINDOWS_OAIF_ALLOW_REGISTRATION, 0);
-        assert_ne!(flags & WINDOWS_OAIF_REGISTER_EXT, 0);
-        assert_ne!(flags & WINDOWS_OAIF_FORCE_REGISTRATION, 0);
+    #[test]
+    fn windows_open_with_shell_result_error_propagates() {
+        let error =
+            windows_open_with_outcome_from_shell_result(Err(io::Error::other("shell failed")))
+                .unwrap_err();
+
+        assert_eq!(error.to_string(), "shell failed");
+    }
+
+    #[test]
+    fn windows_default_app_change_shell_result_true_maps_to_changed() {
+        assert_eq!(
+            windows_default_app_change_outcome_from_shell_result(Ok(true)).unwrap(),
+            DefaultAppChangeOutcome::Changed
+        );
+    }
+
+    #[test]
+    fn windows_default_app_change_shell_result_false_maps_to_cancelled() {
+        assert_eq!(
+            windows_default_app_change_outcome_from_shell_result(Ok(false)).unwrap(),
+            DefaultAppChangeOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn windows_default_app_change_shell_result_error_propagates() {
+        let error = windows_default_app_change_outcome_from_shell_result(Err(io::Error::other(
+            "shell failed",
+        )))
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "shell failed");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_execute_success_maps_to_true() {
+        assert!(windows_shell_execute_result(Ok(())).unwrap());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_execute_cancelled_maps_to_false() {
+        let result = windows_shell_execute_result(Err(windows::core::Error::from_hresult(
+            windows::core::HRESULT::from_win32(WINDOWS_ERROR_CANCELLED),
+        )))
+        .unwrap();
+
+        assert!(!result);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_execute_error_propagates() {
+        let error = windows_shell_execute_result(Err(windows::core::Error::from_hresult(
+            windows::core::HRESULT::from_win32(2),
+        )))
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_open_with_execute_request_targets_registered_picker_verb() {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::Shell::{SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI},
+        };
+
+        let parent = HWND(0x1234usize as *mut _);
+        let request = windows_open_with_execute_request(
+            Path::new(r"C:\Users\hrmer\Downloads\PLAN.md"),
+            Some(parent),
+        );
+        let execute_info = request.execute_info();
+
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(execute_info.lpVerb) },
+            WINDOWS_OPEN_WITH_VERB
+        );
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(execute_info.lpClass) },
+            WINDOWS_OPEN_WITH_CLASS
+        );
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(execute_info.lpFile) },
+            r"C:\Users\hrmer\Downloads\PLAN.md"
+        );
+        assert_eq!(execute_info.hwnd, parent);
+        assert_ne!(execute_info.fMask & SEE_MASK_CLASSNAME, 0);
+        assert_ne!(execute_info.fMask & SEE_MASK_FLAG_NO_UI, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_null_terminated_wide_appends_single_nul() {
+        let wide = windows_null_terminated_wide(std::ffi::OsStr::new(WINDOWS_OPEN_WITH_VERB));
+
+        assert_eq!(
+            wide,
+            vec![
+                'O' as u16, 'p' as u16, 'e' as u16, 'n' as u16, 'W' as u16, 'i' as u16, 't' as u16,
+                'h' as u16, 'S' as u16, 'e' as u16, 't' as u16, 'D' as u16, 'e' as u16, 'f' as u16,
+                'a' as u16, 'u' as u16, 'l' as u16, 't' as u16, 'O' as u16, 'n' as u16, 0
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn windows_pcwstr_to_string(value: windows::core::PCWSTR) -> String {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt, slice};
+
+        let mut len = 0;
+        while unsafe { *value.0.add(len) } != 0 {
+            len += 1;
+        }
+        OsString::from_wide(unsafe { slice::from_raw_parts(value.0, len) })
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
