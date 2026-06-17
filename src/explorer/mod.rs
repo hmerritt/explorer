@@ -16,6 +16,8 @@ mod filesystem;
 mod folder_size;
 mod formatting;
 mod icons;
+mod image_preview;
+mod image_thumbnails;
 mod large_icons;
 mod mouse_selection;
 mod navigation;
@@ -66,6 +68,7 @@ pub(crate) use filesystem::{
     user_music_dir, user_pictures_dir, user_videos_dir,
 };
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
+pub(crate) use image_thumbnails::initialize as initialize_image_thumbnail_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
     pub use super::filesystem::benchmark_support::{

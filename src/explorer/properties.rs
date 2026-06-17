@@ -22,6 +22,8 @@ use gpui::{
 };
 use thousands::Separable;
 
+#[cfg(test)]
+use crate::explorer::image_preview::svg_raster_dimensions;
 #[cfg(not(target_os = "windows"))]
 use crate::explorer::open_with::OpenWithOutcome;
 use crate::explorer::{
@@ -36,6 +38,9 @@ use crate::explorer::{
     icons::{
         copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
         folder_icon_sized, image_icon,
+    },
+    image_preview::{
+        PropertyImagePreview, load_property_image_preview, path_may_have_image_preview,
     },
     open_with::{DefaultApplication, default_application_for_file},
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
@@ -298,13 +303,6 @@ struct PropertyFrameThumbnail {
     label: String,
     image: Arc<RenderImage>,
     aspect_ratio: f32,
-}
-
-#[derive(Clone, Debug)]
-struct PropertyImagePreview {
-    image: Arc<RenderImage>,
-    width: u32,
-    height: u32,
 }
 
 pub(super) struct PropertiesDialog {
@@ -2654,7 +2652,6 @@ const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(test)]
 const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
-const SVG_IMAGE_RASTER_LONGEST_SIDE: u32 = 500;
 
 fn single_file_image_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
@@ -2678,124 +2675,6 @@ fn single_file_media_path(target: &PropertyTarget, item_kind: PropertyItemKind) 
     }
     let path = target.paths.first()?;
     path_may_have_media_details(path).then_some(path.as_path())
-}
-
-fn path_may_have_image_preview(path: &Path) -> bool {
-    let Some(extension) = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-    else {
-        return mime_guess::from_path(path)
-            .first_raw()
-            .is_some_and(|mime| mime.starts_with("image/"));
-    };
-
-    extension == "svg"
-        || image::ImageFormat::from_extension(&extension).is_some()
-        || mime_guess::from_path(path)
-            .first_raw()
-            .is_some_and(|mime| mime.starts_with("image/"))
-}
-
-fn load_property_image_preview(path: &Path) -> Result<PropertyImagePreview, String> {
-    if path_is_svg(path) {
-        return load_property_svg_preview(path);
-    }
-
-    let bytes = fs::read(path).map_err(|error| format!("Failed to read image file: {error}"))?;
-    let format = image::guess_format(&bytes)
-        .or_else(|_| image::ImageFormat::from_path(path))
-        .map_err(|error| format!("Unsupported image format: {error}"))?;
-    let image = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|error| format!("Failed to decode image: {error}"))?
-        .into_rgba8();
-
-    property_image_preview_from_rgba(image)
-}
-
-fn load_property_svg_preview(path: &Path) -> Result<PropertyImagePreview, String> {
-    let bytes = fs::read(path).map_err(|error| format!("Failed to read SVG file: {error}"))?;
-    let options = usvg::Options::default();
-    let tree = usvg::Tree::from_data(&bytes, &options)
-        .map_err(|error| format!("Failed to parse SVG: {error}"))?;
-    let svg_size = tree.size();
-    let (width, height) = svg_raster_dimensions(
-        svg_size.width(),
-        svg_size.height(),
-        SVG_IMAGE_RASTER_LONGEST_SIDE,
-    )
-    .ok_or_else(|| "SVG has no renderable dimensions.".to_owned())?;
-    let scale = width as f32 / svg_size.width();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| "SVG raster target has invalid dimensions.".to_owned())?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-
-    let mut image = image::RgbaImage::from_raw(width, height, pixmap.take())
-        .ok_or_else(|| "SVG rasterizer returned invalid pixel data.".to_owned())?;
-    for pixel in image.chunks_exact_mut(4) {
-        swap_rgba_premultiplied_to_bgra(pixel);
-    }
-
-    Ok(PropertyImagePreview {
-        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
-        width,
-        height,
-    })
-}
-
-fn property_image_preview_from_rgba(
-    mut image: image::RgbaImage,
-) -> Result<PropertyImagePreview, String> {
-    let width = image.width();
-    let height = image.height();
-    if width == 0 || height == 0 {
-        return Err("Image has no dimensions.".to_owned());
-    }
-
-    for pixel in image.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-
-    Ok(PropertyImagePreview {
-        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
-        width,
-        height,
-    })
-}
-
-fn svg_raster_dimensions(width: f32, height: f32, longest_side: u32) -> Option<(u32, u32)> {
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    if longest_side == 0 {
-        return None;
-    }
-
-    let scale = longest_side as f32 / width.max(height);
-    let raster_width = (width * scale).round().max(1.0) as u32;
-    let raster_height = (height * scale).round().max(1.0) as u32;
-    Some((raster_width, raster_height))
-}
-
-fn path_is_svg(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
-}
-
-fn swap_rgba_premultiplied_to_bgra(color: &mut [u8]) {
-    color.swap(0, 2);
-    if color[3] > 0 {
-        let alpha = color[3] as f32 / 255.0;
-        color[0] = (color[0] as f32 / alpha) as u8;
-        color[1] = (color[1] as f32 / alpha) as u8;
-        color[2] = (color[2] as f32 / alpha) as u8;
-    }
 }
 
 fn collect_single_file_media_detail_groups(

@@ -178,6 +178,7 @@ impl ExplorerView {
         view.restart_directory_watcher(cx);
         view.schedule_entry_metadata_resolution(cx);
         view.observe_icon_caches(cx);
+        view.observe_image_thumbnail_cache(cx);
         view
     }
 

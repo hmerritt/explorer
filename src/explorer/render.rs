@@ -1908,6 +1908,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
+        let image_thumbnail = self.image_thumbnail_for_entry(&entry, cx);
         let app_icon = self.native_icon_for_entry(&entry, cx);
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
@@ -2176,7 +2177,7 @@ impl ExplorerView {
                 }));
         }
 
-        tile.child(large_entry_icon(&entry, app_icon))
+        tile.child(large_entry_icon(&entry, image_thumbnail, app_icon))
             .child(div().mt(px(LARGE_ICON_TEXT_TOP_GAP)).child(name))
             .into_any_element()
     }
@@ -4955,7 +4956,15 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     }
 }
 
-fn large_entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
+fn large_entry_icon(
+    entry: &FileEntry,
+    image_thumbnail: Option<Arc<Image>>,
+    app_icon: Option<Arc<Image>>,
+) -> AnyElement {
+    if let Some(image_thumbnail) = image_thumbnail {
+        return image_icon(image_thumbnail, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
+    }
+
     if let Some(app_icon) = app_icon {
         return image_icon(app_icon, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
     }

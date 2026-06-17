@@ -3,10 +3,10 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Large icons grid view improvements:
-    - Add image thumbnail extraction + cache, extract at 128px
-    - Support SVG files by rasterizing them at 128px
-    - Support .webp image files also
+- Large icons grid view image thumbnail extraction improvements:
+    - Add debug timings for this
+    - Currently once a folder has begun extraction, it is never canceled when the user navigates away (and this blocks other folders from extracting images until the previous one finishes). Stop extraction process if user navigates away from directory.
+    - It is very slow, lets optimise the pipeline. Add multithreaded extraction (multiple items at once) in addition to other optimisations
 
 ## 2
 

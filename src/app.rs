@@ -441,6 +441,7 @@ pub fn run() {
         crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
         crate::explorer::initialize_native_icon_cache(cx);
+        crate::explorer::initialize_image_thumbnail_cache(cx);
         crate::explorer::initialize_folder_size_cache(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),
