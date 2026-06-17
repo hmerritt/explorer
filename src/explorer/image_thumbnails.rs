@@ -265,6 +265,8 @@ impl ExplorerView {
 
 fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64) {
     cx.spawn(async move |_, cx| {
+        let mut timings = ImageThumbnailTimingBatch::start();
+
         loop {
             let job = cx
                 .update(|cx| {
@@ -277,66 +279,444 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
                 break;
             };
 
+            let request_started = timings.now();
+            timings.record_request();
+            timings.record_queue_wait(job.queued_at.elapsed());
+
             let request = job.request.clone();
             let cache_dir = job.cache_dir.clone();
             let cancel = job.cancel.clone();
+            let timings_enabled = timings.enabled();
             let load_task = cx.background_executor().spawn(async move {
-                load_or_create_thumbnail_png(&request, cache_dir.as_deref(), &cancel)
+                load_or_create_thumbnail_png_with_timings(
+                    &request,
+                    cache_dir.as_deref(),
+                    &cancel,
+                    timings_enabled,
+                )
             });
             let thumbnail = load_task.await;
+            timings.record_load_result(&thumbnail);
 
+            let commit_started = timings.now();
             let finished = cx
                 .update_global::<ImageThumbnailCache, _>(|cache, _| {
-                    cache
-                        .inner
-                        .borrow_mut()
-                        .finish_request(job.request, job.generation, thumbnail)
+                    cache.inner.borrow_mut().finish_request(
+                        job.request,
+                        job.generation,
+                        thumbnail.bytes,
+                    )
                 })
                 .unwrap_or(false);
+            timings.record_commit(commit_started);
+            if !finished {
+                timings.record_discarded();
+            }
+            timings.record_request_total(request_started);
 
             if !finished {
                 continue;
             }
 
-            let elapsed = job.queued_at.elapsed();
-            crate::debug_options::log_icon_timing(format_args!(
-                "image_thumbnail loaded in {:.3}ms",
-                elapsed.as_secs_f64() * 1000.0
-            ));
-
             cx.background_executor()
                 .timer(IMAGE_THUMBNAIL_LOAD_INTERVAL)
                 .await;
         }
+
+        timings.finish();
     })
     .detach();
 }
 
+#[cfg(test)]
 fn load_or_create_thumbnail_png(
     request: &ImageThumbnailRequest,
     cache_dir: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Option<Vec<u8>> {
+    load_or_create_thumbnail_png_with_timings(request, cache_dir, cancel, false).bytes
+}
+
+fn load_or_create_thumbnail_png_with_timings(
+    request: &ImageThumbnailRequest,
+    cache_dir: Option<&Path>,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+) -> ImageThumbnailLoadResult {
     if cancel.load(Ordering::Relaxed) {
-        return None;
+        return ImageThumbnailLoadResult::cancelled();
     }
 
-    if let Some(bytes) = read_cached_thumbnail(cache_dir, &request.key) {
-        return (!cancel.load(Ordering::Relaxed)).then_some(bytes);
+    let cache_read_started = timings_enabled.then(Instant::now);
+    let cached = read_cached_thumbnail(cache_dir, &request.key);
+    let cache_read_elapsed = cache_read_started.map(|started| started.elapsed());
+    let cache_hit = cached.is_some();
+    if let Some(bytes) = cached {
+        if cancel.load(Ordering::Relaxed) {
+            return ImageThumbnailLoadResult::cancelled_after_cache_read(
+                cache_hit,
+                cache_read_elapsed,
+            );
+        }
+
+        return ImageThumbnailLoadResult::cache_hit(bytes, cache_read_elapsed);
     }
 
     if cancel.load(Ordering::Relaxed) {
-        return None;
+        return ImageThumbnailLoadResult::cancelled_after_cache_read(cache_hit, cache_read_elapsed);
     }
 
+    let extract_started = timings_enabled.then(Instant::now);
     let bytes =
-        load_image_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel).ok()?;
+        match load_image_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel) {
+            Ok(bytes) => bytes,
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                return ImageThumbnailLoadResult::cancelled_after_extract(
+                    cache_read_elapsed,
+                    extract_started.map(|started| started.elapsed()),
+                );
+            }
+            Err(_) => {
+                return ImageThumbnailLoadResult::failed(
+                    cache_read_elapsed,
+                    extract_started.map(|started| started.elapsed()),
+                );
+            }
+        };
+    let extract_elapsed = extract_started.map(|started| started.elapsed());
     if cancel.load(Ordering::Relaxed) {
-        return None;
+        return ImageThumbnailLoadResult::cancelled_after_extract(
+            cache_read_elapsed,
+            extract_elapsed,
+        );
     }
 
-    write_cached_thumbnail(cache_dir, &request.key, &bytes);
-    (!cancel.load(Ordering::Relaxed)).then_some(bytes)
+    let cache_write_started = timings_enabled.then(Instant::now);
+    let cache_write_attempted = write_cached_thumbnail(cache_dir, &request.key, &bytes);
+    let cache_write_elapsed = cache_write_attempted
+        .then(|| cache_write_started.map(|started| started.elapsed()))
+        .flatten();
+    if cancel.load(Ordering::Relaxed) {
+        return ImageThumbnailLoadResult::cancelled_after_cache_write(
+            cache_read_elapsed,
+            extract_elapsed,
+            cache_write_elapsed,
+        );
+    }
+
+    ImageThumbnailLoadResult::generated(
+        bytes,
+        cache_read_elapsed,
+        extract_elapsed,
+        cache_write_elapsed,
+    )
+}
+
+struct ImageThumbnailLoadResult {
+    bytes: Option<Vec<u8>>,
+    cache_hit: Option<bool>,
+    cache_read_elapsed: Option<Duration>,
+    extract_elapsed: Option<Duration>,
+    cache_write_elapsed: Option<Duration>,
+    outcome: ImageThumbnailLoadOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageThumbnailLoadOutcome {
+    CacheHit,
+    Generated,
+    Failed,
+    Cancelled,
+}
+
+impl ImageThumbnailLoadResult {
+    fn cache_hit(bytes: Vec<u8>, cache_read_elapsed: Option<Duration>) -> Self {
+        Self {
+            bytes: Some(bytes),
+            cache_hit: Some(true),
+            cache_read_elapsed,
+            extract_elapsed: None,
+            cache_write_elapsed: None,
+            outcome: ImageThumbnailLoadOutcome::CacheHit,
+        }
+    }
+
+    fn generated(
+        bytes: Vec<u8>,
+        cache_read_elapsed: Option<Duration>,
+        extract_elapsed: Option<Duration>,
+        cache_write_elapsed: Option<Duration>,
+    ) -> Self {
+        Self {
+            bytes: Some(bytes),
+            cache_hit: Some(false),
+            cache_read_elapsed,
+            extract_elapsed,
+            cache_write_elapsed,
+            outcome: ImageThumbnailLoadOutcome::Generated,
+        }
+    }
+
+    fn failed(cache_read_elapsed: Option<Duration>, extract_elapsed: Option<Duration>) -> Self {
+        Self {
+            bytes: None,
+            cache_hit: Some(false),
+            cache_read_elapsed,
+            extract_elapsed,
+            cache_write_elapsed: None,
+            outcome: ImageThumbnailLoadOutcome::Failed,
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            bytes: None,
+            cache_hit: None,
+            cache_read_elapsed: None,
+            extract_elapsed: None,
+            cache_write_elapsed: None,
+            outcome: ImageThumbnailLoadOutcome::Cancelled,
+        }
+    }
+
+    fn cancelled_after_cache_read(cache_hit: bool, cache_read_elapsed: Option<Duration>) -> Self {
+        Self {
+            bytes: None,
+            cache_hit: Some(cache_hit),
+            cache_read_elapsed,
+            extract_elapsed: None,
+            cache_write_elapsed: None,
+            outcome: ImageThumbnailLoadOutcome::Cancelled,
+        }
+    }
+
+    fn cancelled_after_extract(
+        cache_read_elapsed: Option<Duration>,
+        extract_elapsed: Option<Duration>,
+    ) -> Self {
+        Self {
+            bytes: None,
+            cache_hit: Some(false),
+            cache_read_elapsed,
+            extract_elapsed,
+            cache_write_elapsed: None,
+            outcome: ImageThumbnailLoadOutcome::Cancelled,
+        }
+    }
+
+    fn cancelled_after_cache_write(
+        cache_read_elapsed: Option<Duration>,
+        extract_elapsed: Option<Duration>,
+        cache_write_elapsed: Option<Duration>,
+    ) -> Self {
+        Self {
+            bytes: None,
+            cache_hit: Some(false),
+            cache_read_elapsed,
+            extract_elapsed,
+            cache_write_elapsed,
+            outcome: ImageThumbnailLoadOutcome::Cancelled,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ImageThumbnailTimingBatch {
+    enabled: bool,
+    batch_started: Option<Instant>,
+    requests: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    generated: usize,
+    failed: usize,
+    cancelled: usize,
+    discarded: usize,
+    queue_wait: ImageThumbnailStageTimingStats,
+    cache_read: ImageThumbnailStageTimingStats,
+    extract: ImageThumbnailStageTimingStats,
+    cache_write: ImageThumbnailStageTimingStats,
+    commit: ImageThumbnailStageTimingStats,
+    request_total: ImageThumbnailStageTimingStats,
+}
+
+impl ImageThumbnailTimingBatch {
+    fn start() -> Self {
+        let enabled = crate::debug_options::icon_timings_enabled();
+        Self {
+            enabled,
+            batch_started: enabled.then(Instant::now),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn enabled_for_test() -> Self {
+        Self {
+            enabled: true,
+            batch_started: Some(Instant::now()),
+            ..Self::default()
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn now(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    fn record_request(&mut self) {
+        if self.enabled {
+            self.requests += 1;
+        }
+    }
+
+    fn record_queue_wait(&mut self, elapsed: Duration) {
+        if self.enabled {
+            self.queue_wait.record(elapsed);
+        }
+    }
+
+    fn record_load_result(&mut self, result: &ImageThumbnailLoadResult) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(elapsed) = result.cache_read_elapsed {
+            self.cache_read.record(elapsed);
+        }
+        if let Some(cache_hit) = result.cache_hit {
+            if cache_hit {
+                self.cache_hits += 1;
+            } else {
+                self.cache_misses += 1;
+            }
+        }
+        if let Some(elapsed) = result.extract_elapsed {
+            self.extract.record(elapsed);
+        }
+        if let Some(elapsed) = result.cache_write_elapsed {
+            self.cache_write.record(elapsed);
+        }
+
+        match result.outcome {
+            ImageThumbnailLoadOutcome::CacheHit => {}
+            ImageThumbnailLoadOutcome::Generated => self.generated += 1,
+            ImageThumbnailLoadOutcome::Failed => self.failed += 1,
+            ImageThumbnailLoadOutcome::Cancelled => self.cancelled += 1,
+        }
+    }
+
+    fn record_commit(&mut self, started: Option<Instant>) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(started) = started {
+            self.commit.record(started.elapsed());
+        }
+    }
+
+    fn record_discarded(&mut self) {
+        if self.enabled {
+            self.discarded += 1;
+        }
+    }
+
+    fn record_request_total(&mut self, started: Option<Instant>) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(started) = started {
+            self.request_total.record(started.elapsed());
+        }
+    }
+
+    fn finish(self) {
+        if !self.enabled {
+            return;
+        }
+
+        let batch_total = self
+            .batch_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        for line in self.format_lines(batch_total) {
+            crate::debug_options::log_icon_timing(format_args!("{line}"));
+        }
+    }
+
+    fn format_lines(&self, batch_total: Duration) -> Vec<String> {
+        if self.requests == 0 {
+            return Vec::new();
+        }
+
+        let mut lines = vec![format!(
+            "image_thumbnails total={} requests={} cache_hits={} cache_misses={} generated={} failed={} cancelled={} discarded={}",
+            format_image_thumbnail_timing_duration(batch_total),
+            self.requests,
+            self.cache_hits,
+            self.cache_misses,
+            self.generated,
+            self.failed,
+            self.cancelled,
+            self.discarded
+        )];
+        push_image_thumbnail_stage_line(&mut lines, "queue_wait", &self.queue_wait);
+        push_image_thumbnail_stage_line(&mut lines, "cache_read", &self.cache_read);
+        push_image_thumbnail_stage_line(&mut lines, "extract", &self.extract);
+        push_image_thumbnail_stage_line(&mut lines, "cache_write", &self.cache_write);
+        push_image_thumbnail_stage_line(&mut lines, "commit", &self.commit);
+        push_image_thumbnail_stage_line(&mut lines, "request_total", &self.request_total);
+        lines
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ImageThumbnailStageTimingStats {
+    count: usize,
+    total: Duration,
+    fastest: Option<Duration>,
+    slowest: Option<Duration>,
+}
+
+impl ImageThumbnailStageTimingStats {
+    fn record(&mut self, elapsed: Duration) {
+        self.count += 1;
+        self.total += elapsed;
+        self.fastest = Some(self.fastest.map_or(elapsed, |fastest| fastest.min(elapsed)));
+        self.slowest = Some(self.slowest.map_or(elapsed, |slowest| slowest.max(elapsed)));
+    }
+
+    fn format_line(&self, stage: &str) -> Option<String> {
+        if self.count == 0 {
+            return None;
+        }
+
+        Some(format!(
+            "image_thumbnails {stage} count={} total={} fastest={} slowest={}",
+            self.count,
+            format_image_thumbnail_timing_duration(self.total),
+            format_image_thumbnail_timing_duration(self.fastest.unwrap_or_default()),
+            format_image_thumbnail_timing_duration(self.slowest.unwrap_or_default())
+        ))
+    }
+}
+
+fn push_image_thumbnail_stage_line(
+    lines: &mut Vec<String>,
+    stage: &str,
+    stats: &ImageThumbnailStageTimingStats,
+) {
+    if let Some(line) = stats.format_line(stage) {
+        lines.push(line);
+    }
+}
+
+fn format_image_thumbnail_timing_duration(elapsed: Duration) -> String {
+    format!("{:.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
 
 fn image_thumbnail_request_for_entry(
@@ -380,11 +760,12 @@ fn read_cached_thumbnail(cache_dir: Option<&Path>, key: &str) -> Option<Vec<u8>>
         .and_then(valid_png_bytes)
 }
 
-fn write_cached_thumbnail(cache_dir: Option<&Path>, key: &str, bytes: &[u8]) {
+fn write_cached_thumbnail(cache_dir: Option<&Path>, key: &str, bytes: &[u8]) -> bool {
     let Some(path) = thumbnail_file_path(cache_dir, key) else {
-        return;
+        return false;
     };
     let _ = write_atomic(&path, bytes);
+    true
 }
 
 fn thumbnail_file_path(cache_dir: Option<&Path>, key: &str) -> Option<PathBuf> {
@@ -556,6 +937,56 @@ mod tests {
         assert_eq!(cache.pending.len(), 1);
         assert!(cache.thumbnail_for_request(request).0.is_none());
         assert_eq!(cache.pending.len(), 1);
+    }
+
+    #[test]
+    fn image_thumbnail_timing_batch_omits_empty_batches() {
+        let batch = ImageThumbnailTimingBatch::enabled_for_test();
+
+        assert!(batch.format_lines(Duration::from_millis(1)).is_empty());
+    }
+
+    #[test]
+    fn image_thumbnail_timing_batch_formats_stage_totals_fastest_and_slowest() {
+        let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
+        batch.requests = 2;
+        batch.queue_wait.record(Duration::from_millis(2));
+        batch.queue_wait.record(Duration::from_micros(500));
+
+        let lines = batch.format_lines(Duration::from_millis(3));
+        let queue_wait = lines
+            .iter()
+            .find(|line| line.starts_with("image_thumbnails queue_wait "))
+            .expect("queue_wait timing line");
+
+        assert!(queue_wait.contains("count=2"));
+        assert!(queue_wait.contains("total=2.500ms"));
+        assert!(queue_wait.contains("fastest=0.500ms"));
+        assert!(queue_wait.contains("slowest=2.000ms"));
+    }
+
+    #[test]
+    fn image_thumbnail_timing_batch_formats_outcome_counters() {
+        let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
+        batch.requests = 4;
+        batch.cache_hits = 1;
+        batch.cache_misses = 3;
+        batch.generated = 2;
+        batch.failed = 1;
+        batch.cancelled = 1;
+        batch.discarded = 1;
+
+        let lines = batch.format_lines(Duration::from_millis(15));
+        let summary = lines.first().expect("summary line");
+
+        assert!(summary.starts_with("image_thumbnails total=15.000ms"));
+        assert!(summary.contains("requests=4"));
+        assert!(summary.contains("cache_hits=1"));
+        assert!(summary.contains("cache_misses=3"));
+        assert!(summary.contains("generated=2"));
+        assert!(summary.contains("failed=1"));
+        assert!(summary.contains("cancelled=1"));
+        assert!(summary.contains("discarded=1"));
     }
 
     #[test]
