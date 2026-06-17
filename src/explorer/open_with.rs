@@ -25,10 +25,46 @@ pub(super) enum OpenWithOutcome {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DefaultAppChangeOutcome {
+    Changed,
+    Cancelled,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DefaultApplication {
     pub(super) name: String,
     pub(super) path: Option<PathBuf>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct LinuxDefaultApplicationChoice {
+    pub(super) name: String,
+    pub(super) desktop_id: String,
+    pub(super) compatible: bool,
+    pub(super) current_default: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct LinuxDefaultApplicationChoices {
+    pub(super) mime_type: String,
+    pub(super) choices: Vec<LinuxDefaultApplicationChoice>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxDesktopEntryInfo {
+    name: String,
+    desktop_id: String,
+    type_name: Option<String>,
+    hidden: bool,
+    no_display: bool,
+    terminal: bool,
+    has_exec: bool,
+    dbus_activatable: bool,
+    mime_types: Vec<String>,
 }
 
 pub(super) fn context_menu_item(path: &Path) -> ContextMenuItem {
@@ -105,35 +141,20 @@ pub(super) fn default_application_for_file(path: &Path) -> Option<DefaultApplica
     None
 }
 
-#[cfg(target_os = "windows")]
-pub(super) fn choose_default_application_for_file(
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(super) fn change_default_application_for_file(
     path: &Path,
     window: &Window,
-) -> io::Result<OpenWithOutcome> {
-    windows_choose_application(path, windows_parent_hwnd(window), true)
-}
+) -> io::Result<DefaultAppChangeOutcome> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_change_default_application_for_file(path, window);
+    }
 
-#[cfg(target_os = "macos")]
-pub(super) fn choose_default_application_for_file(
-    path: &Path,
-    _: &Window,
-) -> io::Result<OpenWithOutcome> {
-    mac_open_file(path, &OpenFileIntent::ChooseApplication)
-}
-
-#[cfg(target_os = "linux")]
-pub(super) async fn choose_default_application_for_file(
-    path: &Path,
-    window_handle: Option<&raw_window_handle::RawWindowHandle>,
-    display_handle: Option<&raw_window_handle::RawDisplayHandle>,
-) -> io::Result<OpenWithOutcome> {
-    linux_open_file(
-        path,
-        &OpenFileIntent::ChooseApplication,
-        window_handle,
-        display_handle,
-    )
-    .await
+    #[cfg(target_os = "macos")]
+    {
+        return mac_change_default_application_for_file(path, window);
+    }
 }
 
 impl ExplorerView {
@@ -333,20 +354,52 @@ fn windows_error_is_no_association(error: &io::Error) -> bool {
     error.raw_os_error() == Some(1155)
 }
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_OAIF_ALLOW_REGISTRATION: i32 = 1;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_OAIF_REGISTER_EXT: i32 = 2;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_OAIF_EXEC: i32 = 4;
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_OAIF_FORCE_REGISTRATION: i32 = 8;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_open_with_dialog_flag_bits(execute: bool, register_default: bool) -> i32 {
+    let mut flags = 0;
+    if execute {
+        flags |= WINDOWS_OAIF_EXEC;
+    }
+    if register_default {
+        flags |= WINDOWS_OAIF_ALLOW_REGISTRATION
+            | WINDOWS_OAIF_REGISTER_EXT
+            | WINDOWS_OAIF_FORCE_REGISTRATION;
+    }
+    flags
+}
+
 #[cfg(target_os = "windows")]
-fn windows_choose_application(
+fn windows_open_with_dialog_flags(
+    execute: bool,
+    register_default: bool,
+) -> windows::Win32::UI::Shell::OPEN_AS_INFO_FLAGS {
+    windows::Win32::UI::Shell::OPEN_AS_INFO_FLAGS(windows_open_with_dialog_flag_bits(
+        execute,
+        register_default,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_show_open_with_dialog(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
+    execute: bool,
     register_default: bool,
-) -> io::Result<OpenWithOutcome> {
+) -> io::Result<bool> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::{
             Foundation::ERROR_CANCELLED,
-            UI::Shell::{
-                OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT,
-                OPENASINFO, SHOpenWithDialog,
-            },
+            UI::Shell::{OPENASINFO, SHOpenWithDialog},
         },
         core::{HRESULT, PCWSTR},
     };
@@ -359,19 +412,38 @@ fn windows_choose_application(
     let info = OPENASINFO {
         pcszFile: PCWSTR::from_raw(path.as_ptr()),
         pcszClass: PCWSTR::null(),
-        oaifInFlags: if register_default {
-            OAIF_EXEC | OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_FORCE_REGISTRATION
-        } else {
-            OAIF_EXEC
-        },
+        oaifInFlags: windows_open_with_dialog_flags(execute, register_default),
     };
 
     match unsafe { SHOpenWithDialog(parent, &info) } {
-        Ok(()) => Ok(OpenWithOutcome::Opened),
-        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => {
-            Ok(OpenWithOutcome::Cancelled)
-        }
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => Ok(false),
         Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_choose_application(
+    path: &Path,
+    parent: Option<windows::Win32::Foundation::HWND>,
+    register_default: bool,
+) -> io::Result<OpenWithOutcome> {
+    if windows_show_open_with_dialog(path, parent, true, register_default)? {
+        Ok(OpenWithOutcome::Opened)
+    } else {
+        Ok(OpenWithOutcome::Cancelled)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_change_default_application_for_file(
+    path: &Path,
+    window: &Window,
+) -> io::Result<DefaultAppChangeOutcome> {
+    if windows_show_open_with_dialog(path, windows_parent_hwnd(window), false, true)? {
+        Ok(DefaultAppChangeOutcome::Changed)
+    } else {
+        Ok(DefaultAppChangeOutcome::Cancelled)
     }
 }
 
@@ -609,11 +681,187 @@ fn linux_default_desktop_id_for_mime(mime: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn linux_default_app_choices_for_file(
+    path: &Path,
+) -> io::Result<LinuxDefaultApplicationChoices> {
+    let mime_type = linux_file_mime_type(path).ok_or_else(|| {
+        io::Error::other(format!(
+            "could not determine file type for {}",
+            path.display()
+        ))
+    })?;
+    let current_default = linux_default_desktop_id_for_mime(&mime_type);
+    let entries = freedesktop_desktop_entry::desktop_entries(&[])
+        .into_iter()
+        .map(linux_desktop_entry_info)
+        .collect::<Vec<_>>();
+    let choices =
+        linux_default_app_choices_from_entries(&mime_type, current_default.as_deref(), entries);
+
+    Ok(LinuxDefaultApplicationChoices { mime_type, choices })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_entry_info(
+    entry: freedesktop_desktop_entry::DesktopEntry,
+) -> LinuxDesktopEntryInfo {
+    let desktop_id = linux_desktop_id_with_suffix(entry.id());
+    let name = entry
+        .full_name::<&str>(&[])
+        .or_else(|| entry.name::<&str>(&[]))
+        .map(|name| name.into_owned())
+        .unwrap_or_else(|| desktop_id.clone());
+    let type_name = entry.desktop_entry("Type").map(str::to_owned);
+    let has_exec = entry.exec().is_some() || entry.try_exec().is_some();
+    let mime_types = entry
+        .mime_type()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|mime| !mime.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    LinuxDesktopEntryInfo {
+        name,
+        desktop_id,
+        type_name,
+        hidden: entry.hidden(),
+        no_display: entry.no_display(),
+        terminal: entry.terminal(),
+        has_exec,
+        dbus_activatable: entry.dbus_activatable(),
+        mime_types,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_desktop_id_with_suffix(desktop_id: &str) -> String {
+    if desktop_id.ends_with(".desktop") {
+        desktop_id.to_owned()
+    } else {
+        format!("{desktop_id}.desktop")
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_default_desktop_ids_match(left: &str, right: &str) -> bool {
+    left.strip_suffix(".desktop").unwrap_or(left) == right.strip_suffix(".desktop").unwrap_or(right)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_default_app_choices_from_entries(
+    mime_type: &str,
+    current_default: Option<&str>,
+    entries: Vec<LinuxDesktopEntryInfo>,
+) -> Vec<LinuxDefaultApplicationChoice> {
+    let mut seen = std::collections::HashSet::new();
+    let mut choices = entries
+        .into_iter()
+        .filter(linux_desktop_entry_is_default_app_candidate)
+        .filter(|entry| seen.insert(entry.desktop_id.clone()))
+        .map(|entry| {
+            let compatible = entry.mime_types.iter().any(|mime| mime == mime_type);
+            let current_default = current_default
+                .is_some_and(|default| linux_default_desktop_ids_match(default, &entry.desktop_id));
+            LinuxDefaultApplicationChoice {
+                name: entry.name,
+                desktop_id: entry.desktop_id,
+                compatible,
+                current_default,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    choices.sort_by(|left, right| {
+        right
+            .compatible
+            .cmp(&left.compatible)
+            .then_with(|| right.current_default.cmp(&left.current_default))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.desktop_id.cmp(&right.desktop_id))
+    });
+    choices
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_desktop_entry_is_default_app_candidate(entry: &LinuxDesktopEntryInfo) -> bool {
+    entry.type_name.as_deref() == Some("Application")
+        && !entry.hidden
+        && !entry.no_display
+        && !entry.terminal
+        && (entry.has_exec || entry.dbus_activatable)
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn linux_default_app_initial_selection(
+    choices: &[LinuxDefaultApplicationChoice],
+) -> Option<usize> {
+    choices
+        .iter()
+        .position(|choice| choice.current_default)
+        .or_else(|| choices.iter().position(|choice| choice.compatible))
+        .or_else(|| (!choices.is_empty()).then_some(0))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_xdg_mime_default_args(desktop_id: &str, mime_type: &str) -> [String; 3] {
+    [
+        "default".to_owned(),
+        linux_desktop_id_with_suffix(desktop_id),
+        mime_type.to_owned(),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn linux_change_default_application(
+    mime_type: &str,
+    desktop_id: &str,
+) -> io::Result<DefaultAppChangeOutcome> {
+    use std::process::Command;
+
+    let args = linux_xdg_mime_default_args(desktop_id, mime_type);
+    let output = Command::new("xdg-mime").args(args.iter()).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(io::Error::other(if stderr.is_empty() {
+            format!("xdg-mime failed to set {desktop_id} as the default for {mime_type}")
+        } else {
+            stderr
+        }));
+    }
+
+    let verified = linux_default_desktop_id_for_mime(mime_type).ok_or_else(|| {
+        io::Error::other(format!(
+            "could not verify the default application for {mime_type}"
+        ))
+    })?;
+    if !linux_default_desktop_ids_match(&verified, desktop_id) {
+        return Err(io::Error::other(format!(
+            "the default application for {mime_type} is still {verified}"
+        )));
+    }
+
+    Ok(DefaultAppChangeOutcome::Changed)
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MacApplication {
     name: String,
     path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn mac_change_default_application_for_file(
+    path: &Path,
+    _: &Window,
+) -> io::Result<DefaultAppChangeOutcome> {
+    let Some(application) = mac_choose_application()? else {
+        return Ok(DefaultAppChangeOutcome::Cancelled);
+    };
+    mac_set_default_application_for_file_type(path, &application)?;
+    Ok(DefaultAppChangeOutcome::Changed)
 }
 
 #[cfg(target_os = "macos")]
@@ -633,6 +881,80 @@ fn mac_open_file(path: &Path, intent: &OpenFileIntent) -> io::Result<OpenWithOut
         OpenFileIntent::SpecificApplication(application) => {
             mac_open_with_application(path, application)
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MAC_LS_ROLES_ALL: u32 = u32::MAX;
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn LSSetDefaultRoleHandlerForContentType(
+        in_content_type: cocoa::base::id,
+        in_role: u32,
+        in_handler_bundle_id: cocoa::base::id,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn mac_set_default_application_for_file_type(path: &Path, application: &Path) -> io::Result<()> {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let result = (|| {
+            let content_type = mac_content_type_for_file(path)?;
+            let application_url = mac_file_url(application)
+                .ok_or_else(|| io::Error::other("could not create application URL"))?;
+            let bundle: id = msg_send![class!(NSBundle), bundleWithURL: application_url];
+            if bundle == nil {
+                return Err(io::Error::other("selected application has no bundle"));
+            }
+            let bundle_id: id = msg_send![bundle, bundleIdentifier];
+            if bundle_id == nil {
+                return Err(io::Error::other(
+                    "selected application has no bundle identifier",
+                ));
+            }
+
+            let status =
+                LSSetDefaultRoleHandlerForContentType(content_type, MAC_LS_ROLES_ALL, bundle_id);
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "LaunchServices failed with status {status}"
+                )))
+            }
+        })();
+        let _: () = msg_send![pool, drain];
+        result
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn mac_content_type_for_file(path: &Path) -> io::Result<cocoa::base::id> {
+    use cocoa::{
+        base::{id, nil},
+        foundation::NSString,
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| io::Error::other("file path is not valid UTF-8"))?;
+    let ns_path = NSString::alloc(nil).init_str(path);
+    let _: id = msg_send![ns_path, autorelease];
+    let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let content_type: id = msg_send![workspace, typeOfFile: ns_path error: nil];
+    if content_type == nil {
+        Err(io::Error::other(
+            "could not determine the file content type",
+        ))
+    } else {
+        Ok(content_type)
     }
 }
 
@@ -872,6 +1194,21 @@ mod tests {
             .collect()
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    fn linux_entry(name: &str, desktop_id: &str, mime_types: &[&str]) -> LinuxDesktopEntryInfo {
+        LinuxDesktopEntryInfo {
+            name: name.to_owned(),
+            desktop_id: linux_desktop_id_with_suffix(desktop_id),
+            type_name: Some("Application".to_owned()),
+            hidden: false,
+            no_display: false,
+            terminal: false,
+            has_exec: true,
+            dbus_activatable: false,
+            mime_types: mime_types.iter().map(|mime| (*mime).to_owned()).collect(),
+        }
+    }
+
     #[test]
     fn open_paths_until_not_opened_records_all_successful_attempts() {
         let results = open_paths_until_not_opened(
@@ -998,6 +1335,79 @@ mod tests {
             Some(".txt")
         );
         assert_eq!(windows_file_association_query(Path::new("Makefile")), None);
+    }
+
+    #[test]
+    fn windows_open_with_flags_for_file_open_execute_without_registration() {
+        let flags = windows_open_with_dialog_flag_bits(true, false);
+
+        assert_ne!(flags & WINDOWS_OAIF_EXEC, 0);
+        assert_eq!(flags & WINDOWS_OAIF_ALLOW_REGISTRATION, 0);
+        assert_eq!(flags & WINDOWS_OAIF_REGISTER_EXT, 0);
+        assert_eq!(flags & WINDOWS_OAIF_FORCE_REGISTRATION, 0);
+    }
+
+    #[test]
+    fn windows_default_app_change_flags_register_without_execute() {
+        let flags = windows_open_with_dialog_flag_bits(false, true);
+
+        assert_eq!(flags & WINDOWS_OAIF_EXEC, 0);
+        assert_ne!(flags & WINDOWS_OAIF_ALLOW_REGISTRATION, 0);
+        assert_ne!(flags & WINDOWS_OAIF_REGISTER_EXT, 0);
+        assert_ne!(flags & WINDOWS_OAIF_FORCE_REGISTRATION, 0);
+    }
+
+    #[test]
+    fn linux_default_app_choices_include_visible_apps_and_sort_compatible_first() {
+        let mut hidden = linux_entry("Hidden App", "hidden", &["text/plain"]);
+        hidden.hidden = true;
+        let mut no_display = linux_entry("No Display", "no-display", &["text/plain"]);
+        no_display.no_display = true;
+        let mut terminal = linux_entry("Terminal App", "terminal", &["text/plain"]);
+        terminal.terminal = true;
+        let mut not_app = linux_entry("Link", "link", &["text/plain"]);
+        not_app.type_name = Some("Link".to_owned());
+        let mut unavailable = linux_entry("Unavailable", "unavailable", &["text/plain"]);
+        unavailable.has_exec = false;
+        unavailable.dbus_activatable = false;
+
+        let choices = linux_default_app_choices_from_entries(
+            "text/plain",
+            Some("org.other.desktop"),
+            vec![
+                linux_entry("Other App", "org.other", &["image/png"]),
+                hidden,
+                no_display,
+                terminal,
+                not_app,
+                unavailable,
+                linux_entry("Text Editor", "org.editor", &["text/plain"]),
+                linux_entry("Archive Manager", "org.archive", &[]),
+            ],
+        );
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Text Editor", "Other App", "Archive Manager"]
+        );
+        assert!(choices[0].compatible);
+        assert!(choices[1].current_default);
+        assert_eq!(linux_default_app_initial_selection(&choices), Some(1));
+    }
+
+    #[test]
+    fn linux_xdg_mime_default_args_include_desktop_suffix_and_mime_type() {
+        assert_eq!(
+            linux_xdg_mime_default_args("org.editor", "text/plain"),
+            [
+                "default".to_owned(),
+                "org.editor.desktop".to_owned(),
+                "text/plain".to_owned()
+            ]
+        );
     }
 
     #[cfg(target_os = "linux")]

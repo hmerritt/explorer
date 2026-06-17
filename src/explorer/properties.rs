@@ -25,8 +25,6 @@ use thousands::Separable;
 
 #[cfg(test)]
 use crate::explorer::image_preview::svg_raster_dimensions;
-#[cfg(not(target_os = "windows"))]
-use crate::explorer::open_with::OpenWithOutcome;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
     app_icons::NativeIconSize,
@@ -44,7 +42,7 @@ use crate::explorer::{
     image_preview::{
         PropertyImagePreview, load_property_image_preview, path_may_have_image_preview,
     },
-    open_with::{DefaultApplication, default_application_for_file},
+    open_with::{DefaultAppChangeOutcome, DefaultApplication, default_application_for_file},
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     video::{
         ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe, ffprobe_scalar_value_label,
@@ -337,11 +335,11 @@ pub(super) struct PropertiesDialog {
     image_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
-    #[cfg(not(target_os = "windows"))]
     default_app_task: Option<Task<()>>,
+    #[cfg(target_os = "linux")]
+    default_app_picker: Option<AnyWindowHandle>,
     draft: EditablePropertyDraft,
     apply_error: Option<String>,
-    #[cfg(not(target_os = "windows"))]
     default_app_error: Option<String>,
     completed: bool,
 }
@@ -415,11 +413,11 @@ impl PropertiesDialog {
             image_task: None,
             frames_task: None,
             apply_task: None,
-            #[cfg(not(target_os = "windows"))]
             default_app_task: None,
+            #[cfg(target_os = "linux")]
+            default_app_picker: None,
             draft: EditablePropertyDraft::default(),
             apply_error: None,
-            #[cfg(not(target_os = "windows"))]
             default_app_error: None,
             completed: false,
         };
@@ -836,8 +834,12 @@ impl PropertiesDialog {
         window.remove_window();
     }
 
-    fn release(&mut self, _: &mut App) {
+    fn release(&mut self, _cx: &mut App) {
         self.completed = true;
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = self.default_app_picker.take() {
+            let _ = handle.update(_cx, |_, window, _| window.remove_window());
+        }
     }
 
     fn has_changes(&self) -> bool {
@@ -903,7 +905,7 @@ impl PropertiesDialog {
         self.apply_task = Some(task);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(target_os = "linux"))]
     fn change_default_app(
         &mut self,
         snapshot: &PropertySnapshot,
@@ -917,9 +919,8 @@ impl PropertiesDialog {
             return;
         };
 
-        self.default_app_error = None;
         let before = snapshot.default_app.clone();
-        let result = crate::explorer::open_with::choose_default_application_for_file(&path, window);
+        let result = crate::explorer::open_with::change_default_application_for_file(&path, window);
         self.refresh_after_default_app_change(path, before, result, cx);
     }
 
@@ -933,30 +934,65 @@ impl PropertiesDialog {
         if self.default_app_task.is_some() {
             return;
         }
+        if let Some(handle) = self.default_app_picker {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.default_app_picker = None;
+        }
         let Some(path) = single_file_default_app_path(snapshot).map(Path::to_path_buf) else {
             return;
         };
 
-        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
-        self.default_app_error = None;
         let before = snapshot.default_app.clone();
-        let target = snapshot.target.clone();
-        let date_format = self.date_format.clone();
-        let window_handle = HasWindowHandle::window_handle(window)
-            .ok()
-            .map(|handle| handle.as_raw());
-        let display_handle = HasDisplayHandle::display_handle(window)
-            .ok()
-            .map(|handle| handle.as_raw());
-        let path_for_result = path.clone();
+        let _ = window;
         let task = cx.spawn(async move |this, cx| {
-            let result = crate::explorer::open_with::choose_default_application_for_file(
-                &path,
-                window_handle.as_ref(),
-                display_handle.as_ref(),
-            )
-            .await;
+            let result =
+                cx.background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move {
+                            crate::explorer::open_with::linux_default_app_choices_for_file(&path)
+                        }
+                    })
+                    .await;
+
+            let _ = this.update(cx, |dialog, cx| {
+                dialog.default_app_task = None;
+                match result {
+                    Ok(choices) => {
+                        match dialog.open_linux_default_app_picker(path, before, choices, cx) {
+                            Ok(()) => {}
+                            Err(error) => dialog.default_app_error = Some(error),
+                        }
+                    }
+                    Err(error) => {
+                        dialog.default_app_error = Some(format!(
+                            "Could not list default app choices for {}: {error}",
+                            property_path_display_name(&path)
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.default_app_task = Some(task);
+        cx.notify();
+    }
+
+    fn refresh_after_default_app_change(
+        &mut self,
+        path: PathBuf,
+        before: Option<PropertyDefaultApp>,
+        result: std::io::Result<DefaultAppChangeOutcome>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.target.clone();
+        let date_format = self.date_format.clone();
+        let task = cx.spawn(async move |this, cx| {
             let snapshot = cx
                 .background_executor()
                 .spawn(
@@ -967,8 +1003,10 @@ impl PropertiesDialog {
 
             let _ = this.update(cx, |dialog, cx| {
                 dialog.default_app_task = None;
-                dialog.default_app_error =
-                    default_app_change_error(&path_for_result, &before, &result, snapshot.as_ref());
+                if !matches!(result, Ok(DefaultAppChangeOutcome::Cancelled)) {
+                    dialog.default_app_error =
+                        default_app_change_error(&path, &before, &result, snapshot.as_ref());
+                }
                 if let Some(snapshot) = snapshot {
                     dialog.set_ready_snapshot(snapshot, cx);
                 }
@@ -979,17 +1017,52 @@ impl PropertiesDialog {
         cx.notify();
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    fn refresh_after_default_app_change(
+    #[cfg(target_os = "linux")]
+    fn open_linux_default_app_picker(
         &mut self,
         path: PathBuf,
         before: Option<PropertyDefaultApp>,
-        result: std::io::Result<OpenWithOutcome>,
+        choices: crate::explorer::open_with::LinuxDefaultApplicationChoices,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if choices.choices.is_empty() {
+            return Err(format!(
+                "No applications were found for {}.",
+                property_path_display_name(&path)
+            ));
+        }
+
+        let handle = open_linux_default_app_picker_window(path, before, choices, cx.entity(), cx)?;
+        self.default_app_picker = Some(handle);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_linux_default_app_choice(
+        &mut self,
+        path: PathBuf,
+        before: Option<PropertyDefaultApp>,
+        mime_type: String,
+        desktop_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self.default_app_task.is_some() {
+            return;
+        }
+
+        self.default_app_error = None;
         let target = self.target.clone();
         let date_format = self.date_format.clone();
         let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::explorer::open_with::linux_change_default_application(
+                        &mime_type,
+                        &desktop_id,
+                    )
+                })
+                .await;
             let snapshot = cx
                 .background_executor()
                 .spawn(
@@ -1009,6 +1082,12 @@ impl PropertiesDialog {
             });
         });
         self.default_app_task = Some(task);
+        cx.notify();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clear_linux_default_app_picker(&mut self, cx: &mut Context<Self>) {
+        self.default_app_picker = None;
         cx.notify();
     }
 
@@ -1083,6 +1162,266 @@ impl Render for PropertiesDialog {
 }
 
 impl Focusable for PropertiesDialog {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+#[cfg(target_os = "linux")]
+const DEFAULT_APP_PICKER_WIDTH: f32 = 460.0;
+#[cfg(target_os = "linux")]
+const DEFAULT_APP_PICKER_HEIGHT: f32 = 420.0;
+#[cfg(target_os = "linux")]
+const DEFAULT_APP_PICKER_ROW_HEIGHT: f32 = 36.0;
+#[cfg(target_os = "linux")]
+const DEFAULT_APP_PICKER_SELECTED_BG: u32 = 0xcfe8ff;
+#[cfg(target_os = "linux")]
+const DEFAULT_APP_PICKER_HOVER_BG: u32 = 0xe5f3ff;
+
+#[cfg(target_os = "linux")]
+struct LinuxDefaultAppPickerDialog {
+    path: PathBuf,
+    before: Option<PropertyDefaultApp>,
+    mime_type: String,
+    choices: Vec<crate::explorer::open_with::LinuxDefaultApplicationChoice>,
+    selected_index: Option<usize>,
+    properties: WeakEntity<PropertiesDialog>,
+    font: gpui::Font,
+    focus_handle: FocusHandle,
+    scroll_handle: ScrollHandle,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxDefaultAppPickerDialog {
+    fn new(
+        path: PathBuf,
+        before: Option<PropertyDefaultApp>,
+        choices: crate::explorer::open_with::LinuxDefaultApplicationChoices,
+        properties: WeakEntity<PropertiesDialog>,
+        focus_handle: FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let font = crate::settings::current_app_font(cx);
+        let selected_index =
+            crate::explorer::open_with::linux_default_app_initial_selection(&choices.choices);
+        let dialog = Self {
+            path,
+            before,
+            mime_type: choices.mime_type,
+            choices: choices.choices,
+            selected_index,
+            properties,
+            font,
+            focus_handle,
+            scroll_handle: ScrollHandle::new(),
+        };
+        cx.observe_global::<SettingsState>(|this, cx| {
+            this.font = crate::settings::current_app_font(cx);
+            cx.notify();
+        })
+        .detach();
+        dialog
+    }
+
+    fn handle_cancel(&mut self, _: &DialogCancel, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel(window, cx);
+    }
+
+    fn handle_confirm(&mut self, _: &DialogConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm(window, cx);
+    }
+
+    fn select_choice(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected_index = Some(index);
+        cx.notify();
+    }
+
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_index else {
+            return;
+        };
+        let Some(choice) = self.choices.get(index).cloned() else {
+            return;
+        };
+
+        let path = self.path.clone();
+        let before = self.before.clone();
+        let mime_type = self.mime_type.clone();
+        let desktop_id = choice.desktop_id;
+        let _ = self.properties.update(cx, |properties, cx| {
+            properties.apply_linux_default_app_choice(path, before, mime_type, desktop_id, cx);
+            properties.clear_linux_default_app_picker(cx);
+        });
+        window.remove_window();
+    }
+
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.properties.update(cx, |properties, cx| {
+            properties.clear_linux_default_app_picker(cx);
+        });
+        window.remove_window();
+    }
+
+    fn release(&mut self, cx: &mut App) {
+        let _ = self.properties.update(cx, |properties, cx| {
+            properties.clear_linux_default_app_picker(cx);
+        });
+    }
+
+    fn render_choice(
+        &self,
+        index: usize,
+        choice: &crate::explorer::open_with::LinuxDefaultApplicationChoice,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.selected_index == Some(index);
+        let mut sublabel = if choice.current_default {
+            "Current default".to_owned()
+        } else if choice.compatible {
+            "Recommended for this file type".to_owned()
+        } else {
+            "Other application".to_owned()
+        };
+        if choice.current_default && choice.compatible {
+            sublabel = "Current default, recommended for this file type".to_owned();
+        }
+
+        div()
+            .id(("linux-default-app-choice", index))
+            .h(px(DEFAULT_APP_PICKER_ROW_HEIGHT))
+            .px(px(8.0))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .border_b_1()
+            .border_color(rgb(PROPERTIES_BORDER))
+            .bg(rgb(if selected {
+                DEFAULT_APP_PICKER_SELECTED_BG
+            } else {
+                0xffffff
+            }))
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(rgb(DEFAULT_APP_PICKER_HOVER_BG)))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.select_choice(index, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .child(SharedString::from(choice.name.clone())),
+            )
+            .child(
+                div()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .child(SharedString::from(sublabel)),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Render for LinuxDefaultAppPickerDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.selected_index.is_some();
+        let file_name = property_path_display_name(&self.path);
+        let mut list = div().flex().flex_col().bg(rgb(0xffffff));
+        for (index, choice) in self.choices.iter().enumerate() {
+            list = list.child(self.render_choice(index, choice, cx));
+        }
+
+        div()
+            .font(self.font.clone())
+            .key_context("ExplorerDialog")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(rgb(0xf3f3f3))
+            .cursor_default()
+            .text_size(px(12.0))
+            .text_color(rgb(0x000000))
+            .on_action(cx.listener(Self::handle_cancel))
+            .on_action(cx.listener(Self::handle_confirm))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .p(px(PROPERTIES_PADDING))
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .child(format!("Choose a default app for {file_name}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                            .child(format!("File type: {}", self.mime_type)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .border_1()
+                            .border_color(rgb(PROPERTIES_BORDER))
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(0.0))
+                            .track_scroll(&self.scroll_handle)
+                            .on_scroll_wheel(cx.listener(
+                                |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                                    cx.notify();
+                                },
+                            ))
+                            .child(list),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                property_button(
+                                    "linux-default-app-ok",
+                                    "OK",
+                                    selected,
+                                    window.scale_factor(),
+                                )
+                                .when(selected, |this| {
+                                    this.on_click(cx.listener(
+                                        |this, _: &ClickEvent, window, cx| {
+                                            this.confirm(window, cx);
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                }),
+                            )
+                            .child(
+                                property_button(
+                                    "linux-default-app-cancel",
+                                    "Cancel",
+                                    true,
+                                    window.scale_factor(),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, window, cx| {
+                                        this.cancel(window, cx);
+                                        cx.stop_propagation();
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Focusable for LinuxDefaultAppPickerDialog {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -1264,7 +1603,6 @@ impl PropertiesDialog {
         body = body
             .child(separator())
             .child(self.render_attributes_row(snapshot, cx));
-        #[cfg(not(target_os = "windows"))]
         if let Some(error) = self.default_app_error.as_ref() {
             body = body.child(error_message(error));
         }
@@ -1327,9 +1665,6 @@ impl PropertiesDialog {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        #[cfg(target_os = "windows")]
-        let _ = window;
-
         let default_app_label = snapshot
             .default_app
             .as_ref()
@@ -1371,7 +1706,6 @@ impl PropertiesDialog {
                     ),
             );
 
-        #[cfg(not(target_os = "windows"))]
         let row = {
             let snapshot_for_click = snapshot.clone();
             let enabled = self.default_app_task.is_none();
@@ -2085,6 +2419,66 @@ fn open_properties_window(
         .map_err(|error| error.to_string())?;
 
     Ok(handle.into())
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_default_app_picker_window(
+    path: PathBuf,
+    before: Option<PropertyDefaultApp>,
+    choices: crate::explorer::open_with::LinuxDefaultApplicationChoices,
+    properties: gpui::Entity<PropertiesDialog>,
+    cx: &mut Context<PropertiesDialog>,
+) -> Result<AnyWindowHandle, String> {
+    let title = format!("Open With - {}", property_path_display_name(&path));
+    let handle = cx
+        .open_window(
+            linux_default_app_picker_window_options(title, cx),
+            |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                cx.new(|cx| {
+                    cx.on_release(|dialog: &mut LinuxDefaultAppPickerDialog, cx| {
+                        dialog.release(cx)
+                    })
+                    .detach();
+                    LinuxDefaultAppPickerDialog::new(
+                        path,
+                        before,
+                        choices,
+                        properties.downgrade(),
+                        focus_handle,
+                        cx,
+                    )
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(handle.into())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_app_picker_window_options(title: String, cx: &App) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::centered(
+            size(px(DEFAULT_APP_PICKER_WIDTH), px(DEFAULT_APP_PICKER_HEIGHT)),
+            cx,
+        )),
+        window_min_size: Some(size(
+            px(DEFAULT_APP_PICKER_WIDTH),
+            px(DEFAULT_APP_PICKER_HEIGHT),
+        )),
+        titlebar: Some(TitlebarOptions {
+            title: Some(SharedString::from(title)),
+            ..Default::default()
+        }),
+        kind: WindowKind::Floating,
+        is_movable: true,
+        is_resizable: true,
+        is_minimizable: false,
+        window_decorations: Some(WindowDecorations::Server),
+        ..Default::default()
+    }
 }
 
 fn properties_window_options(title: String, cx: &App) -> WindowOptions {
@@ -4887,11 +5281,10 @@ fn single_file_default_app_path(snapshot: &PropertySnapshot) -> Option<&Path> {
         .flatten()
 }
 
-#[cfg(not(target_os = "windows"))]
 fn default_app_change_error(
     path: &Path,
     before: &Option<PropertyDefaultApp>,
-    result: &std::io::Result<OpenWithOutcome>,
+    result: &std::io::Result<DefaultAppChangeOutcome>,
     snapshot: Option<&PropertySnapshot>,
 ) -> Option<String> {
     match result {
@@ -4899,24 +5292,24 @@ fn default_app_change_error(
             "Could not change the default app for {}: {error}",
             property_path_display_name(path)
         )),
-        Ok(OpenWithOutcome::Cancelled) => None,
-        Ok(OpenWithOutcome::Opened) => {
+        Ok(DefaultAppChangeOutcome::Cancelled) => None,
+        Ok(DefaultAppChangeOutcome::Changed) => {
             let Some(snapshot) = snapshot else {
                 return Some(format!(
                     "The default app for {} could not be verified.",
                     property_path_display_name(path)
                 ));
             };
-            if &snapshot.default_app != before {
-                None
-            } else if snapshot.default_app.is_none() {
+            if snapshot.default_app.is_none() {
                 Some(format!(
                     "No default app for {} could be verified.",
                     property_path_display_name(path)
                 ))
+            } else if &snapshot.default_app != before {
+                None
             } else {
                 Some(format!(
-                    "The selected app was opened, but the default app for {} did not appear to change.",
+                    "The default app for {} did not appear to change.",
                     property_path_display_name(path)
                 ))
             }
@@ -4924,7 +5317,6 @@ fn default_app_change_error(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn property_path_display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -6718,7 +7110,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn default_app_change_error_reports_unverified_changes() {
         let temp = TempDir::new();
@@ -6738,7 +7129,7 @@ mod tests {
             default_app_change_error(
                 &file,
                 &before,
-                &Ok(OpenWithOutcome::Cancelled),
+                &Ok(DefaultAppChangeOutcome::Cancelled),
                 Some(&snapshot)
             ),
             None
@@ -6747,7 +7138,7 @@ mod tests {
             default_app_change_error(
                 &file,
                 &before,
-                &Ok(OpenWithOutcome::Opened),
+                &Ok(DefaultAppChangeOutcome::Changed),
                 Some(&snapshot)
             )
             .unwrap()
@@ -6762,10 +7153,33 @@ mod tests {
             default_app_change_error(
                 &file,
                 &before,
-                &Ok(OpenWithOutcome::Opened),
+                &Ok(DefaultAppChangeOutcome::Changed),
                 Some(&snapshot)
             ),
             None
+        );
+
+        snapshot.default_app = None;
+        assert!(
+            default_app_change_error(
+                &file,
+                &before,
+                &Ok(DefaultAppChangeOutcome::Changed),
+                Some(&snapshot)
+            )
+            .unwrap()
+            .contains("No default app")
+        );
+
+        assert!(
+            default_app_change_error(
+                &file,
+                &before,
+                &Err(std::io::Error::other("denied")),
+                Some(&snapshot)
+            )
+            .unwrap()
+            .contains("Could not change the default app")
         );
     }
 
