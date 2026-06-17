@@ -25,6 +25,7 @@ use crate::explorer::{
         visible_breadcrumb_for_path,
     },
     clipboard::clipboard_item_can_paste,
+    codebase_summary::{CodebaseSummary, language_segment_widths},
     columns::file_column_label,
     constants::{
         COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT,
@@ -106,6 +107,7 @@ const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
 const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
+const CODEBASE_MAKEUP_BAR_WIDTH: f32 = 200.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileColumnHeaderDrag {
@@ -2632,7 +2634,7 @@ impl ExplorerView {
         let codebase_summary = self
             .codebase_summary
             .as_ref()
-            .and_then(|summary| summary.text.as_ref());
+            .filter(|summary| summary.total_code > 0 && !summary.languages.is_empty());
 
         div()
             .id("explorer-status-bar")
@@ -2653,15 +2655,7 @@ impl ExplorerView {
                     .child(SharedString::from(summary.total_items)),
             )
             .when_some(summary.selection_info, |this, selection_info| {
-                this.child(
-                    div()
-                        .h(px(14.0))
-                        .w(px(1.0))
-                        .mx(px(12.0))
-                        .flex_shrink_0()
-                        .bg(rgb(STATUS_BAR_SEPARATOR_COLOR)),
-                )
-                .child(
+                this.child(status_bar_separator()).child(
                     div()
                         .min_w(px(0.0))
                         .truncate()
@@ -2670,14 +2664,7 @@ impl ExplorerView {
             })
             .child(div().flex_1().min_w(px(12.0)))
             .when_some(codebase_summary, |this, codebase_summary| {
-                this.child(
-                    div()
-                        .min_w(px(0.0))
-                        .max_w_full()
-                        .truncate()
-                        .text_align(TextAlign::Right)
-                        .child(SharedString::from(codebase_summary.clone())),
-                )
+                this.child(render_codebase_makeup_status(codebase_summary))
             })
             .into_any_element()
     }
@@ -5328,6 +5315,66 @@ fn text_cell(text: String, width: f32, right: bool, font: &gpui::Font, window: &
     } else {
         cell.justify_start()
     }
+}
+
+fn render_codebase_makeup_status(summary: &CodebaseSummary) -> AnyElement {
+    let Some(dominant_language) = summary.languages.first() else {
+        return div().into_any_element();
+    };
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_full()
+        .flex_shrink_0()
+        .child(render_codebase_makeup_bar(summary))
+        .child(status_bar_separator())
+        .child(div().flex_shrink_0().child(SharedString::from(
+            summary.total_code.separate_with_commas(),
+        )))
+        .child(status_bar_separator())
+        .child(div().flex_shrink_0().child(SharedString::from(format!(
+            "{}% {}",
+            dominant_language.percentage, dominant_language.name
+        ))))
+        .into_any_element()
+}
+
+fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
+    let widths = language_segment_widths(
+        &summary.languages,
+        summary.total_code,
+        CODEBASE_MAKEUP_BAR_WIDTH,
+    );
+    let mut bar = div()
+        .flex()
+        .flex_row()
+        .h_full()
+        .w(px(CODEBASE_MAKEUP_BAR_WIDTH))
+        .flex_shrink_0()
+        .overflow_hidden();
+
+    for (language, width) in summary.languages.iter().zip(widths) {
+        bar = bar.child(
+            div()
+                .h_full()
+                .w(px(width))
+                .flex_shrink_0()
+                .bg(rgb(language.color)),
+        );
+    }
+
+    bar
+}
+
+fn status_bar_separator() -> Div {
+    div()
+        .h(px(14.0))
+        .w(px(1.0))
+        .mx(px(12.0))
+        .flex_shrink_0()
+        .bg(rgb(STATUS_BAR_SEPARATOR_COLOR))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,28 +1,33 @@
 use std::path::{Path, PathBuf};
 
-use thousands::Separable;
 use tokei::{Config, Languages};
 
 const CODEBASE_IGNORE_PATTERNS: &[&str] = &[".git", "target", "vendor"];
-const MIN_LANGUAGE_PERCENTAGE: f64 = 1.0;
+pub(super) const GITHUB_LANGUAGE_FALLBACK_COLOR: u32 = 0xd0d7de;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CodebaseSummary {
     pub(super) repo_root: PathBuf,
-    pub(super) text: Option<String>,
+    pub(super) total_code: usize,
+    pub(super) languages: Vec<CodebaseLanguageSummary>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CodebaseLanguageSummary {
-    name: String,
-    code: usize,
-    percentage: usize,
+    pub(super) name: String,
+    pub(super) code: usize,
+    pub(super) percentage: usize,
+    pub(super) color: u32,
 }
 
 pub(super) fn scan_codebase_summary(path: &Path) -> Option<CodebaseSummary> {
     let repo_root = find_git_repository_root(path)?;
-    let text = language_summary_for_repository(&repo_root);
-    Some(CodebaseSummary { repo_root, text })
+    let (total_code, languages) = language_summary_for_repository(&repo_root);
+    Some(CodebaseSummary {
+        repo_root,
+        total_code,
+        languages,
+    })
 }
 
 pub(super) fn find_git_repository_root(path: &Path) -> Option<PathBuf> {
@@ -36,7 +41,7 @@ pub(super) fn find_git_repository_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn language_summary_for_repository(repo_root: &Path) -> Option<String> {
+fn language_summary_for_repository(repo_root: &Path) -> (usize, Vec<CodebaseLanguageSummary>) {
     let mut languages = Languages::new();
     let config = Config::default();
     languages.get_statistics(&[repo_root], CODEBASE_IGNORE_PATTERNS, &config);
@@ -52,7 +57,7 @@ fn language_summary_for_repository(repo_root: &Path) -> Option<String> {
         total_code,
     );
 
-    format_language_summaries(&summaries)
+    (total_code, summaries)
 }
 
 fn language_summaries(
@@ -66,13 +71,14 @@ fn language_summaries(
     let mut summaries = languages
         .into_iter()
         .filter(|(_, code)| *code > 0)
-        .filter_map(|(name, code)| {
+        .map(|(name, code)| {
             let exact_percentage = (code as f64 / total_code as f64) * 100.0;
-            (exact_percentage >= MIN_LANGUAGE_PERCENTAGE).then(|| CodebaseLanguageSummary {
+            CodebaseLanguageSummary {
+                color: github_language_color(&name),
                 name,
                 code,
                 percentage: exact_percentage.round() as usize,
-            })
+            }
         })
         .collect::<Vec<_>>();
 
@@ -85,25 +91,49 @@ fn language_summaries(
     summaries
 }
 
-fn format_language_summaries(summaries: &[CodebaseLanguageSummary]) -> Option<String> {
-    if summaries.is_empty() {
-        return None;
+pub(super) fn language_segment_widths(
+    languages: &[CodebaseLanguageSummary],
+    total_code: usize,
+    bar_width: f32,
+) -> Vec<f32> {
+    if languages.is_empty() {
+        return Vec::new();
     }
 
-    Some(
-        summaries
-            .iter()
-            .map(|summary| {
-                format!(
-                    "{} {}% ({} LoC)",
-                    summary.name,
-                    summary.percentage,
-                    summary.code.separate_with_commas()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("  "),
-    )
+    if total_code == 0 || bar_width <= 0.0 {
+        return vec![0.0; languages.len()];
+    }
+
+    let mut widths = Vec::with_capacity(languages.len());
+    let mut allocated = 0.0_f64;
+    let bar_width = f64::from(bar_width);
+
+    for (ix, language) in languages.iter().enumerate() {
+        let width = if ix + 1 == languages.len() {
+            (bar_width - allocated).max(0.0)
+        } else {
+            let width = (language.code as f64 / total_code as f64) * bar_width;
+            allocated += width;
+            width
+        };
+        widths.push(width as f32);
+    }
+
+    widths
+}
+
+fn github_language_color(name: &str) -> u32 {
+    languages::from_name(name)
+        .and_then(|language| language.color)
+        .and_then(parse_github_language_color)
+        .unwrap_or(GITHUB_LANGUAGE_FALLBACK_COLOR)
+}
+
+fn parse_github_language_color(color: &str) -> Option<u32> {
+    let hex = color.strip_prefix('#')?;
+    (hex.len() == 6)
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -143,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn language_summary_formats_percentages_and_loc() {
+    fn language_summary_keeps_total_sorted_languages_and_percentages() {
         let summaries = language_summaries(
             [
                 ("Rust".to_owned(), 18_240),
@@ -154,13 +184,16 @@ mod tests {
         );
 
         assert_eq!(
-            format_language_summaries(&summaries),
-            Some("Rust 97% (18,240 LoC)  TOML 2% (390 LoC)".to_owned())
+            summaries
+                .iter()
+                .map(|summary| (summary.name.as_str(), summary.code, summary.percentage))
+                .collect::<Vec<_>>(),
+            vec![("Rust", 18_240, 97), ("TOML", 390, 2), ("Markdown", 150, 1)]
         );
     }
 
     #[test]
-    fn language_summary_omits_languages_below_one_percent() {
+    fn language_summary_includes_nonzero_languages_below_one_percent() {
         let summaries = language_summaries(
             [
                 ("Rust".to_owned(), 990),
@@ -171,12 +204,11 @@ mod tests {
         );
 
         assert_eq!(
-            summaries,
-            vec![CodebaseLanguageSummary {
-                name: "Rust".to_owned(),
-                code: 990,
-                percentage: 99,
-            }]
+            summaries
+                .iter()
+                .map(|summary| (summary.name.as_str(), summary.code, summary.percentage))
+                .collect::<Vec<_>>(),
+            vec![("Rust", 990, 99), ("TOML", 9, 1), ("Markdown", 1, 0)]
         );
     }
 
@@ -185,7 +217,42 @@ mod tests {
         let summaries = language_summaries([("Rust".to_owned(), 0)], 0);
 
         assert!(summaries.is_empty());
-        assert_eq!(format_language_summaries(&summaries), None);
+    }
+
+    #[test]
+    fn github_language_color_uses_linguist_color_and_fallback() {
+        assert_eq!(github_language_color("Rust"), 0xdea584);
+        assert_eq!(
+            github_language_color("Not A GitHub Language"),
+            GITHUB_LANGUAGE_FALLBACK_COLOR
+        );
+    }
+
+    #[test]
+    fn github_language_color_parser_accepts_rrggbb_hex_only() {
+        assert_eq!(parse_github_language_color("#dea584"), Some(0xdea584));
+        assert_eq!(parse_github_language_color("dea584"), None);
+        assert_eq!(parse_github_language_color("#dea58"), None);
+        assert_eq!(parse_github_language_color("#nothex"), None);
+    }
+
+    #[test]
+    fn language_segment_widths_fill_bar_and_preserve_dominant_language() {
+        let summaries = language_summaries(
+            [
+                ("Rust".to_owned(), 84),
+                ("TOML".to_owned(), 10),
+                ("Markdown".to_owned(), 6),
+            ],
+            100,
+        );
+
+        let widths = language_segment_widths(&summaries, 100, 200.0);
+        let total_width = widths.iter().sum::<f32>();
+
+        assert_eq!(summaries[0].name, "Rust");
+        assert!(widths[0] > widths[1]);
+        assert!((total_width - 200.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -207,6 +274,14 @@ mod tests {
 
         let summary = scan_codebase_summary(temp.path()).expect("codebase summary");
 
-        assert_eq!(summary.text, Some("Rust 100% (1 LoC)".to_owned()));
+        assert_eq!(summary.total_code, 1);
+        assert_eq!(
+            summary
+                .languages
+                .iter()
+                .map(|summary| (summary.name.as_str(), summary.code, summary.percentage))
+                .collect::<Vec<_>>(),
+            vec![("Rust", 1, 100)]
+        );
     }
 }
