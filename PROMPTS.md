@@ -4,9 +4,8 @@
 
 - Improve readme - add screenshots / branding
 - Large icons grid view improvements:
-    - Native icon resolution is very low and those icons are blurry
-    - Row item gap should grow/shrink so items occupy full width (instead of a static gap)
-    - Change item name max-rows from 3 to 2, also fix elipsis for the overflow on the 2nd row
+    - Add row gap of 2px
+    - Remove the static height from each item. Add a maximum height, that allows for 3 rows of item filename. Row height expands to match the tallest item (this is what Windows Explorer does)
 
 ## 2
 
@@ -60,7 +59,6 @@ Major remaining Windows Explorer parity areas:
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - Open With "Custom" needs a rework (it doesn't work)
 - Image metadata
-    - Implement a new "Preview" tab for images, renders the full-res image. Supports as many filetypes as possible.
     - Rotate images Left/Right
     - Edit metadata values
 - Video metadata

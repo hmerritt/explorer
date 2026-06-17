@@ -7,9 +7,7 @@ use gpui::{Modifiers, ScrollStrategy};
 
 use crate::{
     explorer::{
-        constants::LARGE_ICON_TILE_HEIGHT,
-        entry::FileEntry,
-        mouse_selection::{large_icon_grid_columns, large_icon_grid_row_for_index},
+        constants::LARGE_ICON_TILE_HEIGHT, entry::FileEntry, mouse_selection::LargeIconGridMetrics,
         view::ExplorerView,
     },
     settings::FileViewMode,
@@ -243,8 +241,7 @@ impl ExplorerView {
 
     fn scroll_large_icon_index_into_view(&self, ix: usize) {
         if let Some(metrics) = self.scrollbar_metrics() {
-            let columns = large_icon_grid_columns(metrics.viewport_width);
-            let row = large_icon_grid_row_for_index(ix, columns);
+            let row = LargeIconGridMetrics::new(metrics.viewport_width).row_for_index(ix);
             let row_top = row as f32 * LARGE_ICON_TILE_HEIGHT;
             let row_bottom = row_top + LARGE_ICON_TILE_HEIGHT;
             let viewport_bottom = metrics.scroll_top + metrics.viewport_height;

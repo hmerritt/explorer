@@ -2819,7 +2819,7 @@ fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
     groups
 }
 
-const EXIF_VALUE_TOO_BIG_LABEL: &str = "<value too big to display>";
+const EXIF_VALUE_TOO_LARGE_LABEL: &str = "<value too large to display>";
 const EXIF_NON_STANDARD_VALUE_CHAR_LIMIT: usize = 1024;
 const EXIF_STANDARD_VALUE_CHAR_LIMIT: usize = 5120;
 
@@ -4388,10 +4388,10 @@ fn exif_ascii_value_label(values: &[Vec<u8>], char_limit: Option<usize>) -> Stri
         }
 
         if !label.is_empty() && label.write_str(", ").is_err() {
-            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+            return EXIF_VALUE_TOO_LARGE_LABEL.to_owned();
         }
         if label.write_str(value).is_err() {
-            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+            return EXIF_VALUE_TOO_LARGE_LABEL.to_owned();
         }
     }
 
@@ -4411,7 +4411,7 @@ fn bounded_exif_value_label(
         )
         .is_err()
         {
-            return EXIF_VALUE_TOO_BIG_LABEL.to_owned();
+            return EXIF_VALUE_TOO_LARGE_LABEL.to_owned();
         }
         label.into_string()
     } else {
@@ -6577,7 +6577,7 @@ mod tests {
                 PropertyDetailGroupKind::NonStandard,
                 "Tag(Tiff, 0xFDE8)"
             ),
-            Some(EXIF_VALUE_TOO_BIG_LABEL)
+            Some(EXIF_VALUE_TOO_LARGE_LABEL)
         );
     }
 
@@ -6592,7 +6592,7 @@ mod tests {
 
         assert_eq!(
             detail_value(&exif_groups, PropertyDetailGroupKind::Camera, "Make"),
-            Some(EXIF_VALUE_TOO_BIG_LABEL)
+            Some(EXIF_VALUE_TOO_LARGE_LABEL)
         );
     }
 

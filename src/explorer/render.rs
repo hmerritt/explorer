@@ -67,10 +67,7 @@ use crate::explorer::{
         file_icon, file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
-    mouse_selection::{
-        large_icon_grid_columns, large_icon_grid_row_count, local_point, selection_box_bounds,
-        viewport_size,
-    },
+    mouse_selection::{LargeIconGridMetrics, local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
@@ -1875,16 +1872,17 @@ impl ExplorerView {
     fn render_large_icon_row(
         &mut self,
         row_ix: usize,
-        columns: usize,
+        metrics: LargeIconGridMetrics,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let start = row_ix * columns;
-        let end = (start + columns).min(self.entries.len());
+        let start = row_ix * metrics.columns;
+        let end = (start + metrics.columns).min(self.entries.len());
         let mut row = div()
             .flex()
             .flex_row()
             .items_start()
+            .gap(px(metrics.column_gap))
             .h(px(LARGE_ICON_TILE_HEIGHT))
             .w_full();
 
@@ -2178,8 +2176,8 @@ impl ExplorerView {
         let entity = cx.entity();
         let current_directory = DropDestination::CurrentDirectory;
         let viewport_width = (self.list_viewport_width(window) - SCROLLBAR_GUTTER_WIDTH).max(0.0);
-        let columns = large_icon_grid_columns(viewport_width);
-        let row_count = large_icon_grid_row_count(self.entries.len(), columns);
+        let metrics = LargeIconGridMetrics::new(viewport_width);
+        let row_count = metrics.row_count(self.entries.len());
 
         div().flex().flex_col().size_full().overflow_hidden().child(
             div()
@@ -2304,7 +2302,7 @@ impl ExplorerView {
                                     let mut rows = Vec::with_capacity(range.end - range.start);
                                     for row_ix in range {
                                         rows.push(
-                                            this.render_large_icon_row(row_ix, columns, window, cx),
+                                            this.render_large_icon_row(row_ix, metrics, window, cx),
                                         );
                                     }
                                     rows
@@ -4979,6 +4977,7 @@ fn large_icon_filename(
         .text_size(px(LARGE_ICON_TEXT_SIZE))
         .line_height(px(LARGE_ICON_TEXT_LINE_HEIGHT))
         .font(font.clone())
+        .text_ellipsis()
         .line_clamp(LARGE_ICON_TEXT_ROWS)
         .child(
             entry

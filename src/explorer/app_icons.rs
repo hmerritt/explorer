@@ -19,15 +19,21 @@ use crate::{
 
 const NATIVE_ICON_LOAD_INTERVAL: Duration = Duration::from_millis(16);
 const URL_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v1";
+const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v3";
 const URL_ICON_CACHE_VERSION: &str = "url-icons-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "mappings.json";
 const DISK_ICON_DIR_NAME: &str = "icons";
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const NATIVE_ICON_NORMALIZED_PNG_SIZE: u32 = 128;
+const NATIVE_ICON_NORMALIZED_CONTENT_SIZE: u32 = 112;
+const NATIVE_ICON_UNDERSIZED_RATIO: f32 = 0.75;
+const NATIVE_ICON_CENTER_TOLERANCE_RATIO: f32 = 0.08;
 #[cfg(target_os = "macos")]
-const APP_ICON_PNG_SIZE: f64 = 32.0;
+const APP_ICON_PNG_SIZE: f64 = 128.0;
 #[cfg(target_os = "windows")]
-const WINDOWS_ICON_PNG_SIZE: i32 = 32;
+const WINDOWS_ICON_PNG_SIZE: i32 = 128;
+#[cfg(target_os = "linux")]
+const LINUX_ICON_PNG_SIZE: u32 = 128;
 
 pub(super) struct NativeIconCache {
     inner: RefCell<NativeIconCacheInner>,
@@ -237,7 +243,7 @@ impl NativeIconCacheInner {
             Some(NativeIconState::Pending { .. }) | None => None,
         };
 
-        let state = match bytes.and_then(valid_png_bytes) {
+        let state = match bytes.and_then(normalize_native_icon_png_bytes) {
             Some(bytes) => {
                 self.store.write_mapping(&request.key, &bytes);
                 NativeIconState::Ready(image_from_png_bytes(bytes))
@@ -1007,7 +1013,9 @@ fn load_linux_icon_png_bytes(request: &LinuxIconRequest) -> Option<Vec<u8>> {
         IconSource::Path(path) => path,
         IconSource::Name(name) => {
             let theme = freedesktop_icons::default_theme_gtk();
-            let lookup = freedesktop_icons::lookup(&name).with_size(32).with_cache();
+            let lookup = freedesktop_icons::lookup(&name)
+                .with_size(LINUX_ICON_PNG_SIZE as u16)
+                .with_cache();
             match theme {
                 Some(theme) => lookup.with_theme(&theme).find(),
                 None => lookup.find(),
@@ -1075,8 +1083,9 @@ fn linux_svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
     let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
     let size = tree.size();
-    let scale = (32.0 / size.width()).min(32.0 / size.height());
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32)?;
+    let target_size = LINUX_ICON_PNG_SIZE as f32;
+    let scale = (target_size / size.width()).min(target_size / size.height());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(LINUX_ICON_PNG_SIZE, LINUX_ICON_PNG_SIZE)?;
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
@@ -1094,13 +1103,102 @@ fn linux_svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "windows")]
 fn load_windows_shell_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
+    load_windows_image_list_icon_png_bytes(request)
+        .or_else(|| load_windows_file_info_icon_png_bytes(request))
+}
+
+#[cfg(target_os = "windows")]
+fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
+    use std::{mem, os::windows::ffi::OsStrExt};
+    use windows::{
+        Win32::{
+            Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES},
+            UI::{
+                Controls::{IImageList, ILD_TRANSPARENT},
+                Shell::{
+                    SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+                    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO,
+                },
+                WindowsAndMessaging::DestroyIcon,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    let (path, use_file_attributes) = match request {
+        WindowsIconRequest::Extension { extension } => {
+            (PathBuf::from(windows_extension_probe_name(extension)), true)
+        }
+        WindowsIconRequest::Path { path } => (path.clone(), false),
+    };
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if !use_file_attributes && unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let attributes = if use_file_attributes {
+        FILE_ATTRIBUTE_NORMAL
+    } else {
+        FILE_FLAGS_AND_ATTRIBUTES(0)
+    };
+    let mut flags = SHGFI_SYSICONINDEX | SHGFI_ADDOVERLAYS;
+    if use_file_attributes {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+    }
+
+    let mut info = SHFILEINFOW::default();
+    let result = unsafe {
+        SHGetFileInfoW(
+            PCWSTR::from_raw(wide_path.as_ptr()),
+            attributes,
+            Some(&mut info),
+            mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        )
+    };
+
+    if result == 0 {
+        return None;
+    }
+
+    for image_list_size in [SHIL_JUMBO, SHIL_EXTRALARGE] {
+        let Some(image_list) = unsafe { SHGetImageList::<IImageList>(image_list_size as i32) }.ok()
+        else {
+            continue;
+        };
+        let Some(icon) = unsafe { image_list.GetIcon(info.iIcon, ILD_TRANSPARENT.0) }.ok() else {
+            continue;
+        };
+        if icon.is_invalid() {
+            continue;
+        }
+
+        let bytes = unsafe { hicon_to_png_bytes(icon, WINDOWS_ICON_PNG_SIZE) };
+        let _ = unsafe { DestroyIcon(icon) };
+        if bytes.is_some() {
+            return bytes;
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn load_windows_file_info_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
     use std::{mem, os::windows::ffi::OsStrExt};
     use windows::{
         Win32::{
             Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES},
             UI::{
                 Shell::{
-                    SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_ICON, SHGFI_SMALLICON,
+                    SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_ICON, SHGFI_LARGEICON,
                     SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
                 },
                 WindowsAndMessaging::DestroyIcon,
@@ -1132,7 +1230,7 @@ fn load_windows_shell_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec
     } else {
         FILE_FLAGS_AND_ATTRIBUTES(0)
     };
-    let mut flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_ADDOVERLAYS;
+    let mut flags = SHGFI_ICON | SHGFI_LARGEICON | SHGFI_ADDOVERLAYS;
     if use_file_attributes {
         flags |= SHGFI_USEFILEATTRIBUTES;
     }
@@ -1364,19 +1462,19 @@ fn preferred_icon_type(available_icons: &[icns::IconType]) -> Option<icns::IconT
     let preferred = [
         IconType::RGBA32_128x128,
         IconType::RGBA32_128x128_2x,
-        IconType::RGBA32_32x32_2x,
-        IconType::RGBA32_32x32,
-        IconType::RGBA32_16x16_2x,
-        IconType::RGBA32_16x16,
-        IconType::RGB24_32x32,
-        IconType::RGB24_16x16,
-        IconType::RGBA32_64x64,
         IconType::RGBA32_256x256,
         IconType::RGBA32_256x256_2x,
         IconType::RGBA32_512x512,
         IconType::RGBA32_512x512_2x,
-        IconType::RGB24_48x48,
         IconType::RGB24_128x128,
+        IconType::RGBA32_64x64,
+        IconType::RGBA32_32x32_2x,
+        IconType::RGBA32_32x32,
+        IconType::RGB24_48x48,
+        IconType::RGBA32_16x16_2x,
+        IconType::RGBA32_16x16,
+        IconType::RGB24_32x32,
+        IconType::RGB24_16x16,
     ];
 
     preferred
@@ -1538,6 +1636,130 @@ fn image_from_png_bytes(bytes: Vec<u8>) -> Arc<Image> {
 
 fn valid_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
     bytes.starts_with(PNG_SIGNATURE).then_some(bytes)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AlphaBounds {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl AlphaBounds {
+    fn right(self) -> u32 {
+        self.x + self.width
+    }
+
+    fn bottom(self) -> u32 {
+        self.y + self.height
+    }
+}
+
+fn normalize_native_icon_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    let bytes = valid_png_bytes(bytes)?;
+    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let Some(bounds) = alpha_bounds(&image) else {
+        return None;
+    };
+    let (width, height) = image.dimensions();
+    if !native_icon_needs_normalization(width, height, bounds) {
+        return Some(bytes);
+    }
+
+    normalized_rgba_icon_png(&image, bounds)
+}
+
+fn alpha_bounds(image: &image::RgbaImage) -> Option<AlphaBounds> {
+    let (width, height) = image.dimensions();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel[3] == 0 {
+            continue;
+        }
+
+        found = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(AlphaBounds {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
+}
+
+fn native_icon_needs_normalization(width: u32, height: u32, bounds: AlphaBounds) -> bool {
+    if width != NATIVE_ICON_NORMALIZED_PNG_SIZE || height != NATIVE_ICON_NORMALIZED_PNG_SIZE {
+        return true;
+    }
+
+    let min_dimension = width.min(height) as f32;
+    let content_ratio = bounds.width.max(bounds.height) as f32 / min_dimension;
+    if content_ratio < NATIVE_ICON_UNDERSIZED_RATIO {
+        return true;
+    }
+
+    let image_center_x = width as f32 / 2.0;
+    let image_center_y = height as f32 / 2.0;
+    let content_center_x = (bounds.x + bounds.right()) as f32 / 2.0;
+    let content_center_y = (bounds.y + bounds.bottom()) as f32 / 2.0;
+    let tolerance = min_dimension * NATIVE_ICON_CENTER_TOLERANCE_RATIO;
+
+    (content_center_x - image_center_x).abs() > tolerance
+        || (content_center_y - image_center_y).abs() > tolerance
+}
+
+fn normalized_rgba_icon_png(image: &image::RgbaImage, bounds: AlphaBounds) -> Option<Vec<u8>> {
+    let cropped = image::imageops::crop_imm(image, bounds.x, bounds.y, bounds.width, bounds.height)
+        .to_image();
+    let scale = (NATIVE_ICON_NORMALIZED_CONTENT_SIZE as f32 / bounds.width as f32)
+        .min(NATIVE_ICON_NORMALIZED_CONTENT_SIZE as f32 / bounds.height as f32);
+    let resized_width = ((bounds.width as f32 * scale).round() as u32).max(1);
+    let resized_height = ((bounds.height as f32 * scale).round() as u32).max(1);
+    let resized = image::imageops::resize(
+        &cropped,
+        resized_width,
+        resized_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let mut canvas = image::RgbaImage::from_pixel(
+        NATIVE_ICON_NORMALIZED_PNG_SIZE,
+        NATIVE_ICON_NORMALIZED_PNG_SIZE,
+        image::Rgba([0, 0, 0, 0]),
+    );
+    let x = ((NATIVE_ICON_NORMALIZED_PNG_SIZE - resized_width) / 2) as i64;
+    let y = ((NATIVE_ICON_NORMALIZED_PNG_SIZE - resized_height) / 2) as i64;
+    image::imageops::overlay(&mut canvas, &resized, x, y);
+    encode_rgba_png_bytes(
+        canvas.as_raw(),
+        NATIVE_ICON_NORMALIZED_PNG_SIZE,
+        NATIVE_ICON_NORMALIZED_PNG_SIZE,
+    )
+}
+
+fn encode_rgba_png_bytes(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    valid_png_bytes(bytes)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1828,11 +2050,27 @@ mod tests {
     };
 
     fn one_pixel_png_bytes() -> Vec<u8> {
-        vec![
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0,
-            5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-        ]
+        encode_rgba_png_bytes(&[0, 0, 0, 255], 1, 1).expect("encode test png")
+    }
+
+    fn test_png_with_rect(width: u32, height: u32, rect: Option<AlphaBounds>) -> Vec<u8> {
+        let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+        if let Some(rect) = rect {
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    image.put_pixel(x, y, image::Rgba([200, 40, 10, 255]));
+                }
+            }
+        }
+
+        encode_rgba_png_bytes(image.as_raw(), width, height).expect("encode test png")
+    }
+
+    fn decoded_alpha_bounds(bytes: Vec<u8>) -> AlphaBounds {
+        let image = image::load_from_memory(&bytes)
+            .expect("decode png")
+            .to_rgba8();
+        alpha_bounds(&image).expect("alpha bounds")
     }
 
     fn test_request(key: &str) -> NativeIconRequest {
@@ -1844,6 +2082,90 @@ mod tests {
 
     fn cache_with_dir(cache_dir: Option<PathBuf>) -> NativeIconCacheInner {
         NativeIconCacheInner::new(DiskIconStore::load(cache_dir))
+    }
+
+    #[test]
+    fn native_icon_cache_version_invalidates_old_low_resolution_icons() {
+        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v3");
+    }
+
+    #[test]
+    fn native_icon_normalization_centers_and_scales_small_top_left_content() {
+        let bytes = test_png_with_rect(
+            128,
+            128,
+            Some(AlphaBounds {
+                x: 0,
+                y: 0,
+                width: 36,
+                height: 36,
+            }),
+        );
+
+        let normalized = normalize_native_icon_png_bytes(bytes).expect("normalized png");
+        let bounds = decoded_alpha_bounds(normalized);
+
+        assert_eq!(
+            bounds,
+            AlphaBounds {
+                x: 8,
+                y: 8,
+                width: 112,
+                height: 112
+            }
+        );
+    }
+
+    #[test]
+    fn native_icon_normalization_preserves_non_square_aspect_ratio() {
+        let bytes = test_png_with_rect(
+            128,
+            128,
+            Some(AlphaBounds {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 64,
+            }),
+        );
+
+        let normalized = normalize_native_icon_png_bytes(bytes).expect("normalized png");
+        let bounds = decoded_alpha_bounds(normalized);
+
+        assert_eq!(
+            bounds,
+            AlphaBounds {
+                x: 36,
+                y: 8,
+                width: 56,
+                height: 112
+            }
+        );
+    }
+
+    #[test]
+    fn native_icon_normalization_leaves_centered_full_size_content_unchanged() {
+        let bytes = test_png_with_rect(
+            128,
+            128,
+            Some(AlphaBounds {
+                x: 8,
+                y: 8,
+                width: 112,
+                height: 112,
+            }),
+        );
+
+        assert_eq!(normalize_native_icon_png_bytes(bytes.clone()), Some(bytes));
+    }
+
+    #[test]
+    fn native_icon_normalization_rejects_transparent_and_invalid_pngs() {
+        let transparent = test_png_with_rect(128, 128, None);
+
+        assert!(normalize_native_icon_png_bytes(transparent).is_none());
+        assert!(normalize_native_icon_png_bytes(b"not png".to_vec()).is_none());
+        assert!(normalize_native_icon_png_bytes(PNG_SIGNATURE.to_vec()).is_none());
     }
 
     #[test]

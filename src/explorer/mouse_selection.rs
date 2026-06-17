@@ -354,6 +354,62 @@ pub(super) fn row_indices_intersecting_content_box_with_row_height(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LargeIconGridMetrics {
+    pub(super) columns: usize,
+    pub(super) column_gap: f32,
+}
+
+impl LargeIconGridMetrics {
+    pub(super) fn new(viewport_width: f32) -> Self {
+        let columns = large_icon_grid_columns(viewport_width);
+        let column_gap = if columns > 1 {
+            ((viewport_width - LARGE_ICON_TILE_WIDTH * columns as f32) / (columns - 1) as f32)
+                .max(0.0)
+        } else {
+            0.0
+        };
+
+        Self {
+            columns,
+            column_gap,
+        }
+    }
+
+    pub(super) fn row_count(self, entry_count: usize) -> usize {
+        large_icon_grid_row_count(entry_count, self.columns)
+    }
+
+    pub(super) fn row_for_index(self, ix: usize) -> usize {
+        large_icon_grid_row_for_index(ix, self.columns)
+    }
+
+    pub(super) fn index_bounds(self, ix: usize) -> (f32, f32, f32, f32) {
+        let column = ix % self.columns;
+        let row = self.row_for_index(ix);
+        let stride = LARGE_ICON_TILE_WIDTH + self.column_gap;
+
+        (
+            column as f32 * stride,
+            row as f32 * LARGE_ICON_TILE_HEIGHT,
+            LARGE_ICON_TILE_WIDTH,
+            LARGE_ICON_TILE_HEIGHT,
+        )
+    }
+
+    fn column_at_x(self, content_x: f32) -> Option<usize> {
+        for column in 0..self.columns {
+            let left = column as f32 * (LARGE_ICON_TILE_WIDTH + self.column_gap);
+            let right = left + LARGE_ICON_TILE_WIDTH;
+            if content_x >= left && content_x < right {
+                return Some(column);
+            }
+        }
+
+        None
+    }
+}
+
 pub(super) fn large_icon_grid_columns(viewport_width: f32) -> usize {
     (viewport_width / LARGE_ICON_TILE_WIDTH).floor().max(1.0) as usize
 }
@@ -370,19 +426,6 @@ pub(super) fn large_icon_grid_row_for_index(ix: usize, columns: usize) -> usize 
     ix / columns.max(1)
 }
 
-pub(super) fn large_icon_grid_index_bounds(ix: usize, columns: usize) -> (f32, f32, f32, f32) {
-    let columns = columns.max(1);
-    let column = ix % columns;
-    let row = large_icon_grid_row_for_index(ix, columns);
-
-    (
-        column as f32 * LARGE_ICON_TILE_WIDTH,
-        row as f32 * LARGE_ICON_TILE_HEIGHT,
-        LARGE_ICON_TILE_WIDTH,
-        LARGE_ICON_TILE_HEIGHT,
-    )
-}
-
 pub(super) fn large_icon_grid_indices_intersecting_content_box(
     selection_box: SelectionBox,
     viewport_width: f32,
@@ -392,8 +435,8 @@ pub(super) fn large_icon_grid_indices_intersecting_content_box(
         return BTreeSet::new();
     }
 
-    let columns = large_icon_grid_columns(viewport_width);
-    let row_count = large_icon_grid_row_count(entry_count, columns);
+    let metrics = LargeIconGridMetrics::new(viewport_width);
+    let row_count = metrics.row_count(entry_count);
     if row_count == 0 {
         return BTreeSet::new();
     }
@@ -407,12 +450,12 @@ pub(super) fn large_icon_grid_indices_intersecting_content_box(
 
     (first_row..=last_row)
         .flat_map(|row| {
-            let start = row * columns;
-            let end = (start + columns).min(entry_count);
+            let start = row * metrics.columns;
+            let end = (start + metrics.columns).min(entry_count);
             start..end
         })
         .filter(|ix| {
-            let (left, top, width, height) = large_icon_grid_index_bounds(*ix, columns);
+            let (left, top, width, height) = metrics.index_bounds(*ix);
             left < selection_box.left + selection_box.width
                 && left + width > selection_box.left
                 && top < selection_box.bottom()
@@ -574,14 +617,11 @@ fn large_icon_grid_index_at_content_point(
         return None;
     }
 
-    let columns = large_icon_grid_columns(viewport_width);
-    let column = (content_x / LARGE_ICON_TILE_WIDTH).floor() as usize;
+    let metrics = LargeIconGridMetrics::new(viewport_width);
+    let column = metrics.column_at_x(content_x)?;
     let row = (content_y / LARGE_ICON_TILE_HEIGHT).floor() as usize;
-    if column >= columns {
-        return None;
-    }
 
-    let ix = row * columns + column;
+    let ix = row * metrics.columns + column;
     (ix < entry_count).then_some(ix)
 }
 
@@ -649,17 +689,69 @@ mod tests {
     }
 
     #[test]
+    fn large_icon_grid_metrics_distribute_extra_width_as_column_gap() {
+        let metrics = LargeIconGridMetrics::new(LARGE_ICON_TILE_WIDTH * 3.0 + 60.0);
+
+        assert_eq!(metrics.columns, 3);
+        assert_eq!(metrics.column_gap, 30.0);
+        assert_eq!(
+            metrics.index_bounds(1),
+            (
+                LARGE_ICON_TILE_WIDTH + 30.0,
+                0.0,
+                LARGE_ICON_TILE_WIDTH,
+                LARGE_ICON_TILE_HEIGHT
+            )
+        );
+        assert_eq!(
+            metrics.index_bounds(2),
+            (
+                (LARGE_ICON_TILE_WIDTH + 30.0) * 2.0,
+                0.0,
+                LARGE_ICON_TILE_WIDTH,
+                LARGE_ICON_TILE_HEIGHT
+            )
+        );
+    }
+
+    #[test]
+    fn large_icon_grid_metrics_keep_partial_final_rows_left_aligned() {
+        let metrics = LargeIconGridMetrics::new(LARGE_ICON_TILE_WIDTH * 3.0 + 60.0);
+
+        assert_eq!(metrics.row_count(5), 2);
+        assert_eq!(
+            metrics.index_bounds(3),
+            (
+                0.0,
+                LARGE_ICON_TILE_HEIGHT,
+                LARGE_ICON_TILE_WIDTH,
+                LARGE_ICON_TILE_HEIGHT
+            )
+        );
+        assert_eq!(
+            metrics.index_bounds(4),
+            (
+                LARGE_ICON_TILE_WIDTH + 30.0,
+                LARGE_ICON_TILE_HEIGHT,
+                LARGE_ICON_TILE_WIDTH,
+                LARGE_ICON_TILE_HEIGHT
+            )
+        );
+    }
+
+    #[test]
     fn large_icon_grid_intersections_use_tile_rectangles() {
+        let gap = 30.0;
         let box_over_second_column = SelectionBox::new(
-            LARGE_ICON_TILE_WIDTH + 1.0,
+            LARGE_ICON_TILE_WIDTH + gap + 1.0,
             1.0,
-            LARGE_ICON_TILE_WIDTH * 2.0 - 1.0,
+            LARGE_ICON_TILE_WIDTH * 2.0 + gap - 1.0,
             LARGE_ICON_TILE_HEIGHT - 1.0,
         );
 
         let indices = large_icon_grid_indices_intersecting_content_box(
             box_over_second_column,
-            LARGE_ICON_TILE_WIDTH * 3.0,
+            LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
             6,
         );
 
@@ -667,11 +759,30 @@ mod tests {
     }
 
     #[test]
+    fn large_icon_grid_intersections_ignore_dynamic_column_gaps() {
+        let gap = 30.0;
+        let box_inside_gap = SelectionBox::new(
+            LARGE_ICON_TILE_WIDTH + 1.0,
+            1.0,
+            LARGE_ICON_TILE_WIDTH + gap - 1.0,
+            LARGE_ICON_TILE_HEIGHT - 1.0,
+        );
+
+        let indices = large_icon_grid_indices_intersecting_content_box(
+            box_inside_gap,
+            LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
+            6,
+        );
+
+        assert!(indices.is_empty());
+    }
+
+    #[test]
     fn large_icon_grid_intersections_span_rows() {
         let selection_box = SelectionBox::new(
             LARGE_ICON_TILE_WIDTH - 1.0,
             LARGE_ICON_TILE_HEIGHT - 1.0,
-            LARGE_ICON_TILE_WIDTH + 1.0,
+            LARGE_ICON_TILE_WIDTH * 2.0 + 1.0,
             LARGE_ICON_TILE_HEIGHT + 1.0,
         );
 
@@ -682,6 +793,31 @@ mod tests {
         );
 
         assert_eq!(indices, BTreeSet::from([0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn large_icon_pointer_drag_intent_treats_dynamic_column_gap_as_rubber_band() {
+        let gap = 30.0;
+        assert_eq!(
+            large_icon_pointer_drag_intent_at(
+                LARGE_ICON_TILE_WIDTH + gap / 2.0,
+                1.0,
+                0.0,
+                LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
+                6,
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            large_icon_pointer_drag_intent_at(
+                LARGE_ICON_TILE_WIDTH + gap + 1.0,
+                1.0,
+                0.0,
+                LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
+                6,
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
     }
 
     #[test]
