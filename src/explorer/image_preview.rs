@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use gpui::RenderImage;
@@ -18,6 +19,24 @@ pub(super) struct PropertyImagePreview {
     pub(super) image: Arc<RenderImage>,
     pub(super) width: u32,
     pub(super) height: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ImageThumbnailExtractionTimings {
+    pub(super) source_read: Option<Duration>,
+    pub(super) format_detect: Option<Duration>,
+    pub(super) raster_decode: Option<Duration>,
+    pub(super) rgba_convert: Option<Duration>,
+    pub(super) svg_parse: Option<Duration>,
+    pub(super) svg_render: Option<Duration>,
+    pub(super) svg_unpremultiply: Option<Duration>,
+    pub(super) resize_canvas: Option<Duration>,
+    pub(super) png_encode: Option<Duration>,
+}
+
+pub(super) struct TimedImageThumbnailPng {
+    pub(super) result: Result<Vec<u8>, String>,
+    pub(super) timings: ImageThumbnailExtractionTimings,
 }
 
 pub(super) fn path_may_have_image_preview(path: &Path) -> bool {
@@ -49,22 +68,55 @@ pub(super) fn load_image_thumbnail_png(path: &Path, size: u32) -> Result<Vec<u8>
     load_image_thumbnail_png_with_cancel(path, size, &cancel)
 }
 
+#[cfg(test)]
 pub(super) fn load_image_thumbnail_png_with_cancel(
     path: &Path,
     size: u32,
     cancel: &AtomicBool,
+) -> Result<Vec<u8>, String> {
+    load_image_thumbnail_png_with_cancel_timed(path, size, cancel, false).result
+}
+
+pub(super) fn load_image_thumbnail_png_with_cancel_timed(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+) -> TimedImageThumbnailPng {
+    let mut timings = ImageThumbnailExtractionTimings::default();
+    let result = load_image_thumbnail_png_with_cancel_timed_result(
+        path,
+        size,
+        cancel,
+        timings_enabled,
+        &mut timings,
+    );
+    TimedImageThumbnailPng { result, timings }
+}
+
+fn load_image_thumbnail_png_with_cancel_timed_result(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
 ) -> Result<Vec<u8>, String> {
     if size == 0 {
         return Err("Thumbnail target has no dimensions.".to_owned());
     }
 
     check_image_cancelled(cancel)?;
-    let image = load_image_rgba_with_cancel(path, size, cancel)?;
+    let image = load_image_rgba_with_cancel_timed(path, size, cancel, timings_enabled, timings)?;
     check_image_cancelled(cancel)?;
-    let thumbnail = fit_rgba_image_on_square_canvas(image, size)?;
+    let resize_started = thumbnail_timing_started(timings_enabled);
+    let thumbnail = fit_rgba_image_on_square_canvas(image, size);
+    thumbnail_timing_finished(&mut timings.resize_canvas, resize_started);
+    let thumbnail = thumbnail?;
     check_image_cancelled(cancel)?;
-    encode_rgba_png_bytes(thumbnail.as_raw(), size, size)
-        .ok_or_else(|| "Failed to encode image thumbnail.".to_owned())
+    let encode_started = thumbnail_timing_started(timings_enabled);
+    let encoded = encode_rgba_png_bytes(thumbnail.as_raw(), size, size);
+    thumbnail_timing_finished(&mut timings.png_encode, encode_started);
+    encoded.ok_or_else(|| "Failed to encode image thumbnail.".to_owned())
 }
 
 fn load_image_rgba(path: &Path, svg_longest_side: u32) -> Result<image::RgbaImage, String> {
@@ -77,35 +129,94 @@ fn load_image_rgba_with_cancel(
     svg_longest_side: u32,
     cancel: &AtomicBool,
 ) -> Result<image::RgbaImage, String> {
-    check_image_cancelled(cancel)?;
-    if path_is_svg(path) {
-        return load_svg_rgba_with_cancel(path, svg_longest_side, cancel);
-    }
-
-    let bytes = fs::read(path).map_err(|error| format!("Failed to read image file: {error}"))?;
-    check_image_cancelled(cancel)?;
-    let format = image::guess_format(&bytes)
-        .or_else(|_| image::ImageFormat::from_path(path))
-        .map_err(|error| format!("Unsupported image format: {error}"))?;
-    check_image_cancelled(cancel)?;
-    let image = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|error| format!("Failed to decode image: {error}"))?;
-    check_image_cancelled(cancel)?;
-    Ok(image.into_rgba8())
+    let mut timings = ImageThumbnailExtractionTimings::default();
+    load_image_rgba_with_cancel_timed(path, svg_longest_side, cancel, false, &mut timings)
 }
 
-fn load_svg_rgba_with_cancel(
+fn load_image_rgba_with_cancel_timed(
+    path: &Path,
+    svg_longest_side: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
+) -> Result<image::RgbaImage, String> {
+    check_image_cancelled(cancel)?;
+    if path_is_svg(path) {
+        return load_svg_rgba_with_cancel_timed(
+            path,
+            svg_longest_side,
+            cancel,
+            timings_enabled,
+            timings,
+        );
+    }
+
+    let read_started = thumbnail_timing_started(timings_enabled);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            thumbnail_timing_finished(&mut timings.source_read, read_started);
+            return Err(format!("Failed to read image file: {error}"));
+        }
+    };
+    thumbnail_timing_finished(&mut timings.source_read, read_started);
+    check_image_cancelled(cancel)?;
+    let format_started = thumbnail_timing_started(timings_enabled);
+    let format = image::guess_format(&bytes).or_else(|_| image::ImageFormat::from_path(path));
+    thumbnail_timing_finished(&mut timings.format_detect, format_started);
+    let format = format.map_err(|error| format!("Unsupported image format: {error}"))?;
+    check_image_cancelled(cancel)?;
+    let decode_started = thumbnail_timing_started(timings_enabled);
+    let image = image::load_from_memory_with_format(&bytes, format);
+    thumbnail_timing_finished(&mut timings.raster_decode, decode_started);
+    let image = image.map_err(|error| format!("Failed to decode image: {error}"))?;
+    check_image_cancelled(cancel)?;
+    let rgba_started = thumbnail_timing_started(timings_enabled);
+    let image = image.into_rgba8();
+    thumbnail_timing_finished(&mut timings.rgba_convert, rgba_started);
+    Ok(image)
+}
+
+fn load_svg_rgba_with_cancel_timed(
     path: &Path,
     longest_side: u32,
     cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
 ) -> Result<image::RgbaImage, String> {
     check_image_cancelled(cancel)?;
-    let bytes = fs::read(path).map_err(|error| format!("Failed to read SVG file: {error}"))?;
+    let read_started = thumbnail_timing_started(timings_enabled);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            thumbnail_timing_finished(&mut timings.source_read, read_started);
+            return Err(format!("Failed to read SVG file: {error}"));
+        }
+    };
+    thumbnail_timing_finished(&mut timings.source_read, read_started);
     check_image_cancelled(cancel)?;
     let options = usvg::Options::default();
-    let tree = usvg::Tree::from_data(&bytes, &options)
-        .map_err(|error| format!("Failed to parse SVG: {error}"))?;
+    let parse_started = thumbnail_timing_started(timings_enabled);
+    let tree = usvg::Tree::from_data(&bytes, &options);
+    thumbnail_timing_finished(&mut timings.svg_parse, parse_started);
+    let tree = tree.map_err(|error| format!("Failed to parse SVG: {error}"))?;
     check_image_cancelled(cancel)?;
+    let render_started = thumbnail_timing_started(timings_enabled);
+    let image = render_svg_rgba(&tree, longest_side);
+    thumbnail_timing_finished(&mut timings.svg_render, render_started);
+    let mut image = image?;
+    check_image_cancelled(cancel)?;
+
+    let unpremultiply_started = thumbnail_timing_started(timings_enabled);
+    for pixel in image.chunks_exact_mut(4) {
+        unpremultiply_rgba(pixel);
+    }
+    thumbnail_timing_finished(&mut timings.svg_unpremultiply, unpremultiply_started);
+
+    Ok(image)
+}
+
+fn render_svg_rgba(tree: &usvg::Tree, longest_side: u32) -> Result<image::RgbaImage, String> {
     let svg_size = tree.size();
     let (width, height) = svg_raster_dimensions(svg_size.width(), svg_size.height(), longest_side)
         .ok_or_else(|| "SVG has no renderable dimensions.".to_owned())?;
@@ -113,19 +224,13 @@ fn load_svg_rgba_with_cancel(
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| "SVG raster target has invalid dimensions.".to_owned())?;
     resvg::render(
-        &tree,
+        tree,
         resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    check_image_cancelled(cancel)?;
 
-    let mut image = image::RgbaImage::from_raw(width, height, pixmap.take())
-        .ok_or_else(|| "SVG rasterizer returned invalid pixel data.".to_owned())?;
-    for pixel in image.chunks_exact_mut(4) {
-        unpremultiply_rgba(pixel);
-    }
-
-    Ok(image)
+    image::RgbaImage::from_raw(width, height, pixmap.take())
+        .ok_or_else(|| "SVG rasterizer returned invalid pixel data.".to_owned())
 }
 
 fn check_image_cancelled(cancel: &AtomicBool) -> Result<(), String> {
@@ -223,6 +328,16 @@ fn unpremultiply_rgba(color: &mut [u8]) {
     }
 }
 
+fn thumbnail_timing_started(enabled: bool) -> Option<Instant> {
+    enabled.then(Instant::now)
+}
+
+fn thumbnail_timing_finished(slot: &mut Option<Duration>, started: Option<Instant>) {
+    if let Some(started) = started {
+        *slot = Some(started.elapsed());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +421,32 @@ mod tests {
     }
 
     #[test]
+    fn timed_raster_thumbnail_records_extraction_stages() {
+        let temp = TempDir::new();
+        let path = temp.path().join("image.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let thumbnail = load_image_thumbnail_png_with_cancel_timed(&path, 128, &cancel, true);
+
+        assert!(thumbnail.result.is_ok());
+        assert!(thumbnail.timings.source_read.is_some());
+        assert!(thumbnail.timings.format_detect.is_some());
+        assert!(thumbnail.timings.raster_decode.is_some());
+        assert!(thumbnail.timings.rgba_convert.is_some());
+        assert!(thumbnail.timings.resize_canvas.is_some());
+        assert!(thumbnail.timings.png_encode.is_some());
+        assert!(thumbnail.timings.svg_parse.is_none());
+        assert!(thumbnail.timings.svg_render.is_none());
+        assert!(thumbnail.timings.svg_unpremultiply.is_none());
+    }
+
+    #[test]
     fn svg_thumbnail_png_uses_square_128px_canvas() {
         let temp = TempDir::new();
         let path = temp.path().join("vector.svg");
@@ -319,6 +460,31 @@ mod tests {
         let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
 
         assert_eq!(decoded.dimensions(), (128, 128));
+    }
+
+    #[test]
+    fn timed_svg_thumbnail_records_extraction_stages() {
+        let temp = TempDir::new();
+        let path = temp.path().join("vector.svg");
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="250"><rect width="1000" height="250" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let thumbnail = load_image_thumbnail_png_with_cancel_timed(&path, 128, &cancel, true);
+
+        assert!(thumbnail.result.is_ok());
+        assert!(thumbnail.timings.source_read.is_some());
+        assert!(thumbnail.timings.svg_parse.is_some());
+        assert!(thumbnail.timings.svg_render.is_some());
+        assert!(thumbnail.timings.svg_unpremultiply.is_some());
+        assert!(thumbnail.timings.resize_canvas.is_some());
+        assert!(thumbnail.timings.png_encode.is_some());
+        assert!(thumbnail.timings.format_detect.is_none());
+        assert!(thumbnail.timings.raster_decode.is_none());
+        assert!(thumbnail.timings.rgba_convert.is_none());
     }
 
     fn assert_render_image_size(preview: &PropertyImagePreview, width: u32, height: u32) {

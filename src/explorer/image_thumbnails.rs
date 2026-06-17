@@ -15,7 +15,10 @@ use gpui::{App, Context, Global, Image};
 use crate::{
     explorer::{
         entry::FileEntry,
-        image_preview::{load_image_thumbnail_png_with_cancel, path_may_have_image_preview},
+        image_preview::{
+            ImageThumbnailExtractionTimings, load_image_thumbnail_png_with_cancel_timed,
+            path_may_have_image_preview,
+        },
         view::ExplorerView,
     },
     settings::{APP_ID, ConfigPlatform, config_dir_for},
@@ -367,27 +370,36 @@ fn load_or_create_thumbnail_png_with_timings(
     }
 
     let extract_started = timings_enabled.then(Instant::now);
-    let bytes =
-        match load_image_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel) {
-            Ok(bytes) => bytes,
-            Err(_) if cancel.load(Ordering::Relaxed) => {
-                return ImageThumbnailLoadResult::cancelled_after_extract(
-                    cache_read_elapsed,
-                    extract_started.map(|started| started.elapsed()),
-                );
-            }
-            Err(_) => {
-                return ImageThumbnailLoadResult::failed(
-                    cache_read_elapsed,
-                    extract_started.map(|started| started.elapsed()),
-                );
-            }
-        };
+    let extracted = load_image_thumbnail_png_with_cancel_timed(
+        &request.path,
+        IMAGE_THUMBNAIL_SIZE,
+        cancel,
+        timings_enabled,
+    );
+    let extraction_timings = extracted.timings;
+    let bytes = match extracted.result {
+        Ok(bytes) => bytes,
+        Err(_) if cancel.load(Ordering::Relaxed) => {
+            return ImageThumbnailLoadResult::cancelled_after_extract(
+                cache_read_elapsed,
+                extract_started.map(|started| started.elapsed()),
+                extraction_timings,
+            );
+        }
+        Err(_) => {
+            return ImageThumbnailLoadResult::failed(
+                cache_read_elapsed,
+                extract_started.map(|started| started.elapsed()),
+                extraction_timings,
+            );
+        }
+    };
     let extract_elapsed = extract_started.map(|started| started.elapsed());
     if cancel.load(Ordering::Relaxed) {
         return ImageThumbnailLoadResult::cancelled_after_extract(
             cache_read_elapsed,
             extract_elapsed,
+            extraction_timings,
         );
     }
 
@@ -401,6 +413,7 @@ fn load_or_create_thumbnail_png_with_timings(
             cache_read_elapsed,
             extract_elapsed,
             cache_write_elapsed,
+            extraction_timings,
         );
     }
 
@@ -409,6 +422,7 @@ fn load_or_create_thumbnail_png_with_timings(
         cache_read_elapsed,
         extract_elapsed,
         cache_write_elapsed,
+        extraction_timings,
     )
 }
 
@@ -418,6 +432,7 @@ struct ImageThumbnailLoadResult {
     cache_read_elapsed: Option<Duration>,
     extract_elapsed: Option<Duration>,
     cache_write_elapsed: Option<Duration>,
+    extraction_timings: ImageThumbnailExtractionTimings,
     outcome: ImageThumbnailLoadOutcome,
 }
 
@@ -437,6 +452,7 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed,
             extract_elapsed: None,
             cache_write_elapsed: None,
+            extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::CacheHit,
         }
     }
@@ -446,6 +462,7 @@ impl ImageThumbnailLoadResult {
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
         cache_write_elapsed: Option<Duration>,
+        extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         Self {
             bytes: Some(bytes),
@@ -453,17 +470,23 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed,
             extract_elapsed,
             cache_write_elapsed,
+            extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Generated,
         }
     }
 
-    fn failed(cache_read_elapsed: Option<Duration>, extract_elapsed: Option<Duration>) -> Self {
+    fn failed(
+        cache_read_elapsed: Option<Duration>,
+        extract_elapsed: Option<Duration>,
+        extraction_timings: ImageThumbnailExtractionTimings,
+    ) -> Self {
         Self {
             bytes: None,
             cache_hit: Some(false),
             cache_read_elapsed,
             extract_elapsed,
             cache_write_elapsed: None,
+            extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Failed,
         }
     }
@@ -475,6 +498,7 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed: None,
             extract_elapsed: None,
             cache_write_elapsed: None,
+            extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
     }
@@ -486,6 +510,7 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed,
             extract_elapsed: None,
             cache_write_elapsed: None,
+            extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
     }
@@ -493,6 +518,7 @@ impl ImageThumbnailLoadResult {
     fn cancelled_after_extract(
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
+        extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         Self {
             bytes: None,
@@ -500,6 +526,7 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed,
             extract_elapsed,
             cache_write_elapsed: None,
+            extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
     }
@@ -508,6 +535,7 @@ impl ImageThumbnailLoadResult {
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
         cache_write_elapsed: Option<Duration>,
+        extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         Self {
             bytes: None,
@@ -515,6 +543,7 @@ impl ImageThumbnailLoadResult {
             cache_read_elapsed,
             extract_elapsed,
             cache_write_elapsed,
+            extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
     }
@@ -534,6 +563,15 @@ struct ImageThumbnailTimingBatch {
     queue_wait: ImageThumbnailStageTimingStats,
     cache_read: ImageThumbnailStageTimingStats,
     extract: ImageThumbnailStageTimingStats,
+    source_read: ImageThumbnailStageTimingStats,
+    format_detect: ImageThumbnailStageTimingStats,
+    raster_decode: ImageThumbnailStageTimingStats,
+    rgba_convert: ImageThumbnailStageTimingStats,
+    svg_parse: ImageThumbnailStageTimingStats,
+    svg_render: ImageThumbnailStageTimingStats,
+    svg_unpremultiply: ImageThumbnailStageTimingStats,
+    resize_canvas: ImageThumbnailStageTimingStats,
+    png_encode: ImageThumbnailStageTimingStats,
     cache_write: ImageThumbnailStageTimingStats,
     commit: ImageThumbnailStageTimingStats,
     request_total: ImageThumbnailStageTimingStats,
@@ -596,6 +634,7 @@ impl ImageThumbnailTimingBatch {
         if let Some(elapsed) = result.extract_elapsed {
             self.extract.record(elapsed);
         }
+        self.record_extraction_timings(&result.extraction_timings);
         if let Some(elapsed) = result.cache_write_elapsed {
             self.cache_write.record(elapsed);
         }
@@ -616,6 +655,21 @@ impl ImageThumbnailTimingBatch {
         if let Some(started) = started {
             self.commit.record(started.elapsed());
         }
+    }
+
+    fn record_extraction_timings(&mut self, timings: &ImageThumbnailExtractionTimings) {
+        record_image_thumbnail_stage_if_some(&mut self.source_read, timings.source_read);
+        record_image_thumbnail_stage_if_some(&mut self.format_detect, timings.format_detect);
+        record_image_thumbnail_stage_if_some(&mut self.raster_decode, timings.raster_decode);
+        record_image_thumbnail_stage_if_some(&mut self.rgba_convert, timings.rgba_convert);
+        record_image_thumbnail_stage_if_some(&mut self.svg_parse, timings.svg_parse);
+        record_image_thumbnail_stage_if_some(&mut self.svg_render, timings.svg_render);
+        record_image_thumbnail_stage_if_some(
+            &mut self.svg_unpremultiply,
+            timings.svg_unpremultiply,
+        );
+        record_image_thumbnail_stage_if_some(&mut self.resize_canvas, timings.resize_canvas);
+        record_image_thumbnail_stage_if_some(&mut self.png_encode, timings.png_encode);
     }
 
     fn record_discarded(&mut self) {
@@ -667,6 +721,15 @@ impl ImageThumbnailTimingBatch {
         push_image_thumbnail_stage_line(&mut lines, "queue_wait", &self.queue_wait);
         push_image_thumbnail_stage_line(&mut lines, "cache_read", &self.cache_read);
         push_image_thumbnail_stage_line(&mut lines, "extract", &self.extract);
+        push_image_thumbnail_stage_line(&mut lines, "source_read", &self.source_read);
+        push_image_thumbnail_stage_line(&mut lines, "format_detect", &self.format_detect);
+        push_image_thumbnail_stage_line(&mut lines, "raster_decode", &self.raster_decode);
+        push_image_thumbnail_stage_line(&mut lines, "rgba_convert", &self.rgba_convert);
+        push_image_thumbnail_stage_line(&mut lines, "svg_parse", &self.svg_parse);
+        push_image_thumbnail_stage_line(&mut lines, "svg_render", &self.svg_render);
+        push_image_thumbnail_stage_line(&mut lines, "svg_unpremultiply", &self.svg_unpremultiply);
+        push_image_thumbnail_stage_line(&mut lines, "resize_canvas", &self.resize_canvas);
+        push_image_thumbnail_stage_line(&mut lines, "png_encode", &self.png_encode);
         push_image_thumbnail_stage_line(&mut lines, "cache_write", &self.cache_write);
         push_image_thumbnail_stage_line(&mut lines, "commit", &self.commit);
         push_image_thumbnail_stage_line(&mut lines, "request_total", &self.request_total);
@@ -712,6 +775,15 @@ fn push_image_thumbnail_stage_line(
 ) {
     if let Some(line) = stats.format_line(stage) {
         lines.push(line);
+    }
+}
+
+fn record_image_thumbnail_stage_if_some(
+    stats: &mut ImageThumbnailStageTimingStats,
+    elapsed: Option<Duration>,
+) {
+    if let Some(elapsed) = elapsed {
+        stats.record(elapsed);
     }
 }
 
@@ -987,6 +1059,52 @@ mod tests {
         assert!(summary.contains("failed=1"));
         assert!(summary.contains("cancelled=1"));
         assert!(summary.contains("discarded=1"));
+    }
+
+    #[test]
+    fn image_thumbnail_timing_batch_formats_extraction_stage_lines() {
+        let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
+        batch.requests = 1;
+        let result = ImageThumbnailLoadResult::generated(
+            vec![1],
+            None,
+            Some(Duration::from_millis(10)),
+            None,
+            ImageThumbnailExtractionTimings {
+                source_read: Some(Duration::from_millis(1)),
+                format_detect: Some(Duration::from_millis(2)),
+                raster_decode: Some(Duration::from_millis(3)),
+                rgba_convert: Some(Duration::from_millis(4)),
+                svg_parse: Some(Duration::from_millis(5)),
+                svg_render: Some(Duration::from_millis(6)),
+                svg_unpremultiply: Some(Duration::from_millis(7)),
+                resize_canvas: Some(Duration::from_millis(8)),
+                png_encode: Some(Duration::from_millis(9)),
+            },
+        );
+
+        batch.record_load_result(&result);
+        let lines = batch.format_lines(Duration::from_millis(20));
+
+        for stage in [
+            "extract",
+            "source_read",
+            "format_detect",
+            "raster_decode",
+            "rgba_convert",
+            "svg_parse",
+            "svg_render",
+            "svg_unpremultiply",
+            "resize_canvas",
+            "png_encode",
+        ] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with(&format!("image_thumbnails {stage} "))),
+                "missing timing line for {stage}"
+            );
+        }
     }
 
     #[test]
