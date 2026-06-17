@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
-    io::BufReader,
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -20,6 +20,7 @@ use gpui::{
     TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
     WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
+use sha2::{Digest, Sha256, Sha512};
 use thousands::Separable;
 
 #[cfg(test)]
@@ -530,7 +531,7 @@ impl PropertiesDialog {
         let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
             return;
         };
-        if single_file_media_path(&snapshot.target, snapshot.item_kind).is_none() {
+        if single_file_path(&snapshot.target, snapshot.item_kind).is_none() {
             self.details_state = PropertyDetailsState::Ready(Vec::new());
             return;
         }
@@ -545,7 +546,7 @@ impl PropertiesDialog {
                 .spawn(async move {
                     let path_count = target.paths.len();
                     let started = Instant::now();
-                    let groups = collect_single_file_media_detail_groups(&target, item_kind);
+                    let groups = collect_single_file_detail_groups(&target, item_kind);
                     crate::debug_options::log_property_timing(
                         started.elapsed(),
                         format_args!(
@@ -1530,7 +1531,7 @@ impl PropertiesDialog {
                     .pt(px(12.0))
                     .text_color(rgb(PROPERTIES_MUTED_TEXT))
                     .truncate()
-                    .child("Loading media metadata..."),
+                    .child("Loading details..."),
             );
         }
 
@@ -2633,37 +2634,34 @@ const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
 
 fn single_file_image_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
-    if !matches!(item_kind, PropertyItemKind::SingleFile) {
-        return None;
-    }
-    let path = target.paths.first()?;
-    path_may_have_image_preview(path).then_some(path.as_path())
+    let path = single_file_path(target, item_kind)?;
+    path_may_have_image_preview(path).then_some(path)
 }
 
 fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
+    let path = single_file_path(target, item_kind)?;
+    path_may_have_video_metadata(path).then_some(path)
+}
+
+fn single_file_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
         return None;
     }
-    let path = target.paths.first()?;
-    path_may_have_video_metadata(path).then_some(path.as_path())
+    target.paths.first().map(PathBuf::as_path)
 }
 
-fn single_file_media_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
-    if !matches!(item_kind, PropertyItemKind::SingleFile) {
-        return None;
-    }
-    let path = target.paths.first()?;
-    path_may_have_media_details(path).then_some(path.as_path())
-}
-
-fn collect_single_file_media_detail_groups(
+fn collect_single_file_detail_groups(
     target: &PropertyTarget,
     item_kind: PropertyItemKind,
 ) -> Vec<PropertyDetailGroup> {
-    let Some(path) = single_file_media_path(target, item_kind) else {
+    let Some(path) = single_file_path(target, item_kind) else {
         return Vec::new();
     };
-    media_details(path)
+    let mut groups = file_checksum_details(path);
+    if path_may_have_media_details(path) {
+        groups.extend(media_details(path));
+    }
+    groups
 }
 
 fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
@@ -2675,6 +2673,63 @@ fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
         groups.extend(video_details(path));
     }
     groups
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileChecksums {
+    crc32: String,
+    sha256: String,
+    sha512: String,
+}
+
+fn file_checksum_details(path: &Path) -> Vec<PropertyDetailGroup> {
+    let Ok(checksums) = file_checksums(path) else {
+        return Vec::new();
+    };
+
+    vec![property_detail_group(
+        PropertyDetailGroupKind::File,
+        vec![
+            PropertyDetail {
+                name: "CRC32".to_owned(),
+                value: checksums.crc32,
+            },
+            PropertyDetail {
+                name: "SHA256".to_owned(),
+                value: checksums.sha256,
+            },
+            PropertyDetail {
+                name: "SHA512".to_owned(),
+                value: checksums.sha512,
+            },
+        ],
+    )]
+}
+
+fn file_checksums(path: &Path) -> std::io::Result<FileChecksums> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut crc32 = crc32fast::Hasher::new();
+    let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
+    let mut buffer = [0_u8; 64 * 1024];
+
+    loop {
+        let byte_count = reader.read(&mut buffer)?;
+        if byte_count == 0 {
+            break;
+        }
+        let bytes = &buffer[..byte_count];
+        crc32.update(bytes);
+        sha256.update(bytes);
+        sha512.update(bytes);
+    }
+
+    Ok(FileChecksums {
+        crc32: format!("{:08x}", crc32.finalize()),
+        sha256: format!("{:x}", sha256.finalize()),
+        sha512: format!("{:x}", sha512.finalize()),
+    })
 }
 
 const EXIF_VALUE_TOO_LARGE_LABEL: &str = "<value too large to display>";
@@ -4977,10 +5032,14 @@ fn detail_groups_for_render(
     snapshot: &PropertySnapshot,
     details_state: &PropertyDetailsState,
 ) -> Vec<PropertyDetailGroup> {
-    let mut groups = snapshot.details.clone();
-    if let PropertyDetailsState::Ready(exif_groups) = details_state {
-        groups.extend(exif_groups.iter().cloned());
-    }
+    let mut groups = match details_state {
+        PropertyDetailsState::Ready(extra_groups) => {
+            merge_detail_groups([snapshot.details.as_slice(), extra_groups.as_slice()])
+        }
+        PropertyDetailsState::NotStarted | PropertyDetailsState::Loading => {
+            snapshot.details.clone()
+        }
+    };
     groups.sort_by_key(|group| group.kind);
     groups
 }
@@ -6510,14 +6569,126 @@ mod tests {
     }
 
     #[test]
-    fn multiple_file_properties_do_not_collect_media_metadata() {
+    fn file_checksums_match_known_values() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let checksums = file_checksums(&file).unwrap();
+
+        assert_eq!(checksums.crc32, "352441c2");
+        assert_eq!(
+            checksums.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            checksums.sha512,
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+    }
+
+    #[test]
+    fn single_file_details_include_file_checksums() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let groups = collect_single_file_detail_groups(
+            &PropertyTarget { paths: vec![file] },
+            PropertyItemKind::SingleFile,
+        );
+
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::File, "CRC32"),
+            Some("352441c2")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::File, "SHA256"),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::File, "SHA512"),
+            Some(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+            )
+        );
+    }
+
+    #[test]
+    fn non_single_file_properties_do_not_collect_file_checksums() {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.txt");
+        let second = temp.path().join("b.txt");
+        let folder = temp.path().join("folder");
+        let missing = temp.path().join("missing.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let folder_groups = collect_single_file_detail_groups(
+            &PropertyTarget {
+                paths: vec![folder],
+            },
+            PropertyItemKind::SingleFolder,
+        );
+        let missing_groups = collect_single_file_detail_groups(
+            &PropertyTarget {
+                paths: vec![missing],
+            },
+            PropertyItemKind::Missing,
+        );
+        let multiple_groups = collect_single_file_detail_groups(
+            &PropertyTarget {
+                paths: vec![first, second],
+            },
+            PropertyItemKind::MultipleFiles,
+        );
+
+        assert!(folder_groups.is_empty());
+        assert!(missing_groups.is_empty());
+        assert!(multiple_groups.is_empty());
+    }
+
+    #[test]
+    fn rendered_details_merge_async_file_group_into_snapshot_file_group() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+        let snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![file.clone()],
+        })
+        .unwrap();
+        let extra_groups = file_checksum_details(&file);
+
+        let groups =
+            detail_groups_for_render(&snapshot, &PropertyDetailsState::Ready(extra_groups));
+
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.kind == PropertyDetailGroupKind::File)
+                .count(),
+            1
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::File, "Name"),
+            Some("a.txt")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::File, "CRC32"),
+            Some("352441c2")
+        );
+    }
+
+    #[test]
+    fn multiple_file_properties_do_not_collect_extra_details() {
         let temp = TempDir::new();
         let first = temp.path().join("a.jpg");
         let second = temp.path().join("b.jpg");
         fs::write(&first, jpeg_with_exif(&exif_tiff("Canon", "A", None))).unwrap();
         fs::write(&second, jpeg_with_exif(&exif_tiff("Nikon", "B", None))).unwrap();
 
-        let groups = collect_single_file_media_detail_groups(
+        let groups = collect_single_file_detail_groups(
             &PropertyTarget {
                 paths: vec![first, second],
             },

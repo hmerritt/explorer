@@ -3,13 +3,12 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Currently native icons are fetched to accomodate Large Icon view. There are scaling issues with Details view where these larger icons look bad when scaled down. I would like to implement separate native-icon cache for Details/Large Icons sizes.
+- Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2
 
-- [Windows-only] detext WSL Linux install, show drive for it
+- [Windows-only] detect WSL Linux install, show drive for it
 - UI refinement and improvements (tighten everything up, make it look nice)
-- Codebase support. When git is detected, scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 3
