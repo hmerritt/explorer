@@ -236,6 +236,7 @@ impl ExplorerTabs {
         observe_tab_view(&view, window, cx);
 
         self.tabs.push(ExplorerTab { id, view });
+        self.cancel_active_tab_thumbnail_extraction(cx);
         self.active_tab = id;
         self.scroll_active_tab_into_view();
     }
@@ -264,6 +265,7 @@ impl ExplorerTabs {
             return;
         }
 
+        self.cancel_active_tab_thumbnail_extraction(cx);
         self.active_tab = id;
         self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
@@ -395,7 +397,13 @@ impl ExplorerTabs {
             return;
         };
         let next_index = adjacent_tab_index(active_index, self.tabs.len(), direction);
-        self.active_tab = self.tabs[next_index].id;
+        let next_tab = self.tabs[next_index].id;
+        if next_tab == self.active_tab {
+            return;
+        }
+
+        self.cancel_active_tab_thumbnail_extraction(cx);
+        self.active_tab = next_tab;
         self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
     }
@@ -410,6 +418,7 @@ impl ExplorerTabs {
             return false;
         };
 
+        self.cancel_active_tab_thumbnail_extraction(cx);
         self.active_tab = target_id;
         self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
@@ -431,6 +440,14 @@ impl ExplorerTabs {
     fn scroll_active_tab_into_view(&self) {
         if let Some(index) = self.active_tab_index() {
             self.tab_scroll_handle.scroll_to_item(index);
+        }
+    }
+
+    fn cancel_active_tab_thumbnail_extraction(&self, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_tab() {
+            let _ = tab.view.update(cx, |view, cx| {
+                view.cancel_image_thumbnail_extraction(cx);
+            });
         }
     }
 

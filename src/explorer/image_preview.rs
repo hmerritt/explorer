@@ -1,4 +1,11 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use gpui::RenderImage;
 use image::ImageEncoder;
@@ -36,36 +43,69 @@ pub(super) fn load_property_image_preview(path: &Path) -> Result<PropertyImagePr
     property_image_preview_from_rgba(image)
 }
 
+#[cfg(test)]
 pub(super) fn load_image_thumbnail_png(path: &Path, size: u32) -> Result<Vec<u8>, String> {
+    let cancel = AtomicBool::new(false);
+    load_image_thumbnail_png_with_cancel(path, size, &cancel)
+}
+
+pub(super) fn load_image_thumbnail_png_with_cancel(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, String> {
     if size == 0 {
         return Err("Thumbnail target has no dimensions.".to_owned());
     }
 
-    let image = load_image_rgba(path, size)?;
+    check_image_cancelled(cancel)?;
+    let image = load_image_rgba_with_cancel(path, size, cancel)?;
+    check_image_cancelled(cancel)?;
     let thumbnail = fit_rgba_image_on_square_canvas(image, size)?;
+    check_image_cancelled(cancel)?;
     encode_rgba_png_bytes(thumbnail.as_raw(), size, size)
         .ok_or_else(|| "Failed to encode image thumbnail.".to_owned())
 }
 
 fn load_image_rgba(path: &Path, svg_longest_side: u32) -> Result<image::RgbaImage, String> {
+    let cancel = AtomicBool::new(false);
+    load_image_rgba_with_cancel(path, svg_longest_side, &cancel)
+}
+
+fn load_image_rgba_with_cancel(
+    path: &Path,
+    svg_longest_side: u32,
+    cancel: &AtomicBool,
+) -> Result<image::RgbaImage, String> {
+    check_image_cancelled(cancel)?;
     if path_is_svg(path) {
-        return load_svg_rgba(path, svg_longest_side);
+        return load_svg_rgba_with_cancel(path, svg_longest_side, cancel);
     }
 
     let bytes = fs::read(path).map_err(|error| format!("Failed to read image file: {error}"))?;
+    check_image_cancelled(cancel)?;
     let format = image::guess_format(&bytes)
         .or_else(|_| image::ImageFormat::from_path(path))
         .map_err(|error| format!("Unsupported image format: {error}"))?;
-    image::load_from_memory_with_format(&bytes, format)
-        .map_err(|error| format!("Failed to decode image: {error}"))
-        .map(|image| image.into_rgba8())
+    check_image_cancelled(cancel)?;
+    let image = image::load_from_memory_with_format(&bytes, format)
+        .map_err(|error| format!("Failed to decode image: {error}"))?;
+    check_image_cancelled(cancel)?;
+    Ok(image.into_rgba8())
 }
 
-fn load_svg_rgba(path: &Path, longest_side: u32) -> Result<image::RgbaImage, String> {
+fn load_svg_rgba_with_cancel(
+    path: &Path,
+    longest_side: u32,
+    cancel: &AtomicBool,
+) -> Result<image::RgbaImage, String> {
+    check_image_cancelled(cancel)?;
     let bytes = fs::read(path).map_err(|error| format!("Failed to read SVG file: {error}"))?;
+    check_image_cancelled(cancel)?;
     let options = usvg::Options::default();
     let tree = usvg::Tree::from_data(&bytes, &options)
         .map_err(|error| format!("Failed to parse SVG: {error}"))?;
+    check_image_cancelled(cancel)?;
     let svg_size = tree.size();
     let (width, height) = svg_raster_dimensions(svg_size.width(), svg_size.height(), longest_side)
         .ok_or_else(|| "SVG has no renderable dimensions.".to_owned())?;
@@ -77,6 +117,7 @@ fn load_svg_rgba(path: &Path, longest_side: u32) -> Result<image::RgbaImage, Str
         resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
+    check_image_cancelled(cancel)?;
 
     let mut image = image::RgbaImage::from_raw(width, height, pixmap.take())
         .ok_or_else(|| "SVG rasterizer returned invalid pixel data.".to_owned())?;
@@ -85,6 +126,14 @@ fn load_svg_rgba(path: &Path, longest_side: u32) -> Result<image::RgbaImage, Str
     }
 
     Ok(image)
+}
+
+fn check_image_cancelled(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err("Image thumbnail loading was cancelled.".to_owned())
+    } else {
+        Ok(())
+    }
 }
 
 fn property_image_preview_from_rgba(

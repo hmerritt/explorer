@@ -801,6 +801,7 @@ impl ExplorerView {
     }
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
+        self.cancel_image_thumbnail_extraction(cx);
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
         self.finish_search_edit();

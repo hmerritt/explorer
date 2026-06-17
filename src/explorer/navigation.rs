@@ -97,6 +97,9 @@ impl ExplorerView {
             self.forward_stack.clear();
         }
 
+        if let Some(cx) = cx.as_deref_mut() {
+            self.cancel_image_thumbnail_extraction(cx);
+        }
         self.path = path;
         self.reset_search_for_navigation();
         self.clear_selection();
