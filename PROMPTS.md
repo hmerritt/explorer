@@ -3,11 +3,11 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- [Windows-only] detect WSL Linux install, show drive for it
 - Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2
 
+- Settings option to hide drives (WSL ones you may not want)
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 

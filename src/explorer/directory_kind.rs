@@ -1,7 +1,7 @@
 use crate::explorer::filesystem::{
     local_drive_roots, macos_applications_dir, macos_bin_dir, user_desktop_dir, user_documents_dir,
     user_downloads_dir, user_home_dir, user_music_dir, user_pictures_dir, user_videos_dir,
-    windows_local_os_drive_root,
+    windows_local_os_drive_root, wsl_drive_roots,
 };
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -19,6 +19,7 @@ pub enum DirectoryKind {
     Bin,
     Drive,
     DriveWindows,
+    DriveWsl,
 }
 
 pub fn resolve_directory_kind(path: &Path) -> Option<DirectoryKind> {
@@ -32,10 +33,11 @@ pub fn resolve_directory_kind(path: &Path) -> Option<DirectoryKind> {
             dirs.push((root.clone(), DirectoryKind::DriveWindows));
         }
 
-        if let Some(roots) = Some(local_drive_roots()) {
-            for root in roots {
-                dirs.push((root.clone(), DirectoryKind::Drive));
-            }
+        for root in local_drive_roots() {
+            dirs.push((root.clone(), DirectoryKind::Drive));
+        }
+        for root in wsl_drive_roots() {
+            dirs.push((root.clone(), DirectoryKind::DriveWsl));
         }
 
         if let Some(p) = &home {

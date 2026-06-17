@@ -67,7 +67,7 @@ pub use entry::FileEntry;
 pub(crate) use filesystem::{
     default_start_path, drive_display_label, local_drive_roots, macos_applications_dir,
     macos_bin_dir, user_desktop_dir, user_documents_dir, user_downloads_dir, user_home_dir,
-    user_music_dir, user_pictures_dir, user_videos_dir,
+    user_music_dir, user_pictures_dir, user_videos_dir, wsl_drive_roots,
 };
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 pub(crate) use image_thumbnails::initialize as initialize_image_thumbnail_cache;

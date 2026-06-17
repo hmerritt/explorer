@@ -1438,6 +1438,34 @@ mod tests {
     }
 
     #[test]
+    fn unconfigured_wsl_sidebar_menu_uses_wsl_icon_kind() {
+        let path = PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\");
+        let items = sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::DriveWsl));
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open".to_owned(),
+                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::DriveWsl))),
+                label: "Open".to_owned(),
+                command: ContextMenuCommand::OpenDirectory { path: path.clone() },
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            items[1],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-open-new-tab".to_owned(),
+                icon: Some(ContextMenuIcon::NewTab),
+                label: "Open in new tab".to_owned(),
+                command: ContextMenuCommand::OpenDirectoryInNewTab { path },
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
     fn entry_menu_for_single_folder_contains_open_actions_and_rename_state() {
         let path = PathBuf::from("/tmp/folder-target");
         let items = entry_context_menu_items(Some(path.clone()), 1, 0, 1, false, false);

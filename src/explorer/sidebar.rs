@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::explorer::filesystem::windows_local_os_drive_root;
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
-    user_home_dir,
+    user_home_dir, wsl_drive_roots,
 };
 use crate::settings::SidebarLocation;
 
@@ -21,14 +21,24 @@ pub(super) enum SidebarItemKind {
     CustomDirectory,
     Drive,
     DriveWindows,
+    DriveWsl,
 }
 
 pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarSections {
+    sidebar_sections_from_roots(configured_items, local_drive_roots(), wsl_drive_roots())
+}
+
+fn sidebar_sections_from_roots(
+    configured_items: &[SidebarLocation],
+    drive_roots: Vec<PathBuf>,
+    wsl_roots: Vec<PathBuf>,
+) -> SidebarSections {
     let home_dir = user_home_dir();
     SidebarSections {
         user_directories: configured_sidebar_items(configured_items),
         macos_system_locations: macos_system_location_items(home_dir.as_deref()),
-        drives: drive_items_from_roots(local_drive_roots()),
+        drives: drive_items_from_roots(drive_roots),
+        wsl_drives: wsl_drive_items_from_roots(wsl_roots),
     }
 }
 
@@ -37,6 +47,7 @@ pub(super) struct SidebarSections {
     pub(super) user_directories: Vec<SidebarItem>,
     pub(super) macos_system_locations: Vec<SidebarItem>,
     pub(super) drives: Vec<SidebarItem>,
+    pub(super) wsl_drives: Vec<SidebarItem>,
 }
 
 #[cfg(test)]
@@ -193,6 +204,18 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
         .collect()
 }
 
+fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
+    roots
+        .into_iter()
+        .map(|path| SidebarItem {
+            label: sidebar_wsl_drive_label(&path),
+            path,
+            kind: SidebarItemKind::DriveWsl,
+            configured_index: None,
+        })
+        .collect()
+}
+
 fn sidebar_drive_label(path: &Path) -> String {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -202,6 +225,17 @@ fn sidebar_drive_label(path: &Path) -> String {
     }
 
     drive_display_label(path)
+}
+
+fn sidebar_wsl_drive_label(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Linux")
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -412,5 +446,47 @@ mod tests {
         } else {
             assert_eq!(items[0].label, "Filesystem");
         }
+    }
+
+    #[test]
+    fn wsl_drive_items_use_distribution_labels_and_wsl_kind() {
+        let roots = vec![
+            PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\"),
+            PathBuf::from("\\\\wsl.localhost\\docker-desktop\\"),
+        ];
+
+        let items = wsl_drive_items_from_roots(roots.clone());
+
+        assert_eq!(
+            items,
+            vec![
+                SidebarItem {
+                    label: "Ubuntu-24.04".to_owned(),
+                    path: roots[0].clone(),
+                    kind: SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                },
+                SidebarItem {
+                    label: "docker-desktop".to_owned(),
+                    path: roots[1].clone(),
+                    kind: SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_sections_keep_wsl_drives_separate_from_local_drives() {
+        let sections = sidebar_sections_from_roots(
+            &[],
+            vec![PathBuf::from("X:\\")],
+            vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
+        );
+
+        assert_eq!(sections.drives.len(), 1);
+        assert_eq!(sections.wsl_drives.len(), 1);
+        assert_eq!(sections.wsl_drives[0].label, "Ubuntu-24.04");
+        assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
     }
 }

@@ -218,6 +218,16 @@ pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn wsl_drive_roots() -> Vec<PathBuf> {
+    wsl_drive_roots_from_distribution_names(windows_wsl_distribution_names())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn wsl_drive_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 pub(crate) fn drive_display_label(path: &Path) -> String {
     let display = path.display().to_string();
 
@@ -276,6 +286,182 @@ fn windows_drive_display_label(path_display: &str, volume_label: Option<&str>) -
 #[cfg(target_os = "windows")]
 fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
     matches!(drive_type, 2 | 3 | 5 | 6)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn wsl_drive_roots_from_distribution_names<I, S>(names: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut names = names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.as_ref().trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+
+    names.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+
+    names.into_iter().map(wsl_drive_root).collect()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn wsl_drive_root(name: String) -> PathBuf {
+    let mut path = String::from(r"\\wsl.localhost\");
+    path.push_str(&name);
+    path.push('\\');
+    PathBuf::from(path)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wsl_distribution_names() -> Vec<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    use windows::core::PCWSTR;
+
+    const WSL_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
+    const DISTRIBUTION_NAME_VALUE: &str = "DistributionName";
+
+    let key_path = wide_null(WSL_REGISTRY_PATH);
+    let mut root = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_path.as_ptr()),
+            None,
+            KEY_READ,
+            &mut root,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Vec::new();
+    }
+
+    let mut names = Vec::new();
+    for subkey in windows_registry_subkey_names(root) {
+        if let Some(name) = windows_registry_string_value(root, &subkey, DISTRIBUTION_NAME_VALUE) {
+            names.push(name);
+        }
+    }
+
+    let _ = unsafe { RegCloseKey(root) };
+    names
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_subkey_names(root: windows::Win32::System::Registry::HKEY) -> Vec<String> {
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::RegEnumKeyExW;
+    use windows::core::PWSTR;
+
+    let mut names = Vec::new();
+    let mut index = 0;
+
+    loop {
+        let mut capacity = 256usize;
+        let mut found = None;
+
+        loop {
+            let mut buffer = vec![0u16; capacity];
+            let mut len = buffer.len() as u32;
+            let status = unsafe {
+                RegEnumKeyExW(
+                    root,
+                    index,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+
+            if status == ERROR_NO_MORE_ITEMS {
+                return names;
+            }
+            if status == ERROR_MORE_DATA {
+                capacity *= 2;
+                continue;
+            }
+            if status == ERROR_SUCCESS {
+                buffer.truncate(len as usize);
+                found = String::from_utf16(&buffer).ok();
+            }
+            break;
+        }
+
+        if let Some(name) = found.filter(|name| !name.is_empty()) {
+            names.push(name);
+        }
+        index += 1;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_string_value(
+    root: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    value_name: &str,
+) -> Option<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{REG_VALUE_TYPE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::PCWSTR;
+
+    let subkey = wide_null(subkey);
+    let value_name = wide_null(value_name);
+    let mut value_type = REG_VALUE_TYPE(0);
+    let mut byte_len = 0u32;
+
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            Some(&mut value_type),
+            None,
+            Some(&mut byte_len),
+        )
+    };
+    if status != ERROR_SUCCESS || byte_len < 2 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; byte_len.div_ceil(2) as usize];
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut byte_len),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let mut char_len = (byte_len / 2) as usize;
+    if char_len > 0 && buffer.get(char_len - 1) == Some(&0) {
+        char_len -= 1;
+    }
+    String::from_utf16(&buffer[..char_len]).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -3467,6 +3653,28 @@ mod tests {
     #[test]
     fn local_drive_roots_falls_back_to_unix_root() {
         assert_eq!(local_drive_roots(), vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn wsl_drive_roots_from_distribution_names_builds_sorted_unc_roots() {
+        let roots =
+            wsl_drive_roots_from_distribution_names(["Ubuntu-24.04", "docker-desktop", "Alpine"]);
+
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("\\\\wsl.localhost\\Alpine\\"),
+                PathBuf::from("\\\\wsl.localhost\\docker-desktop\\"),
+                PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\"),
+            ]
+        );
+    }
+
+    #[test]
+    fn wsl_drive_roots_from_distribution_names_omits_blank_names() {
+        let roots = wsl_drive_roots_from_distribution_names(["", "  ", "Ubuntu"]);
+
+        assert_eq!(roots, vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu\\")]);
     }
 
     #[test]

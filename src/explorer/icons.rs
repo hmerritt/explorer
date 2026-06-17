@@ -123,6 +123,7 @@ png_icon!(
     "macos-applications.png"
 );
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
+png_icon!(DRIVE_WSL_ICON, "devices/drives", "network.png");
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
@@ -381,6 +382,10 @@ pub(super) fn drive_windows_icon() -> AnyElement {
     image_sidebar_icon(DRIVE_WINDOWS_ICON.clone())
 }
 
+pub(super) fn drive_wsl_icon() -> AnyElement {
+    image_sidebar_icon(DRIVE_WSL_ICON.clone())
+}
+
 pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
     match kind {
         DirectoryKind::Home => folder_sidebar_icon().into_any_element(),
@@ -394,6 +399,7 @@ pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
         DirectoryKind::Bin => bin_sidebar_icon(),
         DirectoryKind::Drive => drive_icon(),
         DirectoryKind::DriveWindows => drive_windows_icon(),
+        DirectoryKind::DriveWsl => drive_wsl_icon(),
     }
 }
 
@@ -410,6 +416,7 @@ pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyEl
         DirectoryKind::Bin => BIN_SIDEBAR_ICON.clone(),
         DirectoryKind::Drive => DRIVE_ICON.clone(),
         DirectoryKind::DriveWindows => DRIVE_WINDOWS_ICON.clone(),
+        DirectoryKind::DriveWsl => DRIVE_WSL_ICON.clone(),
     };
     image_icon(image, size, size)
 }

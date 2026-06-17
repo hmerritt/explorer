@@ -65,8 +65,8 @@ use crate::explorer::{
         LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
         PROPERTIES_ICON, RENAME_ICON, directory_kind_icon, directory_kind_icon_sized,
         directory_shortcut_icon, directory_shortcut_icon_sized, drive_icon, drive_windows_icon,
-        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
-        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
+        drive_wsl_icon, executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized,
+        folder_icon, folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{LargeIconLayout, large_icon_filename_text_width, large_icon_max_tile_height},
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
@@ -1123,6 +1123,17 @@ impl ExplorerView {
                 children.push(sidebar_item_gap().into_any_element());
             }
             children.push(self.render_sidebar_row(index + 2_000, item, cx));
+        }
+
+        if !children.is_empty() && !sections.wsl_drives.is_empty() {
+            children.push(sidebar_separator().into_any_element());
+        }
+
+        for (index, item) in sections.wsl_drives.iter().cloned().enumerate() {
+            if index > 0 {
+                children.push(sidebar_item_gap().into_any_element());
+            }
+            children.push(self.render_sidebar_row(index + 3_000, item, cx));
         }
 
         div()
@@ -3174,7 +3185,7 @@ fn sidebar_separator() -> Div {
     div()
         .h(px(1.0))
         .mx(px(12.0))
-        .my(px(12.0))
+        .my(px(18.0))
         .bg(rgb(0xe5e5e5))
         .flex_shrink_0()
 }
@@ -3213,6 +3224,7 @@ fn sidebar_context_menu_target(
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
+        SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
     };
     (item.path.clone(), item.configured_index, open_icon_kind)
 }
@@ -3251,6 +3263,7 @@ fn sidebar_item_kind_icon(kind: SidebarItemKind) -> AnyElement {
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
+        SidebarItemKind::DriveWsl => drive_wsl_icon().into_any_element(),
     }
 }
 
@@ -5665,6 +5678,12 @@ mod tests {
             kind: SidebarItemKind::DriveWindows,
             configured_index: None,
         };
+        let wsl_drive = SidebarItem {
+            label: "Ubuntu".to_owned(),
+            path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+            kind: SidebarItemKind::DriveWsl,
+            configured_index: None,
+        };
 
         assert_eq!(
             sidebar_context_menu_target(&custom),
@@ -5692,6 +5711,14 @@ mod tests {
                 PathBuf::from("C:\\"),
                 None,
                 Some(DirectoryKind::DriveWindows)
+            )
+        );
+        assert_eq!(
+            sidebar_context_menu_target(&wsl_drive),
+            (
+                PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+                None,
+                Some(DirectoryKind::DriveWsl)
             )
         );
     }
