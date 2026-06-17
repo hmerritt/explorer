@@ -939,14 +939,43 @@ struct MacApplication {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MacApplicationPickerOptions {
+    show_always_open_with: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacApplicationPickerOptions {
+    fn open_with() -> Self {
+        Self {
+            show_always_open_with: true,
+        }
+    }
+
+    fn change_default() -> Self {
+        Self {
+            show_always_open_with: false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MacApplicationSelection {
+    application: PathBuf,
+    always_open_with: bool,
+}
+
+#[cfg(target_os = "macos")]
 fn mac_change_default_application_for_file(
     path: &Path,
     _: &Window,
 ) -> io::Result<DefaultAppChangeOutcome> {
-    let Some(application) = mac_choose_application()? else {
+    let Some(selection) = mac_choose_application(MacApplicationPickerOptions::change_default())?
+    else {
         return Ok(DefaultAppChangeOutcome::Cancelled);
     };
-    mac_set_default_application_for_file_type(path, &application)?;
+    mac_set_default_application_for_file_type(path, &selection.application)?;
     Ok(DefaultAppChangeOutcome::Changed)
 }
 
@@ -959,10 +988,15 @@ fn mac_open_file(path: &Path, intent: &OpenFileIntent) -> io::Result<OpenWithOut
             open::that_detached(path).map(|_| OpenWithOutcome::opened(false))
         }
         OpenFileIntent::Default | OpenFileIntent::ChooseApplication => {
-            let Some(application) = mac_choose_application()? else {
+            let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with())?
+            else {
                 return Ok(OpenWithOutcome::Cancelled);
             };
-            mac_open_with_application(path, &application)
+            if selection.always_open_with {
+                mac_set_default_application_for_file_type(path, &selection.application)?;
+            }
+            mac_open_with_application(path, &selection.application)?;
+            Ok(OpenWithOutcome::opened(selection.always_open_with))
         }
         OpenFileIntent::SpecificApplication(application) => {
             mac_open_with_application(path, application)
@@ -1185,7 +1219,19 @@ fn deduplicate_mac_applications(applications: Vec<MacApplication>) -> Vec<MacApp
 }
 
 #[cfg(target_os = "macos")]
-fn mac_choose_application() -> io::Result<Option<PathBuf>> {
+const MAC_NS_BUTTON_TYPE_SWITCH: usize = 3;
+#[cfg(any(target_os = "macos", test))]
+const MAC_NS_CONTROL_STATE_VALUE_ON: isize = 1;
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_control_state_is_checked(state: isize) -> bool {
+    state == MAC_NS_CONTROL_STATE_VALUE_ON
+}
+
+#[cfg(target_os = "macos")]
+fn mac_choose_application(
+    options: MacApplicationPickerOptions,
+) -> io::Result<Option<MacApplicationSelection>> {
     use cocoa::{
         appkit::{NSModalResponse, NSOpenPanel, NSSavePanel},
         base::{NO, YES, id, nil},
@@ -1211,6 +1257,10 @@ fn mac_choose_application() -> io::Result<Option<PathBuf>> {
             let allowed_types = NSArray::arrayWithObject(nil, app_type);
             let _: () = msg_send![panel, setAllowedFileTypes: allowed_types];
 
+            let always_open_with_checkbox = options
+                .show_always_open_with
+                .then(|| mac_add_always_open_with_accessory(panel));
+
             if panel.runModal() != NSModalResponse::NSModalResponseOk {
                 return Ok(None);
             }
@@ -1220,10 +1270,54 @@ fn mac_choose_application() -> io::Result<Option<PathBuf>> {
             if !mac_is_application_bundle(&application) {
                 return Err(io::Error::other("selected item is not an application"));
             }
-            Ok(Some(application))
+            Ok(Some(MacApplicationSelection {
+                application,
+                always_open_with: always_open_with_checkbox
+                    .is_some_and(mac_always_open_with_checkbox_is_checked),
+            }))
         })();
         let _: () = msg_send![pool, drain];
         result
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn mac_add_always_open_with_accessory(panel: cocoa::base::id) -> cocoa::base::id {
+    use cocoa::{
+        base::{YES, id},
+        foundation::{NSPoint, NSRect, NSSize, NSString},
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let accessory_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 24.0));
+    let checkbox_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 24.0));
+
+    let accessory_view: id = msg_send![class!(NSView), alloc];
+    let accessory_view: id = msg_send![accessory_view, initWithFrame: accessory_frame];
+    let _: id = msg_send![accessory_view, autorelease];
+
+    let checkbox: id = msg_send![class!(NSButton), alloc];
+    let checkbox: id = msg_send![checkbox, initWithFrame: checkbox_frame];
+    let _: id = msg_send![checkbox, autorelease];
+    let _: () = msg_send![checkbox, setButtonType: MAC_NS_BUTTON_TYPE_SWITCH];
+    let title = NSString::alloc(nil).init_str("Always Open With");
+    let _: id = msg_send![title, autorelease];
+    let _: () = msg_send![checkbox, setTitle: title];
+    let _: () = msg_send![checkbox, setState: 0isize];
+
+    let _: () = msg_send![accessory_view, addSubview: checkbox];
+    let _: () = msg_send![panel, setAccessoryView: accessory_view];
+    let _: () = msg_send![panel, setAccessoryViewDisclosed: YES];
+    checkbox
+}
+
+#[cfg(target_os = "macos")]
+fn mac_always_open_with_checkbox_is_checked(checkbox: cocoa::base::id) -> bool {
+    use objc::{msg_send, sel, sel_impl};
+
+    unsafe {
+        let state: isize = msg_send![checkbox, state];
+        mac_control_state_is_checked(state)
     }
 }
 
@@ -1414,6 +1508,13 @@ mod tests {
             view.open_error.as_deref(),
             Some("Could not open file.txt: missing")
         );
+    }
+
+    #[test]
+    fn mac_control_state_checked_matches_only_on_state() {
+        assert!(!mac_control_state_is_checked(0));
+        assert!(mac_control_state_is_checked(1));
+        assert!(!mac_control_state_is_checked(-1));
     }
 
     #[test]
