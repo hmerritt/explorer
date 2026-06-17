@@ -6,7 +6,7 @@
 - Large icons grid view improvements:
     - Add image thumbnail extraction + cache, extract at 128px
     - Support SVG files by rasterizing them at 128px
-    - New settings item "mode_media" which supports the same values as "view.mode" large_icons|details. It is activated when a directory is most made up of media files (image/video), so >50% of items (inc folders) are image/video files. E.g. If there are 12 folders, 5 images, and 8 videos, then this mode is active.
+    - Support .webp image files also
 
 ## 2
 

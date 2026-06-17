@@ -80,6 +80,8 @@ pub struct ExplorerView {
     pub(super) show_file_name_extensions: bool,
     pub(super) show_folder_size: bool,
     pub(super) resolve_icons: bool,
+    pub(super) base_view_mode: FileViewMode,
+    pub(super) media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
@@ -244,6 +246,8 @@ impl ExplorerView {
             show_file_name_extensions: settings.view.show_extensions,
             show_folder_size: settings.view.show_folder_sizes,
             resolve_icons: settings.view.native_icons,
+            base_view_mode: settings.view.mode,
+            media_view_mode: settings.view.mode_media,
             view_mode: settings.view.mode,
             open_utility_menu: None,
             context_menu: None,
@@ -270,11 +274,8 @@ impl ExplorerView {
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
-        if self.view_mode != settings.view.mode {
-            self.scroll_to_top();
-            self.horizontal_scrollbar_drag = None;
-        }
-        self.view_mode = settings.view.mode;
+        self.base_view_mode = settings.view.mode;
+        self.media_view_mode = settings.view.mode_media;
 
         self.sidebar_items = settings.sidebar.items.clone();
         if self.sidebar_resize_drag.is_none() {
@@ -305,6 +306,7 @@ impl ExplorerView {
         } else {
             self.sidebar_sections = sidebar_sections(&self.sidebar_items);
         }
+        self.apply_effective_view_mode();
         cx.notify();
     }
 
@@ -406,6 +408,7 @@ impl ExplorerView {
             self.set_horizontal_scroll_offset(0.0);
             self.horizontal_scrollbar_drag = None;
         }
+        self.apply_effective_view_mode();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!(
@@ -872,6 +875,46 @@ impl ExplorerView {
     }
 }
 
+impl ExplorerView {
+    fn apply_effective_view_mode(&mut self) -> bool {
+        let view_mode = effective_view_mode_for_entries(
+            &self.all_entries,
+            self.base_view_mode,
+            self.media_view_mode,
+        );
+        if self.view_mode == view_mode {
+            return false;
+        }
+
+        self.scroll_to_top();
+        self.horizontal_scrollbar_drag = None;
+        self.view_mode = view_mode;
+        true
+    }
+}
+
+fn effective_view_mode_for_entries(
+    entries: &[FileEntry],
+    base_view_mode: FileViewMode,
+    media_view_mode: FileViewMode,
+) -> FileViewMode {
+    if directory_is_media_majority(entries) {
+        media_view_mode
+    } else {
+        base_view_mode
+    }
+}
+
+fn directory_is_media_majority(entries: &[FileEntry]) -> bool {
+    let media_entries = entries
+        .iter()
+        .filter(|entry| !entry.is_directory_like())
+        .filter(|entry| super::icons::file_path_is_image_or_video(&entry.path))
+        .count();
+
+    (media_entries as u128) * 4 > (entries.len() as u128) * 3
+}
+
 fn apply_shell_shortcut_resolution_to_entries(
     entries: &mut [FileEntry],
     resolution: &ShellShortcutResolution,
@@ -923,6 +966,14 @@ mod tests {
         }
     }
 
+    fn test_file(name: &str) -> FileEntry {
+        FileEntry::test(name, false, Some(1), None)
+    }
+
+    fn test_folder(name: &str) -> FileEntry {
+        FileEntry::test(name, true, None, None)
+    }
+
     #[test]
     fn empty_directory_without_error_shows_empty_folder_message() {
         let mut view = ExplorerView::new(PathBuf::from("empty"));
@@ -942,6 +993,11 @@ mod tests {
         assert!(view.show_file_name_extensions);
         assert!(!view.show_folder_size);
         assert!(view.resolve_icons);
+        assert_eq!(view.base_view_mode, crate::settings::FileViewMode::Details);
+        assert_eq!(
+            view.media_view_mode,
+            crate::settings::FileViewMode::LargeIcons
+        );
         assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         assert_eq!(
             view.sidebar_width,
@@ -999,6 +1055,97 @@ mod tests {
             },
         );
 
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+    }
+
+    #[test]
+    fn directory_media_majority_is_strict_and_counts_folders() {
+        assert!(!directory_is_media_majority(&[]));
+        assert!(!directory_is_media_majority(&[
+            test_file("photo.jpg"),
+            test_file("notes.txt"),
+        ]));
+        assert!(!directory_is_media_majority(&[
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+            test_file("notes.txt"),
+        ]));
+        assert!(directory_is_media_majority(&[
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+            test_file("notes.txt"),
+        ]));
+        assert!(!directory_is_media_majority(&[
+            test_folder("folder-1"),
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+        ]));
+        assert!(directory_is_media_majority(&[
+            test_folder("folder"),
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.PNG"),
+            test_file("poster.webp"),
+        ]));
+    }
+
+    #[test]
+    fn effective_view_mode_uses_base_for_non_media_majority_directories() {
+        let entries = vec![
+            test_folder("folder"),
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+        ];
+
+        assert_eq!(
+            effective_view_mode_for_entries(
+                &entries,
+                crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::Details,
+            ),
+            crate::settings::FileViewMode::LargeIcons
+        );
+    }
+
+    #[test]
+    fn effective_view_mode_uses_media_mode_for_media_majority_directories() {
+        let entries = vec![
+            test_folder("folder"),
+            test_file("photo.jpg"),
+            test_file("clip.mov"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+        ];
+
+        assert_eq!(
+            effective_view_mode_for_entries(
+                &entries,
+                crate::settings::FileViewMode::Details,
+                crate::settings::FileViewMode::LargeIcons,
+            ),
+            crate::settings::FileViewMode::LargeIcons
+        );
+    }
+
+    #[test]
+    fn effective_view_mode_uses_all_entries_not_search_filtered_entries() {
+        let mut view = ExplorerView::new(PathBuf::from("media-search"));
+        view.read_error = None;
+        view.all_entries = vec![
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+            test_file("notes.txt"),
+        ];
+        view.entries = vec![test_file("notes.txt")];
+
+        assert!(view.apply_effective_view_mode());
         assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
     }
 
@@ -1145,6 +1292,45 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_recomputes_media_view_mode(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("photo.jpg"), b"jpg").unwrap();
+        std::fs::write(temp.path().join("clip.mp4"), b"mp4").unwrap();
+        std::fs::write(temp.path().join("scan.png"), b"png").unwrap();
+        std::fs::write(temp.path().join("poster.webp"), b"webp").unwrap();
+        std::fs::write(temp.path().join("notes.txt"), b"txt").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            mode_media: crate::settings::FileViewMode::Details,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         });
     }
 

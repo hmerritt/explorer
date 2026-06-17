@@ -209,6 +209,10 @@ impl FileIconKind {
         }
     }
 
+    fn is_media(self) -> bool {
+        matches!(self, Self::Image | Self::Video)
+    }
+
     fn image(self, large: bool) -> Arc<Image> {
         match self {
             Self::Archive => ARCHIVE_FILE_ICON.clone(),
@@ -298,6 +302,10 @@ pub(super) fn file_icon_for_path(path: &Path) -> Div {
 
 pub(super) fn file_icon_for_path_sized(path: &Path, size: f32) -> Div {
     sized_file_icon(FileIconKind::for_path(path), size)
+}
+
+pub(super) fn file_path_is_image_or_video(path: &Path) -> bool {
+    FileIconKind::for_path(path).is_media()
 }
 
 pub(super) fn large_file_icon_for_path_sized(path: &Path, size: f32) -> Div {
