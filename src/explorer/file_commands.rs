@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Cursor, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -588,13 +588,84 @@ fn clipboard_image_file_payload(image: &Image) -> Result<(&'static str, Cow<'_, 
 }
 
 fn clipboard_tiff_image_png_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
+    #[cfg(target_os = "macos")]
+    if let Some(png) = macos_tiff_image_png_bytes(bytes) {
+        return Ok(png);
+    }
+
+    rust_tiff_image_png_bytes(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tiff_image_png_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    use cocoa::{
+        base::{id, nil},
+        foundation::NSData,
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::ffi::c_void;
+
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+    if bytes.is_empty() {
+        return None;
+    }
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let result = (|| {
+            let data = NSData::dataWithBytes_length_(
+                nil,
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as u64,
+            );
+            if data == nil {
+                return None;
+            }
+
+            let bitmap_rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+            let bitmap_rep: id = msg_send![bitmap_rep, initWithData: data];
+            if bitmap_rep == nil {
+                return None;
+            }
+            let _: id = msg_send![bitmap_rep, autorelease];
+
+            let png_file_type = 4usize;
+            let png_data: id = msg_send![
+                bitmap_rep,
+                representationUsingType: png_file_type
+                properties: nil
+            ];
+            if png_data == nil {
+                return None;
+            }
+
+            let length = png_data.length();
+            if length == 0 || png_data.bytes().is_null() {
+                return None;
+            }
+
+            let png =
+                std::slice::from_raw_parts(png_data.bytes().cast::<u8>(), length as usize).to_vec();
+            png.starts_with(PNG_SIGNATURE).then_some(png)
+        })();
+        let _: () = msg_send![pool, drain];
+        result
+    }
+}
+
+fn rust_tiff_image_png_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
         .map_err(|error| format!("Could not convert clipboard image to PNG: {error}"))?;
-    let mut png = Cursor::new(Vec::new());
-    image
-        .write_to(&mut png, image::ImageFormat::Png)
+    let mut png = Vec::new();
+    decoded
+        .write_with_encoder(image::codecs::png::PngEncoder::new_with_quality(
+            &mut png,
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::NoFilter,
+        ))
         .map_err(|error| format!("Could not convert clipboard image to PNG: {error}"))?;
-    Ok(png.into_inner())
+    Ok(png)
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -649,7 +720,7 @@ mod tests {
         test_support::{TempDir, selected_names, test_view_with_entries},
     };
     use gpui::{Image, ImageFormat};
-    use std::fs;
+    use std::{fs, io::Cursor};
 
     #[test]
     fn new_folder_uses_base_name_in_empty_directory() {
@@ -819,6 +890,20 @@ mod tests {
 
         assert!(error.contains("Could not convert clipboard image to PNG"));
         assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tiff_image_png_bytes_converts_valid_tiff() {
+        let png = macos_tiff_image_png_bytes(&test_tiff_bytes()).expect("converted png");
+
+        assert_saved_png_image(&png);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tiff_image_png_bytes_rejects_invalid_tiff() {
+        assert_eq!(macos_tiff_image_png_bytes(b"not a tiff"), None);
     }
 
     #[test]
@@ -1018,7 +1103,9 @@ mod tests {
     }
 
     fn assert_saved_png_image(bytes: &[u8]) {
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+        assert_eq!(&bytes[..PNG_SIGNATURE.len()], PNG_SIGNATURE);
         let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
             .expect("decode saved png")
             .to_rgba8();
