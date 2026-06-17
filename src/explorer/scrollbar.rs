@@ -13,6 +13,7 @@ use crate::explorer::{
     icons::nav_icon_font,
     view::ExplorerView,
 };
+use crate::settings::FileViewMode;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ScrollbarDrag {
@@ -201,17 +202,50 @@ fn clamped_visible_horizontal_scroll_offset(
 
 impl ExplorerView {
     pub(super) fn scroll_to_top(&self) {
+        if self.view_mode == FileViewMode::LargeIcons {
+            self.large_icon_list_state
+                .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
+            return;
+        }
+
         let scroll_handle = self.scroll_handle.0.borrow().base_handle.clone();
         scroll_handle.set_offset(point(px(0.0), px(0.0)));
     }
 
     pub(super) fn set_scroll_offset(&self, scroll_top: f32) {
+        if self.view_mode == FileViewMode::LargeIcons {
+            self.large_icon_list_state
+                .set_offset_from_scrollbar(point(px(0.0), px(-scroll_top.max(0.0))));
+            return;
+        }
+
         let scroll_handle = self.scroll_handle.0.borrow().base_handle.clone();
         let offset = scroll_handle.offset();
         scroll_handle.set_offset(point(offset.x, px(-scroll_top.max(0.0))));
     }
 
     pub(super) fn scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        if self.view_mode == FileViewMode::LargeIcons {
+            let bounds = self.large_icon_list_state.viewport_bounds();
+            let viewport_width = f32::from(bounds.size.width);
+            let viewport_height = f32::from(bounds.size.height);
+            let scroll_max =
+                f32::from(self.large_icon_list_state.max_offset_for_scrollbar().height);
+            let content_height = viewport_height + scroll_max;
+            let scroll_top = -f32::from(
+                self.large_icon_list_state
+                    .scroll_px_offset_for_scrollbar()
+                    .y,
+            );
+
+            return ScrollbarMetrics::new(
+                viewport_width,
+                viewport_height,
+                content_height,
+                scroll_top,
+            );
+        }
+
         let scroll_state = self.scroll_handle.0.borrow();
         let item_size = scroll_state.last_item_size?;
         let viewport_width = f32::from(item_size.item.width);
@@ -295,6 +329,9 @@ impl ExplorerView {
         } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
             self.set_scroll_offset(metrics.scroll_by(self.entry_row_height()));
         } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            if self.view_mode == FileViewMode::LargeIcons {
+                self.large_icon_list_state.scrollbar_drag_started();
+            }
             self.scrollbar_drag = Some(ScrollbarDrag {
                 pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
             });
@@ -425,6 +462,9 @@ impl ExplorerView {
 
                     let _ = entity.update(cx, |this, cx| {
                         if this.scrollbar_drag.take().is_some() {
+                            if this.view_mode == FileViewMode::LargeIcons {
+                                this.large_icon_list_state.scrollbar_drag_ended();
+                            }
                             cx.notify();
                         }
                     });

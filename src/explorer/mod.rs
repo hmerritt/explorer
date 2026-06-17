@@ -16,6 +16,7 @@ mod filesystem;
 mod folder_size;
 mod formatting;
 mod icons;
+mod large_icons;
 mod mouse_selection;
 mod navigation;
 mod open_with;

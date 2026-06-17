@@ -5,6 +5,7 @@ use gpui::{Bounds, MouseButton, Pixels, Point, px, size};
 use crate::{
     explorer::{
         constants::{LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, SCROLLBAR_GUTTER_WIDTH},
+        large_icons::LargeIconLayout,
         selection::SelectionModifiers,
         view::ExplorerView,
     },
@@ -85,6 +86,7 @@ impl ExplorerView {
                 scroll_top,
                 viewport_width,
                 self.entries.len(),
+                self.large_icon_layout.as_ref(),
             );
         }
 
@@ -238,6 +240,7 @@ impl ExplorerView {
                 selection_box,
                 viewport_width,
                 self.entries.len(),
+                self.large_icon_layout.as_ref(),
             )
         } else {
             row_indices_intersecting_content_box_with_row_height(
@@ -430,9 +433,24 @@ pub(super) fn large_icon_grid_indices_intersecting_content_box(
     selection_box: SelectionBox,
     viewport_width: f32,
     entry_count: usize,
+    layout: Option<&LargeIconLayout>,
 ) -> BTreeSet<usize> {
     if selection_box.is_empty() || entry_count == 0 {
         return BTreeSet::new();
+    }
+
+    if let Some(layout) = layout {
+        return (0..entry_count)
+            .filter(|ix| {
+                let Some((left, top, width, height)) = layout.index_bounds(*ix) else {
+                    return false;
+                };
+                left < selection_box.left + selection_box.width
+                    && left + width > selection_box.left
+                    && top < selection_box.bottom()
+                    && top + height > selection_box.top
+            })
+            .collect();
     }
 
     let metrics = LargeIconGridMetrics::new(viewport_width);
@@ -588,9 +606,21 @@ fn large_icon_pointer_drag_intent_at(
     scroll_top: f32,
     viewport_width: f32,
     entry_count: usize,
+    layout: Option<&LargeIconLayout>,
 ) -> Option<PointerDragIntent> {
     if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
         return None;
+    }
+
+    if let Some(layout) = layout {
+        return if layout
+            .index_at_content_point(local_x, local_y + scroll_top, entry_count)
+            .is_some()
+        {
+            Some(PointerDragIntent::ItemDrag)
+        } else {
+            Some(PointerDragIntent::RubberBand)
+        };
     }
 
     if large_icon_grid_index_at_content_point(
@@ -639,6 +669,7 @@ mod tests {
         LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, ROW_HEIGHT, effective_name_column_width,
     };
     use crate::explorer::context_menu::ContextMenuState;
+    use crate::explorer::large_icons::{LargeIconLayout, large_icon_tile_height_for_rows};
     use crate::explorer::test_support::{selected_names, test_view_with_entries};
     use crate::settings::FileColumnKind;
 
@@ -753,6 +784,7 @@ mod tests {
             box_over_second_column,
             LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
             6,
+            None,
         );
 
         assert_eq!(indices, BTreeSet::from([1]));
@@ -772,6 +804,7 @@ mod tests {
             box_inside_gap,
             LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
             6,
+            None,
         );
 
         assert!(indices.is_empty());
@@ -790,9 +823,74 @@ mod tests {
             selection_box,
             LARGE_ICON_TILE_WIDTH * 2.0,
             4,
+            None,
         );
 
         assert_eq!(indices, BTreeSet::from([0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn large_icon_grid_intersections_use_variable_tile_heights() {
+        let layout = LargeIconLayout::from_tile_heights(
+            2,
+            20.0,
+            vec![
+                large_icon_tile_height_for_rows(1),
+                large_icon_tile_height_for_rows(3),
+                large_icon_tile_height_for_rows(1),
+                large_icon_tile_height_for_rows(1),
+            ],
+        );
+        let first_row = layout.row_bounds(0).expect("first row");
+        let second_row = layout.row_bounds(1).expect("second row");
+        let selection_box = SelectionBox::new(
+            0.0,
+            first_row.top + first_row.tile_height - 1.0,
+            LARGE_ICON_TILE_WIDTH * 2.0 + 20.0,
+            second_row.top + 1.0,
+        );
+
+        let indices =
+            large_icon_grid_indices_intersecting_content_box(selection_box, 0.0, 4, Some(&layout));
+
+        assert_eq!(indices, BTreeSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn large_icon_pointer_drag_intent_treats_variable_row_gap_as_rubber_band() {
+        let layout = LargeIconLayout::from_tile_heights(
+            2,
+            20.0,
+            vec![
+                large_icon_tile_height_for_rows(1),
+                large_icon_tile_height_for_rows(1),
+                large_icon_tile_height_for_rows(1),
+            ],
+        );
+        let first_row = layout.row_bounds(0).expect("first row");
+
+        assert_eq!(
+            large_icon_pointer_drag_intent_at(
+                1.0,
+                first_row.tile_height + 1.0,
+                0.0,
+                LARGE_ICON_TILE_WIDTH * 2.0 + 20.0,
+                3,
+                Some(&layout),
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            large_icon_pointer_drag_intent_at(
+                1.0,
+                first_row.height,
+                0.0,
+                LARGE_ICON_TILE_WIDTH * 2.0 + 20.0,
+                3,
+                Some(&layout),
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
     }
 
     #[test]
@@ -805,6 +903,7 @@ mod tests {
                 0.0,
                 LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
                 6,
+                None,
             ),
             Some(PointerDragIntent::RubberBand)
         );
@@ -815,6 +914,7 @@ mod tests {
                 0.0,
                 LARGE_ICON_TILE_WIDTH * 3.0 + gap * 2.0,
                 6,
+                None,
             ),
             Some(PointerDragIntent::ItemDrag)
         );

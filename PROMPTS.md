@@ -4,8 +4,9 @@
 
 - Improve readme - add screenshots / branding
 - Large icons grid view improvements:
-    - Add row gap of 2px
-    - Remove the static height from each item. Add a maximum height, that allows for 3 rows of item filename. Row height expands to match the tallest item (this is what Windows Explorer does)
+    - Add image thumbnail extraction + cache, extract at 128px
+    - Support SVG files by rasterizing them at 128px
+    - New settings item "mode_media" which supports the same values as "view.mode" large_icons|details. It is activated when a directory is most made up of media files (image/video), so >50% of items (inc folders) are image/video files. E.g. If there are 12 folders, 5 images, and 8 videos, then this mode is active.
 
 ## 2
 
@@ -80,7 +81,7 @@ Major remaining Windows Explorer parity areas:
     - Lines
     - Lines of Code
     - Blanks
--
+- PDF view: https://crates.io/crates/pdf_oxide
 
 ## File move/copy/sync engine
 

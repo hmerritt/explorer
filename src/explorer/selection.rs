@@ -240,6 +240,25 @@ impl ExplorerView {
     }
 
     fn scroll_large_icon_index_into_view(&self, ix: usize) {
+        if let Some(layout) = &self.large_icon_layout {
+            let Some((_, row_top, _, row_height)) = layout.index_bounds(ix) else {
+                return;
+            };
+            let row_bottom = row_top + row_height;
+            if let Some(metrics) = self.scrollbar_metrics() {
+                let viewport_bottom = metrics.scroll_top + metrics.viewport_height;
+                if row_top < metrics.scroll_top {
+                    self.set_scroll_offset(row_top);
+                } else if row_bottom > viewport_bottom {
+                    self.set_scroll_offset(row_bottom - metrics.viewport_height);
+                }
+            } else {
+                self.large_icon_list_state
+                    .scroll_to_reveal_item(layout.row_for_index(ix));
+            }
+            return;
+        }
+
         if let Some(metrics) = self.scrollbar_metrics() {
             let row = LargeIconGridMetrics::new(metrics.viewport_width).row_for_index(ix);
             let row_top = row as f32 * LARGE_ICON_TILE_HEIGHT;
@@ -251,7 +270,7 @@ impl ExplorerView {
                 self.set_scroll_offset(row_bottom - metrics.viewport_height);
             }
         } else {
-            self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
+            self.large_icon_list_state.scroll_to_reveal_item(ix);
         }
     }
 

@@ -11,7 +11,7 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ListHorizontalSizingBehavior,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     NavigationDirection, Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun,
-    Window, canvas, div, prelude::*, px, rgb, transparent_black, uniform_list,
+    Window, canvas, div, list, prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -67,7 +67,8 @@ use crate::explorer::{
         file_icon, file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
-    mouse_selection::{LargeIconGridMetrics, local_point, selection_box_bounds, viewport_size},
+    large_icons::{LargeIconLayout, large_icon_filename_text_width, large_icon_max_tile_height},
+    mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
@@ -1872,22 +1873,28 @@ impl ExplorerView {
     fn render_large_icon_row(
         &mut self,
         row_ix: usize,
-        metrics: LargeIconGridMetrics,
+        layout: LargeIconLayout,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let start = row_ix * metrics.columns;
-        let end = (start + metrics.columns).min(self.entries.len());
+        let Some(row_layout) = layout.row_bounds(row_ix) else {
+            return div().into_any_element();
+        };
+        let start = row_ix * layout.columns;
+        let end = (start + layout.columns).min(self.entries.len());
         let mut row = div()
             .flex()
             .flex_row()
             .items_start()
-            .gap(px(metrics.column_gap))
-            .h(px(LARGE_ICON_TILE_HEIGHT))
+            .gap(px(layout.column_gap))
+            .h(px(row_layout.height))
             .w_full();
 
         for ix in start..end {
-            row = row.child(self.render_large_icon_tile(ix, window, cx));
+            let tile_height = layout
+                .tile_height(ix)
+                .unwrap_or_else(large_icon_max_tile_height);
+            row = row.child(self.render_large_icon_tile(ix, tile_height, window, cx));
         }
 
         row.into_any_element()
@@ -1896,6 +1903,7 @@ impl ExplorerView {
     fn render_large_icon_tile(
         &mut self,
         ix: usize,
+        tile_height: f32,
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1940,7 +1948,8 @@ impl ExplorerView {
             .flex_col()
             .items_center()
             .w(px(LARGE_ICON_TILE_WIDTH))
-            .h(px(LARGE_ICON_TILE_HEIGHT))
+            .h(px(tile_height))
+            .max_h(px(large_icon_max_tile_height()))
             .flex_shrink_0()
             .border_1()
             .border_color(if is_selected {
@@ -2176,8 +2185,20 @@ impl ExplorerView {
         let entity = cx.entity();
         let current_directory = DropDestination::CurrentDirectory;
         let viewport_width = (self.list_viewport_width(window) - SCROLLBAR_GUTTER_WIDTH).max(0.0);
-        let metrics = LargeIconGridMetrics::new(viewport_width);
-        let row_count = metrics.row_count(self.entries.len());
+        let layout = LargeIconLayout::new(
+            &self.entries,
+            viewport_width,
+            self.show_file_name_extensions,
+            &self.font,
+            cx,
+        );
+        let row_count = layout.row_count();
+        let layout_key = layout.key();
+        if self.large_icon_layout_key.as_ref() != Some(&layout_key) {
+            self.large_icon_list_state.reset(row_count);
+            self.large_icon_layout_key = Some(layout_key);
+        }
+        self.large_icon_layout = Some(layout.clone());
 
         div().flex().flex_col().size_full().overflow_hidden().child(
             div()
@@ -2295,26 +2316,13 @@ impl ExplorerView {
                         }))
                         .child(self.render_mouse_selection_hit_layer(cx))
                         .child(
-                            uniform_list(
-                                "explorer-large-icon-rows",
-                                row_count,
-                                cx.processor(move |this, range: Range<usize>, window, cx| {
-                                    let mut rows = Vec::with_capacity(range.end - range.start);
-                                    for row_ix in range {
-                                        rows.push(
-                                            this.render_large_icon_row(row_ix, metrics, window, cx),
-                                        );
-                                    }
-                                    rows
+                            list(
+                                self.large_icon_list_state.clone(),
+                                cx.processor(move |this, row_ix: usize, window, cx| {
+                                    this.render_large_icon_row(row_ix, layout.clone(), window, cx)
                                 }),
                             )
-                            .size_full()
-                            .track_scroll(self.scroll_handle.clone())
-                            .on_scroll_wheel(cx.listener(
-                                |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
-                                    cx.notify();
-                                },
-                            )),
+                            .size_full(),
                         )
                         .child(self.render_mouse_selection_box()),
                 )
@@ -4970,7 +4978,7 @@ fn large_icon_filename(
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     div()
-        .w(px(LARGE_ICON_TILE_WIDTH - 8.0))
+        .w(px(large_icon_filename_text_width()))
         .max_h(px(LARGE_ICON_TEXT_LINE_HEIGHT * LARGE_ICON_TEXT_ROWS as f32))
         .overflow_hidden()
         .text_center()
