@@ -1284,7 +1284,7 @@ fn mac_choose_application(
 #[cfg(target_os = "macos")]
 unsafe fn mac_add_always_open_with_accessory(panel: cocoa::base::id) -> cocoa::base::id {
     use cocoa::{
-        base::{YES, id},
+        base::{YES, id, nil},
         foundation::{NSPoint, NSRect, NSSize, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};

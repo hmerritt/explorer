@@ -1,7 +1,8 @@
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Cursor, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -550,7 +551,7 @@ fn create_clipboard_image_file_in_directory(
     parent: &Path,
     image: &Image,
 ) -> Result<PathBuf, String> {
-    let extension = image_format_extension(image.format());
+    let (extension, bytes) = clipboard_image_file_payload(image)?;
     let mut index = 1usize;
 
     loop {
@@ -562,7 +563,7 @@ fn create_clipboard_image_file_in_directory(
             continue;
         }
 
-        match write_new_file(&path, image.bytes()) {
+        match write_new_file(&path, bytes.as_ref()) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 index = next_new_item_index(index, &name)?;
@@ -572,6 +573,28 @@ fn create_clipboard_image_file_in_directory(
             }
         }
     }
+}
+
+fn clipboard_image_file_payload(image: &Image) -> Result<(&'static str, Cow<'_, [u8]>), String> {
+    if image.format() == ImageFormat::Tiff {
+        return clipboard_tiff_image_png_bytes(image.bytes())
+            .map(|bytes| ("png", Cow::Owned(bytes)));
+    }
+
+    Ok((
+        image_format_extension(image.format()),
+        Cow::Borrowed(image.bytes()),
+    ))
+}
+
+fn clipboard_tiff_image_png_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Tiff)
+        .map_err(|error| format!("Could not convert clipboard image to PNG: {error}"))?;
+    let mut png = Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| format!("Could not convert clipboard image to PNG: {error}"))?;
+    Ok(png.into_inner())
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -748,6 +771,17 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_tiff_image_file_saves_png_in_empty_directory() {
+        let temp = TempDir::new();
+        let image = Image::from_bytes(ImageFormat::Tiff, test_tiff_bytes());
+
+        let path = create_clipboard_image_file_in_directory(temp.path(), &image).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "image.png");
+        assert_saved_png_image(&fs::read(path).unwrap());
+    }
+
+    #[test]
     fn clipboard_image_file_uses_first_free_suffix() {
         let temp = TempDir::new();
         fs::write(temp.path().join("image.png"), b"base").expect("create base image");
@@ -759,6 +793,32 @@ mod tests {
         assert_eq!(path.file_name().unwrap(), "image (2).png");
         assert_eq!(fs::read(path).unwrap(), vec![4, 5, 6]);
         assert_eq!(fs::read(temp.path().join("image.png")).unwrap(), b"base");
+    }
+
+    #[test]
+    fn clipboard_tiff_image_file_uses_first_free_png_suffix() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("image.png"), b"base").expect("create base image");
+        fs::write(temp.path().join("image (3).png"), b"third").expect("create third image");
+        let image = Image::from_bytes(ImageFormat::Tiff, test_tiff_bytes());
+
+        let path = create_clipboard_image_file_in_directory(temp.path(), &image).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "image (2).png");
+        assert_saved_png_image(&fs::read(path).unwrap());
+        assert_eq!(fs::read(temp.path().join("image.png")).unwrap(), b"base");
+        assert!(!temp.path().join("image.tiff").exists());
+    }
+
+    #[test]
+    fn clipboard_tiff_image_file_rejects_invalid_tiff_without_creating_file() {
+        let temp = TempDir::new();
+        let image = Image::from_bytes(ImageFormat::Tiff, b"not a tiff".to_vec());
+
+        let error = create_clipboard_image_file_in_directory(temp.path(), &image).unwrap_err();
+
+        assert!(error.contains("Could not convert clipboard image to PNG"));
+        assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -942,5 +1002,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a.txt", "c.txt"]
         );
+    }
+
+    fn test_tiff_bytes() -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            1,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let mut bytes = Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Tiff)
+            .expect("encode test tiff");
+        bytes.into_inner()
+    }
+
+    fn assert_saved_png_image(bytes: &[u8]) {
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .expect("decode saved png")
+            .to_rgba8();
+        assert_eq!(image.dimensions(), (2, 1));
+        assert_eq!(image.get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 }
