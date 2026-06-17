@@ -571,6 +571,10 @@ pub(crate) fn set_show_extensions(value: bool, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.view.show_extensions = value);
 }
 
+pub(crate) fn set_view_mode(mode: FileViewMode, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| settings.view.mode = mode);
+}
+
 pub(crate) fn set_sidebar_width(value: u32, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| {
         settings.sidebar.width = normalized_sidebar_width(value);
@@ -2612,6 +2616,33 @@ mod tests {
         assert_eq!(document["future_option"]["z"], 1);
         assert_eq!(document["view"]["future_view"], 7);
         assert_eq!(document["view"]["show_hidden"], true);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn view_mode_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("view-mode-preserve-unknown").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"future_option":{"z":1,"a":2},"view":{"future_view":7,"mode":"details"}}"#,
+        )
+        .unwrap();
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        cx.set_global(SettingsState {
+            value: loaded.value,
+            document: loaded.document,
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| set_view_mode(FileViewMode::LargeIcons, cx));
+
+        let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["future_option"]["a"], 2);
+        assert_eq!(document["future_option"]["z"], 1);
+        assert_eq!(document["view"]["future_view"], 7);
+        assert_eq!(document["view"]["mode"], "large_icons");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

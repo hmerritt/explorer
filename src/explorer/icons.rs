@@ -142,6 +142,7 @@ svg_icon!(
     "utility",
     "favorite_pin_remove.svg"
 );
+svg_icon!(LARGE_ICONS_ICON, "utility", "large_icons.svg");
 svg_icon!(NEW_ITEM_ICON, "utility", "new_item.svg");
 svg_icon!(NEW_TAB_ICON, "utility", "new_tab.svg");
 svg_icon!(OPEN_WITH_ICON, "utility", "open_with.svg");

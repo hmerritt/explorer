@@ -61,11 +61,11 @@ use crate::explorer::{
     formatting::{format_size, format_timestamp},
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
-        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON,
-        RENAME_ICON, directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
-        directory_shortcut_icon_sized, drive_icon, drive_windows_icon, executable_icon_sized,
-        file_icon, file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font,
+        LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
+        PROPERTIES_ICON, RENAME_ICON, directory_kind_icon, directory_kind_icon_sized,
+        directory_shortcut_icon, directory_shortcut_icon_sized, drive_icon, drive_windows_icon,
+        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
+        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{LargeIconLayout, large_icon_filename_text_width, large_icon_max_tile_height},
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
@@ -593,6 +593,33 @@ impl ExplorerView {
                     }),
                 )),
             UtilityMenu::View => utility_dropdown()
+                .child(utility_menu_row(
+                    "utility-large-icons",
+                    Some(utility_menu_image_icon(LARGE_ICONS_ICON.clone())),
+                    "Large Icons",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            crate::settings::set_view_mode(FileViewMode::LargeIcons, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_menu_row(
+                    "utility-details",
+                    Some(utility_menu_image_icon(DETAILS_ICON.clone())),
+                    "Details",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            crate::settings::set_view_mode(FileViewMode::Details, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_menu_separator())
                 .child(utility_checkbox_row(
                     "utility-hidden-files",
                     self.show_hidden_files,
@@ -3587,6 +3614,15 @@ fn utility_dropdown() -> Div {
         .occlude()
 }
 
+fn utility_menu_separator() -> Div {
+    div()
+        .h(px(9.0))
+        .mx(px(10.0))
+        .flex()
+        .items_center()
+        .child(div().h(px(1.0)).w_full().bg(rgb(0xe5e5e5)))
+}
+
 fn context_menu_dropdown(width: f32) -> Div {
     div()
         .debug_selector(|| "context-menu".to_owned())
@@ -4225,6 +4261,7 @@ fn utility_menu_row(
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -4247,6 +4284,10 @@ fn utility_menu_row(
                 .child(label),
         )
         .into_any_element()
+}
+
+fn utility_menu_image_icon(icon: Arc<Image>) -> AnyElement {
+    gpui::img(icon).w(px(16.0)).h(px(16.0)).into_any_element()
 }
 
 fn address_suggestion_row(
@@ -5804,6 +5845,54 @@ mod tests {
     fn utility_text_button_icon_geometry_fits_button() {
         assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
         assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
+    }
+
+    #[gpui::test]
+    fn view_menu_large_icons_updates_global_view_mode(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let view_position = cx
+            .debug_bounds("utility-view")
+            .expect("view utility button bounds")
+            .center();
+        cx.simulate_mouse_down(view_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let large_icons_position = cx
+            .debug_bounds("utility-large-icons")
+            .expect("large icons menu row bounds")
+            .center();
+        cx.simulate_mouse_down(
+            large_icons_position,
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            large_icons_position,
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .mode),
+            crate::settings::FileViewMode::LargeIcons
+        );
     }
 
     #[test]
