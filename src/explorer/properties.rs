@@ -1374,6 +1374,7 @@ impl Render for LinuxDefaultAppPickerDialog {
                         div()
                             .flex_1()
                             .min_h(px(0.0))
+                            .id("linux-default-app-picker-list")
                             .border_1()
                             .border_color(rgb(PROPERTIES_BORDER))
                             .overflow_y_scroll()
@@ -2437,9 +2438,10 @@ fn open_linux_default_app_picker_window(
     cx: &mut Context<PropertiesDialog>,
 ) -> Result<AnyWindowHandle, String> {
     let title = format!("Open With - {}", property_path_display_name(&path));
+    let options = linux_default_app_picker_window_options(title, cx);
     let handle = cx
         .open_window(
-            linux_default_app_picker_window_options(title, cx),
+            options,
             |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
