@@ -17,6 +17,7 @@ use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
+    codebase_summary::{CodebaseSummary, find_git_repository_root, scan_codebase_summary},
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
@@ -94,6 +95,9 @@ pub struct ExplorerView {
     pub(super) folder_size_generation: u64,
     pub(super) folder_size_task: Option<Task<()>>,
     pub(super) folder_size_cancel: Option<Arc<AtomicBool>>,
+    pub(super) codebase_summary: Option<CodebaseSummary>,
+    pub(super) codebase_summary_generation: u64,
+    pub(super) codebase_summary_task: Option<Task<()>>,
 }
 
 pub(super) struct FileOperationState {
@@ -261,6 +265,9 @@ impl ExplorerView {
             folder_size_generation: 0,
             folder_size_task: None,
             folder_size_cancel: None,
+            codebase_summary: None,
+            codebase_summary_generation: 0,
+            codebase_summary_task: None,
         };
         view.reload();
         view
@@ -436,6 +443,44 @@ impl ExplorerView {
     pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
         self.schedule_pending_shell_shortcut_resolution(cx);
         self.schedule_folder_sizes(cx);
+        self.schedule_codebase_summary(cx);
+    }
+
+    pub(super) fn schedule_codebase_summary(&mut self, cx: &mut Context<Self>) {
+        self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
+        let generation = self.codebase_summary_generation;
+        let path = self.path.clone();
+        let Some(repo_root) = find_git_repository_root(&path) else {
+            self.codebase_summary = None;
+            self.codebase_summary_task = None;
+            return;
+        };
+
+        if self
+            .codebase_summary
+            .as_ref()
+            .is_none_or(|summary| summary.repo_root != repo_root)
+        {
+            self.codebase_summary = None;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let output_task = cx
+                .background_executor()
+                .spawn(async move { scan_codebase_summary(&path) });
+            let summary = output_task.await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.codebase_summary_generation != generation {
+                    return;
+                }
+
+                explorer.codebase_summary = summary;
+                explorer.codebase_summary_task = None;
+                cx.notify();
+            });
+        });
+        self.codebase_summary_task = Some(task);
     }
 
     fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {

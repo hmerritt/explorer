@@ -2618,6 +2618,10 @@ impl ExplorerView {
 
     fn render_status_bar(&self) -> AnyElement {
         let summary = folder_status_summary(&self.entries, &self.selection.selected_indices);
+        let codebase_summary = self
+            .codebase_summary
+            .as_ref()
+            .and_then(|summary| summary.text.as_ref());
 
         div()
             .id("explorer-status-bar")
@@ -2651,6 +2655,17 @@ impl ExplorerView {
                         .min_w(px(0.0))
                         .truncate()
                         .child(SharedString::from(selection_info)),
+                )
+            })
+            .child(div().flex_1().min_w(px(12.0)))
+            .when_some(codebase_summary, |this, codebase_summary| {
+                this.child(
+                    div()
+                        .min_w(px(0.0))
+                        .max_w_full()
+                        .truncate()
+                        .text_align(TextAlign::Right)
+                        .child(SharedString::from(codebase_summary.clone())),
                 )
             })
             .into_any_element()

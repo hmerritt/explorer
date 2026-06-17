@@ -116,3 +116,4 @@ lto = true
 [dependencies]
 paste = "1.0.15"
 thousands = "0.2.0"
+tokei = { version = "14.0.0", default-features = false }
