@@ -245,12 +245,14 @@ pub(super) struct PropertyDetail {
 enum PropertyTab {
     General,
     Details,
+    Image,
     Frames,
 }
 
 const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
     (PropertyTab::General, "General"),
     (PropertyTab::Details, "Details"),
+    (PropertyTab::Image, "Image"),
     (PropertyTab::Frames, "Frames"),
 ];
 
@@ -275,6 +277,13 @@ enum PropertyFramesState {
     Failed(String),
 }
 
+enum PropertyImageState {
+    NotStarted,
+    Loading,
+    Ready(PropertyImagePreview),
+    Failed(String),
+}
+
 fn property_frames_state_label(state: &PropertyFramesState) -> &'static str {
     match state {
         PropertyFramesState::NotStarted => "not-started",
@@ -291,6 +300,13 @@ struct PropertyFrameThumbnail {
     aspect_ratio: f32,
 }
 
+#[derive(Clone, Debug)]
+struct PropertyImagePreview {
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
+}
+
 pub(super) struct PropertiesDialog {
     target: PropertyTarget,
     explorer: WeakEntity<ExplorerView>,
@@ -304,6 +320,8 @@ pub(super) struct PropertiesDialog {
     details_scroll_handle: ScrollHandle,
     details_scrollbar_hovered: bool,
     details_scrollbar_drag: Option<ScrollbarDrag>,
+    image_state: PropertyImageState,
+    image_generation: u64,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -311,6 +329,7 @@ pub(super) struct PropertiesDialog {
     frames_scrollbar_drag: Option<ScrollbarDrag>,
     snapshot_task: Option<Task<()>>,
     details_task: Option<Task<()>>,
+    image_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
     #[cfg(not(target_os = "windows"))]
@@ -379,6 +398,8 @@ impl PropertiesDialog {
             details_scroll_handle: ScrollHandle::new(),
             details_scrollbar_hovered: false,
             details_scrollbar_drag: None,
+            image_state: PropertyImageState::NotStarted,
+            image_generation: 0,
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -386,6 +407,7 @@ impl PropertiesDialog {
             frames_scrollbar_drag: None,
             snapshot_task: None,
             details_task: None,
+            image_task: None,
             frames_task: None,
             apply_task: None,
             #[cfg(not(target_os = "windows"))]
@@ -408,6 +430,7 @@ impl PropertiesDialog {
     fn start_snapshot_task(&mut self, cx: &mut Context<Self>) {
         self.snapshot_state = PropertySnapshotState::Loading;
         self.reset_details_state();
+        self.reset_image_state();
         self.reset_frames_state();
         let target = self.target.clone();
         let date_format = self.date_format.clone();
@@ -461,6 +484,12 @@ impl PropertiesDialog {
         self.set_details_scroll_top(0.0);
     }
 
+    fn reset_image_state(&mut self) {
+        self.image_generation = self.image_generation.wrapping_add(1);
+        self.image_state = PropertyImageState::NotStarted;
+        self.image_task = None;
+    }
+
     fn reset_frames_state(&mut self) {
         self.frames_generation = self.frames_generation.wrapping_add(1);
         self.frames_state = PropertyFramesState::NotStarted;
@@ -475,6 +504,7 @@ impl PropertiesDialog {
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
         self.reset_details_state();
+        self.reset_image_state();
         self.reset_frames_state();
         if let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state {
             if !property_tab_is_visible(self.active_tab, Some(snapshot)) {
@@ -483,6 +513,7 @@ impl PropertiesDialog {
         }
         match self.active_tab {
             PropertyTab::Details => self.start_details_task(cx),
+            PropertyTab::Image => self.start_image_task(cx),
             PropertyTab::Frames => self.start_frames_task(cx),
             PropertyTab::General => {}
         }
@@ -533,6 +564,68 @@ impl PropertiesDialog {
             });
         });
         self.details_task = Some(task);
+    }
+
+    fn start_image_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.image_state, PropertyImageState::NotStarted) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        let Some(path) =
+            single_file_image_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
+        else {
+            self.image_state = PropertyImageState::Failed(
+                "Image preview is not available for this item.".to_owned(),
+            );
+            return;
+        };
+
+        self.image_state = PropertyImageState::Loading;
+        let generation = self.image_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { load_property_image_preview(&path) }
+                })
+                .await;
+
+            match &result {
+                Ok(preview) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "image preview ready path={} dimensions={}x{}",
+                        path.display(),
+                        preview.width,
+                        preview.height
+                    ),
+                ),
+                Err(error) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "image preview failed path={} error={}",
+                        path.display(),
+                        error
+                    ),
+                ),
+            }
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.image_generation == generation {
+                    dialog.image_task = None;
+                    dialog.image_state = match result {
+                        Ok(preview) => PropertyImageState::Ready(preview),
+                        Err(error) => PropertyImageState::Failed(error),
+                    };
+                    cx.notify();
+                }
+            });
+        });
+        self.image_task = Some(task);
     }
 
     fn start_frames_task(&mut self, cx: &mut Context<Self>) {
@@ -926,6 +1019,8 @@ impl PropertiesDialog {
             self.active_tab = tab;
             if tab == PropertyTab::Details {
                 self.start_details_task(cx);
+            } else if tab == PropertyTab::Image {
+                self.start_image_task(cx);
             } else if tab == PropertyTab::Frames {
                 if let Some(snapshot) = snapshot {
                     if let Some(path) = single_file_video_path(&snapshot.target, snapshot.item_kind)
@@ -1037,6 +1132,7 @@ impl PropertiesDialog {
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
                 PropertyTab::General => self.render_general(&snapshot, window, cx),
                 PropertyTab::Details => self.render_details(&snapshot, cx),
+                PropertyTab::Image => self.render_image(&snapshot),
                 PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
         };
@@ -1458,6 +1554,38 @@ impl PropertiesDialog {
                 this.child(self.render_details_scrollbar(cx))
             })
             .into_any_element()
+    }
+
+    fn render_image(&self, snapshot: &PropertySnapshot) -> AnyElement {
+        if single_file_image_path(&snapshot.target, snapshot.item_kind).is_none() {
+            return centered_message("Image preview is not available for this item.");
+        }
+
+        let body = div()
+            .id("properties-image-body")
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .p(px(PROPERTIES_PANEL_PADDING))
+            .overflow_hidden();
+
+        match &self.image_state {
+            PropertyImageState::NotStarted | PropertyImageState::Loading => body
+                .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                .child("Loading image...")
+                .into_any_element(),
+            PropertyImageState::Failed(error) => body
+                .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                .child(SharedString::from(error.clone()))
+                .into_any_element(),
+            PropertyImageState::Ready(preview) => body
+                .child(property_image_preview(preview))
+                .into_any_element(),
+        }
     }
 
     fn render_frames(&mut self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
@@ -2526,6 +2654,15 @@ const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(test)]
 const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
+const SVG_IMAGE_RASTER_LONGEST_SIDE: u32 = 500;
+
+fn single_file_image_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
+    if !matches!(item_kind, PropertyItemKind::SingleFile) {
+        return None;
+    }
+    let path = target.paths.first()?;
+    path_may_have_image_preview(path).then_some(path.as_path())
+}
 
 fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
@@ -2541,6 +2678,124 @@ fn single_file_media_path(target: &PropertyTarget, item_kind: PropertyItemKind) 
     }
     let path = target.paths.first()?;
     path_may_have_media_details(path).then_some(path.as_path())
+}
+
+fn path_may_have_image_preview(path: &Path) -> bool {
+    let Some(extension) = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+    else {
+        return mime_guess::from_path(path)
+            .first_raw()
+            .is_some_and(|mime| mime.starts_with("image/"));
+    };
+
+    extension == "svg"
+        || image::ImageFormat::from_extension(&extension).is_some()
+        || mime_guess::from_path(path)
+            .first_raw()
+            .is_some_and(|mime| mime.starts_with("image/"))
+}
+
+fn load_property_image_preview(path: &Path) -> Result<PropertyImagePreview, String> {
+    if path_is_svg(path) {
+        return load_property_svg_preview(path);
+    }
+
+    let bytes = fs::read(path).map_err(|error| format!("Failed to read image file: {error}"))?;
+    let format = image::guess_format(&bytes)
+        .or_else(|_| image::ImageFormat::from_path(path))
+        .map_err(|error| format!("Unsupported image format: {error}"))?;
+    let image = image::load_from_memory_with_format(&bytes, format)
+        .map_err(|error| format!("Failed to decode image: {error}"))?
+        .into_rgba8();
+
+    property_image_preview_from_rgba(image)
+}
+
+fn load_property_svg_preview(path: &Path) -> Result<PropertyImagePreview, String> {
+    let bytes = fs::read(path).map_err(|error| format!("Failed to read SVG file: {error}"))?;
+    let options = usvg::Options::default();
+    let tree = usvg::Tree::from_data(&bytes, &options)
+        .map_err(|error| format!("Failed to parse SVG: {error}"))?;
+    let svg_size = tree.size();
+    let (width, height) = svg_raster_dimensions(
+        svg_size.width(),
+        svg_size.height(),
+        SVG_IMAGE_RASTER_LONGEST_SIDE,
+    )
+    .ok_or_else(|| "SVG has no renderable dimensions.".to_owned())?;
+    let scale = width as f32 / svg_size.width();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| "SVG raster target has invalid dimensions.".to_owned())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    let mut image = image::RgbaImage::from_raw(width, height, pixmap.take())
+        .ok_or_else(|| "SVG rasterizer returned invalid pixel data.".to_owned())?;
+    for pixel in image.chunks_exact_mut(4) {
+        swap_rgba_premultiplied_to_bgra(pixel);
+    }
+
+    Ok(PropertyImagePreview {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        width,
+        height,
+    })
+}
+
+fn property_image_preview_from_rgba(
+    mut image: image::RgbaImage,
+) -> Result<PropertyImagePreview, String> {
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err("Image has no dimensions.".to_owned());
+    }
+
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(PropertyImagePreview {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        width,
+        height,
+    })
+}
+
+fn svg_raster_dimensions(width: f32, height: f32, longest_side: u32) -> Option<(u32, u32)> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    if longest_side == 0 {
+        return None;
+    }
+
+    let scale = longest_side as f32 / width.max(height);
+    let raster_width = (width * scale).round().max(1.0) as u32;
+    let raster_height = (height * scale).round().max(1.0) as u32;
+    Some((raster_width, raster_height))
+}
+
+fn path_is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+}
+
+fn swap_rgba_premultiplied_to_bgra(color: &mut [u8]) {
+    color.swap(0, 2);
+    if color[3] > 0 {
+        let alpha = color[3] as f32 / 255.0;
+        color[0] = (color[0] as f32 / alpha) as u8;
+        color[1] = (color[1] as f32 / alpha) as u8;
+        color[2] = (color[2] as f32 / alpha) as u8;
+    }
 }
 
 fn collect_single_file_media_detail_groups(
@@ -4972,8 +5227,13 @@ fn property_tabs_for_snapshot(
 fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>) -> bool {
     match tab {
         PropertyTab::General | PropertyTab::Details => true,
+        PropertyTab::Image => snapshot.is_some_and(snapshot_has_image_tab),
         PropertyTab::Frames => snapshot.is_some_and(snapshot_has_frames_tab),
     }
+}
+
+fn snapshot_has_image_tab(snapshot: &PropertySnapshot) -> bool {
+    single_file_image_path(&snapshot.target, snapshot.item_kind).is_some()
 }
 
 fn snapshot_has_frames_tab(snapshot: &PropertySnapshot) -> bool {
@@ -5002,6 +5262,16 @@ fn frames_scrollbar_metrics_for_dimensions(
     }
 
     ScrollbarMetrics::new(viewport_height, viewport_height + scroll_max, scroll_top)
+}
+
+fn property_image_preview(preview: &PropertyImagePreview) -> AnyElement {
+    gpui::img(preview.image.clone())
+        .w(px(preview.width as f32))
+        .h(px(preview.height as f32))
+        .max_w_full()
+        .max_h_full()
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
 }
 
 fn frame_thumbnail_list(frames: &[PropertyFrameThumbnail]) -> AnyElement {
@@ -5071,6 +5341,7 @@ fn tab_button(
     let id = match tab {
         PropertyTab::General => "properties-tab-general",
         PropertyTab::Details => "properties-tab-details",
+        PropertyTab::Image => "properties-tab-image",
         PropertyTab::Frames => "properties-tab-frames",
     };
     div()
@@ -5477,12 +5748,13 @@ mod tests {
     }
 
     #[test]
-    fn properties_dialog_defines_general_details_and_frames_tabs() {
+    fn properties_dialog_defines_general_details_image_and_frames_tabs() {
         assert_eq!(
             PROPERTY_TABS,
             &[
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details"),
+                (PropertyTab::Image, "Image"),
                 (PropertyTab::Frames, "Frames")
             ]
         );
@@ -5528,9 +5800,78 @@ mod tests {
             property_tabs_for_snapshot(Some(&image)),
             vec![
                 (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Image, "Image")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&folder)),
+            vec![
+                (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details")
             ]
         );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&missing)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&mixed)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+    }
+
+    #[test]
+    fn image_tab_is_visible_only_for_single_image_files() {
+        let temp = TempDir::new();
+        let png = temp.path().join("photo.png");
+        let jpg = temp.path().join("photo.jpg");
+        let ico = temp.path().join("icon.ico");
+        let svg = temp.path().join("vector.svg");
+        let folder = temp.path().join("folder");
+        let other = temp.path().join("other.txt");
+        let missing_path = temp.path().join("missing.png");
+        fs::write(&png, b"not real png").unwrap();
+        fs::write(&jpg, b"not real jpg").unwrap();
+        fs::write(&ico, b"not real ico").unwrap();
+        fs::write(&svg, b"not real svg").unwrap();
+        fs::write(&other, b"other").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        for image_path in [&png, &jpg, &ico, &svg] {
+            let snapshot = collect_property_snapshot(PropertyTarget {
+                paths: vec![image_path.clone()],
+            })
+            .unwrap();
+            assert_eq!(
+                property_tabs_for_snapshot(Some(&snapshot)),
+                vec![
+                    (PropertyTab::General, "General"),
+                    (PropertyTab::Details, "Details"),
+                    (PropertyTab::Image, "Image")
+                ]
+            );
+        }
+
+        let folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+        let missing = collect_property_snapshot(PropertyTarget {
+            paths: vec![missing_path],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![jpg, other],
+        })
+        .unwrap();
+
         assert_eq!(
             property_tabs_for_snapshot(Some(&folder)),
             vec![
@@ -5678,6 +6019,72 @@ mod tests {
         assert_eq!(metrics.content_height, 150.0);
         assert_eq!(metrics.scroll_max, 50.0);
         assert_eq!(metrics.scroll_top, 50.0);
+    }
+
+    #[test]
+    fn svg_raster_dimensions_scale_longest_side_to_limit() {
+        assert_eq!(svg_raster_dimensions(1000.0, 250.0, 500), Some((500, 125)));
+        assert_eq!(svg_raster_dimensions(250.0, 1000.0, 500), Some((125, 500)));
+        assert_eq!(svg_raster_dimensions(400.0, 400.0, 500), Some((500, 500)));
+        assert_eq!(svg_raster_dimensions(3.0, 1.0, 500), Some((500, 167)));
+    }
+
+    #[test]
+    fn svg_raster_dimensions_reject_invalid_inputs() {
+        assert_eq!(svg_raster_dimensions(0.0, 100.0, 500), None);
+        assert_eq!(svg_raster_dimensions(100.0, 0.0, 500), None);
+        assert_eq!(svg_raster_dimensions(f32::NAN, 100.0, 500), None);
+        assert_eq!(svg_raster_dimensions(100.0, f32::INFINITY, 500), None);
+        assert_eq!(svg_raster_dimensions(100.0, 100.0, 0), None);
+    }
+
+    #[test]
+    fn image_preview_decodes_png_dimensions() {
+        let temp = TempDir::new();
+        let path = temp.path().join("image.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let preview = load_property_image_preview(&path).unwrap();
+
+        assert_eq!(preview.width, 4);
+        assert_eq!(preview.height, 2);
+        assert_render_image_size(&preview, 4, 2);
+        assert!(!preview.image.as_bytes(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn image_preview_decodes_ico_dimensions() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/explorer.ico");
+
+        let preview = load_property_image_preview(&path).unwrap();
+
+        assert!(preview.width > 0);
+        assert!(preview.height > 0);
+        assert_render_image_size(&preview, preview.width, preview.height);
+        assert!(!preview.image.as_bytes(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn image_preview_rasterizes_svg_to_500px_longest_side() {
+        let temp = TempDir::new();
+        let path = temp.path().join("vector.svg");
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="250"><rect width="1000" height="250" fill="red"/></svg>"#,
+        )
+        .unwrap();
+
+        let preview = load_property_image_preview(&path).unwrap();
+
+        assert_eq!(preview.width, 500);
+        assert_eq!(preview.height, 125);
+        assert_render_image_size(&preview, 500, 125);
+        assert!(!preview.image.as_bytes(0).unwrap().is_empty());
     }
 
     #[test]
@@ -6904,6 +7311,12 @@ mod tests {
         let mut bytes = value.as_bytes().to_vec();
         bytes.push(0);
         bytes
+    }
+
+    fn assert_render_image_size(preview: &PropertyImagePreview, width: u32, height: u32) {
+        let size = preview.image.size(0);
+        assert_eq!(size.width.0, width as i32);
+        assert_eq!(size.height.0, height as i32);
     }
 
     fn push_ifd_entry(tiff: &mut Vec<u8>, tag: u16, field_type: u16, count: u32, value: u32) {
