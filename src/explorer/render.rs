@@ -19,6 +19,7 @@ use crate::explorer::{
     address_bar::{
         ADDRESS_SUGGESTION_ROW_HEIGHT, ADDRESS_SUGGESTIONS_VERTICAL_PADDING, address_text_element,
     },
+    app_icons::NativeIconSize,
     breadcrumb::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
@@ -691,14 +692,14 @@ impl ExplorerView {
         let native_icon_entry = self.context_menu.as_ref()?.native_icon_entry.clone();
         let native_file_icon = native_icon_entry
             .as_ref()
-            .and_then(|entry| self.native_icon_for_entry(entry, cx));
+            .and_then(|entry| self.native_icon_for_entry(entry, NativeIconSize::Details, cx));
         let native_path_icons = {
             let mut paths = Vec::new();
             collect_context_menu_native_paths(&self.context_menu.as_ref()?.items, &mut paths);
             paths
                 .into_iter()
                 .filter_map(|path| {
-                    self.native_icon_for_path(&path, cx)
+                    self.native_icon_for_path(&path, NativeIconSize::Details, cx)
                         .map(|icon| (path, icon))
                 })
                 .collect::<HashMap<_, _>>()
@@ -1532,7 +1533,7 @@ impl ExplorerView {
 
     fn render_row(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
-        let app_icon = self.native_icon_for_entry(&entry, cx);
+        let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::Details, cx);
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
@@ -1936,7 +1937,7 @@ impl ExplorerView {
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
         let image_thumbnail = self.image_thumbnail_for_entry(&entry, cx);
-        let app_icon = self.native_icon_for_entry(&entry, cx);
+        let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::LargeIcons, cx);
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);

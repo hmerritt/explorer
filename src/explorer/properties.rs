@@ -28,6 +28,7 @@ use crate::explorer::image_preview::svg_raster_dimensions;
 use crate::explorer::open_with::OpenWithOutcome;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
+    app_icons::NativeIconSize,
     constants::{
         SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
         SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
@@ -1419,7 +1420,9 @@ impl PropertiesDialog {
 
     fn native_icon_for_path(&self, path: &Path, cx: &mut Context<Self>) -> Option<Arc<Image>> {
         self.explorer
-            .update(cx, |explorer, cx| explorer.native_icon_for_path(path, cx))
+            .update(cx, |explorer, cx| {
+                explorer.native_icon_for_path(path, NativeIconSize::Details, cx)
+            })
             .ok()
             .flatten()
     }

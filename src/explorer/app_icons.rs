@@ -19,21 +19,42 @@ use crate::{
 
 const NATIVE_ICON_LOAD_INTERVAL: Duration = Duration::from_millis(16);
 const URL_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v3";
+const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v4";
 const URL_ICON_CACHE_VERSION: &str = "url-icons-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "mappings.json";
 const DISK_ICON_DIR_NAME: &str = "icons";
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
-const NATIVE_ICON_NORMALIZED_PNG_SIZE: u32 = 128;
-const NATIVE_ICON_NORMALIZED_CONTENT_SIZE: u32 = 112;
 const NATIVE_ICON_UNDERSIZED_RATIO: f32 = 0.75;
 const NATIVE_ICON_CENTER_TOLERANCE_RATIO: f32 = 0.08;
-#[cfg(target_os = "macos")]
-const APP_ICON_PNG_SIZE: f64 = 128.0;
-#[cfg(target_os = "windows")]
-const WINDOWS_ICON_PNG_SIZE: i32 = 128;
-#[cfg(target_os = "linux")]
-const LINUX_ICON_PNG_SIZE: u32 = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NativeIconSize {
+    Details,
+    LargeIcons,
+}
+
+impl NativeIconSize {
+    fn source_pixels(self) -> u32 {
+        match self {
+            Self::Details => 32,
+            Self::LargeIcons => 128,
+        }
+    }
+
+    fn normalized_content_pixels(self) -> u32 {
+        match self {
+            Self::Details => 28,
+            Self::LargeIcons => 112,
+        }
+    }
+
+    fn cache_key_segment(self) -> &'static str {
+        match self {
+            Self::Details => "details-32",
+            Self::LargeIcons => "large-128",
+        }
+    }
+}
 
 pub(super) struct NativeIconCache {
     inner: RefCell<NativeIconCacheInner>,
@@ -73,6 +94,7 @@ pub(crate) fn initialize(cx: &mut App) {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NativeIconRequest {
     key: String,
+    size: NativeIconSize,
     source: PlatformIconRequest,
 }
 
@@ -243,13 +265,14 @@ impl NativeIconCacheInner {
             Some(NativeIconState::Pending { .. }) | None => None,
         };
 
-        let state = match bytes.and_then(normalize_native_icon_png_bytes) {
-            Some(bytes) => {
-                self.store.write_mapping(&request.key, &bytes);
-                NativeIconState::Ready(image_from_png_bytes(bytes))
-            }
-            None => NativeIconState::Failed(stale_icon),
-        };
+        let state =
+            match bytes.and_then(|bytes| normalize_native_icon_png_bytes(request.size, bytes)) {
+                Some(bytes) => {
+                    self.store.write_mapping(&request.key, &bytes);
+                    NativeIconState::Ready(image_from_png_bytes(bytes))
+                }
+                None => NativeIconState::Failed(stale_icon),
+            };
 
         self.states.insert(request.key, state);
         true
@@ -350,17 +373,19 @@ impl ExplorerView {
     pub(super) fn native_icon_for_entry(
         &mut self,
         entry: &FileEntry,
+        size: NativeIconSize,
         cx: &mut Context<Self>,
     ) -> Option<Arc<Image>> {
-        self.native_icon_for_request(native_icon_request_for_entry(entry), cx)
+        self.native_icon_for_request(native_icon_request_for_entry(entry, size), cx)
     }
 
     pub(super) fn native_icon_for_path(
         &mut self,
         path: &Path,
+        size: NativeIconSize,
         cx: &mut Context<Self>,
     ) -> Option<Arc<Image>> {
-        self.native_icon_for_request(native_icon_request_for_path(path), cx)
+        self.native_icon_for_request(native_icon_request_for_path(path, size), cx)
     }
 
     pub(super) fn cached_url_icon_path(
@@ -789,41 +814,53 @@ fn format_icon_timing_duration(elapsed: Duration) -> String {
     format!("{:.3}ms", elapsed.as_secs_f64() * 1000.0)
 }
 
-fn native_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
+fn native_icon_request_for_entry(
+    entry: &FileEntry,
+    size: NativeIconSize,
+) -> Option<NativeIconRequest> {
     #[cfg(target_os = "macos")]
     {
-        return mac_icon_request_for_entry(entry);
+        return mac_icon_request_for_entry(entry, size);
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_icon_request_for_entry(entry);
+        return windows_icon_request_for_entry(entry, size);
     }
 
     #[allow(unreachable_code)]
     None
 }
 
-fn native_icon_request_for_path(path: &Path) -> Option<NativeIconRequest> {
+fn native_icon_request_for_path(path: &Path, size: NativeIconSize) -> Option<NativeIconRequest> {
     #[cfg(target_os = "macos")]
     {
-        return Some(mac_native_icon_request(MacIconRequest::Path {
-            path: path.to_path_buf(),
-        }));
+        return Some(mac_native_icon_request(
+            MacIconRequest::Path {
+                path: path.to_path_buf(),
+            },
+            size,
+        ));
     }
 
     #[cfg(target_os = "windows")]
     {
-        return Some(windows_native_icon_request(WindowsIconRequest::Path {
-            path: path.to_path_buf(),
-        }));
+        return Some(windows_native_icon_request(
+            WindowsIconRequest::Path {
+                path: path.to_path_buf(),
+            },
+            size,
+        ));
     }
 
     #[cfg(target_os = "linux")]
     {
-        return Some(linux_native_icon_request(LinuxIconRequest::Path {
-            path: path.to_path_buf(),
-        }));
+        return Some(linux_native_icon_request(
+            LinuxIconRequest::Path {
+                path: path.to_path_buf(),
+            },
+            size,
+        ));
     }
 
     #[allow(unreachable_code)]
@@ -832,11 +869,12 @@ fn native_icon_request_for_path(path: &Path) -> Option<NativeIconRequest> {
 
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(test, allow(dead_code))]
-fn linux_native_icon_request(request: LinuxIconRequest) -> NativeIconRequest {
+fn linux_native_icon_request(request: LinuxIconRequest, size: NativeIconSize) -> NativeIconRequest {
     let key = match &request {
         LinuxIconRequest::Path { path } => {
             format!(
-                "{NATIVE_ICON_CACHE_VERSION}:linux:path:{}",
+                "{NATIVE_ICON_CACHE_VERSION}:{}:linux:path:{}",
+                size.cache_key_segment(),
                 normalized_path_key(path)
             )
         }
@@ -844,42 +882,57 @@ fn linux_native_icon_request(request: LinuxIconRequest) -> NativeIconRequest {
 
     NativeIconRequest {
         key,
+        size,
         source: PlatformIconRequest::Linux(request),
     }
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn mac_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
+fn mac_icon_request_for_entry(
+    entry: &FileEntry,
+    size: NativeIconSize,
+) -> Option<NativeIconRequest> {
     if entry.uses_app_bundle_icon() {
-        return Some(mac_native_icon_request(MacIconRequest::AppBundle {
-            path: entry.path.clone(),
-        }));
+        return Some(mac_native_icon_request(
+            MacIconRequest::AppBundle {
+                path: entry.path.clone(),
+            },
+            size,
+        ));
     }
 
     if entry.is_directory_like() {
         return None;
     }
 
-    Some(mac_native_icon_request(MacIconRequest::FileType {
-        extension: lowercase_extension(&entry.path).unwrap_or_default(),
-    }))
+    Some(mac_native_icon_request(
+        MacIconRequest::FileType {
+            extension: lowercase_extension(&entry.path).unwrap_or_default(),
+        },
+        size,
+    ))
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn mac_native_icon_request(request: MacIconRequest) -> NativeIconRequest {
+fn mac_native_icon_request(request: MacIconRequest, size: NativeIconSize) -> NativeIconRequest {
     let key = match &request {
         MacIconRequest::AppBundle { path } => {
             format!(
-                "{NATIVE_ICON_CACHE_VERSION}:macos:app:{}",
+                "{NATIVE_ICON_CACHE_VERSION}:{}:macos:app:{}",
+                size.cache_key_segment(),
                 normalized_path_key(path)
             )
         }
         MacIconRequest::FileType { extension, .. } => {
-            format!("{NATIVE_ICON_CACHE_VERSION}:macos:file-type:{extension}")
+            format!(
+                "{NATIVE_ICON_CACHE_VERSION}:{}:macos:file-type:{extension}",
+                size.cache_key_segment()
+            )
         }
         MacIconRequest::Path { path } => {
             format!(
-                "{NATIVE_ICON_CACHE_VERSION}:macos:path:{}",
+                "{NATIVE_ICON_CACHE_VERSION}:{}:macos:path:{}",
+                size.cache_key_segment(),
                 normalized_path_key(path)
             )
         }
@@ -887,12 +940,16 @@ fn mac_native_icon_request(request: MacIconRequest) -> NativeIconRequest {
 
     NativeIconRequest {
         key,
+        size,
         source: PlatformIconRequest::Mac(request),
     }
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
+fn windows_icon_request_for_entry(
+    entry: &FileEntry,
+    size: NativeIconSize,
+) -> Option<NativeIconRequest> {
     if entry.is_directory_like() {
         return None;
     }
@@ -907,18 +964,25 @@ fn windows_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest
         }
     };
 
-    Some(windows_native_icon_request(request))
+    Some(windows_native_icon_request(request, size))
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_native_icon_request(request: WindowsIconRequest) -> NativeIconRequest {
+fn windows_native_icon_request(
+    request: WindowsIconRequest,
+    size: NativeIconSize,
+) -> NativeIconRequest {
     let key = match &request {
         WindowsIconRequest::Extension { extension } => {
-            format!("{NATIVE_ICON_CACHE_VERSION}:windows:extension:{extension}")
+            format!(
+                "{NATIVE_ICON_CACHE_VERSION}:{}:windows:extension:{extension}",
+                size.cache_key_segment()
+            )
         }
         WindowsIconRequest::Path { path } => {
             format!(
-                "{NATIVE_ICON_CACHE_VERSION}:windows:path:{}",
+                "{NATIVE_ICON_CACHE_VERSION}:{}:windows:path:{}",
+                size.cache_key_segment(),
                 normalized_path_key(path)
             )
         }
@@ -926,6 +990,7 @@ fn windows_native_icon_request(request: WindowsIconRequest) -> NativeIconRequest
 
     NativeIconRequest {
         key,
+        size,
         source: PlatformIconRequest::Windows(request),
     }
 }
@@ -983,15 +1048,17 @@ fn normalized_path_key(path: &Path) -> String {
 fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> {
     match &request.source {
         #[cfg(target_os = "linux")]
-        PlatformIconRequest::Linux(request) => load_linux_icon_png_bytes(request),
+        PlatformIconRequest::Linux(source) => load_linux_icon_png_bytes(source, request.size),
         #[cfg(all(test, not(target_os = "linux")))]
         PlatformIconRequest::Linux(_) => None,
         #[cfg(target_os = "macos")]
-        PlatformIconRequest::Mac(request) => load_macos_icon_png_bytes(request),
+        PlatformIconRequest::Mac(source) => load_macos_icon_png_bytes(source, request.size),
         #[cfg(all(test, not(target_os = "macos")))]
         PlatformIconRequest::Mac(_) => None,
         #[cfg(target_os = "windows")]
-        PlatformIconRequest::Windows(request) => load_windows_shell_icon_png_bytes(request),
+        PlatformIconRequest::Windows(source) => {
+            load_windows_shell_icon_png_bytes(source, request.size)
+        }
         #[cfg(all(test, not(target_os = "windows")))]
         PlatformIconRequest::Windows(_) => None,
         #[cfg(test)]
@@ -1002,7 +1069,7 @@ fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> 
 }
 
 #[cfg(target_os = "linux")]
-fn load_linux_icon_png_bytes(request: &LinuxIconRequest) -> Option<Vec<u8>> {
+fn load_linux_icon_png_bytes(request: &LinuxIconRequest, size: NativeIconSize) -> Option<Vec<u8>> {
     use freedesktop_desktop_entry::IconSource;
 
     let LinuxIconRequest::Path { path } = request;
@@ -1014,7 +1081,7 @@ fn load_linux_icon_png_bytes(request: &LinuxIconRequest) -> Option<Vec<u8>> {
         IconSource::Name(name) => {
             let theme = freedesktop_icons::default_theme_gtk();
             let lookup = freedesktop_icons::lookup(&name)
-                .with_size(LINUX_ICON_PNG_SIZE as u16)
+                .with_size(size.source_pixels() as u16)
                 .with_cache();
             match theme {
                 Some(theme) => lookup.with_theme(&theme).find(),
@@ -1023,7 +1090,7 @@ fn load_linux_icon_png_bytes(request: &LinuxIconRequest) -> Option<Vec<u8>> {
         }
     };
 
-    load_linux_icon_path_as_png(&icon_path)
+    load_linux_icon_path_as_png(&icon_path, size)
 }
 
 #[cfg(target_os = "linux")]
@@ -1065,27 +1132,28 @@ fn linux_icon_source_for_executable(
 }
 
 #[cfg(target_os = "linux")]
-fn load_linux_icon_path_as_png(path: &Path) -> Option<Vec<u8>> {
+fn load_linux_icon_path_as_png(path: &Path, size: NativeIconSize) -> Option<Vec<u8>> {
     let bytes = fs::read(path).ok()?;
     if path
         .extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
     {
-        return linux_svg_to_png(&bytes);
+        return linux_svg_to_png(&bytes, size);
     }
     valid_png_bytes(bytes)
 }
 
 #[cfg(target_os = "linux")]
-fn linux_svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+fn linux_svg_to_png(bytes: &[u8], size: NativeIconSize) -> Option<Vec<u8>> {
     use image::ImageEncoder;
 
     let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
-    let size = tree.size();
-    let target_size = LINUX_ICON_PNG_SIZE as f32;
-    let scale = (target_size / size.width()).min(target_size / size.height());
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(LINUX_ICON_PNG_SIZE, LINUX_ICON_PNG_SIZE)?;
+    let svg_size = tree.size();
+    let target_pixels = size.source_pixels();
+    let target_size = target_pixels as f32;
+    let scale = (target_size / svg_size.width()).min(target_size / svg_size.height());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(target_pixels, target_pixels)?;
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
@@ -1102,13 +1170,19 @@ fn linux_svg_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
-fn load_windows_shell_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
-    load_windows_image_list_icon_png_bytes(request)
-        .or_else(|| load_windows_file_info_icon_png_bytes(request))
+fn load_windows_shell_icon_png_bytes(
+    request: &WindowsIconRequest,
+    size: NativeIconSize,
+) -> Option<Vec<u8>> {
+    load_windows_image_list_icon_png_bytes(request, size)
+        .or_else(|| load_windows_file_info_icon_png_bytes(request, size))
 }
 
 #[cfg(target_os = "windows")]
-fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
+fn load_windows_image_list_icon_png_bytes(
+    request: &WindowsIconRequest,
+    size: NativeIconSize,
+) -> Option<Vec<u8>> {
     use std::{mem, os::windows::ffi::OsStrExt};
     use windows::{
         Win32::{
@@ -1117,7 +1191,8 @@ fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Optio
                 Controls::{IImageList, ILD_TRANSPARENT},
                 Shell::{
                     SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
-                    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO,
+                    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE,
+                    SHIL_SMALL,
                 },
                 WindowsAndMessaging::DestroyIcon,
             },
@@ -1168,7 +1243,12 @@ fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Optio
         return None;
     }
 
-    for image_list_size in [SHIL_JUMBO, SHIL_EXTRALARGE] {
+    let image_list_sizes: &[u32] = match size {
+        NativeIconSize::Details => &[SHIL_LARGE, SHIL_SMALL],
+        NativeIconSize::LargeIcons => &[SHIL_JUMBO, SHIL_EXTRALARGE],
+    };
+
+    for &image_list_size in image_list_sizes {
         let Some(image_list) = unsafe { SHGetImageList::<IImageList>(image_list_size as i32) }.ok()
         else {
             continue;
@@ -1180,7 +1260,7 @@ fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Optio
             continue;
         }
 
-        let bytes = unsafe { hicon_to_png_bytes(icon, WINDOWS_ICON_PNG_SIZE) };
+        let bytes = unsafe { hicon_to_png_bytes(icon, size.source_pixels() as i32) };
         let _ = unsafe { DestroyIcon(icon) };
         if bytes.is_some() {
             return bytes;
@@ -1191,7 +1271,10 @@ fn load_windows_image_list_icon_png_bytes(request: &WindowsIconRequest) -> Optio
 }
 
 #[cfg(target_os = "windows")]
-fn load_windows_file_info_icon_png_bytes(request: &WindowsIconRequest) -> Option<Vec<u8>> {
+fn load_windows_file_info_icon_png_bytes(
+    request: &WindowsIconRequest,
+    size: NativeIconSize,
+) -> Option<Vec<u8>> {
     use std::{mem, os::windows::ffi::OsStrExt};
     use windows::{
         Win32::{
@@ -1250,7 +1333,7 @@ fn load_windows_file_info_icon_png_bytes(request: &WindowsIconRequest) -> Option
         return None;
     }
 
-    let bytes = unsafe { hicon_to_png_bytes(info.hIcon, WINDOWS_ICON_PNG_SIZE) };
+    let bytes = unsafe { hicon_to_png_bytes(info.hIcon, size.source_pixels() as i32) };
     let _ = unsafe { DestroyIcon(info.hIcon) };
     bytes
 }
@@ -1387,26 +1470,26 @@ fn rgba_to_png_bytes(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> 
 }
 
 #[cfg(target_os = "macos")]
-fn load_macos_icon_png_bytes(request: &MacIconRequest) -> Option<Vec<u8>> {
+fn load_macos_icon_png_bytes(request: &MacIconRequest, size: NativeIconSize) -> Option<Vec<u8>> {
     match request {
-        MacIconRequest::AppBundle { path } => load_app_bundle_icon_png_bytes(path),
-        MacIconRequest::FileType { extension } => load_file_type_icon_png_bytes(extension),
-        MacIconRequest::Path { path } => load_icon_from_workspace(path),
+        MacIconRequest::AppBundle { path } => load_app_bundle_icon_png_bytes(path, size),
+        MacIconRequest::FileType { extension } => load_file_type_icon_png_bytes(extension, size),
+        MacIconRequest::Path { path } => load_icon_from_workspace(path, size),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn load_app_bundle_icon_png_bytes(path: &Path) -> Option<Vec<u8>> {
-    load_icon_from_workspace(path).or_else(|| {
+fn load_app_bundle_icon_png_bytes(path: &Path, size: NativeIconSize) -> Option<Vec<u8>> {
+    load_icon_from_workspace(path, size).or_else(|| {
         resolve_bundle_icon_path(path)
             .as_deref()
-            .and_then(load_icon_from_icns)
+            .and_then(|icon_path| load_icon_from_icns(icon_path, size))
     })
 }
 
 #[cfg(target_os = "macos")]
-fn load_file_type_icon_png_bytes(extension: &str) -> Option<Vec<u8>> {
-    load_icon_from_file_type(extension)
+fn load_file_type_icon_png_bytes(extension: &str, size: NativeIconSize) -> Option<Vec<u8>> {
+    load_icon_from_file_type(extension, size)
 }
 
 #[cfg(target_os = "macos")]
@@ -1444,11 +1527,11 @@ fn bundle_icon_resource_path(app_path: &Path, icon_name: &str) -> Option<PathBuf
 }
 
 #[cfg(target_os = "macos")]
-fn load_icon_from_icns(icon_path: &Path) -> Option<Vec<u8>> {
-    use icns::{IconFamily, IconType};
+fn load_icon_from_icns(icon_path: &Path, size: NativeIconSize) -> Option<Vec<u8>> {
+    use icns::IconFamily;
 
     let icon_family = IconFamily::read(fs::File::open(icon_path).ok()?).ok()?;
-    let icon_type = preferred_icon_type(&icon_family.available_icons())?;
+    let icon_type = preferred_icon_type(&icon_family.available_icons(), size)?;
     let image = icon_family.get_icon_with_type(icon_type).ok()?;
     let mut bytes = Vec::new();
     image.write_png(&mut bytes).ok()?;
@@ -1456,40 +1539,19 @@ fn load_icon_from_icns(icon_path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn preferred_icon_type(available_icons: &[icns::IconType]) -> Option<icns::IconType> {
-    use icns::IconType;
-
-    let preferred = [
-        IconType::RGBA32_128x128,
-        IconType::RGBA32_128x128_2x,
-        IconType::RGBA32_256x256,
-        IconType::RGBA32_256x256_2x,
-        IconType::RGBA32_512x512,
-        IconType::RGBA32_512x512_2x,
-        IconType::RGB24_128x128,
-        IconType::RGBA32_64x64,
-        IconType::RGBA32_32x32_2x,
-        IconType::RGBA32_32x32,
-        IconType::RGB24_48x48,
-        IconType::RGBA32_16x16_2x,
-        IconType::RGBA32_16x16,
-        IconType::RGB24_32x32,
-        IconType::RGB24_16x16,
-    ];
-
-    preferred
-        .into_iter()
-        .find(|icon_type| available_icons.contains(icon_type))
-        .or_else(|| {
-            available_icons.iter().copied().min_by_key(|icon_type| {
-                let width = icon_type.screen_width() as i64;
-                ((width - APP_ICON_PNG_SIZE as i64).abs(), width)
-            })
-        })
+fn preferred_icon_type(
+    available_icons: &[icns::IconType],
+    size: NativeIconSize,
+) -> Option<icns::IconType> {
+    let target_width = size.source_pixels() as i64;
+    available_icons.iter().copied().min_by_key(|icon_type| {
+        let width = icon_type.screen_width() as i64;
+        ((width - target_width).abs(), width)
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn load_icon_from_workspace(path: &Path) -> Option<Vec<u8>> {
+fn load_icon_from_workspace(path: &Path, size: NativeIconSize) -> Option<Vec<u8>> {
     use cocoa::{
         appkit::NSImage,
         base::{id, nil},
@@ -1515,7 +1577,7 @@ fn load_icon_from_workspace(path: &Path) -> Option<Vec<u8>> {
                 return None;
             }
 
-            small_png_from_ns_image(icon)
+            png_from_ns_image(icon, size)
         })();
         let _: () = msg_send![pool, drain];
         result
@@ -1523,7 +1585,7 @@ fn load_icon_from_workspace(path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn load_icon_from_file_type(file_type: &str) -> Option<Vec<u8>> {
+fn load_icon_from_file_type(file_type: &str, size: NativeIconSize) -> Option<Vec<u8>> {
     use cocoa::{
         appkit::NSImage,
         base::{id, nil},
@@ -1547,7 +1609,7 @@ fn load_icon_from_file_type(file_type: &str) -> Option<Vec<u8>> {
                 return None;
             }
 
-            small_png_from_ns_image(icon)
+            png_from_ns_image(icon, size)
         })();
         let _: () = msg_send![pool, drain];
         result
@@ -1555,7 +1617,7 @@ fn load_icon_from_file_type(file_type: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn small_png_from_ns_image(icon: cocoa::base::id) -> Option<Vec<u8>> {
+unsafe fn png_from_ns_image(icon: cocoa::base::id, size: NativeIconSize) -> Option<Vec<u8>> {
     use cocoa::{
         appkit::{NSCompositingOperation, NSImage},
         base::{NO, YES, id, nil},
@@ -1563,7 +1625,9 @@ unsafe fn small_png_from_ns_image(icon: cocoa::base::id) -> Option<Vec<u8>> {
     };
     use objc::{class, msg_send, sel, sel_impl};
 
-    let size = APP_ICON_PNG_SIZE as isize;
+    let size_pixels = size.source_pixels();
+    let size_isize = size_pixels as isize;
+    let size_f64 = size_pixels as f64;
     let color_space = NSString::alloc(nil).init_str("NSDeviceRGBColorSpace");
     let _: id = msg_send![color_space, autorelease];
 
@@ -1571,8 +1635,8 @@ unsafe fn small_png_from_ns_image(icon: cocoa::base::id) -> Option<Vec<u8>> {
     let bitmap_rep: id = msg_send![
         bitmap_rep,
         initWithBitmapDataPlanes: nil
-        pixelsWide: size
-        pixelsHigh: size
+        pixelsWide: size_isize
+        pixelsHigh: size_isize
         bitsPerSample: 8isize
         samplesPerPixel: 4isize
         hasAlpha: YES
@@ -1596,10 +1660,7 @@ unsafe fn small_png_from_ns_image(icon: cocoa::base::id) -> Option<Vec<u8>> {
     let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
     let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: graphics_context];
 
-    let destination = NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(APP_ICON_PNG_SIZE, APP_ICON_PNG_SIZE),
-    );
+    let destination = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(size_f64, size_f64));
     let source = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
     icon.drawInRect_fromRect_operation_fraction_(
         destination,
@@ -1656,18 +1717,18 @@ impl AlphaBounds {
     }
 }
 
-fn normalize_native_icon_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
+fn normalize_native_icon_png_bytes(size: NativeIconSize, bytes: Vec<u8>) -> Option<Vec<u8>> {
     let bytes = valid_png_bytes(bytes)?;
     let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let Some(bounds) = alpha_bounds(&image) else {
         return None;
     };
     let (width, height) = image.dimensions();
-    if !native_icon_needs_normalization(width, height, bounds) {
+    if !native_icon_needs_normalization(size, width, height, bounds) {
         return Some(bytes);
     }
 
-    normalized_rgba_icon_png(&image, bounds)
+    normalized_rgba_icon_png(size, &image, bounds)
 }
 
 fn alpha_bounds(image: &image::RgbaImage) -> Option<AlphaBounds> {
@@ -1702,8 +1763,14 @@ fn alpha_bounds(image: &image::RgbaImage) -> Option<AlphaBounds> {
     })
 }
 
-fn native_icon_needs_normalization(width: u32, height: u32, bounds: AlphaBounds) -> bool {
-    if width != NATIVE_ICON_NORMALIZED_PNG_SIZE || height != NATIVE_ICON_NORMALIZED_PNG_SIZE {
+fn native_icon_needs_normalization(
+    size: NativeIconSize,
+    width: u32,
+    height: u32,
+    bounds: AlphaBounds,
+) -> bool {
+    let source_pixels = size.source_pixels();
+    if width != source_pixels || height != source_pixels {
         return true;
     }
 
@@ -1723,11 +1790,16 @@ fn native_icon_needs_normalization(width: u32, height: u32, bounds: AlphaBounds)
         || (content_center_y - image_center_y).abs() > tolerance
 }
 
-fn normalized_rgba_icon_png(image: &image::RgbaImage, bounds: AlphaBounds) -> Option<Vec<u8>> {
+fn normalized_rgba_icon_png(
+    size: NativeIconSize,
+    image: &image::RgbaImage,
+    bounds: AlphaBounds,
+) -> Option<Vec<u8>> {
     let cropped = image::imageops::crop_imm(image, bounds.x, bounds.y, bounds.width, bounds.height)
         .to_image();
-    let scale = (NATIVE_ICON_NORMALIZED_CONTENT_SIZE as f32 / bounds.width as f32)
-        .min(NATIVE_ICON_NORMALIZED_CONTENT_SIZE as f32 / bounds.height as f32);
+    let content_pixels = size.normalized_content_pixels();
+    let scale = (content_pixels as f32 / bounds.width as f32)
+        .min(content_pixels as f32 / bounds.height as f32);
     let resized_width = ((bounds.width as f32 * scale).round() as u32).max(1);
     let resized_height = ((bounds.height as f32 * scale).round() as u32).max(1);
     let resized = image::imageops::resize(
@@ -1737,19 +1809,13 @@ fn normalized_rgba_icon_png(image: &image::RgbaImage, bounds: AlphaBounds) -> Op
         image::imageops::FilterType::Lanczos3,
     );
 
-    let mut canvas = image::RgbaImage::from_pixel(
-        NATIVE_ICON_NORMALIZED_PNG_SIZE,
-        NATIVE_ICON_NORMALIZED_PNG_SIZE,
-        image::Rgba([0, 0, 0, 0]),
-    );
-    let x = ((NATIVE_ICON_NORMALIZED_PNG_SIZE - resized_width) / 2) as i64;
-    let y = ((NATIVE_ICON_NORMALIZED_PNG_SIZE - resized_height) / 2) as i64;
+    let source_pixels = size.source_pixels();
+    let mut canvas =
+        image::RgbaImage::from_pixel(source_pixels, source_pixels, image::Rgba([0, 0, 0, 0]));
+    let x = ((source_pixels - resized_width) / 2) as i64;
+    let y = ((source_pixels - resized_height) / 2) as i64;
     image::imageops::overlay(&mut canvas, &resized, x, y);
-    encode_rgba_png_bytes(
-        canvas.as_raw(),
-        NATIVE_ICON_NORMALIZED_PNG_SIZE,
-        NATIVE_ICON_NORMALIZED_PNG_SIZE,
-    )
+    encode_rgba_png_bytes(canvas.as_raw(), source_pixels, source_pixels)
 }
 
 fn encode_rgba_png_bytes(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
@@ -2076,6 +2142,15 @@ mod tests {
     fn test_request(key: &str) -> NativeIconRequest {
         NativeIconRequest {
             key: key.to_owned(),
+            size: NativeIconSize::Details,
+            source: PlatformIconRequest::Test,
+        }
+    }
+
+    fn sized_test_request(key: &str, size: NativeIconSize) -> NativeIconRequest {
+        NativeIconRequest {
+            key: format!("{key}:{}", size.cache_key_segment()),
+            size,
             source: PlatformIconRequest::Test,
         }
     }
@@ -2086,11 +2161,11 @@ mod tests {
 
     #[test]
     fn native_icon_cache_version_invalidates_old_low_resolution_icons() {
-        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v3");
+        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v4");
     }
 
     #[test]
-    fn native_icon_normalization_centers_and_scales_small_top_left_content() {
+    fn large_native_icon_normalization_centers_and_scales_small_top_left_content() {
         let bytes = test_png_with_rect(
             128,
             128,
@@ -2102,7 +2177,8 @@ mod tests {
             }),
         );
 
-        let normalized = normalize_native_icon_png_bytes(bytes).expect("normalized png");
+        let normalized = normalize_native_icon_png_bytes(NativeIconSize::LargeIcons, bytes)
+            .expect("normalized png");
         let bounds = decoded_alpha_bounds(normalized);
 
         assert_eq!(
@@ -2112,6 +2188,34 @@ mod tests {
                 y: 8,
                 width: 112,
                 height: 112
+            }
+        );
+    }
+
+    #[test]
+    fn details_native_icon_normalization_centers_and_scales_small_top_left_content() {
+        let bytes = test_png_with_rect(
+            32,
+            32,
+            Some(AlphaBounds {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            }),
+        );
+
+        let normalized = normalize_native_icon_png_bytes(NativeIconSize::Details, bytes)
+            .expect("normalized png");
+        let bounds = decoded_alpha_bounds(normalized);
+
+        assert_eq!(
+            bounds,
+            AlphaBounds {
+                x: 2,
+                y: 2,
+                width: 28,
+                height: 28
             }
         );
     }
@@ -2129,7 +2233,8 @@ mod tests {
             }),
         );
 
-        let normalized = normalize_native_icon_png_bytes(bytes).expect("normalized png");
+        let normalized = normalize_native_icon_png_bytes(NativeIconSize::LargeIcons, bytes)
+            .expect("normalized png");
         let bounds = decoded_alpha_bounds(normalized);
 
         assert_eq!(
@@ -2156,16 +2261,40 @@ mod tests {
             }),
         );
 
-        assert_eq!(normalize_native_icon_png_bytes(bytes.clone()), Some(bytes));
+        assert_eq!(
+            normalize_native_icon_png_bytes(NativeIconSize::LargeIcons, bytes.clone()),
+            Some(bytes)
+        );
+
+        let bytes = test_png_with_rect(
+            32,
+            32,
+            Some(AlphaBounds {
+                x: 2,
+                y: 2,
+                width: 28,
+                height: 28,
+            }),
+        );
+
+        assert_eq!(
+            normalize_native_icon_png_bytes(NativeIconSize::Details, bytes.clone()),
+            Some(bytes)
+        );
     }
 
     #[test]
     fn native_icon_normalization_rejects_transparent_and_invalid_pngs() {
-        let transparent = test_png_with_rect(128, 128, None);
+        let transparent = test_png_with_rect(32, 32, None);
 
-        assert!(normalize_native_icon_png_bytes(transparent).is_none());
-        assert!(normalize_native_icon_png_bytes(b"not png".to_vec()).is_none());
-        assert!(normalize_native_icon_png_bytes(PNG_SIGNATURE.to_vec()).is_none());
+        assert!(normalize_native_icon_png_bytes(NativeIconSize::Details, transparent).is_none());
+        assert!(
+            normalize_native_icon_png_bytes(NativeIconSize::Details, b"not png".to_vec()).is_none()
+        );
+        assert!(
+            normalize_native_icon_png_bytes(NativeIconSize::Details, PNG_SIGNATURE.to_vec())
+                .is_none()
+        );
     }
 
     #[test]
@@ -2397,6 +2526,42 @@ mod tests {
     }
 
     #[test]
+    fn cache_keeps_details_and_large_native_icons_separate() {
+        let mut cache = cache_with_dir(None);
+        let details = sized_test_request("shared", NativeIconSize::Details);
+        let large = sized_test_request("shared", NativeIconSize::LargeIcons);
+
+        cache.icon_for_request(large.clone());
+        cache.next_load_job().expect("large load job");
+        assert!(cache.finish_request(large.clone(), Some(one_pixel_png_bytes())));
+
+        assert!(cache.icon_for_request(large).0.is_some());
+        let (details_icon, _) = cache.icon_for_request(details.clone());
+        assert!(details_icon.is_none());
+
+        let job = cache.next_load_job().expect("details load job");
+        assert_eq!(job.request, details);
+    }
+
+    #[test]
+    fn cache_keeps_large_native_icons_separate_from_ready_details_icons() {
+        let mut cache = cache_with_dir(None);
+        let details = sized_test_request("shared", NativeIconSize::Details);
+        let large = sized_test_request("shared", NativeIconSize::LargeIcons);
+
+        cache.icon_for_request(details.clone());
+        cache.next_load_job().expect("details load job");
+        assert!(cache.finish_request(details.clone(), Some(one_pixel_png_bytes())));
+
+        assert!(cache.icon_for_request(details).0.is_some());
+        let (large_icon, _) = cache.icon_for_request(large.clone());
+        assert!(large_icon.is_none());
+
+        let job = cache.next_load_job().expect("large load job");
+        assert_eq!(job.request, large);
+    }
+
+    #[test]
     fn stale_icon_is_loaded_from_manifest_hash() {
         let temp = TempDir::new();
         let cache_dir = temp.path().join("cache");
@@ -2598,14 +2763,34 @@ mod tests {
     }
 
     #[test]
+    fn linux_path_request_keys_include_native_icon_size() {
+        let path = PathBuf::from("/usr/bin/app");
+
+        let details = linux_native_icon_request(
+            LinuxIconRequest::Path { path: path.clone() },
+            NativeIconSize::Details,
+        );
+        let large =
+            linux_native_icon_request(LinuxIconRequest::Path { path }, NativeIconSize::LargeIcons);
+
+        assert_ne!(details.key, large.key);
+        assert!(details.key.contains(":details-32:linux:path:"));
+        assert!(large.key.contains(":large-128:linux:path:"));
+        assert_eq!(details.source, large.source);
+    }
+
+    #[test]
     fn windows_extension_requests_are_shared_and_case_insensitive() {
         let first = FileEntry::test("Report.TXT", false, Some(1), None);
         let second = FileEntry::test("notes.txt", false, Some(1), None);
 
-        let first = windows_icon_request_for_entry(&first).expect("first icon request");
-        let second = windows_icon_request_for_entry(&second).expect("second icon request");
+        let first = windows_icon_request_for_entry(&first, NativeIconSize::Details)
+            .expect("first icon request");
+        let second = windows_icon_request_for_entry(&second, NativeIconSize::Details)
+            .expect("second icon request");
 
         assert_eq!(first.key, second.key);
+        assert!(first.key.contains(":details-32:windows:extension:txt"));
         assert!(matches!(
             first.source,
             PlatformIconRequest::Windows(WindowsIconRequest::Extension { ref extension })
@@ -2614,12 +2799,47 @@ mod tests {
     }
 
     #[test]
+    fn windows_extension_request_keys_include_native_icon_size() {
+        let entry = FileEntry::test("Report.TXT", false, Some(1), None);
+
+        let details = windows_icon_request_for_entry(&entry, NativeIconSize::Details)
+            .expect("details icon request");
+        let large = windows_icon_request_for_entry(&entry, NativeIconSize::LargeIcons)
+            .expect("large icon request");
+
+        assert_ne!(details.key, large.key);
+        assert!(details.key.contains(":details-32:windows:extension:txt"));
+        assert!(large.key.contains(":large-128:windows:extension:txt"));
+        assert_eq!(details.source, large.source);
+    }
+
+    #[test]
+    fn windows_path_request_keys_include_native_icon_size() {
+        let path = PathBuf::from("app.exe");
+
+        let details = windows_native_icon_request(
+            WindowsIconRequest::Path { path: path.clone() },
+            NativeIconSize::Details,
+        );
+        let large = windows_native_icon_request(
+            WindowsIconRequest::Path { path },
+            NativeIconSize::LargeIcons,
+        );
+
+        assert_ne!(details.key, large.key);
+        assert!(details.key.contains(":details-32:windows:path:"));
+        assert!(large.key.contains(":large-128:windows:path:"));
+        assert_eq!(details.source, large.source);
+    }
+
+    #[test]
     fn windows_path_icons_are_used_for_executables_and_file_shortcuts() {
         let exe = FileEntry::test("app.exe", false, Some(1), None);
         let shortcut = FileEntry::test("target.lnk", false, Some(1), None);
 
         for entry in [exe, shortcut] {
-            let request = windows_icon_request_for_entry(&entry).expect("icon request");
+            let request = windows_icon_request_for_entry(&entry, NativeIconSize::Details)
+                .expect("icon request");
             assert!(matches!(
                 request.source,
                 PlatformIconRequest::Windows(WindowsIconRequest::Path { .. })
@@ -2631,7 +2851,7 @@ mod tests {
     fn windows_plain_directories_do_not_request_native_icons() {
         let folder = FileEntry::test("folder", true, None, None);
 
-        assert!(windows_icon_request_for_entry(&folder).is_none());
+        assert!(windows_icon_request_for_entry(&folder, NativeIconSize::Details).is_none());
     }
 
     #[test]
@@ -2644,14 +2864,14 @@ mod tests {
             },
         );
 
-        assert!(windows_icon_request_for_entry(&entry).is_none());
+        assert!(windows_icon_request_for_entry(&entry, NativeIconSize::Details).is_none());
     }
 
     #[test]
     fn windows_directory_links_use_bundled_icons() {
         let entry = FileEntry::test_directory_link("linked", DirectoryLinkKind::FilesystemLink);
 
-        assert!(windows_icon_request_for_entry(&entry).is_none());
+        assert!(windows_icon_request_for_entry(&entry, NativeIconSize::Details).is_none());
     }
 
     #[test]
@@ -2659,10 +2879,13 @@ mod tests {
         let first = FileEntry::test("Report.TXT", false, Some(1), None);
         let second = FileEntry::test("notes.txt", false, Some(1), None);
 
-        let first = mac_icon_request_for_entry(&first).expect("first icon request");
-        let second = mac_icon_request_for_entry(&second).expect("second icon request");
+        let first = mac_icon_request_for_entry(&first, NativeIconSize::Details)
+            .expect("first icon request");
+        let second = mac_icon_request_for_entry(&second, NativeIconSize::Details)
+            .expect("second icon request");
 
         assert_eq!(first.key, second.key);
+        assert!(first.key.contains(":details-32:macos:file-type:txt"));
         assert!(matches!(
             first.source,
             PlatformIconRequest::Mac(MacIconRequest::FileType { ref extension })
@@ -2671,9 +2894,25 @@ mod tests {
     }
 
     #[test]
+    fn mac_file_type_request_keys_include_native_icon_size() {
+        let entry = FileEntry::test("Report.TXT", false, Some(1), None);
+
+        let details = mac_icon_request_for_entry(&entry, NativeIconSize::Details)
+            .expect("details icon request");
+        let large = mac_icon_request_for_entry(&entry, NativeIconSize::LargeIcons)
+            .expect("large icon request");
+
+        assert_ne!(details.key, large.key);
+        assert!(details.key.contains(":details-32:macos:file-type:txt"));
+        assert!(large.key.contains(":large-128:macos:file-type:txt"));
+        assert_eq!(details.source, large.source);
+    }
+
+    #[test]
     fn mac_unknown_file_type_requests_use_extension_key() {
         let entry = FileEntry::test("document.custom", false, Some(1), None);
-        let request = mac_icon_request_for_entry(&entry).expect("icon request");
+        let request =
+            mac_icon_request_for_entry(&entry, NativeIconSize::Details).expect("icon request");
 
         assert!(matches!(
             request.source,
@@ -2686,20 +2925,19 @@ mod tests {
     fn mac_plain_directories_do_not_request_native_icons() {
         let folder = FileEntry::test("folder", true, None, None);
 
-        assert!(mac_icon_request_for_entry(&folder).is_none());
+        assert!(mac_icon_request_for_entry(&folder, NativeIconSize::Details).is_none());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_app_bundle_requests_use_path_specific_cache_key() {
         let entry = FileEntry::test("Preview.app", true, None, None);
-        let request = mac_icon_request_for_entry(&entry).expect("icon request");
+        let request =
+            mac_icon_request_for_entry(&entry, NativeIconSize::Details).expect("icon request");
 
-        assert!(
-            request
-                .key
-                .starts_with(&format!("{NATIVE_ICON_CACHE_VERSION}:macos:app:"))
-        );
+        assert!(request.key.starts_with(&format!(
+            "{NATIVE_ICON_CACHE_VERSION}:details-32:macos:app:"
+        )));
         assert!(matches!(
             request.source,
             PlatformIconRequest::Mac(MacIconRequest::AppBundle { .. })
@@ -2707,10 +2945,13 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn assert_windows_shell_icon_request_extracts_valid_png(request: WindowsIconRequest) {
+    fn assert_windows_shell_icon_request_extracts_valid_png(
+        request: WindowsIconRequest,
+        size: NativeIconSize,
+    ) {
         static SHELL_ICON_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = SHELL_ICON_TEST_LOCK.lock().expect("shell icon test lock");
-        let bytes = load_windows_shell_icon_png_bytes(&request).expect("icon png");
+        let bytes = load_windows_shell_icon_png_bytes(&request, size).expect("icon png");
 
         assert!(valid_png_bytes(bytes).is_some());
     }
@@ -2721,7 +2962,9 @@ mod tests {
         let request = WindowsIconRequest::Path {
             path: std::env::current_exe().expect("current exe"),
         };
-        assert_windows_shell_icon_request_extracts_valid_png(request);
+        for size in [NativeIconSize::Details, NativeIconSize::LargeIcons] {
+            assert_windows_shell_icon_request_extracts_valid_png(request.clone(), size);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -2733,14 +2976,18 @@ mod tests {
         let request = WindowsIconRequest::Path {
             path: forward_slash_path,
         };
-        assert_windows_shell_icon_request_extracts_valid_png(request);
+        assert_windows_shell_icon_request_extracts_valid_png(request, NativeIconSize::Details);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_file_type_icon_loader_extracts_valid_png_for_text_files() {
-        let bytes = load_file_type_icon_png_bytes("txt").expect("icon png");
+        let details =
+            load_file_type_icon_png_bytes("txt", NativeIconSize::Details).expect("details png");
+        let large =
+            load_file_type_icon_png_bytes("txt", NativeIconSize::LargeIcons).expect("large png");
 
-        assert!(valid_png_bytes(bytes).is_some());
+        assert!(valid_png_bytes(details).is_some());
+        assert!(valid_png_bytes(large).is_some());
     }
 }
