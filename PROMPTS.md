@@ -3,7 +3,6 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Open With "Custom" needs a rework (it doesn't work)
 - Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2
@@ -18,6 +17,7 @@
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu
+- Tooltips
 - Split-screen (see Zed)
 - rsync copy/sync builtin
 - Shell-extension system

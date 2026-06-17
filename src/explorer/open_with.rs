@@ -938,23 +938,29 @@ struct MacApplication {
     path: PathBuf,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MacApplicationPickerOptions {
     show_always_open_with: bool,
+    always_open_with_checked: bool,
+    always_open_with_enabled: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 impl MacApplicationPickerOptions {
     fn open_with() -> Self {
         Self {
             show_always_open_with: true,
+            always_open_with_checked: false,
+            always_open_with_enabled: true,
         }
     }
 
     fn change_default() -> Self {
         Self {
-            show_always_open_with: false,
+            show_always_open_with: true,
+            always_open_with_checked: true,
+            always_open_with_enabled: false,
         }
     }
 }
@@ -1221,7 +1227,18 @@ fn deduplicate_mac_applications(applications: Vec<MacApplication>) -> Vec<MacApp
 #[cfg(target_os = "macos")]
 const MAC_NS_BUTTON_TYPE_SWITCH: usize = 3;
 #[cfg(any(target_os = "macos", test))]
+const MAC_NS_CONTROL_STATE_VALUE_OFF: isize = 0;
+#[cfg(any(target_os = "macos", test))]
 const MAC_NS_CONTROL_STATE_VALUE_ON: isize = 1;
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_control_state_for_checked(checked: bool) -> isize {
+    if checked {
+        MAC_NS_CONTROL_STATE_VALUE_ON
+    } else {
+        MAC_NS_CONTROL_STATE_VALUE_OFF
+    }
+}
 
 #[cfg(any(target_os = "macos", test))]
 fn mac_control_state_is_checked(state: isize) -> bool {
@@ -1257,9 +1274,13 @@ fn mac_choose_application(
             let allowed_types = NSArray::arrayWithObject(nil, app_type);
             let _: () = msg_send![panel, setAllowedFileTypes: allowed_types];
 
-            let always_open_with_checkbox = options
-                .show_always_open_with
-                .then(|| mac_add_always_open_with_accessory(panel));
+            let always_open_with_checkbox = options.show_always_open_with.then(|| {
+                mac_add_always_open_with_accessory(
+                    panel,
+                    options.always_open_with_checked,
+                    options.always_open_with_enabled,
+                )
+            });
 
             if panel.runModal() != NSModalResponse::NSModalResponseOk {
                 return Ok(None);
@@ -1282,9 +1303,13 @@ fn mac_choose_application(
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn mac_add_always_open_with_accessory(panel: cocoa::base::id) -> cocoa::base::id {
+unsafe fn mac_add_always_open_with_accessory(
+    panel: cocoa::base::id,
+    checked: bool,
+    enabled: bool,
+) -> cocoa::base::id {
     use cocoa::{
-        base::{YES, id, nil},
+        base::{BOOL, NO, YES, id, nil},
         foundation::{NSPoint, NSRect, NSSize, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};
@@ -1303,7 +1328,9 @@ unsafe fn mac_add_always_open_with_accessory(panel: cocoa::base::id) -> cocoa::b
     let title = NSString::alloc(nil).init_str("Always Open With");
     let _: id = msg_send![title, autorelease];
     let _: () = msg_send![checkbox, setTitle: title];
-    let _: () = msg_send![checkbox, setState: 0isize];
+    let _: () = msg_send![checkbox, setState: mac_control_state_for_checked(checked)];
+    let enabled: BOOL = if enabled { YES } else { NO };
+    let _: () = msg_send![checkbox, setEnabled: enabled];
 
     let _: () = msg_send![accessory_view, addSubview: checkbox];
     let _: () = msg_send![panel, setAccessoryView: accessory_view];
@@ -1515,6 +1542,31 @@ mod tests {
         assert!(!mac_control_state_is_checked(0));
         assert!(mac_control_state_is_checked(1));
         assert!(!mac_control_state_is_checked(-1));
+    }
+
+    #[test]
+    fn mac_control_state_for_checked_matches_appkit_states() {
+        assert_eq!(
+            mac_control_state_for_checked(false),
+            MAC_NS_CONTROL_STATE_VALUE_OFF
+        );
+        assert_eq!(
+            mac_control_state_for_checked(true),
+            MAC_NS_CONTROL_STATE_VALUE_ON
+        );
+    }
+
+    #[test]
+    fn mac_application_picker_options_match_entry_points() {
+        let open_with = MacApplicationPickerOptions::open_with();
+        assert!(open_with.show_always_open_with);
+        assert!(!open_with.always_open_with_checked);
+        assert!(open_with.always_open_with_enabled);
+
+        let change_default = MacApplicationPickerOptions::change_default();
+        assert!(change_default.show_always_open_with);
+        assert!(change_default.always_open_with_checked);
+        assert!(!change_default.always_open_with_enabled);
     }
 
     #[test]
