@@ -3,7 +3,6 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Regression: Shortcuts no longer use the shortcut item and instead use folder icon. Let's fix this
 - Large icons grid view image thumbnail extraction improvements:
     - Add debug timings for this
     - It is very slow, lets optimise the pipeline. Add multithreaded extraction (multiple items at once) in addition to other optimisations

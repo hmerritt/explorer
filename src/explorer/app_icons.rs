@@ -893,7 +893,7 @@ fn mac_native_icon_request(request: MacIconRequest) -> NativeIconRequest {
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_icon_request_for_entry(entry: &FileEntry) -> Option<NativeIconRequest> {
-    if entry.is_directory_like() && !entry.uses_directory_shortcut_icon() {
+    if entry.is_directory_like() {
         return None;
     }
 
@@ -2045,7 +2045,7 @@ impl StableHash {
 mod tests {
     use super::*;
     use crate::explorer::{
-        entry::{DirectoryLinkKind, EntryKind, ShellShortcutTargetKind},
+        entry::{DirectoryLinkKind, ShellShortcutTargetKind},
         test_support::TempDir,
     };
 
@@ -2614,18 +2614,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_path_icons_are_used_for_executables_shortcuts_and_directory_links() {
+    fn windows_path_icons_are_used_for_executables_and_file_shortcuts() {
         let exe = FileEntry::test("app.exe", false, Some(1), None);
         let shortcut = FileEntry::test("target.lnk", false, Some(1), None);
-        let directory_link = FileEntry {
-            path: PathBuf::from("linked"),
-            name: "linked".to_owned(),
-            kind: EntryKind::DirectoryLink(DirectoryLinkKind::FilesystemLink),
-            modified: None,
-            size: None,
-        };
 
-        for entry in [exe, shortcut, directory_link] {
+        for entry in [exe, shortcut] {
             let request = windows_icon_request_for_entry(&entry).expect("icon request");
             assert!(matches!(
                 request.source,
@@ -2642,7 +2635,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_directory_shortcuts_request_path_icons() {
+    fn windows_directory_shortcuts_use_bundled_icons() {
         let entry = FileEntry::test_directory_link(
             "target.lnk",
             DirectoryLinkKind::ShellShortcut {
@@ -2651,12 +2644,14 @@ mod tests {
             },
         );
 
-        let request = windows_icon_request_for_entry(&entry).expect("icon request");
+        assert!(windows_icon_request_for_entry(&entry).is_none());
+    }
 
-        assert!(matches!(
-            request.source,
-            PlatformIconRequest::Windows(WindowsIconRequest::Path { .. })
-        ));
+    #[test]
+    fn windows_directory_links_use_bundled_icons() {
+        let entry = FileEntry::test_directory_link("linked", DirectoryLinkKind::FilesystemLink);
+
+        assert!(windows_icon_request_for_entry(&entry).is_none());
     }
 
     #[test]

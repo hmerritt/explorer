@@ -4943,13 +4943,15 @@ fn rename_name_cell(
 }
 
 fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
+    if entry.uses_directory_shortcut_icon() {
+        return directory_shortcut_icon().into_any_element();
+    }
+
     if let Some(app_icon) = app_icon {
         return image_icon(app_icon, FILE_ICON_SLOT_WIDTH, FILE_ICON_SLOT_HEIGHT);
     }
 
-    if entry.uses_directory_shortcut_icon() {
-        directory_shortcut_icon().into_any_element()
-    } else if entry.is_directory_like() {
+    if entry.is_directory_like() {
         folder_icon().into_any_element()
     } else {
         file_icon_for_path(&entry.path).into_any_element()
@@ -4965,13 +4967,15 @@ fn large_entry_icon(
         return image_icon(image_thumbnail, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
     }
 
+    if entry.uses_directory_shortcut_icon() {
+        return directory_shortcut_icon_sized(LARGE_ICON_SIZE).into_any_element();
+    }
+
     if let Some(app_icon) = app_icon {
         return image_icon(app_icon, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
     }
 
-    if entry.uses_directory_shortcut_icon() {
-        directory_shortcut_icon_sized(LARGE_ICON_SIZE).into_any_element()
-    } else if entry.is_directory_like() {
+    if entry.is_directory_like() {
         folder_icon_sized(LARGE_ICON_SIZE).into_any_element()
     } else {
         large_file_icon_for_path_sized(&entry.path, LARGE_ICON_SIZE).into_any_element()
