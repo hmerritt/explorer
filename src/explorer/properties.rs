@@ -14,11 +14,11 @@ use std::os::windows::process::CommandExt;
 
 use filetime::{FileTime, set_file_times};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable,
-    Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage, Task, TextRun,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
+    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, FocusHandle,
+    Focusable, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage,
+    Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations,
+    WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
 use sha2::{Digest, Sha256, Sha512};
 use thousands::Separable;
@@ -280,6 +280,27 @@ enum PropertyDetailsState {
     Ready(Vec<PropertyDetailGroup>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PropertyDetailsRenderCacheKey {
+    snapshot_generation: u64,
+    extra_details_ready: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PropertyScrollbarTarget {
+    Details,
+    Frames,
+}
+
+impl PropertyScrollbarTarget {
+    fn scrollbar_id(self) -> &'static str {
+        match self {
+            Self::Details => "properties-details-scrollbar",
+            Self::Frames => "properties-frames-scrollbar",
+        }
+    }
+}
+
 enum PropertyFramesState {
     NotStarted,
     Loading(Vec<PropertyFrameThumbnail>),
@@ -318,8 +339,11 @@ pub(super) struct PropertiesDialog {
     focus_handle: FocusHandle,
     active_tab: PropertyTab,
     snapshot_state: PropertySnapshotState,
+    snapshot_generation: u64,
     details_state: PropertyDetailsState,
     details_generation: u64,
+    details_render_cache_key: Option<PropertyDetailsRenderCacheKey>,
+    details_render_cache: Vec<PropertyDetailGroup>,
     details_scroll_handle: ScrollHandle,
     details_scrollbar_hovered: bool,
     details_scrollbar_drag: Option<ScrollbarDrag>,
@@ -396,8 +420,11 @@ impl PropertiesDialog {
             focus_handle,
             active_tab: PropertyTab::General,
             snapshot_state: PropertySnapshotState::Loading,
+            snapshot_generation: 0,
             details_state: PropertyDetailsState::NotStarted,
             details_generation: 0,
+            details_render_cache_key: None,
+            details_render_cache: Vec::new(),
             details_scroll_handle: ScrollHandle::new(),
             details_scrollbar_hovered: false,
             details_scrollbar_drag: None,
@@ -482,6 +509,7 @@ impl PropertiesDialog {
     fn reset_details_state(&mut self) {
         self.details_generation = self.details_generation.wrapping_add(1);
         self.details_state = PropertyDetailsState::NotStarted;
+        self.clear_details_render_cache();
         self.details_task = None;
         self.details_scrollbar_drag = None;
         self.set_details_scroll_top(0.0);
@@ -504,6 +532,7 @@ impl PropertiesDialog {
     }
 
     fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
         self.reset_details_state();
@@ -522,6 +551,24 @@ impl PropertiesDialog {
         }
     }
 
+    fn clear_details_render_cache(&mut self) {
+        self.details_render_cache_key = None;
+        self.details_render_cache.clear();
+    }
+
+    fn detail_groups_for_render_cached(
+        &mut self,
+        snapshot: &PropertySnapshot,
+    ) -> &[PropertyDetailGroup] {
+        detail_groups_for_render_cached(
+            &mut self.details_render_cache_key,
+            &mut self.details_render_cache,
+            snapshot,
+            &self.details_state,
+            self.snapshot_generation,
+        )
+    }
+
     fn start_details_task(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.details_state, PropertyDetailsState::NotStarted) {
             return;
@@ -531,6 +578,7 @@ impl PropertiesDialog {
         };
         if single_file_path(&snapshot.target, snapshot.item_kind).is_none() {
             self.details_state = PropertyDetailsState::Ready(Vec::new());
+            self.clear_details_render_cache();
             return;
         }
 
@@ -562,6 +610,7 @@ impl PropertiesDialog {
                 if dialog.details_generation == generation {
                     dialog.details_task = None;
                     dialog.details_state = PropertyDetailsState::Ready(groups);
+                    dialog.clear_details_render_cache();
                     cx.notify();
                 }
             });
@@ -1821,8 +1870,26 @@ impl PropertiesDialog {
         snapshot: &PropertySnapshot,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let groups = detail_groups_for_render(snapshot, &self.details_state);
         let loading_details = matches!(self.details_state, PropertyDetailsState::Loading);
+        let (groups_empty, detail_children) = {
+            let groups = self.detail_groups_for_render_cached(snapshot);
+            let groups_empty = groups.is_empty();
+            let mut detail_children = Vec::new();
+            let mut detail_row_index = 0;
+            for group in groups {
+                detail_children.push(detail_group_header(&group.title));
+                for detail in &group.details {
+                    detail_children.push(detail_row(
+                        detail_row_index,
+                        &detail.name,
+                        &detail.value,
+                        cx,
+                    ));
+                    detail_row_index += 1;
+                }
+            }
+            (groups_empty, detail_children)
+        };
         let mut body = div()
             .flex()
             .flex_col()
@@ -1851,21 +1918,11 @@ impl PropertiesDialog {
                     .child(div().flex_1().min_w(px(0.0)).child("Value")),
             );
 
-        let mut detail_row_index = 0;
-        for group in &groups {
-            body = body.child(detail_group_header(&group.title));
-            for detail in &group.details {
-                body = body.child(detail_row(
-                    detail_row_index,
-                    &detail.name,
-                    &detail.value,
-                    cx,
-                ));
-                detail_row_index += 1;
-            }
+        for child in detail_children {
+            body = body.child(child);
         }
 
-        if groups.is_empty() && !loading_details {
+        if groups_empty && !loading_details {
             body = body.child(
                 div()
                     .min_w(px(0.0))
@@ -2039,218 +2096,150 @@ impl PropertiesDialog {
     }
 
     fn details_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
-        let viewport_height = f32::from(self.details_scroll_handle.bounds().size.height);
-        let scroll_max = f32::from(self.details_scroll_handle.max_offset().height);
-        let scroll_top = -f32::from(self.details_scroll_handle.offset().y);
-        details_scrollbar_metrics_for_dimensions(viewport_height, scroll_max, scroll_top)
+        self.property_scrollbar_metrics(PropertyScrollbarTarget::Details)
     }
 
     fn set_details_scroll_top(&self, scroll_top: f32) {
-        let scroll_top = self
-            .details_scrollbar_metrics()
-            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
-        let offset = self.details_scroll_handle.offset();
-        self.details_scroll_handle
-            .set_offset(point(offset.x, px(-scroll_top)));
-    }
-
-    fn handle_details_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
-        if local_y < SCROLLBAR_ARROW_HEIGHT {
-            self.set_details_scroll_top(metrics.scroll_by(-PROPERTIES_ROW_HEIGHT));
-        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
-            self.set_details_scroll_top(metrics.scroll_by(PROPERTIES_ROW_HEIGHT));
-        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
-            self.details_scrollbar_drag = Some(ScrollbarDrag {
-                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
-            });
-        } else if local_y < metrics.thumb_top {
-            self.set_details_scroll_top(metrics.scroll_by(-metrics.viewport_height));
-        } else {
-            self.set_details_scroll_top(metrics.scroll_by(metrics.viewport_height));
-        }
-    }
-
-    fn handle_details_scrollbar_drag(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
-        let Some(drag) = self.details_scrollbar_drag else {
-            return;
-        };
-
-        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
-        self.set_details_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
+        self.set_property_scroll_top(PropertyScrollbarTarget::Details, scroll_top);
     }
 
     fn frames_scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
-        let viewport_height = f32::from(self.frames_scroll_handle.bounds().size.height);
-        let scroll_max = f32::from(self.frames_scroll_handle.max_offset().height);
-        let scroll_top = -f32::from(self.frames_scroll_handle.offset().y);
-        frames_scrollbar_metrics_for_dimensions(viewport_height, scroll_max, scroll_top)
+        self.property_scrollbar_metrics(PropertyScrollbarTarget::Frames)
     }
 
-    fn set_frames_scroll_top(&self, scroll_top: f32) {
-        let scroll_top = self
-            .frames_scrollbar_metrics()
-            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
-        let offset = self.frames_scroll_handle.offset();
-        self.frames_scroll_handle
-            .set_offset(point(offset.x, px(-scroll_top)));
-    }
-
-    fn handle_frames_scrollbar_mouse_down(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
-        if local_y < SCROLLBAR_ARROW_HEIGHT {
-            self.set_frames_scroll_top(metrics.scroll_by(-PROPERTIES_ROW_HEIGHT));
-        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
-            self.set_frames_scroll_top(metrics.scroll_by(PROPERTIES_ROW_HEIGHT));
-        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
-            self.frames_scrollbar_drag = Some(ScrollbarDrag {
-                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
-            });
-        } else if local_y < metrics.thumb_top {
-            self.set_frames_scroll_top(metrics.scroll_by(-metrics.viewport_height));
-        } else {
-            self.set_frames_scroll_top(metrics.scroll_by(metrics.viewport_height));
+    fn property_scrollbar_handle(&self, target: PropertyScrollbarTarget) -> &ScrollHandle {
+        match target {
+            PropertyScrollbarTarget::Details => &self.details_scroll_handle,
+            PropertyScrollbarTarget::Frames => &self.frames_scroll_handle,
         }
     }
 
-    fn handle_frames_scrollbar_drag(&mut self, local_y: f32, metrics: ScrollbarMetrics) {
-        let Some(drag) = self.frames_scrollbar_drag else {
+    fn property_scrollbar_metrics(
+        &self,
+        target: PropertyScrollbarTarget,
+    ) -> Option<ScrollbarMetrics> {
+        let handle = self.property_scrollbar_handle(target);
+        let viewport_height = f32::from(handle.bounds().size.height);
+        let scroll_max = f32::from(handle.max_offset().height);
+        let scroll_top = -f32::from(handle.offset().y);
+        property_scrollbar_metrics_for_dimensions(viewport_height, scroll_max, scroll_top)
+    }
+
+    fn set_property_scroll_top(&self, target: PropertyScrollbarTarget, scroll_top: f32) {
+        let scroll_top = self
+            .property_scrollbar_metrics(target)
+            .map_or(0.0, |metrics| metrics.clamp_scroll_top(scroll_top));
+        let handle = self.property_scrollbar_handle(target);
+        let offset = handle.offset();
+        handle.set_offset(point(offset.x, px(-scroll_top)));
+    }
+
+    fn property_scrollbar_hovered(&self, target: PropertyScrollbarTarget) -> bool {
+        match target {
+            PropertyScrollbarTarget::Details => self.details_scrollbar_hovered,
+            PropertyScrollbarTarget::Frames => self.frames_scrollbar_hovered,
+        }
+    }
+
+    fn set_property_scrollbar_hovered(&mut self, target: PropertyScrollbarTarget, hovered: bool) {
+        match target {
+            PropertyScrollbarTarget::Details => self.details_scrollbar_hovered = hovered,
+            PropertyScrollbarTarget::Frames => self.frames_scrollbar_hovered = hovered,
+        }
+    }
+
+    fn property_scrollbar_drag(&self, target: PropertyScrollbarTarget) -> Option<ScrollbarDrag> {
+        match target {
+            PropertyScrollbarTarget::Details => self.details_scrollbar_drag,
+            PropertyScrollbarTarget::Frames => self.frames_scrollbar_drag,
+        }
+    }
+
+    fn set_property_scrollbar_drag(
+        &mut self,
+        target: PropertyScrollbarTarget,
+        drag: Option<ScrollbarDrag>,
+    ) {
+        match target {
+            PropertyScrollbarTarget::Details => self.details_scrollbar_drag = drag,
+            PropertyScrollbarTarget::Frames => self.frames_scrollbar_drag = drag,
+        }
+    }
+
+    fn clear_property_scrollbar_drag(
+        &mut self,
+        target: PropertyScrollbarTarget,
+    ) -> Option<ScrollbarDrag> {
+        match target {
+            PropertyScrollbarTarget::Details => self.details_scrollbar_drag.take(),
+            PropertyScrollbarTarget::Frames => self.frames_scrollbar_drag.take(),
+        }
+    }
+
+    fn handle_property_scrollbar_mouse_down(
+        &mut self,
+        target: PropertyScrollbarTarget,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+    ) {
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_property_scroll_top(target, metrics.scroll_by(-PROPERTIES_ROW_HEIGHT));
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_property_scroll_top(target, metrics.scroll_by(PROPERTIES_ROW_HEIGHT));
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.set_property_scrollbar_drag(
+                target,
+                Some(ScrollbarDrag {
+                    pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+                }),
+            );
+        } else if local_y < metrics.thumb_top {
+            self.set_property_scroll_top(target, metrics.scroll_by(-metrics.viewport_height));
+        } else {
+            self.set_property_scroll_top(target, metrics.scroll_by(metrics.viewport_height));
+        }
+    }
+
+    fn handle_property_scrollbar_drag(
+        &mut self,
+        target: PropertyScrollbarTarget,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+    ) {
+        let Some(drag) = self.property_scrollbar_drag(target) else {
             return;
         };
 
         let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
-        self.set_frames_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top));
+        self.set_property_scroll_top(target, metrics.scroll_top_for_thumb_top(thumb_top));
     }
 
     fn render_details_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(metrics) = self.details_scrollbar_metrics() else {
-            return div().into_any_element();
-        };
-
-        let hovered_or_dragged =
-            self.details_scrollbar_hovered || self.details_scrollbar_drag.is_some();
-        let thumb_width = if hovered_or_dragged {
-            SCROLLBAR_THUMB_HOVER_WIDTH
-        } else {
-            SCROLLBAR_THUMB_WIDTH
-        };
-        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
-        let thumb_color = if self.details_scrollbar_drag.is_some() {
-            SCROLLBAR_THUMB_ACTIVE_BG
-        } else if hovered_or_dragged {
-            SCROLLBAR_THUMB_HOVER_BG
-        } else {
-            SCROLLBAR_THUMB_BG
-        };
-        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
-
-        div()
-            .id("properties-details-scrollbar")
-            .relative()
-            .w(px(SCROLLBAR_GUTTER_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .bg(rgb(SCROLLBAR_TRACK_BG))
-            .cursor_default()
-            .block_mouse_except_scroll()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.details_scrollbar_hovered = *hovered;
-                cx.notify();
-            }))
-            .when(hovered_or_dragged, |this| {
-                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
-                    .child(scrollbar_arrow_button(
-                        bottom_arrow_top,
-                        ScrollbarArrow::Down,
-                    ))
-            })
-            .child(
-                div()
-                    .absolute()
-                    .top(px(metrics.thumb_top))
-                    .right(px(thumb_right))
-                    .w(px(thumb_width))
-                    .h(px(metrics.thumb_height))
-                    .rounded(px(thumb_width / 2.0))
-                    .bg(rgb(thumb_color)),
-            )
-            .child(self.render_details_scrollbar_hit_layer(cx))
-            .into_any_element()
-    }
-
-    fn render_details_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let entity = cx.entity();
-
-        canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
-                window.on_mouse_event({
-                    let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
-                            return;
-                        }
-
-                        let local_y = f32::from(event.position.y - bounds.origin.y);
-                        let _ = entity.update(cx, |this, cx| {
-                            if let Some(metrics) = this.details_scrollbar_metrics() {
-                                this.handle_details_scrollbar_mouse_down(local_y, metrics);
-                                cx.notify();
-                            }
-                        });
-                    }
-                });
-
-                window.on_mouse_event({
-                    let entity = entity.clone();
-                    move |event: &MouseMoveEvent, _, _, cx| {
-                        if !event.dragging() {
-                            return;
-                        }
-
-                        let local_y = f32::from(event.position.y - bounds.origin.y);
-                        let _ = entity.update(cx, |this, cx| {
-                            if this.details_scrollbar_drag.is_none() {
-                                return;
-                            }
-
-                            if let Some(metrics) = this.details_scrollbar_metrics() {
-                                this.handle_details_scrollbar_drag(local_y, metrics);
-                                cx.notify();
-                            }
-                        });
-                    }
-                });
-
-                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.details_scrollbar_drag.take().is_some() {
-                            cx.notify();
-                        }
-                    });
-                });
-            },
-        )
-        .size_full()
-        .into_any_element()
+        self.render_property_scrollbar(PropertyScrollbarTarget::Details, cx)
     }
 
     fn render_frames_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(metrics) = self.frames_scrollbar_metrics() else {
+        self.render_property_scrollbar(PropertyScrollbarTarget::Frames, cx)
+    }
+
+    fn render_property_scrollbar(
+        &self,
+        target: PropertyScrollbarTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(metrics) = self.property_scrollbar_metrics(target) else {
             return div().into_any_element();
         };
 
-        let hovered_or_dragged =
-            self.frames_scrollbar_hovered || self.frames_scrollbar_drag.is_some();
+        let hovered_or_dragged = self.property_scrollbar_hovered(target)
+            || self.property_scrollbar_drag(target).is_some();
         let thumb_width = if hovered_or_dragged {
             SCROLLBAR_THUMB_HOVER_WIDTH
         } else {
             SCROLLBAR_THUMB_WIDTH
         };
         let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
-        let thumb_color = if self.frames_scrollbar_drag.is_some() {
+        let thumb_color = if self.property_scrollbar_drag(target).is_some() {
             SCROLLBAR_THUMB_ACTIVE_BG
         } else if hovered_or_dragged {
             SCROLLBAR_THUMB_HOVER_BG
@@ -2260,7 +2249,7 @@ impl PropertiesDialog {
         let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
 
         div()
-            .id("properties-frames-scrollbar")
+            .id(target.scrollbar_id())
             .relative()
             .w(px(SCROLLBAR_GUTTER_WIDTH))
             .h_full()
@@ -2268,8 +2257,8 @@ impl PropertiesDialog {
             .bg(rgb(SCROLLBAR_TRACK_BG))
             .cursor_default()
             .block_mouse_except_scroll()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.frames_scrollbar_hovered = *hovered;
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_property_scrollbar_hovered(target, *hovered);
                 cx.notify();
             }))
             .when(hovered_or_dragged, |this| {
@@ -2289,11 +2278,15 @@ impl PropertiesDialog {
                     .rounded(px(thumb_width / 2.0))
                     .bg(rgb(thumb_color)),
             )
-            .child(self.render_frames_scrollbar_hit_layer(cx))
+            .child(self.render_property_scrollbar_hit_layer(target, cx))
             .into_any_element()
     }
 
-    fn render_frames_scrollbar_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_property_scrollbar_hit_layer(
+        &self,
+        target: PropertyScrollbarTarget,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entity = cx.entity();
 
         canvas(
@@ -2308,8 +2301,8 @@ impl PropertiesDialog {
 
                         let local_y = f32::from(event.position.y - bounds.origin.y);
                         let _ = entity.update(cx, |this, cx| {
-                            if let Some(metrics) = this.frames_scrollbar_metrics() {
-                                this.handle_frames_scrollbar_mouse_down(local_y, metrics);
+                            if let Some(metrics) = this.property_scrollbar_metrics(target) {
+                                this.handle_property_scrollbar_mouse_down(target, local_y, metrics);
                                 cx.notify();
                             }
                         });
@@ -2325,12 +2318,12 @@ impl PropertiesDialog {
 
                         let local_y = f32::from(event.position.y - bounds.origin.y);
                         let _ = entity.update(cx, |this, cx| {
-                            if this.frames_scrollbar_drag.is_none() {
+                            if this.property_scrollbar_drag(target).is_none() {
                                 return;
                             }
 
-                            if let Some(metrics) = this.frames_scrollbar_metrics() {
-                                this.handle_frames_scrollbar_drag(local_y, metrics);
+                            if let Some(metrics) = this.property_scrollbar_metrics(target) {
+                                this.handle_property_scrollbar_drag(target, local_y, metrics);
                                 cx.notify();
                             }
                         });
@@ -2343,7 +2336,7 @@ impl PropertiesDialog {
                     }
 
                     let _ = entity.update(cx, |this, cx| {
-                        if this.frames_scrollbar_drag.take().is_some() {
+                        if this.clear_property_scrollbar_drag(target).is_some() {
                             cx.notify();
                         }
                     });
@@ -2457,27 +2450,22 @@ fn open_linux_default_app_picker_window(
     let title = format!("Open With - {}", property_path_display_name(&path));
     let options = linux_default_app_picker_window_options(title, cx);
     let handle = cx
-        .open_window(
-            options,
-            |window, cx| {
-                let focus_handle = cx.focus_handle();
-                focus_handle.focus(window);
-                cx.new(|cx| {
-                    cx.on_release(|dialog: &mut LinuxDefaultAppPickerDialog, cx| {
-                        dialog.release(cx)
-                    })
+        .open_window(options, |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            cx.new(|cx| {
+                cx.on_release(|dialog: &mut LinuxDefaultAppPickerDialog, cx| dialog.release(cx))
                     .detach();
-                    LinuxDefaultAppPickerDialog::new(
-                        path,
-                        before,
-                        choices,
-                        properties.downgrade(),
-                        focus_handle,
-                        cx,
-                    )
-                })
-            },
-        )
+                LinuxDefaultAppPickerDialog::new(
+                    path,
+                    before,
+                    choices,
+                    properties.downgrade(),
+                    focus_handle,
+                    cx,
+                )
+            })
+        })
         .map_err(|error| error.to_string())?;
 
     Ok(handle.into())
@@ -5468,6 +5456,31 @@ fn detail_groups_for_render(
     groups
 }
 
+impl PropertyDetailsRenderCacheKey {
+    fn new(snapshot_generation: u64, details_state: &PropertyDetailsState) -> Self {
+        Self {
+            snapshot_generation,
+            extra_details_ready: matches!(details_state, PropertyDetailsState::Ready(_)),
+        }
+    }
+}
+
+fn detail_groups_for_render_cached<'a>(
+    cache_key: &mut Option<PropertyDetailsRenderCacheKey>,
+    cache: &'a mut Vec<PropertyDetailGroup>,
+    snapshot: &PropertySnapshot,
+    details_state: &PropertyDetailsState,
+    snapshot_generation: u64,
+) -> &'a [PropertyDetailGroup] {
+    let key = PropertyDetailsRenderCacheKey::new(snapshot_generation, details_state);
+    if cache_key.as_ref() != Some(&key) {
+        *cache = detail_groups_for_render(snapshot, details_state);
+        *cache_key = Some(key);
+    }
+
+    cache
+}
+
 fn property_tabs_for_snapshot(
     snapshot: Option<&PropertySnapshot>,
 ) -> Vec<(PropertyTab, &'static str)> {
@@ -5494,24 +5507,7 @@ fn snapshot_has_frames_tab(snapshot: &PropertySnapshot) -> bool {
     single_file_video_path(&snapshot.target, snapshot.item_kind).is_some()
 }
 
-fn details_scrollbar_metrics_for_dimensions(
-    viewport_height: f32,
-    scroll_max: f32,
-    scroll_top: f32,
-) -> Option<ScrollbarMetrics> {
-    if scroll_max <= 0.0 {
-        return None;
-    }
-
-    ScrollbarMetrics::new(
-        0.0,
-        viewport_height,
-        viewport_height + scroll_max,
-        scroll_top,
-    )
-}
-
-fn frames_scrollbar_metrics_for_dimensions(
+fn property_scrollbar_metrics_for_dimensions(
     viewport_height: f32,
     scroll_max: f32,
     scroll_top: f32,
@@ -5667,19 +5663,29 @@ fn copy_property_to_clipboard(label: &str, value: &str, cx: &mut Context<Propert
     cx.write_to_clipboard(ClipboardItem::new_string(property_copy_text(label, value)));
 }
 
-fn property_row(
-    id: &'static str,
-    label: impl Into<String>,
-    value: impl Into<String>,
+#[derive(Clone, Copy)]
+struct PropertyRowStyle {
+    label_width: f32,
+    truncate_label: bool,
+}
+
+fn copyable_property_row_base(
+    row: gpui::Stateful<Div>,
+    label: String,
+    value: String,
+    style: PropertyRowStyle,
     cx: &mut Context<PropertiesDialog>,
 ) -> AnyElement {
-    let label = label.into();
-    let value = value.into();
     let copied_label = label.clone();
     let copied_value = value.clone();
-    div()
-        .id(id)
-        .flex()
+    let label_cell = div()
+        .w(px(style.label_width))
+        .flex_shrink_0()
+        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+        .when(style.truncate_label, |this| this.truncate())
+        .child(SharedString::from(label));
+
+    row.flex()
         .flex_row()
         .items_center()
         .w_full()
@@ -5689,13 +5695,7 @@ fn property_row(
             copy_property_to_clipboard(&copied_label, &copied_value, cx);
             cx.stop_propagation();
         }))
-        .child(
-            div()
-                .w(px(PROPERTIES_LABEL_WIDTH))
-                .flex_shrink_0()
-                .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child(SharedString::from(label)),
-        )
+        .child(label_cell)
         .child(
             div()
                 .flex_1()
@@ -5706,42 +5706,40 @@ fn property_row(
         .into_any_element()
 }
 
+fn property_row(
+    id: &'static str,
+    label: impl Into<String>,
+    value: impl Into<String>,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    copyable_property_row_base(
+        div().id(id),
+        label.into(),
+        value.into(),
+        PropertyRowStyle {
+            label_width: PROPERTIES_LABEL_WIDTH,
+            truncate_label: false,
+        },
+        cx,
+    )
+}
+
 fn detail_row(
     index: usize,
     label: &str,
     value: &str,
     cx: &mut Context<PropertiesDialog>,
 ) -> AnyElement {
-    let copied_label = label.to_owned();
-    let copied_value = value.to_owned();
-    div()
-        .id(detail_row_id(index))
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .min_w(px(0.0))
-        .min_h(px(PROPERTIES_ROW_HEIGHT))
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-            copy_property_to_clipboard(&copied_label, &copied_value, cx);
-            cx.stop_propagation();
-        }))
-        .child(
-            div()
-                .w(px(154.0))
-                .flex_shrink_0()
-                .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .truncate()
-                .child(SharedString::from(label.to_owned())),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .child(SharedString::from(value.to_owned())),
-        )
-        .into_any_element()
+    copyable_property_row_base(
+        div().id(detail_row_id(index)),
+        label.to_owned(),
+        value.to_owned(),
+        PropertyRowStyle {
+            label_width: 154.0,
+            truncate_label: true,
+        },
+        cx,
+    )
 }
 
 fn detail_row_id(index: usize) -> (&'static str, usize) {
@@ -6262,23 +6260,91 @@ mod tests {
     }
 
     #[test]
-    fn details_scrollbar_metrics_only_exist_for_overflow() {
-        assert!(details_scrollbar_metrics_for_dimensions(100.0, 0.0, 0.0).is_none());
+    fn rendered_details_cache_invalidates_when_snapshot_generation_changes() {
+        let mut cache_key = None;
+        let mut cache = Vec::new();
+        let mut snapshot = test_property_snapshot_with_file_detail("Name", "first.txt");
+        let details_state = PropertyDetailsState::NotStarted;
 
-        let metrics =
-            details_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0).expect("overflow metrics");
-        assert_eq!(metrics.viewport_height, 100.0);
-        assert_eq!(metrics.content_height, 150.0);
-        assert_eq!(metrics.scroll_max, 50.0);
-        assert_eq!(metrics.scroll_top, 50.0);
+        let first = detail_groups_for_render_cached(
+            &mut cache_key,
+            &mut cache,
+            &snapshot,
+            &details_state,
+            1,
+        );
+        assert_eq!(
+            detail_value(first, PropertyDetailGroupKind::File, "Name"),
+            Some("first.txt")
+        );
+
+        snapshot.details = vec![test_property_detail_group(
+            PropertyDetailGroupKind::File,
+            "Name",
+            "second.txt",
+        )];
+        let still_cached = detail_groups_for_render_cached(
+            &mut cache_key,
+            &mut cache,
+            &snapshot,
+            &details_state,
+            1,
+        );
+        assert_eq!(
+            detail_value(still_cached, PropertyDetailGroupKind::File, "Name"),
+            Some("first.txt")
+        );
+
+        let refreshed = detail_groups_for_render_cached(
+            &mut cache_key,
+            &mut cache,
+            &snapshot,
+            &details_state,
+            2,
+        );
+        assert_eq!(
+            detail_value(refreshed, PropertyDetailGroupKind::File, "Name"),
+            Some("second.txt")
+        );
     }
 
     #[test]
-    fn frames_scrollbar_metrics_only_exist_for_overflow() {
-        assert!(frames_scrollbar_metrics_for_dimensions(100.0, 0.0, 0.0).is_none());
+    fn rendered_details_cache_invalidates_when_async_details_are_ready() {
+        let mut cache_key = None;
+        let mut cache = Vec::new();
+        let snapshot = test_property_snapshot_with_file_detail("Name", "file.txt");
 
-        let metrics =
-            frames_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0).expect("overflow metrics");
+        let initial = detail_groups_for_render_cached(
+            &mut cache_key,
+            &mut cache,
+            &snapshot,
+            &PropertyDetailsState::Loading,
+            1,
+        );
+        assert_eq!(
+            detail_value(initial, PropertyDetailGroupKind::File, "SHA256"),
+            None
+        );
+
+        let ready_state = PropertyDetailsState::Ready(vec![test_property_detail_group(
+            PropertyDetailGroupKind::File,
+            "SHA256",
+            "abc123",
+        )]);
+        let refreshed =
+            detail_groups_for_render_cached(&mut cache_key, &mut cache, &snapshot, &ready_state, 1);
+        assert_eq!(
+            detail_value(refreshed, PropertyDetailGroupKind::File, "SHA256"),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn property_scrollbar_metrics_only_exist_for_overflow() {
+        assert!(property_scrollbar_metrics_for_dimensions(100.0, 0.0, 0.0).is_none());
+
+        let metrics = property_scrollbar_metrics_for_dimensions(100.0, 50.0, 500.0)
+            .expect("overflow metrics");
         assert_eq!(metrics.viewport_height, 100.0);
         assert_eq!(metrics.content_height, 150.0);
         assert_eq!(metrics.scroll_max, 50.0);
@@ -7322,6 +7388,55 @@ mod tests {
             fs::metadata(file).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    fn test_property_snapshot_with_file_detail(name: &str, value: &str) -> PropertySnapshot {
+        PropertySnapshot {
+            target: PropertyTarget {
+                paths: vec![PathBuf::from("file.txt")],
+            },
+            title: "file.txt".to_owned(),
+            item_count: 1,
+            item_kind: PropertyItemKind::SingleFile,
+            type_label: MixedValue::None,
+            location: MixedValue::None,
+            size: 0,
+            size_on_disk: 0,
+            contains: None,
+            selection_counts: None,
+            created: MixedValue::None,
+            modified: MixedValue::None,
+            accessed: MixedValue::None,
+            attributes: PropertyAttributes {
+                readonly: MixedValue::None,
+                hidden: MixedValue::None,
+            },
+            owner: MixedValue::None,
+            group: MixedValue::None,
+            unix_mode: MixedValue::None,
+            permission_summary: MixedValue::None,
+            default_app: None,
+            shortcut: None,
+            details: vec![test_property_detail_group(
+                PropertyDetailGroupKind::File,
+                name,
+                value,
+            )],
+        }
+    }
+
+    fn test_property_detail_group(
+        kind: PropertyDetailGroupKind,
+        name: &str,
+        value: &str,
+    ) -> PropertyDetailGroup {
+        property_detail_group(
+            kind,
+            vec![PropertyDetail {
+                name: name.to_owned(),
+                value: value.to_owned(),
+            }],
+        )
     }
 
     fn detail_group(
