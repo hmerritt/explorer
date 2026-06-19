@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tokei::{Config, Languages};
 
 const CODEBASE_IGNORE_PATTERNS: &[&str] = &[".git", "target", "vendor"];
-pub(super) const GITHUB_LANGUAGE_FALLBACK_COLOR: u32 = 0xd0d7de;
+pub(super) const GITHUB_LANGUAGE_FALLBACK_COLOR: u32 = 0xe8e8e8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CodebaseSummary {
@@ -123,6 +123,10 @@ pub(super) fn language_segment_widths(
 }
 
 fn github_language_color(name: &str) -> u32 {
+    if name.eq_ignore_ascii_case("Other") {
+        return GITHUB_LANGUAGE_FALLBACK_COLOR;
+    }
+
     languages::from_name(name)
         .and_then(|language| language.color)
         .and_then(parse_github_language_color)
@@ -222,10 +226,8 @@ mod tests {
     #[test]
     fn github_language_color_uses_linguist_color_and_fallback() {
         assert_eq!(github_language_color("Rust"), 0xdea584);
-        assert_eq!(
-            github_language_color("Not A GitHub Language"),
-            GITHUB_LANGUAGE_FALLBACK_COLOR
-        );
+        assert_eq!(github_language_color("Other"), 0xe8e8e8);
+        assert_eq!(github_language_color("Not A GitHub Language"), 0xe8e8e8);
     }
 
     #[test]

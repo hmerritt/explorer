@@ -115,6 +115,7 @@ opt-level = "z" # Optimize for size.
 lto = true
 
 [dependencies]
+git2 = { version = "0.20.4", default-features = false }
 languages = "0.0.2"
 paste = "1.0.15"
 thousands = "0.2.0"

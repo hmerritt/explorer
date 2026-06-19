@@ -16,6 +16,7 @@ mod file_commands;
 mod filesystem;
 mod folder_size;
 mod formatting;
+mod git_status;
 mod icons;
 mod image_preview;
 mod image_thumbnails;

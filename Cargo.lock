@@ -2069,6 +2069,7 @@ dependencies = [
  "freedesktop-desktop-entry",
  "freedesktop-icons",
  "futures",
+ "git2",
  "globset",
  "gpui",
  "icns",

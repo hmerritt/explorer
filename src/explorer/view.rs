@@ -23,6 +23,7 @@ use crate::explorer::{
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
     folder_size::{FolderSizeCache, FolderSizeError, calculate_folder_size},
+    git_status::{GitRepositoryStatus, scan_git_repository_status},
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
@@ -98,6 +99,9 @@ pub struct ExplorerView {
     pub(super) codebase_summary: Option<CodebaseSummary>,
     pub(super) codebase_summary_generation: u64,
     pub(super) codebase_summary_task: Option<Task<()>>,
+    pub(super) git_status: Option<GitRepositoryStatus>,
+    pub(super) git_status_generation: u64,
+    pub(super) git_status_task: Option<Task<()>>,
 }
 
 pub(super) struct FileOperationState {
@@ -268,6 +272,9 @@ impl ExplorerView {
             codebase_summary: None,
             codebase_summary_generation: 0,
             codebase_summary_task: None,
+            git_status: None,
+            git_status_generation: 0,
+            git_status_task: None,
         };
         view.reload();
         view
@@ -448,6 +455,7 @@ impl ExplorerView {
         self.schedule_pending_shell_shortcut_resolution(cx);
         self.schedule_folder_sizes(cx);
         self.schedule_codebase_summary(cx);
+        self.schedule_git_status(cx);
     }
 
     pub(super) fn schedule_codebase_summary(&mut self, cx: &mut Context<Self>) {
@@ -485,6 +493,43 @@ impl ExplorerView {
             });
         });
         self.codebase_summary_task = Some(task);
+    }
+
+    pub(super) fn schedule_git_status(&mut self, cx: &mut Context<Self>) {
+        self.git_status_generation = self.git_status_generation.wrapping_add(1);
+        let generation = self.git_status_generation;
+        let path = self.path.clone();
+        let Some(repo_root) = find_git_repository_root(&path) else {
+            self.git_status = None;
+            self.git_status_task = None;
+            return;
+        };
+
+        if self
+            .git_status
+            .as_ref()
+            .is_none_or(|status| status.repo_root != repo_root)
+        {
+            self.git_status = None;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let output_task = cx
+                .background_executor()
+                .spawn(async move { scan_git_repository_status(&path) });
+            let status = output_task.await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.git_status_generation != generation {
+                    return;
+                }
+
+                explorer.git_status = status;
+                explorer.git_status_task = None;
+                cx.notify();
+            });
+        });
+        self.git_status_task = Some(task);
     }
 
     fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {

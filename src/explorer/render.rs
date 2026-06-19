@@ -61,13 +61,15 @@ use crate::explorer::{
     },
     entry::FileEntry,
     formatting::{format_size, format_timestamp},
+    git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
         COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
-        LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
-        PROPERTIES_ICON, RENAME_ICON, directory_kind_icon, directory_kind_icon_sized,
-        directory_shortcut_icon, directory_shortcut_icon_sized, drive_icon, drive_windows_icon,
-        drive_wsl_icon, executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized,
-        folder_icon, folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
+        GIT_BRANCH_ICON, GIT_ICON, LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon,
+        OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, directory_kind_icon,
+        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
+        drive_icon, drive_windows_icon, drive_wsl_icon, executable_icon_sized, file_icon,
+        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
+        large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
@@ -110,11 +112,13 @@ const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
 const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
-const CODEBASE_MAKEUP_BAR_WIDTH: f32 = 200.0;
+const CODEBASE_MAKEUP_BAR_WIDTH: f32 = 120.0;
 const CODEBASE_MAKEUP_BAR_HEIGHT: f32 = 8.0;
 const CODEBASE_MAKEUP_BAR_RADIUS: f32 = 6.0;
 const CODEBASE_MAKEUP_SEPARATOR_WIDTH: f32 = 2.0;
 const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
+const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
+const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileColumnHeaderDrag {
@@ -1960,6 +1964,7 @@ impl ExplorerView {
             .codebase_summary
             .as_ref()
             .filter(|summary| summary.total_code > 0 && !summary.languages.is_empty());
+        let git_status = self.git_status.as_ref();
 
         div()
             .id("explorer-status-bar")
@@ -1990,6 +1995,12 @@ impl ExplorerView {
             .child(div().flex_1().min_w(px(12.0)))
             .when_some(codebase_summary, |this, codebase_summary| {
                 this.child(render_codebase_makeup_status(codebase_summary))
+            })
+            .when_some(git_status, |this, git_status| {
+                this.when(codebase_summary.is_some(), |this| {
+                    this.child(status_bar_separator())
+                })
+                .child(render_git_repository_status(git_status))
             })
             .into_any_element()
     }
@@ -4972,6 +4983,62 @@ fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
     bar
 }
 
+fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h_full()
+        .min_w(px(0.0))
+        .flex_shrink()
+        .overflow_hidden()
+        .when_some(status.divergence, |this, divergence| {
+            this.child(status_bar_icon_label(
+                GIT_ICON.clone(),
+                git_divergence_label(divergence),
+                false,
+            ))
+            .child(status_bar_separator())
+        })
+        .child(status_bar_icon_label(
+            GIT_BRANCH_ICON.clone(),
+            status.branch.clone(),
+            true,
+        ))
+        .into_any_element()
+}
+
+fn status_bar_icon_label(icon: Arc<Image>, label: String, flexible: bool) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(STATUS_BAR_GIT_ITEM_GAP))
+        .min_w(px(0.0))
+        .when(!flexible, |this| this.flex_shrink_0())
+        .when(flexible, |this| this.flex_shrink().overflow_hidden())
+        .child(image_icon(
+            icon,
+            STATUS_BAR_GIT_ICON_SIZE,
+            STATUS_BAR_GIT_ICON_SIZE,
+        ))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .child(SharedString::from(label)),
+        )
+        .into_any_element()
+}
+
+fn git_divergence_label(divergence: GitDivergence) -> String {
+    format!(
+        "{} / {}",
+        divergence.outgoing.separate_with_commas(),
+        divergence.incoming.separate_with_commas()
+    )
+}
+
 fn status_bar_separator() -> Div {
     div()
         .h(px(14.0))
@@ -5077,11 +5144,12 @@ mod tests {
         available_filename_text_width, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
         context_menu_width_for_natural_width, drop_indicator_target_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, is_alt_entry_double_click,
-        is_normal_entry_click, open_current_folder_context_menu_from_event,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
+        filename_text_width, folder_status_summary, git_divergence_label,
+        is_alt_entry_double_click, is_normal_entry_click,
+        open_current_folder_context_menu_from_event, recursive_result_text_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -5632,13 +5700,12 @@ mod tests {
         );
         cx.run_until_parked();
 
-        assert!(
-            cx.read(|cx| cx
-                .global::<crate::settings::SettingsState>()
+        assert!(cx.read(|cx| {
+            cx.global::<crate::settings::SettingsState>()
                 .value
                 .view
-                .show_folder_sizes)
-        );
+                .show_folder_sizes
+        }));
     }
 
     #[test]
@@ -5963,6 +6030,17 @@ mod tests {
 
         assert_eq!(summary.total_items, "1 item");
         assert_eq!(summary.selection_info, Some("1 folder selected".to_owned()));
+    }
+
+    #[test]
+    fn git_divergence_label_separates_outgoing_and_incoming_counts() {
+        assert_eq!(
+            git_divergence_label(crate::explorer::git_status::GitDivergence {
+                outgoing: 1_234,
+                incoming: 56,
+            }),
+            "1,234 / 56"
+        );
     }
 
     fn status_entries(file_count: usize, folder_count: usize) -> Vec<FileEntry> {

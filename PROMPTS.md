@@ -3,7 +3,6 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Git support (see Files: https://github.com/files-community/Files/blob/main/.github/assets/ReadmeHero.png) (maybe implement fter shell-extension system, as a good first usecase)
 
 ## 2
 
