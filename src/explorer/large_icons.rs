@@ -10,11 +10,12 @@ use crate::explorer::{
     mouse_selection::large_icon_grid_columns,
 };
 
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct LargeIconLayoutKey {
-    columns: usize,
-    row_count: usize,
-    tile_heights: Vec<f32>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct LargeIconLayoutCacheKey {
+    viewport_width_px: u32,
+    show_file_name_extensions: bool,
+    font: Font,
+    display_names: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,21 +34,21 @@ pub(super) struct LargeIconRowLayout {
 }
 
 impl LargeIconLayout {
-    pub(super) fn new(
-        entries: &[FileEntry],
+    pub(super) fn from_cache_key(key: &LargeIconLayoutCacheKey, cx: &App) -> Self {
+        Self::from_display_names(&key.display_names, key.viewport_width(), &key.font, cx)
+    }
+
+    pub(super) fn from_display_names(
+        display_names: &[String],
         viewport_width: f32,
-        show_file_name_extensions: bool,
         font: &Font,
         cx: &App,
     ) -> Self {
         let columns = large_icon_grid_columns(viewport_width);
         let column_gap = large_icon_column_gap(viewport_width, columns);
-        let tile_heights = entries
+        let tile_heights = display_names
             .iter()
-            .map(|entry| {
-                let display_name = entry.display_name_with_extensions(show_file_name_extensions);
-                large_icon_tile_height_for_text(display_name, font, cx)
-            })
+            .map(|display_name| large_icon_tile_height_for_text(display_name, font, cx))
             .collect::<Vec<_>>();
 
         Self::from_tile_heights(columns, column_gap, tile_heights)
@@ -117,14 +118,6 @@ impl LargeIconLayout {
         (ix < entry_count).then_some(ix)
     }
 
-    pub(super) fn key(&self) -> LargeIconLayoutKey {
-        LargeIconLayoutKey {
-            columns: self.columns,
-            row_count: self.row_count(),
-            tile_heights: self.tile_heights.clone(),
-        }
-    }
-
     fn column_at_x(&self, content_x: f32) -> Option<usize> {
         for column in 0..self.columns {
             let left = column as f32 * (LARGE_ICON_TILE_WIDTH + self.column_gap);
@@ -136,6 +129,41 @@ impl LargeIconLayout {
 
         None
     }
+}
+
+impl LargeIconLayoutCacheKey {
+    pub(super) fn new(
+        entries: &[FileEntry],
+        viewport_width: f32,
+        show_file_name_extensions: bool,
+        font: &Font,
+    ) -> Self {
+        Self {
+            viewport_width_px: viewport_width_key(viewport_width),
+            show_file_name_extensions,
+            font: font.clone(),
+            display_names: large_icon_display_names(entries, show_file_name_extensions),
+        }
+    }
+
+    fn viewport_width(&self) -> f32 {
+        f32::from_bits(self.viewport_width_px)
+    }
+}
+
+fn viewport_width_key(viewport_width: f32) -> u32 {
+    viewport_width.max(0.0).to_bits()
+}
+
+fn large_icon_display_names(entries: &[FileEntry], show_file_name_extensions: bool) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .display_name_with_extensions(show_file_name_extensions)
+                .to_owned()
+        })
+        .collect()
 }
 
 pub(super) fn large_icon_filename_text_width() -> f32 {
@@ -206,6 +234,55 @@ fn large_icon_rows_from_tile_heights(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_font(name: &'static str) -> Font {
+        gpui::font(name)
+    }
+
+    #[test]
+    fn layout_cache_key_changes_when_viewport_width_changes() {
+        let entries = vec![FileEntry::test("alpha.txt", false, Some(1), None)];
+        let font = test_font(".SystemUIFont");
+
+        let narrow = LargeIconLayoutCacheKey::new(&entries, 300.0, true, &font);
+        let wide = LargeIconLayoutCacheKey::new(&entries, 301.0, true, &font);
+
+        assert_ne!(narrow, wide);
+    }
+
+    #[test]
+    fn layout_cache_key_changes_when_font_changes() {
+        let entries = vec![FileEntry::test("alpha.txt", false, Some(1), None)];
+
+        let system =
+            LargeIconLayoutCacheKey::new(&entries, 300.0, true, &test_font(".SystemUIFont"));
+        let custom = LargeIconLayoutCacheKey::new(&entries, 300.0, true, &test_font("Segoe UI"));
+
+        assert_ne!(system, custom);
+    }
+
+    #[test]
+    fn layout_cache_key_changes_when_extension_visibility_changes() {
+        let entries = vec![FileEntry::test("alpha.txt", false, Some(1), None)];
+        let font = test_font(".SystemUIFont");
+
+        let hidden = LargeIconLayoutCacheKey::new(&entries, 300.0, false, &font);
+        let visible = LargeIconLayoutCacheKey::new(&entries, 300.0, true, &font);
+
+        assert_ne!(hidden, visible);
+    }
+
+    #[test]
+    fn layout_cache_key_changes_when_display_names_change() {
+        let font = test_font(".SystemUIFont");
+        let first = vec![FileEntry::test("alpha.txt", false, Some(1), None)];
+        let second = vec![FileEntry::test("beta.txt", false, Some(1), None)];
+
+        let first_key = LargeIconLayoutCacheKey::new(&first, 300.0, true, &font);
+        let second_key = LargeIconLayoutCacheKey::new(&second, 300.0, true, &font);
+
+        assert_ne!(first_key, second_key);
+    }
 
     #[test]
     fn tile_height_grows_for_one_two_and_three_filename_rows() {

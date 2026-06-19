@@ -69,7 +69,10 @@ use crate::explorer::{
         drive_wsl_icon, executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized,
         folder_icon, folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
-    large_icons::{LargeIconLayout, large_icon_filename_text_width, large_icon_max_tile_height},
+    large_icons::{
+        LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
+        large_icon_max_tile_height,
+    },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
     navigation::{EntryAction, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
@@ -211,6 +214,24 @@ const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 16.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
 const RECURSIVE_SEARCH_PATH_TEXT_COLOR: u32 = 0x6f6f6f;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntryClickTarget {
+    Row,
+    Name,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntryContextMenuTarget {
+    WholeEntry,
+    NameCell,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CurrentFolderClickTarget {
+    Background,
+    EmptyFolder,
+}
 
 impl ExplorerView {
     pub(super) fn entry_row_height(&self) -> f32 {
@@ -1554,9 +1575,6 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
-        let clicked_entry = entry.clone();
-        let context_clicked_entry = entry.clone();
-        let middle_clicked_entry = entry.clone();
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
@@ -1591,200 +1609,18 @@ impl ExplorerView {
             .border_color(rgb(0xffffff))
             // .border_color(rgb(0x949494))
             .cursor_default()
-            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !is_normal_entry_click(event) {
-                    cx.stop_propagation();
-                    return;
-                }
-
-                this.close_context_menu();
-                if this.suppress_next_click() {
-                    this.cancel_pending_click_rename();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                if !this.commit_active_rename_before_interaction(window, cx) {
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                let click_count =
-                    this.normalize_entry_click_count(&clicked_entry, event.click_count());
-                if is_alt_entry_double_click(event, click_count) {
-                    this.handle_entry_properties_click(
-                        &clicked_entry,
-                        selection_modifiers_for_click(event),
-                    );
-                    this.open_selected_properties(window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click_with_watcher(
-                    &clicked_entry,
-                    click_count,
-                    selection_modifiers_for_click(event),
-                    cx,
-                ) {
-                    this.open_file_with_default_app(&path, window, cx);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
-                    open_entry_context_menu_from_event(
-                        this,
-                        event,
-                        &context_clicked_entry,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if !this.commit_active_rename_before_interaction(window, cx) {
-                        cx.stop_propagation();
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(path) = this.handle_entry_middle_click(
-                        &middle_clicked_entry,
-                        SelectionModifiers::from_gpui(event.modifiers),
-                    ) {
-                        cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_drag_move::<DraggedEntries>({
-                let destination = destination.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                }
-            })
-            .on_drag_move::<ExternalPaths>({
-                let destination = destination.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                }
-            });
-
-        if let Some(drag_payload) = selected_drag_payload {
-            let external_paths = ExternalPaths::new(drag_payload.paths.clone());
-            row = row.on_drag_with_external_paths(drag_payload, external_paths, {
-                let entity = entity.clone();
-                move |dragged: &DraggedEntries, cursor_offset, _, cx| {
-                    entity.update(cx, |this, _| {
-                        if this.mouse_selection_drag.is_none() {
-                            this.cancel_mouse_selection_drag();
-                        }
-                    });
-                    let font = entity.read(cx).font.clone();
-                    cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
-                }
-            });
-        }
-
-        if entry.is_directory_like() {
-            row = row
-                .can_drop({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |dragged_value, window, cx| {
-                        entity.update(cx, |this, _| {
-                            this.can_drop_value(dragged_value, &destination, window.modifiers())
-                        })
-                    }
-                })
-                .drag_over::<DraggedEntries>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .drag_over::<ExternalPaths>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, dragged: &DraggedEntries, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_internal_entries_and_open_dialog(
-                            dragged,
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, paths: &ExternalPaths, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }));
-        } else {
-            row = row
-                .can_drop({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |dragged_value, window, cx| {
-                        entity.update(cx, |this, _| {
-                            this.can_drop_value(dragged_value, &destination, window.modifiers())
-                        })
-                    }
-                })
-                .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, dragged: &DraggedEntries, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_internal_entries_and_open_dialog(
-                            dragged,
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, paths: &ExternalPaths, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }));
-        }
+            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+        row = add_entry_primary_click(row, entry.clone(), EntryClickTarget::Row, cx);
+        row = add_entry_context_menu(row, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
+        row = add_entry_middle_click(row, entry.clone(), cx);
+        row = add_drop_handlers(
+            row,
+            destination,
+            entry.is_directory_like(),
+            entity.clone(),
+            cx,
+        );
+        row = add_selected_entry_drag(row, selected_drag_payload, entity.clone());
 
         let non_name_cells = self
             .file_columns
@@ -1817,10 +1653,7 @@ impl ExplorerView {
             rename_name_cell(&entry, app_icon, self.active_rename_focus_handle(), cx)
                 .into_any_element()
         } else {
-            let name_click_entry = entry.clone();
-            let name_context_clicked_entry = entry.clone();
-            let name_middle_clicked_entry = entry.clone();
-            name_cell(
+            let name_cell = name_cell(
                 &entry,
                 app_icon,
                 self.show_file_name_extensions,
@@ -1829,83 +1662,16 @@ impl ExplorerView {
                 &self.font,
                 window,
             )
-            .id(("explorer-entry-name", ix))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !is_normal_entry_click(event) {
-                    cx.stop_propagation();
-                    return;
-                }
-
-                this.close_context_menu();
-                if this.suppress_next_click() {
-                    this.cancel_pending_click_rename();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                let click_count =
-                    this.normalize_entry_click_count(&name_click_entry, event.click_count());
-                if is_alt_entry_double_click(event, click_count) {
-                    this.handle_entry_properties_click(
-                        &name_click_entry,
-                        selection_modifiers_for_click(event),
-                    );
-                    this.open_selected_properties(window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
-                    &name_click_entry,
-                    click_count,
-                    selection_modifiers_for_click(event),
-                    window,
-                    cx,
-                ) {
-                    this.open_file_with_default_app(&path, window, cx);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
-                    let clicked_index = this.entry_index_by_path(&name_context_clicked_entry.path);
-                    if clicked_index.is_some_and(|ix| this.entry_is_selected(ix)) {
-                        open_entry_context_menu_from_event(
-                            this,
-                            event,
-                            &name_context_clicked_entry,
-                            window,
-                            cx,
-                        );
-                    } else {
-                        open_current_folder_context_menu_from_event(this, event, window, cx);
-                    }
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if !this.commit_active_rename_before_interaction(window, cx) {
-                        cx.stop_propagation();
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(path) = this.handle_entry_middle_click(
-                        &name_middle_clicked_entry,
-                        SelectionModifiers::from_gpui(event.modifiers),
-                    ) {
-                        cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
+            .id(("explorer-entry-name", ix));
+            let name_cell =
+                add_entry_primary_click(name_cell, entry.clone(), EntryClickTarget::Name, cx);
+            let name_cell = add_entry_context_menu(
+                name_cell,
+                entry.clone(),
+                EntryContextMenuTarget::NameCell,
+                cx,
+            );
+            add_entry_middle_click(name_cell, entry.clone(), cx).into_any_element()
         };
 
         let mut row = row.child(name_cell);
@@ -1958,10 +1724,7 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
-        let clicked_entry = entry.clone();
         let name_click_entry = entry.clone();
-        let context_clicked_entry = entry.clone();
-        let middle_clicked_entry = entry.clone();
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
@@ -2013,214 +1776,22 @@ impl ExplorerView {
                 |this| this.hover(|style| style.bg(rgb(0xe5f3ff))),
             )
             .cursor_default()
-            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if !is_normal_entry_click(event) {
-                    cx.stop_propagation();
-                    return;
-                }
-
-                this.close_context_menu();
-                if this.suppress_next_click() {
-                    this.cancel_pending_click_rename();
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                if !this.commit_active_rename_before_interaction(window, cx) {
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                let click_count =
-                    this.normalize_entry_click_count(&clicked_entry, event.click_count());
-                if is_alt_entry_double_click(event, click_count) {
-                    this.handle_entry_properties_click(
-                        &clicked_entry,
-                        selection_modifiers_for_click(event),
-                    );
-                    this.open_selected_properties(window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
-
-                if let Some(EntryAction::OpenFile(path)) = this.handle_entry_click_with_watcher(
-                    &clicked_entry,
-                    click_count,
-                    selection_modifiers_for_click(event),
-                    cx,
-                ) {
-                    this.open_file_with_default_app(&path, window, cx);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
-                    open_entry_context_menu_from_event(
-                        this,
-                        event,
-                        &context_clicked_entry,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if !this.commit_active_rename_before_interaction(window, cx) {
-                        cx.stop_propagation();
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(path) = this.handle_entry_middle_click(
-                        &middle_clicked_entry,
-                        SelectionModifiers::from_gpui(event.modifiers),
-                    ) {
-                        cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_drag_move::<DraggedEntries>({
-                let destination = destination.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                }
-            })
-            .on_drag_move::<ExternalPaths>({
-                let destination = destination.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                }
-            });
-
-        if let Some(drag_payload) = selected_drag_payload {
-            let external_paths = ExternalPaths::new(drag_payload.paths.clone());
-            tile = tile.on_drag_with_external_paths(drag_payload, external_paths, {
-                let entity = entity.clone();
-                move |dragged: &DraggedEntries, cursor_offset, _, cx| {
-                    entity.update(cx, |this, _| {
-                        if this.mouse_selection_drag.is_none() {
-                            this.cancel_mouse_selection_drag();
-                        }
-                    });
-                    let font = entity.read(cx).font.clone();
-                    cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
-                }
-            });
-        } else if let Some(drag_payload) = individual_drag_payload {
-            let external_paths = ExternalPaths::new(drag_payload.paths.clone());
-            let drag_entity = entity.clone();
-            tile = tile.on_drag_with_external_paths(
-                drag_payload,
-                external_paths,
-                move |dragged: &DraggedEntries, cursor_offset, _, cx| {
-                    drag_entity.update(cx, |this, _| {
-                        this.begin_individual_item_drag(dragged);
-                    });
-                    let font = drag_entity.read(cx).font.clone();
-                    cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
-                },
-            );
-        }
-
-        if entry.is_directory_like() {
-            tile = tile
-                .can_drop({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |dragged_value, window, cx| {
-                        entity.update(cx, |this, _| {
-                            this.can_drop_value(dragged_value, &destination, window.modifiers())
-                        })
-                    }
-                })
-                .drag_over::<DraggedEntries>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .drag_over::<ExternalPaths>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, dragged: &DraggedEntries, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_internal_entries_and_open_dialog(
-                            dragged,
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, paths: &ExternalPaths, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }));
+            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+        tile = add_entry_primary_click(tile, entry.clone(), EntryClickTarget::Row, cx);
+        tile = add_entry_context_menu(tile, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
+        tile = add_entry_middle_click(tile, entry.clone(), cx);
+        tile = add_drop_handlers(
+            tile,
+            destination,
+            entry.is_directory_like(),
+            entity.clone(),
+            cx,
+        );
+        tile = if selected_drag_payload.is_some() {
+            add_selected_entry_drag(tile, selected_drag_payload, entity.clone())
         } else {
-            tile = tile
-                .can_drop({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |dragged_value, window, cx| {
-                        entity.update(cx, |this, _| {
-                            this.can_drop_value(dragged_value, &destination, window.modifiers())
-                        })
-                    }
-                })
-                .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, dragged: &DraggedEntries, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_internal_entries_and_open_dialog(
-                            dragged,
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, paths: &ExternalPaths, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }));
-        }
+            add_individual_entry_drag(tile, individual_drag_payload, entity.clone())
+        };
 
         tile.child(large_entry_icon(&entry, image_thumbnail, app_icon))
             .child(div().mt(px(LARGE_ICON_TEXT_TOP_GAP)).child(name))
@@ -2228,23 +1799,26 @@ impl ExplorerView {
     }
 
     fn render_large_icons(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let entity = cx.entity();
-        let current_directory = DropDestination::CurrentDirectory;
         let viewport_width = (self.list_viewport_width(window) - SCROLLBAR_GUTTER_WIDTH).max(0.0);
-        let layout = LargeIconLayout::new(
+        let layout_key = LargeIconLayoutCacheKey::new(
             &self.entries,
             viewport_width,
             self.show_file_name_extensions,
             &self.font,
-            cx,
         );
-        let row_count = layout.row_count();
-        let layout_key = layout.key();
-        if self.large_icon_layout_key.as_ref() != Some(&layout_key) {
-            self.large_icon_list_state.reset(row_count);
+
+        if self.large_icon_layout_key.as_ref() != Some(&layout_key)
+            || self.large_icon_layout.is_none()
+        {
+            let layout = LargeIconLayout::from_cache_key(&layout_key, cx);
+            self.large_icon_list_state.reset(layout.row_count());
+            self.large_icon_layout = Some(layout);
             self.large_icon_layout_key = Some(layout_key);
         }
-        self.large_icon_layout = Some(layout.clone());
+        let layout = self
+            .large_icon_layout
+            .clone()
+            .expect("large icon layout is initialized before rendering");
 
         div().flex().flex_col().size_full().overflow_hidden().child(
             div()
@@ -2253,132 +1827,33 @@ impl ExplorerView {
                 .flex_1()
                 .overflow_hidden()
                 .child(
-                    div()
-                        .id("explorer-list-background")
-                        .relative()
-                        .flex_1()
-                        .h_full()
-                        .overflow_hidden()
-                        .can_drop({
-                            let current_directory = current_directory.clone();
-                            let entity = entity.clone();
-                            move |dragged_value, window, cx| {
-                                entity.update(cx, |this, _| {
-                                    this.can_drop_value(
-                                        dragged_value,
-                                        &current_directory,
-                                        window.modifiers(),
-                                    )
-                                })
-                            }
-                        })
-                        .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                        .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                        .on_drag_move::<DraggedEntries>({
-                            let current_directory = current_directory.clone();
-                            let entity = entity.clone();
-                            move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                                update_drag_cursor_if_hovered(
-                                    &entity,
-                                    event,
-                                    &current_directory,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        })
-                        .on_drag_move::<ExternalPaths>({
-                            let current_directory = current_directory.clone();
-                            let entity = entity.clone();
-                            move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                                update_drag_cursor_if_hovered(
-                                    &entity,
-                                    event,
-                                    &current_directory,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        })
-                        .on_drop(cx.listener({
-                            let current_directory = current_directory.clone();
-                            move |this, dragged: &DraggedEntries, window, cx| {
-                                this.clear_drop_indicator();
-                                this.drop_internal_entries_and_open_dialog(
-                                    dragged,
-                                    current_directory.clone(),
-                                    window.modifiers(),
-                                    cx,
-                                );
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                        }))
-                        .on_drop(cx.listener({
-                            let current_directory = current_directory.clone();
-                            move |this, paths: &ExternalPaths, window, cx| {
-                                this.clear_drop_indicator();
-                                this.drop_external_paths_and_open_dialog(
-                                    paths.paths(),
-                                    current_directory.clone(),
-                                    window.modifiers(),
-                                    cx,
-                                );
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_up(
-                            MouseButton::Right,
-                            cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                open_current_folder_context_menu_from_event(
-                                    this, event, window, cx,
-                                );
+                    add_current_folder_drop_handlers(
+                        div()
+                            .id("explorer-list-background")
+                            .relative()
+                            .flex_1()
+                            .h_full()
+                            .overflow_hidden(),
+                        CurrentFolderClickTarget::Background,
+                        cx,
+                    )
+                    .child(self.render_mouse_selection_hit_layer(cx))
+                    .child(
+                        list(
+                            self.large_icon_list_state.clone(),
+                            cx.processor(move |this, row_ix: usize, window, cx| {
+                                this.render_large_icon_row(row_ix, layout.clone(), window, cx)
                             }),
                         )
-                        .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                            if !event.standard_click() {
-                                cx.stop_propagation();
-                                return;
-                            }
-
-                            this.close_context_menu();
-                            if this.suppress_next_click() {
-                                this.cancel_pending_click_rename();
-                                cx.stop_propagation();
-                                cx.notify();
-                                return;
-                            }
-
-                            if !this.commit_active_rename_before_interaction(window, cx) {
-                                cx.stop_propagation();
-                                cx.notify();
-                                return;
-                            }
-
-                            this.clear_selection();
-                            this.close_context_menu();
-                            cx.notify();
-                        }))
-                        .child(self.render_mouse_selection_hit_layer(cx))
-                        .child(
-                            list(
-                                self.large_icon_list_state.clone(),
-                                cx.processor(move |this, row_ix: usize, window, cx| {
-                                    this.render_large_icon_row(row_ix, layout.clone(), window, cx)
-                                }),
-                            )
-                            .size_full(),
-                        )
-                        .child(self.render_mouse_selection_box()),
+                        .size_full(),
+                    )
+                    .child(self.render_mouse_selection_box()),
                 )
                 .child(self.render_scrollbar(cx)),
         )
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
-        let entity = cx.entity();
-        let current_directory = DropDestination::CurrentDirectory;
         let has_horizontal_scrollbar = self.horizontal_scrollbar_metrics().is_some();
 
         div()
@@ -2393,138 +1868,41 @@ impl ExplorerView {
                     .flex_1()
                     .overflow_hidden()
                     .child(
-                        div()
-                            .id("explorer-list-background")
-                            .relative()
-                            .flex_1()
-                            .h_full()
-                            .overflow_hidden()
-                            .can_drop({
-                                let current_directory = current_directory.clone();
-                                let entity = entity.clone();
-                                move |dragged_value, window, cx| {
-                                    entity.update(cx, |this, _| {
-                                        this.can_drop_value(
-                                            dragged_value,
-                                            &current_directory,
-                                            window.modifiers(),
-                                        )
-                                    })
-                                }
-                            })
-                            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-                            .on_drag_move::<DraggedEntries>({
-                                let current_directory = current_directory.clone();
-                                let entity = entity.clone();
-                                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                                    update_drag_cursor_if_hovered(
-                                        &entity,
-                                        event,
-                                        &current_directory,
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            })
-                            .on_drag_move::<ExternalPaths>({
-                                let current_directory = current_directory.clone();
-                                let entity = entity.clone();
-                                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                                    update_drag_cursor_if_hovered(
-                                        &entity,
-                                        event,
-                                        &current_directory,
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            })
-                            .on_drop(cx.listener({
-                                let current_directory = current_directory.clone();
-                                move |this, dragged: &DraggedEntries, window, cx| {
-                                    this.clear_drop_indicator();
-                                    this.drop_internal_entries_and_open_dialog(
-                                        dragged,
-                                        current_directory.clone(),
-                                        window.modifiers(),
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            }))
-                            .on_drop(cx.listener({
-                                let current_directory = current_directory.clone();
-                                move |this, paths: &ExternalPaths, window, cx| {
-                                    this.clear_drop_indicator();
-                                    this.drop_external_paths_and_open_dialog(
-                                        paths.paths(),
-                                        current_directory.clone(),
-                                        window.modifiers(),
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            }))
-                            .on_mouse_up(
-                                MouseButton::Right,
-                                cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                                    open_current_folder_context_menu_from_event(
-                                        this, event, window, cx,
-                                    );
+                        add_current_folder_drop_handlers(
+                            div()
+                                .id("explorer-list-background")
+                                .relative()
+                                .flex_1()
+                                .h_full()
+                                .overflow_hidden(),
+                            CurrentFolderClickTarget::Background,
+                            cx,
+                        )
+                        .child(self.render_mouse_selection_hit_layer(cx))
+                        .child(
+                            uniform_list(
+                                "explorer-entries",
+                                self.entries.len(),
+                                cx.processor(|this, range: Range<usize>, window, cx| {
+                                    let mut rows = Vec::with_capacity(range.end - range.start);
+                                    for ix in range {
+                                        rows.push(this.render_row(ix, window, cx));
+                                    }
+                                    rows
                                 }),
                             )
-                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                                if !event.standard_click() {
-                                    cx.stop_propagation();
-                                    return;
-                                }
-
-                                this.close_context_menu();
-                                if this.suppress_next_click() {
-                                    this.cancel_pending_click_rename();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                    return;
-                                }
-
-                                if !this.commit_active_rename_before_interaction(window, cx) {
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                    return;
-                                }
-
-                                this.clear_selection();
-                                this.close_context_menu();
-                                cx.notify();
-                            }))
-                            .child(self.render_mouse_selection_hit_layer(cx))
-                            .child(
-                                uniform_list(
-                                    "explorer-entries",
-                                    self.entries.len(),
-                                    cx.processor(|this, range: Range<usize>, window, cx| {
-                                        let mut rows = Vec::with_capacity(range.end - range.start);
-                                        for ix in range {
-                                            rows.push(this.render_row(ix, window, cx));
-                                        }
-                                        rows
-                                    }),
-                                )
-                                .with_horizontal_sizing_behavior(
-                                    ListHorizontalSizingBehavior::Unconstrained,
-                                )
-                                .size_full()
-                                .track_scroll(self.scroll_handle.clone())
-                                .on_scroll_wheel(cx.listener(
-                                    |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
-                                        cx.notify();
-                                    },
-                                )),
+                            .with_horizontal_sizing_behavior(
+                                ListHorizontalSizingBehavior::Unconstrained,
                             )
-                            .child(self.render_mouse_selection_box()),
+                            .size_full()
+                            .track_scroll(self.scroll_handle.clone())
+                            .on_scroll_wheel(cx.listener(
+                                |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(self.render_mouse_selection_box()),
                     )
                     .child(self.render_scrollbar(cx)),
             )
@@ -2551,86 +1929,13 @@ impl ExplorerView {
         detail: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let entity = cx.entity();
-        let current_directory = DropDestination::CurrentDirectory;
-
-        div()
-            .id("explorer-empty-folder-drop-target")
-            .size_full()
-            .can_drop({
-                let current_directory = current_directory.clone();
-                let entity = entity.clone();
-                move |dragged_value, window, cx| {
-                    entity.update(cx, |this, _| {
-                        this.can_drop_value(dragged_value, &current_directory, window.modifiers())
-                    })
-                }
-            })
-            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
-            .on_drag_move::<DraggedEntries>({
-                let current_directory = current_directory.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &current_directory, window, cx);
-                }
-            })
-            .on_drag_move::<ExternalPaths>({
-                let current_directory = current_directory.clone();
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                    update_drag_cursor_if_hovered(&entity, event, &current_directory, window, cx);
-                }
-            })
-            .on_drop(cx.listener({
-                let current_directory = current_directory.clone();
-                move |this, dragged: &DraggedEntries, window, cx| {
-                    this.clear_drop_indicator();
-                    this.drop_internal_entries_and_open_dialog(
-                        dragged,
-                        current_directory.clone(),
-                        window.modifiers(),
-                        cx,
-                    );
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .on_drop(cx.listener({
-                let current_directory = current_directory.clone();
-                move |this, paths: &ExternalPaths, window, cx| {
-                    this.clear_drop_indicator();
-                    this.drop_external_paths_and_open_dialog(
-                        paths.paths(),
-                        current_directory.clone(),
-                        window.modifiers(),
-                        cx,
-                    );
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    open_current_folder_context_menu_from_event(this, event, window, cx);
-                }),
-            )
-            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                if !event.standard_click() {
-                    cx.stop_propagation();
-                    return;
-                }
-
-                this.close_context_menu();
-                if this.commit_active_rename_before_interaction(window, cx) {
-                    this.clear_selection();
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .child(render_empty_folder_message(message, detail))
-            .into_any_element()
+        add_current_folder_drop_handlers(
+            div().id("explorer-empty-folder-drop-target").size_full(),
+            CurrentFolderClickTarget::EmptyFolder,
+            cx,
+        )
+        .child(render_empty_folder_message(message, detail))
+        .into_any_element()
     }
 
     fn render_status_bar(&self) -> AnyElement {
@@ -3503,6 +2808,295 @@ fn open_sidebar_context_menu_from_event(
         cx.notify();
     }
     cx.stop_propagation();
+}
+
+fn add_entry_primary_click(
+    element: gpui::Stateful<Div>,
+    entry: FileEntry,
+    target: EntryClickTarget,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    element.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+        if !is_normal_entry_click(event) {
+            cx.stop_propagation();
+            return;
+        }
+
+        this.close_context_menu();
+        if this.suppress_next_click() {
+            this.cancel_pending_click_rename();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        if target == EntryClickTarget::Row
+            && !this.commit_active_rename_before_interaction(window, cx)
+        {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        let click_count = this.normalize_entry_click_count(&entry, event.click_count());
+        if is_alt_entry_double_click(event, click_count) {
+            this.handle_entry_properties_click(&entry, selection_modifiers_for_click(event));
+            this.open_selected_properties(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        let action = match target {
+            EntryClickTarget::Row => this.handle_entry_click_with_watcher(
+                &entry,
+                click_count,
+                selection_modifiers_for_click(event),
+                cx,
+            ),
+            EntryClickTarget::Name => this.handle_entry_name_click(
+                &entry,
+                click_count,
+                selection_modifiers_for_click(event),
+                window,
+                cx,
+            ),
+        };
+        if let Some(EntryAction::OpenFile(path)) = action {
+            this.open_file_with_default_app(&path, window, cx);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }))
+}
+
+fn add_entry_context_menu(
+    element: gpui::Stateful<Div>,
+    entry: FileEntry,
+    target: EntryContextMenuTarget,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    element.on_mouse_up(
+        MouseButton::Right,
+        cx.listener(move |this, event: &MouseUpEvent, window, cx| match target {
+            EntryContextMenuTarget::WholeEntry => {
+                open_entry_context_menu_from_event(this, event, &entry, window, cx);
+            }
+            EntryContextMenuTarget::NameCell => {
+                let clicked_index = this.entry_index_by_path(&entry.path);
+                if clicked_index.is_some_and(|ix| this.entry_is_selected(ix)) {
+                    open_entry_context_menu_from_event(this, event, &entry, window, cx);
+                } else {
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
+                }
+            }
+        }),
+    )
+}
+
+fn add_entry_middle_click(
+    element: gpui::Stateful<Div>,
+    entry: FileEntry,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    element.on_mouse_down(
+        MouseButton::Middle,
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            if !this.commit_active_rename_before_interaction(window, cx) {
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+
+            if let Some(path) = this
+                .handle_entry_middle_click(&entry, SelectionModifiers::from_gpui(event.modifiers))
+            {
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }),
+    )
+}
+
+fn add_selected_entry_drag(
+    element: gpui::Stateful<Div>,
+    drag_payload: Option<DraggedEntries>,
+    entity: Entity<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    let Some(drag_payload) = drag_payload else {
+        return element;
+    };
+
+    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+    element.on_drag_with_external_paths(drag_payload, external_paths, {
+        let entity = entity.clone();
+        move |dragged: &DraggedEntries, cursor_offset, _, cx| {
+            entity.update(cx, |this, _| {
+                if this.mouse_selection_drag.is_none() {
+                    this.cancel_mouse_selection_drag();
+                }
+            });
+            let font = entity.read(cx).font.clone();
+            cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
+        }
+    })
+}
+
+fn add_individual_entry_drag(
+    element: gpui::Stateful<Div>,
+    drag_payload: Option<DraggedEntries>,
+    entity: Entity<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    let Some(drag_payload) = drag_payload else {
+        return element;
+    };
+
+    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+    element.on_drag_with_external_paths(
+        drag_payload,
+        external_paths,
+        move |dragged: &DraggedEntries, cursor_offset, _, cx| {
+            entity.update(cx, |this, _| {
+                this.begin_individual_item_drag(dragged);
+            });
+            let font = entity.read(cx).font.clone();
+            cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
+        },
+    )
+}
+
+fn add_drop_handlers(
+    element: gpui::Stateful<Div>,
+    destination: DropDestination,
+    highlights_target: bool,
+    entity: Entity<ExplorerView>,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    let element = element
+        .on_drag_move::<DraggedEntries>({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
+                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+            }
+        })
+        .on_drag_move::<ExternalPaths>({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
+            }
+        })
+        .can_drop({
+            let destination = destination.clone();
+            let entity = entity.clone();
+            move |dragged_value, window, cx| {
+                entity.update(cx, |this, _| {
+                    this.can_drop_value(dragged_value, &destination, window.modifiers())
+                })
+            }
+        });
+
+    let element = if highlights_target {
+        element
+            .drag_over::<DraggedEntries>(|style, _, _, _| {
+                style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+            })
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
+            })
+    } else {
+        element
+            .drag_over::<DraggedEntries>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0xf7fbff)))
+    };
+
+    element
+        .on_drop(cx.listener({
+            let destination = destination.clone();
+            move |this, dragged: &DraggedEntries, window, cx| {
+                this.clear_drop_indicator();
+                this.drop_internal_entries_and_open_dialog(
+                    dragged,
+                    destination.clone(),
+                    window.modifiers(),
+                    cx,
+                );
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_drop(cx.listener({
+            let destination = destination.clone();
+            move |this, paths: &ExternalPaths, window, cx| {
+                this.clear_drop_indicator();
+                this.drop_external_paths_and_open_dialog(
+                    paths.paths(),
+                    destination.clone(),
+                    window.modifiers(),
+                    cx,
+                );
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+}
+
+fn add_current_folder_drop_handlers(
+    element: gpui::Stateful<Div>,
+    target: CurrentFolderClickTarget,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    let entity = cx.entity();
+    add_drop_handlers(
+        element,
+        DropDestination::CurrentDirectory,
+        false,
+        entity,
+        cx,
+    )
+    .on_mouse_up(
+        MouseButton::Right,
+        cx.listener(|this, event: &MouseUpEvent, window, cx| {
+            open_current_folder_context_menu_from_event(this, event, window, cx);
+        }),
+    )
+    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+        if !event.standard_click() {
+            cx.stop_propagation();
+            return;
+        }
+
+        match target {
+            CurrentFolderClickTarget::Background => {
+                this.close_context_menu();
+                if this.suppress_next_click() {
+                    this.cancel_pending_click_rename();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
+                if !this.commit_active_rename_before_interaction(window, cx) {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
+                this.clear_selection();
+                this.close_context_menu();
+            }
+            CurrentFolderClickTarget::EmptyFolder => {
+                this.close_context_menu();
+                if this.commit_active_rename_before_interaction(window, cx) {
+                    this.clear_selection();
+                }
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }))
 }
 
 fn utility_text_button(
@@ -5051,7 +4645,7 @@ fn large_icon_filename(
     name_click_entry: FileEntry,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    div()
+    let name = div()
         .w(px(large_icon_filename_text_width()))
         .max_h(px(LARGE_ICON_TEXT_LINE_HEIGHT * LARGE_ICON_TEXT_ROWS as f32))
         .overflow_hidden()
@@ -5066,47 +4660,9 @@ fn large_icon_filename(
                 .display_name_with_extensions(show_file_name_extensions)
                 .to_owned(),
         )
-        .id(("explorer-large-icon-name", ix))
-        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if !is_normal_entry_click(event) {
-                cx.stop_propagation();
-                return;
-            }
+        .id(("explorer-large-icon-name", ix));
 
-            this.close_context_menu();
-            if this.suppress_next_click() {
-                this.cancel_pending_click_rename();
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-
-            let click_count =
-                this.normalize_entry_click_count(&name_click_entry, event.click_count());
-            if is_alt_entry_double_click(event, click_count) {
-                this.handle_entry_properties_click(
-                    &name_click_entry,
-                    selection_modifiers_for_click(event),
-                );
-                this.open_selected_properties(window, cx);
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-
-            if let Some(EntryAction::OpenFile(path)) = this.handle_entry_name_click(
-                &name_click_entry,
-                click_count,
-                selection_modifiers_for_click(event),
-                window,
-                cx,
-            ) {
-                this.open_file_with_default_app(&path, window, cx);
-            }
-            cx.stop_propagation();
-            cx.notify();
-        }))
-        .into_any_element()
+    add_entry_primary_click(name, name_click_entry, EntryClickTarget::Name, cx).into_any_element()
 }
 
 fn large_icon_rename_input(
