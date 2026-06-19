@@ -120,6 +120,15 @@ const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CodebaseMakeupSegment {
+    left: f32,
+    width: f32,
+    color: u32,
+    round_left: bool,
+    round_right: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileColumnHeaderDrag {
     kind: FileColumnKind,
@@ -4933,54 +4942,94 @@ fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
     let separator_width = CODEBASE_MAKEUP_SEPARATOR_WIDTH * separator_count as f32;
     let language_width = (CODEBASE_MAKEUP_BAR_WIDTH - separator_width).max(0.0);
     let widths = language_segment_widths(&summary.languages, summary.total_code, language_width);
-    let mut bar = div()
-        .flex()
-        .flex_row()
+    let colors = summary
+        .languages
+        .iter()
+        .map(|language| language.color)
+        .collect::<Vec<_>>();
+    let segments = codebase_makeup_segments(&widths, &colors);
+
+    div()
+        .relative()
         .h(px(CODEBASE_MAKEUP_BAR_HEIGHT))
         .w(px(CODEBASE_MAKEUP_BAR_WIDTH))
         .flex_shrink_0()
         .overflow_hidden()
-        .rounded(px(CODEBASE_MAKEUP_BAR_RADIUS));
+        .rounded(px(CODEBASE_MAKEUP_BAR_RADIUS))
+        .bg(rgb(CODEBASE_MAKEUP_SEPARATOR_COLOR))
+        .child(
+            canvas(
+                move |_, _, _| segments,
+                |bounds, segments, window, _| {
+                    for segment in segments {
+                        if segment.width <= 0.0 {
+                            continue;
+                        }
 
-    let segment_count = summary.languages.len();
+                        let segment_bounds = Bounds {
+                            origin: gpui::point(
+                                bounds.origin.x + px(segment.left),
+                                bounds.origin.y,
+                            ),
+                            size: gpui::size(px(segment.width), bounds.size.height),
+                        };
+                        window.paint_quad(
+                            gpui::fill(segment_bounds, rgb(segment.color)).corner_radii(
+                                codebase_makeup_segment_corner_radii(&segment, bounds.size.height),
+                            ),
+                        );
+                    }
+                },
+            )
+            .size_full(),
+        )
+}
 
-    for (ix, (language, width)) in summary.languages.iter().zip(widths).enumerate() {
-        let mut segment = div()
-            .h_full()
-            .w(px(width))
-            .flex_shrink_0()
-            .bg(rgb(language.color));
+fn codebase_makeup_segments(widths: &[f32], colors: &[u32]) -> Vec<CodebaseMakeupSegment> {
+    let segment_count = widths.len().min(colors.len());
+    let mut left = 0.0;
+    let mut segments = Vec::with_capacity(segment_count);
 
-        if segment_count == 1 {
-            segment = segment.rounded(px(CODEBASE_MAKEUP_BAR_RADIUS));
-        } else {
-            if ix == 0 {
-                segment = segment
-                    .rounded_tl(px(CODEBASE_MAKEUP_BAR_RADIUS))
-                    .rounded_bl(px(CODEBASE_MAKEUP_BAR_RADIUS));
-            }
+    for ix in 0..segment_count {
+        let width = widths[ix].max(0.0).round();
+        segments.push(CodebaseMakeupSegment {
+            left,
+            width,
+            color: colors[ix],
+            round_left: false,
+            round_right: false,
+        });
 
-            if ix + 1 == segment_count {
-                segment = segment
-                    .rounded_tr(px(CODEBASE_MAKEUP_BAR_RADIUS))
-                    .rounded_br(px(CODEBASE_MAKEUP_BAR_RADIUS));
-            }
-        }
-
-        bar = bar.child(segment);
-
+        left += width;
         if ix + 1 < segment_count {
-            bar = bar.child(
-                div()
-                    .h_full()
-                    .w(px(CODEBASE_MAKEUP_SEPARATOR_WIDTH))
-                    .flex_shrink_0()
-                    .bg(rgb(CODEBASE_MAKEUP_SEPARATOR_COLOR)),
-            );
+            left += CODEBASE_MAKEUP_SEPARATOR_WIDTH;
         }
     }
 
-    bar
+    let first_visible = segments.iter().position(|segment| segment.width > 0.0);
+    let last_visible = segments.iter().rposition(|segment| segment.width > 0.0);
+    if let Some(ix) = first_visible {
+        segments[ix].round_left = true;
+    }
+    if let Some(ix) = last_visible {
+        segments[ix].round_right = true;
+    }
+
+    segments
+}
+
+fn codebase_makeup_segment_corner_radii(
+    segment: &CodebaseMakeupSegment,
+    height: Pixels,
+) -> gpui::Corners<Pixels> {
+    let radius = px(CODEBASE_MAKEUP_BAR_RADIUS);
+    gpui::Corners {
+        top_left: if segment.round_left { radius } else { px(0.0) },
+        top_right: if segment.round_right { radius } else { px(0.0) },
+        bottom_right: if segment.round_right { radius } else { px(0.0) },
+        bottom_left: if segment.round_left { radius } else { px(0.0) },
+    }
+    .clamp_radii_for_quad_size(gpui::size(px(segment.width), height))
 }
 
 fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
@@ -5138,18 +5187,19 @@ mod tests {
     };
 
     use super::{
-        CONTEXT_MENU_MAX_WIDTH, CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY,
+        CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
+        CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
         DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
         RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, context_menu_action_width_for_text_width,
-        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
-        context_menu_width_for_natural_width, drop_indicator_target_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, git_divergence_label,
-        is_alt_entry_double_click, is_normal_entry_click,
-        open_current_folder_context_menu_from_event, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, text_cell_width,
+        available_filename_text_width, codebase_makeup_segments,
+        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
+        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
+        drop_indicator_target_width, entry_row_hover_enabled, filename_text_width,
+        folder_status_summary, git_divergence_label, is_alt_entry_double_click,
+        is_normal_entry_click, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -5162,6 +5212,77 @@ mod tests {
     fn cut_item_opacity_dims_rows() {
         assert_eq!(CUT_ITEM_OPACITY, 0.7);
         assert!(CUT_ITEM_OPACITY < 1.0);
+    }
+
+    #[test]
+    fn codebase_makeup_segments_leave_whole_pixel_separator_gaps() {
+        let segments =
+            codebase_makeup_segments(&[80.0, 30.0, 6.0], &[0x111111, 0x222222, 0x333333]);
+
+        assert_eq!(
+            segments,
+            vec![
+                CodebaseMakeupSegment {
+                    left: 0.0,
+                    width: 80.0,
+                    color: 0x111111,
+                    round_left: true,
+                    round_right: false,
+                },
+                CodebaseMakeupSegment {
+                    left: 80.0 + CODEBASE_MAKEUP_SEPARATOR_WIDTH,
+                    width: 30.0,
+                    color: 0x222222,
+                    round_left: false,
+                    round_right: false,
+                },
+                CodebaseMakeupSegment {
+                    left: 110.0 + (CODEBASE_MAKEUP_SEPARATOR_WIDTH * 2.0),
+                    width: 6.0,
+                    color: 0x333333,
+                    round_left: false,
+                    round_right: true,
+                },
+            ]
+        );
+
+        let last = segments.last().expect("last segment");
+        assert_eq!(last.left + last.width, CODEBASE_MAKEUP_BAR_WIDTH);
+        assert!(segments.iter().all(|segment| segment.left.fract() == 0.0));
+        assert!(segments.iter().all(|segment| segment.width.fract() == 0.0));
+    }
+
+    #[test]
+    fn codebase_makeup_segments_single_language_covers_full_bar() {
+        let segments = codebase_makeup_segments(&[CODEBASE_MAKEUP_BAR_WIDTH], &[0x3178c6]);
+
+        assert_eq!(
+            segments,
+            vec![CodebaseMakeupSegment {
+                left: 0.0,
+                width: CODEBASE_MAKEUP_BAR_WIDTH,
+                color: 0x3178c6,
+                round_left: true,
+                round_right: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn codebase_makeup_segments_round_first_and_last_visible_segments() {
+        let segments = codebase_makeup_segments(
+            &[0.0, 60.0, 56.0, 0.0],
+            &[0x111111, 0x222222, 0x333333, 0x444444],
+        );
+
+        assert!(!segments[0].round_left);
+        assert!(!segments[0].round_right);
+        assert!(segments[1].round_left);
+        assert!(!segments[1].round_right);
+        assert!(!segments[2].round_left);
+        assert!(segments[2].round_right);
+        assert!(!segments[3].round_left);
+        assert!(!segments[3].round_right);
     }
 
     #[test]
