@@ -5,7 +5,7 @@ use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
     user_home_dir, wsl_drive_roots,
 };
-use crate::settings::SidebarLocation;
+use crate::settings::{DriveHideKind, SidebarLocation, SidebarSettings};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -24,21 +24,26 @@ pub(super) enum SidebarItemKind {
     DriveWsl,
 }
 
-pub(super) fn sidebar_sections(configured_items: &[SidebarLocation]) -> SidebarSections {
-    sidebar_sections_from_roots(configured_items, local_drive_roots(), wsl_drive_roots())
+pub(super) fn sidebar_sections(settings: &SidebarSettings) -> SidebarSections {
+    sidebar_sections_from_roots(settings, local_drive_roots(), wsl_drive_roots())
 }
 
 fn sidebar_sections_from_roots(
-    configured_items: &[SidebarLocation],
+    settings: &SidebarSettings,
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     let home_dir = user_home_dir();
+    let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
     SidebarSections {
-        user_directories: configured_sidebar_items(configured_items),
+        user_directories: configured_sidebar_items(&settings.items),
         macos_system_locations: macos_system_location_items(home_dir.as_deref()),
         drives: drive_items_from_roots(drive_roots),
-        wsl_drives: wsl_drive_items_from_roots(wsl_roots),
+        wsl_drives: if hide_wsl_drives {
+            Vec::new()
+        } else {
+            wsl_drive_items_from_roots(wsl_roots)
+        },
     }
 }
 
@@ -242,7 +247,7 @@ fn sidebar_wsl_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use crate::settings::SidebarLocation;
+    use crate::settings::{DriveHideKind, SidebarLocation, SidebarSettings};
     use std::fs;
 
     #[test]
@@ -479,7 +484,10 @@ mod tests {
     #[test]
     fn sidebar_sections_keep_wsl_drives_separate_from_local_drives() {
         let sections = sidebar_sections_from_roots(
-            &[],
+            &SidebarSettings {
+                items: Vec::new(),
+                ..SidebarSettings::default()
+            },
             vec![PathBuf::from("X:\\")],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
@@ -488,5 +496,21 @@ mod tests {
         assert_eq!(sections.wsl_drives.len(), 1);
         assert_eq!(sections.wsl_drives[0].label, "Ubuntu-24.04");
         assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
+    }
+
+    #[test]
+    fn sidebar_sections_hide_wsl_drives_when_configured() {
+        let sections = sidebar_sections_from_roots(
+            &SidebarSettings {
+                hide: vec![DriveHideKind::Wsl],
+                items: Vec::new(),
+                ..SidebarSettings::default()
+            },
+            vec![PathBuf::from("X:\\")],
+            vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
+        );
+
+        assert_eq!(sections.drives.len(), 1);
+        assert!(sections.wsl_drives.is_empty());
     }
 }

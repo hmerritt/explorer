@@ -4,7 +4,6 @@
 
 - Improve readme - add screenshots / branding
 - Add UI menu button for Folder Sizes
-- Settings option to hide WSL drives
 - Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2

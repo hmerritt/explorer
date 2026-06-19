@@ -1105,12 +1105,15 @@ impl ExplorerView {
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
 
         for (index, item) in sections.user_directories.iter().cloned().enumerate() {
-            children.push(self.render_sidebar_insertion_zone(
-                item.configured_index.unwrap_or(self.sidebar_items.len()),
-                index,
-                SIDEBAR_ITEM_GAP,
-                cx,
-            ));
+            children.push(
+                self.render_sidebar_insertion_zone(
+                    item.configured_index
+                        .unwrap_or(self.sidebar_settings.items.len()),
+                    index,
+                    SIDEBAR_ITEM_GAP,
+                    cx,
+                ),
+            );
             children.push(self.render_sidebar_row(index, item, cx));
         }
         let final_insertion_index = sections
@@ -1118,7 +1121,7 @@ impl ExplorerView {
             .last()
             .and_then(|item| item.configured_index)
             .map(|index| index + 1)
-            .unwrap_or(self.sidebar_items.len());
+            .unwrap_or(self.sidebar_settings.items.len());
         children.push(self.render_sidebar_insertion_zone(
             final_insertion_index,
             sections.user_directories.len(),

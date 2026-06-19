@@ -63,6 +63,12 @@ pub enum StartLocation {
     Custom { path: PathBuf },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriveHideKind {
+    Wsl,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ExplorerSettings {
@@ -265,6 +271,8 @@ pub struct AppSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SidebarSettings {
+    #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
+    pub hide: Vec<DriveHideKind>,
     pub items: Vec<SidebarLocation>,
     #[serde(
         default = "default_sidebar_width",
@@ -345,6 +353,7 @@ impl Default for AppSettings {
 impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
+            hide: Vec::new(),
             items: vec![
                 SidebarLocation::Home,
                 SidebarLocation::Desktop,
@@ -1684,6 +1693,39 @@ pub(crate) fn default_file_column_width(kind: FileColumnKind) -> u32 {
     }
 }
 
+fn drive_hide_kind_from_str(value: &str) -> Option<DriveHideKind> {
+    match value {
+        "wsl" => Some(DriveHideKind::Wsl),
+        _ => None,
+    }
+}
+
+fn deserialize_drive_hide_kinds<'de, D>(deserializer: D) -> Result<Vec<DriveHideKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(drive_hide_kinds_from_value(value))
+}
+
+fn drive_hide_kinds_from_value(value: Value) -> Vec<DriveHideKind> {
+    let Some(values) = value.as_array() else {
+        return Vec::new();
+    };
+
+    let mut kinds = Vec::new();
+    for kind in values
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(drive_hide_kind_from_str)
+    {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
 fn file_column_kind_from_str(value: &str) -> Option<FileColumnKind> {
     match value {
         "date_modified" => Some(FileColumnKind::DateModified),
@@ -1863,6 +1905,7 @@ mod tests {
             Some(&default_file_column_width(FileColumnKind::DateModified))
         );
         assert_eq!(settings.app.start, StartLocation::Downloads);
+        assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
     }
@@ -1903,8 +1946,18 @@ mod tests {
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert!(settings.contextmenu.items.is_empty());
+        assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
+    }
+
+    #[test]
+    fn sidebar_hide_deserializes_wsl_and_ignores_unknown_values() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"sidebar":{"hide":["wsl","future_drive",42,"wsl"]}}"#)
+                .expect("deserialize sidebar hide settings");
+
+        assert_eq!(settings.sidebar.hide, vec![DriveHideKind::Wsl]);
     }
 
     #[test]
@@ -2049,6 +2102,7 @@ mod tests {
         assert!(json.starts_with("{\n  \"app\": {"));
         assert!(json.contains("\n    \"start\": {\"kind\": \"downloads\"}"));
         assert!(json.contains("\n  \"contextmenu\": [],"));
+        assert!(json.contains("\n    \"hide\": [],"));
         assert!(json.contains(
             "\n    \"items\": [{\"kind\": \"home\"}, {\"kind\": \"desktop\"}, {\"kind\": \"documents\"}, {\"kind\": \"downloads\"}],"
         ));

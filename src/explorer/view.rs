@@ -32,7 +32,7 @@ use crate::explorer::{
     watcher::DirectoryWatcher,
 };
 use crate::settings::{
-    ExplorerSettings, FileColumnKind, FileColumnSettings, FileViewMode, SidebarLocation,
+    ExplorerSettings, FileColumnKind, FileColumnSettings, FileViewMode, SidebarSettings,
 };
 
 pub struct ExplorerView {
@@ -88,7 +88,7 @@ pub struct ExplorerView {
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
-    pub(super) sidebar_items: Vec<SidebarLocation>,
+    pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
     pub(super) shell_shortcut_resolution_task: Option<Task<()>>,
@@ -258,7 +258,7 @@ impl ExplorerView {
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
-            sidebar_items: settings.sidebar.items.clone(),
+            sidebar_settings: settings.sidebar.clone(),
             sidebar_sections: SidebarSections::default(),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
@@ -276,6 +276,7 @@ impl ExplorerView {
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
         let hidden_changed = self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
+        let sidebar_changed = self.sidebar_settings != settings.sidebar;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
         self.show_hidden_files = settings.view.show_hidden;
@@ -285,7 +286,7 @@ impl ExplorerView {
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
 
-        self.sidebar_items = settings.sidebar.items.clone();
+        self.sidebar_settings = settings.sidebar.clone();
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
         }
@@ -304,15 +305,18 @@ impl ExplorerView {
             self.reload();
             self.schedule_entry_metadata_resolution(cx);
             self.refresh_search_after_external_change(cx);
-        } else if folder_size_changed {
-            if self.show_folder_size {
-                self.schedule_folder_sizes(cx);
-            } else {
-                self.cancel_folder_size_task();
-                self.clear_folder_sizes();
-            }
         } else {
-            self.sidebar_sections = sidebar_sections(&self.sidebar_items);
+            if folder_size_changed {
+                if self.show_folder_size {
+                    self.schedule_folder_sizes(cx);
+                } else {
+                    self.cancel_folder_size_task();
+                    self.clear_folder_sizes();
+                }
+            }
+            if sidebar_changed || !folder_size_changed {
+                self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            }
         }
         self.apply_effective_view_mode();
         cx.notify();
@@ -355,7 +359,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_items);
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -1283,6 +1287,46 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.sidebar_width, 333.0);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_recomputes_sidebar_sections_when_hide_changes(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(
+                PathBuf::from("settings"),
+                focus_handle,
+            );
+            view.sidebar_sections
+                .wsl_drives
+                .push(crate::explorer::sidebar::SidebarItem {
+                    label: "Ubuntu".to_owned(),
+                    path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+                    kind: crate::explorer::sidebar::SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                });
+            view
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        sidebar: crate::settings::SidebarSettings {
+                            hide: vec![crate::settings::DriveHideKind::Wsl],
+                            ..crate::settings::SidebarSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.sidebar_sections.wsl_drives.is_empty());
         });
     }
 
