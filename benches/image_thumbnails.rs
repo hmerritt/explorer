@@ -13,7 +13,7 @@ use std::{
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use explorer::benchmark_support::load_image_thumbnail_for_benchmark;
 
-const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v1";
+const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v2";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
 const LARGE_HEIGHT: u32 = 1200;
@@ -22,6 +22,7 @@ const BATCH_COUNT: usize = 32;
 struct Fixture {
     large_png: PathBuf,
     large_jpeg: PathBuf,
+    large_tiff: PathBuf,
     large_svg: PathBuf,
     batch_jpegs: Vec<PathBuf>,
 }
@@ -39,6 +40,7 @@ impl Fixture {
             fs::create_dir_all(&root).expect("create thumbnail fixture");
             create_png(&root.join("large.png"), LARGE_WIDTH, LARGE_HEIGHT);
             create_jpeg(&root.join("large.jpg"), LARGE_WIDTH, LARGE_HEIGHT, 0);
+            create_tiff(&root.join("large.tif"), LARGE_WIDTH, LARGE_HEIGHT);
             create_svg(&root.join("large.svg"));
             for index in 0..BATCH_COUNT {
                 create_jpeg(
@@ -54,6 +56,7 @@ impl Fixture {
         Self {
             large_png: root.join("large.png"),
             large_jpeg: root.join("large.jpg"),
+            large_tiff: root.join("large.tif"),
             large_svg: root.join("large.svg"),
             batch_jpegs: (0..BATCH_COUNT)
                 .map(|index| root.join(format!("batch-{index:02}.jpg")))
@@ -84,6 +87,25 @@ fn create_jpeg(path: &Path, width: u32, height: u32, seed: u8) {
         )
         .expect("encode benchmark jpeg");
     fs::write(path, bytes).expect("write benchmark jpeg");
+}
+
+fn create_tiff(path: &Path, width: u32, height: u32) {
+    let image = gradient_rgb(width, height, 0);
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let mut encoder = tiff::encoder::TiffEncoder::new(cursor).expect("create tiff encoder");
+        let mut image_encoder = encoder
+            .new_image::<tiff::encoder::colortype::RGB8>(width, height)
+            .expect("create benchmark tiff image");
+        image_encoder
+            .rows_per_strip(16)
+            .expect("set benchmark tiff strip size");
+        image_encoder
+            .write_data(image.as_raw())
+            .expect("encode benchmark tiff");
+    }
+    fs::write(path, bytes).expect("write benchmark tiff");
 }
 
 fn create_svg(path: &Path) {
@@ -156,6 +178,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
     for (name, path) in [
         ("png_large", &fixture.large_png),
         ("jpeg_large", &fixture.large_jpeg),
+        ("tiff_large_uncompressed", &fixture.large_tiff),
         ("svg_large", &fixture.large_svg),
     ] {
         single.throughput(Throughput::Bytes(

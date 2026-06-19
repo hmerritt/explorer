@@ -4,8 +4,8 @@ The recursive-search benchmark suite measures scanning, cached filtering,
 metadata materialization, cached and uncached full searches, and cancellation.
 The navigation-pipeline benchmark measures basic directory entry loading for a
 small Documents-like folder with hidden entries. The image-thumbnail benchmark
-measures cold thumbnail extraction for large raster/SVG files and parallel JPEG
-batch extraction.
+measures cold thumbnail extraction for large raster/SVG/TIFF files and parallel
+JPEG batch extraction.
 
 Run it with:
 
@@ -27,8 +27,8 @@ cargo bench --features benchmarks --bench recursive_search -- --baseline before
 The navigation benchmark creates its fixture under
 `target/navigation-pipeline-benchmark-v1`.
 
-The image-thumbnail benchmark creates deterministic large PNG, JPEG, SVG, and
-batch JPEG fixtures under `target/image-thumbnails-benchmark-v1`.
+The image-thumbnail benchmark creates deterministic large PNG, JPEG, TIFF, SVG,
+and batch JPEG fixtures under `target/image-thumbnails-benchmark-v2`.
 
 ## Archive extraction
 

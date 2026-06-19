@@ -34,7 +34,7 @@ use crate::{
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v3";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v4";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(target_os = "windows")]
@@ -809,6 +809,10 @@ struct ImageThumbnailTimingBatch {
     format_detect: ImageThumbnailStageTimingStats,
     raster_decode: ImageThumbnailStageTimingStats,
     rgba_convert: ImageThumbnailStageTimingStats,
+    tiff_ifd_scan: ImageThumbnailStageTimingStats,
+    tiff_raw_sample: ImageThumbnailStageTimingStats,
+    tiff_chunk_decode: ImageThumbnailStageTimingStats,
+    tiff_chunk_sample: ImageThumbnailStageTimingStats,
     svg_parse: ImageThumbnailStageTimingStats,
     svg_render: ImageThumbnailStageTimingStats,
     svg_unpremultiply: ImageThumbnailStageTimingStats,
@@ -912,6 +916,16 @@ impl ImageThumbnailTimingBatch {
         record_image_thumbnail_stage_if_some(&mut self.format_detect, timings.format_detect);
         record_image_thumbnail_stage_if_some(&mut self.raster_decode, timings.raster_decode);
         record_image_thumbnail_stage_if_some(&mut self.rgba_convert, timings.rgba_convert);
+        record_image_thumbnail_stage_if_some(&mut self.tiff_ifd_scan, timings.tiff_ifd_scan);
+        record_image_thumbnail_stage_if_some(&mut self.tiff_raw_sample, timings.tiff_raw_sample);
+        record_image_thumbnail_stage_if_some(
+            &mut self.tiff_chunk_decode,
+            timings.tiff_chunk_decode,
+        );
+        record_image_thumbnail_stage_if_some(
+            &mut self.tiff_chunk_sample,
+            timings.tiff_chunk_sample,
+        );
         record_image_thumbnail_stage_if_some(&mut self.svg_parse, timings.svg_parse);
         record_image_thumbnail_stage_if_some(&mut self.svg_render, timings.svg_render);
         record_image_thumbnail_stage_if_some(
@@ -992,6 +1006,10 @@ impl ImageThumbnailTimingBatch {
         push_image_thumbnail_stage_line(&mut lines, "format_detect", &self.format_detect);
         push_image_thumbnail_stage_line(&mut lines, "raster_decode", &self.raster_decode);
         push_image_thumbnail_stage_line(&mut lines, "rgba_convert", &self.rgba_convert);
+        push_image_thumbnail_stage_line(&mut lines, "tiff_ifd_scan", &self.tiff_ifd_scan);
+        push_image_thumbnail_stage_line(&mut lines, "tiff_raw_sample", &self.tiff_raw_sample);
+        push_image_thumbnail_stage_line(&mut lines, "tiff_chunk_decode", &self.tiff_chunk_decode);
+        push_image_thumbnail_stage_line(&mut lines, "tiff_chunk_sample", &self.tiff_chunk_sample);
         push_image_thumbnail_stage_line(&mut lines, "svg_parse", &self.svg_parse);
         push_image_thumbnail_stage_line(&mut lines, "svg_render", &self.svg_render);
         push_image_thumbnail_stage_line(&mut lines, "svg_unpremultiply", &self.svg_unpremultiply);
@@ -1382,6 +1400,10 @@ mod tests {
                 format_detect: Some(Duration::from_millis(2)),
                 raster_decode: Some(Duration::from_millis(3)),
                 rgba_convert: Some(Duration::from_millis(4)),
+                tiff_ifd_scan: Some(Duration::from_millis(13)),
+                tiff_raw_sample: Some(Duration::from_millis(14)),
+                tiff_chunk_decode: Some(Duration::from_millis(15)),
+                tiff_chunk_sample: Some(Duration::from_millis(16)),
                 svg_parse: Some(Duration::from_millis(5)),
                 svg_render: Some(Duration::from_millis(6)),
                 svg_unpremultiply: Some(Duration::from_millis(7)),
@@ -1401,6 +1423,10 @@ mod tests {
             "format_detect",
             "raster_decode",
             "rgba_convert",
+            "tiff_ifd_scan",
+            "tiff_raw_sample",
+            "tiff_chunk_decode",
+            "tiff_chunk_sample",
             "svg_parse",
             "svg_render",
             "svg_unpremultiply",

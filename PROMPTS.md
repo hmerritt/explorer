@@ -4,8 +4,7 @@
 
 - Improve readme - add screenshots / branding
 - Add UI menu button for Folder Sizes
-- Image thumbnail extraction is very slow for TIF files (more so than PNGs of the same size). Let's optimise this aggressively, sacrifice quality if needed
-- A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
+- Settings option to hide WSL drives
 - Codebase support. When git is detected (.git directory), scan directory and summarise: Language(s) used with percentages, LoC (auto ignore .gitignore + vendor)
 
 ## 2
@@ -33,6 +32,7 @@
   Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 - Add UI button to calc folder sizes (button disapears once pressed, it's a one-time button that must be pressed per-directory as-and-when it is needed) Only show when "show_folder_size: false"
+- A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
 
 ## Left to implement
 
