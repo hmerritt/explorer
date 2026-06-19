@@ -20,6 +20,8 @@ const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
+const SETTINGS_JSON_INDENT: usize = 2;
+const SETTINGS_JSON_MAX_WIDTH: usize = 120;
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: u32 = 225;
 pub(crate) const SIDEBAR_MIN_WIDTH: u32 = 100;
 pub(crate) const FILE_COLUMN_MIN_WIDTH: u32 = 48;
@@ -895,7 +897,7 @@ fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
     sync_settings_document(&mut document, &value);
 
     sort_json_objects(&mut document);
-    let normalized = serde_json::to_string_pretty(&document).map_err(io::Error::other)?;
+    let normalized = format_settings_document(&document).map_err(io::Error::other)?;
     if source != normalized
         && let Err(error) = fs::write(path, normalized)
     {
@@ -1264,8 +1266,176 @@ fn save_document_to_path(path: &Path, document: &mut Value) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     sort_json_objects(document);
-    let json = serde_json::to_string_pretty(document).map_err(io::Error::other)?;
+    let json = format_settings_document(document).map_err(io::Error::other)?;
     fs::write(path, json)
+}
+
+fn format_settings_document(document: &Value) -> serde_json::Result<String> {
+    let mut formatted = String::new();
+    format_json_value(document, 0, true, 0, 0, &mut formatted)?;
+    Ok(formatted)
+}
+
+fn format_json_value(
+    value: &Value,
+    depth: usize,
+    force_expanded: bool,
+    line_prefix_width: usize,
+    line_suffix_width: usize,
+    formatted: &mut String,
+) -> serde_json::Result<()> {
+    if !force_expanded && is_simple_json_value(value) {
+        let compact = compact_json_value(value)?;
+        if line_prefix_width + compact.chars().count() + line_suffix_width
+            <= SETTINGS_JSON_MAX_WIDTH
+        {
+            formatted.push_str(&compact);
+            return Ok(());
+        }
+    }
+
+    match value {
+        Value::Array(values) => format_json_array(values, depth, formatted),
+        Value::Object(object) => format_json_object(object, depth, formatted),
+        _ => {
+            formatted.push_str(&compact_json_value(value)?);
+            Ok(())
+        }
+    }
+}
+
+fn format_json_array(
+    values: &[Value],
+    depth: usize,
+    formatted: &mut String,
+) -> serde_json::Result<()> {
+    if values.is_empty() {
+        formatted.push_str("[]");
+        return Ok(());
+    }
+
+    formatted.push('[');
+    for (index, value) in values.iter().enumerate() {
+        formatted.push('\n');
+        push_json_indent(formatted, depth + 1);
+        format_json_value(
+            value,
+            depth + 1,
+            false,
+            json_indent_width(depth + 1),
+            trailing_comma_width(index, values.len()),
+            formatted,
+        )?;
+        if index + 1 < values.len() {
+            formatted.push(',');
+        }
+    }
+    formatted.push('\n');
+    push_json_indent(formatted, depth);
+    formatted.push(']');
+    Ok(())
+}
+
+fn format_json_object(
+    object: &serde_json::Map<String, Value>,
+    depth: usize,
+    formatted: &mut String,
+) -> serde_json::Result<()> {
+    if object.is_empty() {
+        formatted.push_str("{}");
+        return Ok(());
+    }
+
+    formatted.push('{');
+    for (index, (key, value)) in object.iter().enumerate() {
+        formatted.push('\n');
+        push_json_indent(formatted, depth + 1);
+        let key = serde_json::to_string(key)?;
+        formatted.push_str(&key);
+        formatted.push_str(": ");
+        format_json_value(
+            value,
+            depth + 1,
+            false,
+            json_indent_width(depth + 1) + key.chars().count() + 2,
+            trailing_comma_width(index, object.len()),
+            formatted,
+        )?;
+        if index + 1 < object.len() {
+            formatted.push(',');
+        }
+    }
+    formatted.push('\n');
+    push_json_indent(formatted, depth);
+    formatted.push('}');
+    Ok(())
+}
+
+fn compact_json_value(value: &Value) -> serde_json::Result<String> {
+    match value {
+        Value::Array(values) => {
+            let mut compact = String::from("[");
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    compact.push_str(", ");
+                }
+                compact.push_str(&compact_json_value(value)?);
+            }
+            compact.push(']');
+            Ok(compact)
+        }
+        Value::Object(object) => {
+            let mut compact = String::from("{");
+            for (index, (key, value)) in object.iter().enumerate() {
+                if index > 0 {
+                    compact.push_str(", ");
+                }
+                compact.push_str(&serde_json::to_string(key)?);
+                compact.push_str(": ");
+                compact.push_str(&compact_json_value(value)?);
+            }
+            compact.push('}');
+            Ok(compact)
+        }
+        _ => serde_json::to_string(value),
+    }
+}
+
+fn is_simple_json_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
+        Value::Array(values) => {
+            values.is_empty()
+                || values.iter().all(is_json_scalar)
+                || values.iter().all(is_scalar_object)
+        }
+        Value::Object(object) => object.values().all(is_json_scalar),
+    }
+}
+
+fn is_json_scalar(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+    )
+}
+
+fn is_scalar_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.values().all(is_json_scalar))
+}
+
+fn push_json_indent(formatted: &mut String, depth: usize) {
+    formatted.push_str(&" ".repeat(json_indent_width(depth)));
+}
+
+fn json_indent_width(depth: usize) -> usize {
+    depth * SETTINGS_JSON_INDENT
+}
+
+fn trailing_comma_width(index: usize, len: usize) -> usize {
+    usize::from(index + 1 < len)
 }
 
 fn settings_document(settings: &ExplorerSettings) -> Value {
@@ -1874,38 +2044,59 @@ mod tests {
         let settings = ExplorerSettings::default();
         save_settings_to_path(&path, &settings).expect("save settings");
         assert_eq!(load_settings_from_path(&path).unwrap(), settings);
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n  \"sidebar\":")
-        );
-        assert!(fs::read_to_string(&path).unwrap().contains("\n  \"tabs\":"));
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n    \"font\": \"default\"")
-        );
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n    \"native_icons\": true")
-        );
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n    \"show_folder_sizes\": false")
-        );
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\"")
-        );
-        assert!(
-            fs::read_to_string(&path)
-                .unwrap()
-                .contains("\n  \"contextmenu\": []")
-        );
+        let json = fs::read_to_string(&path).unwrap();
+        assert!(!json.ends_with('\n'));
+        assert!(json.starts_with("{\n  \"app\": {"));
+        assert!(json.contains("\n    \"start\": {\"kind\": \"downloads\"}"));
+        assert!(json.contains("\n  \"contextmenu\": [],"));
+        assert!(json.contains(
+            "\n    \"items\": [{\"kind\": \"home\"}, {\"kind\": \"desktop\"}, {\"kind\": \"documents\"}, {\"kind\": \"downloads\"}],"
+        ));
+        assert!(json.contains("\n  \"tabs\": {\"focus_new\": false},"));
+        assert!(json.contains("\n      \"order\": [\"date_modified\", \"type\", \"size\"],"));
+        assert!(json.contains(
+            "\n      \"widths\": {\"date_modified\": 150, \"size\": 120, \"type\": 150}"
+        ));
+        assert!(json.contains("\n    \"font\": \"default\""));
+        assert!(json.contains("\n    \"native_icons\": true"));
+        assert!(json.contains("\n    \"show_folder_sizes\": false"));
+        assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settings_formatter_wraps_long_and_nested_values() {
+        let mut document = serde_json::json!({
+            "contextmenu": [
+                {
+                    "label": "Tools",
+                    "items": [
+                        {
+                            "label": "Inspect",
+                            "exe": "~/bin/inspect"
+                        }
+                    ]
+                }
+            ]
+        });
+        document["columns"] = Value::Array(
+            (0..16)
+                .map(|index| Value::String(format!("column_{index:02}")))
+                .collect(),
+        );
+        sort_json_objects(&mut document);
+
+        let formatted = format_settings_document(&document).unwrap();
+
+        assert!(formatted.contains("\n  \"columns\": [\n    \"column_00\","));
+        assert!(!formatted.contains("\"columns\": [\"column_00\", \"column_01\""));
+        assert!(formatted.contains("\n  \"contextmenu\": [\n    {\n"));
+        assert!(!formatted.contains("\"contextmenu\": [{"));
+        assert!(
+            formatted
+                .lines()
+                .all(|line| line.chars().count() <= SETTINGS_JSON_MAX_WIDTH)
+        );
     }
 
     #[test]
