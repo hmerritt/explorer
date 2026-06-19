@@ -651,7 +651,7 @@ impl ExplorerView {
                 .child(utility_checkbox_row(
                     "utility-hidden-files",
                     self.show_hidden_files,
-                    "Hidden files",
+                    "Hidden items",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
@@ -662,9 +662,22 @@ impl ExplorerView {
                     }),
                 ))
                 .child(utility_checkbox_row(
+                    "utility-folder-sizes",
+                    self.show_folder_size,
+                    "Folder sizes",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            crate::settings::set_show_folder_sizes(!this.show_folder_size, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_checkbox_row(
                     "utility-file-name-extensions",
                     self.show_file_name_extensions,
-                    "File Name extensions",
+                    "File name extensions",
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
@@ -5573,6 +5586,58 @@ mod tests {
                 .view
                 .mode),
             crate::settings::FileViewMode::LargeIcons
+        );
+    }
+
+    #[gpui::test]
+    fn view_menu_folder_sizes_updates_global_setting(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let view_position = cx
+            .debug_bounds("utility-view")
+            .expect("view utility button bounds")
+            .center();
+        cx.simulate_mouse_down(view_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let extensions_bounds = cx
+            .debug_bounds("utility-file-name-extensions")
+            .expect("file name extensions menu row bounds");
+        let folder_sizes_bounds = cx
+            .debug_bounds("utility-folder-sizes")
+            .expect("folder sizes menu row bounds");
+        assert!(folder_sizes_bounds.origin.y < extensions_bounds.origin.y);
+
+        let folder_sizes_position = folder_sizes_bounds.center();
+        cx.simulate_mouse_down(
+            folder_sizes_position,
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            folder_sizes_position,
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .show_folder_sizes)
         );
     }
 

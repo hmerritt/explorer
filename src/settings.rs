@@ -578,6 +578,10 @@ pub(crate) fn set_show_hidden(value: bool, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.view.show_hidden = value);
 }
 
+pub(crate) fn set_show_folder_sizes(value: bool, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| settings.view.show_folder_sizes = value);
+}
+
 pub(crate) fn set_show_extensions(value: bool, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.view.show_extensions = value);
 }
