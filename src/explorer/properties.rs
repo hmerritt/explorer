@@ -1865,18 +1865,6 @@ impl PropertiesDialog {
             }
         }
 
-        if loading_details {
-            body = body.child(
-                div()
-                    .min_w(px(0.0))
-                    .w_full()
-                    .pt(px(12.0))
-                    .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                    .truncate()
-                    .child("Loading details..."),
-            );
-        }
-
         if groups.is_empty() && !loading_details {
             body = body.child(
                 div()
@@ -1890,7 +1878,7 @@ impl PropertiesDialog {
         }
 
         let has_scrollbar = self.details_scrollbar_metrics().is_some();
-        div()
+        let content = div()
             .flex()
             .flex_row()
             .flex_1()
@@ -1901,6 +1889,22 @@ impl PropertiesDialog {
             .child(body)
             .when(has_scrollbar, |this| {
                 this.child(self.render_details_scrollbar(cx))
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .child(content)
+            .when(loading_details, |this| {
+                this.child(linear_indeterminate(
+                    "properties-details-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
             })
             .into_any_element()
     }
@@ -1923,9 +1927,22 @@ impl PropertiesDialog {
             .overflow_hidden();
 
         match &self.image_state {
-            PropertyImageState::NotStarted | PropertyImageState::Loading => body
-                .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child("Loading image...")
+            PropertyImageState::NotStarted | PropertyImageState::Loading => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .w_full()
+                .overflow_hidden()
+                .child(
+                    body.text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child("Loading image..."),
+                )
+                .child(linear_indeterminate(
+                    "properties-image-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
                 .into_any_element(),
             PropertyImageState::Failed(error) => body
                 .text_color(rgb(PROPERTIES_MUTED_TEXT))
