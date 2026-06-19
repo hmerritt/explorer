@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use tokei::{Config, Languages};
 
@@ -68,9 +71,14 @@ fn language_summaries(
         return Vec::new();
     }
 
-    let mut summaries = languages
+    let mut grouped_languages = BTreeMap::new();
+    for (name, code) in languages.into_iter().filter(|(_, code)| *code > 0) {
+        let name = codebase_language_display_name(&name);
+        *grouped_languages.entry(name).or_insert(0) += code;
+    }
+
+    let mut summaries = grouped_languages
         .into_iter()
-        .filter(|(_, code)| *code > 0)
         .map(|(name, code)| {
             let exact_percentage = (code as f64 / total_code as f64) * 100.0;
             CodebaseLanguageSummary {
@@ -91,6 +99,12 @@ fn language_summaries(
     summaries
 }
 
+fn codebase_language_display_name(name: &str) -> String {
+    languages::from_name(name)
+        .map(|language| language.group.unwrap_or(language.name).to_owned())
+        .unwrap_or_else(|| name.to_owned())
+}
+
 pub(super) fn language_segment_widths(
     languages: &[CodebaseLanguageSummary],
     total_code: usize,
@@ -104,22 +118,38 @@ pub(super) fn language_segment_widths(
         return vec![0.0; languages.len()];
     }
 
-    let mut widths = Vec::with_capacity(languages.len());
-    let mut allocated = 0.0_f64;
-    let bar_width = f64::from(bar_width);
-
-    for (ix, language) in languages.iter().enumerate() {
-        let width = if ix + 1 == languages.len() {
-            (bar_width - allocated).max(0.0)
-        } else {
-            let width = (language.code as f64 / total_code as f64) * bar_width;
-            allocated += width;
-            width
-        };
-        widths.push(width as f32);
+    let bar_width = bar_width.round() as usize;
+    if bar_width == 0 {
+        return vec![0.0; languages.len()];
     }
 
-    widths
+    let mut widths = languages
+        .iter()
+        .map(|language| {
+            let exact_width = (language.code as f64 / total_code as f64) * bar_width as f64;
+            (exact_width.floor() as usize, exact_width.fract())
+        })
+        .collect::<Vec<_>>();
+    let allocated = widths.iter().map(|(width, _)| *width).sum::<usize>();
+    let mut remaining = bar_width.saturating_sub(allocated);
+    let mut order = widths
+        .iter()
+        .enumerate()
+        .map(|(ix, (_, remainder))| (ix, *remainder))
+        .collect::<Vec<_>>();
+    order.sort_by(|(left_ix, left), (right_ix, right)| {
+        right.total_cmp(left).then_with(|| left_ix.cmp(right_ix))
+    });
+
+    for (ix, _) in order {
+        if remaining == 0 {
+            break;
+        }
+        widths[ix].0 += 1;
+        remaining -= 1;
+    }
+
+    widths.into_iter().map(|(width, _)| width as f32).collect()
 }
 
 fn github_language_color(name: &str) -> u32 {
@@ -197,6 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn language_summary_groups_linguist_children_under_parent() {
+        let summaries = language_summaries(
+            [
+                ("TSX".to_owned(), 5_848),
+                ("TypeScript".to_owned(), 4_852),
+                ("JSON".to_owned(), 300),
+            ],
+            11_000,
+        );
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].name, "TypeScript");
+        assert_eq!(summaries[0].code, 10_700);
+        assert_eq!(summaries[0].percentage, 97);
+        assert_eq!(summaries[0].color, 0x3178c6);
+        assert!(!summaries.iter().any(|summary| summary.name == "TSX"));
+    }
+
+    #[test]
     fn language_summary_includes_nonzero_languages_below_one_percent() {
         let summaries = language_summaries(
             [
@@ -239,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn language_segment_widths_fill_bar_and_preserve_dominant_language() {
+    fn language_segment_widths_fill_bar_with_whole_pixels_and_preserve_dominant_language() {
         let summaries = language_summaries(
             [
                 ("Rust".to_owned(), 84),
@@ -249,12 +298,13 @@ mod tests {
             100,
         );
 
-        let widths = language_segment_widths(&summaries, 100, 200.0);
+        let widths = language_segment_widths(&summaries, 100, 101.0);
         let total_width = widths.iter().sum::<f32>();
 
         assert_eq!(summaries[0].name, "Rust");
         assert!(widths[0] > widths[1]);
-        assert!((total_width - 200.0).abs() < f32::EPSILON);
+        assert_eq!(total_width, 101.0);
+        assert!(widths.iter().all(|width| width.fract() == 0.0));
     }
 
     #[test]
