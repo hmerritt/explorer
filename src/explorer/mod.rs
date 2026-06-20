@@ -28,6 +28,7 @@ mod properties;
 mod recursive_search;
 mod rename;
 mod render;
+mod resumable_copy;
 mod scrollbar;
 mod search;
 mod selection;

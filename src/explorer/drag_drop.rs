@@ -5,11 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::path::{Component, Prefix};
-
 use gpui::{
     Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, TextRun, Window, div,
     prelude::*, px, rgb,
@@ -17,7 +12,9 @@ use gpui::{
 
 use crate::explorer::{
     entry::FileEntry,
-    filesystem::{prepare_copy_paths_to_directory, prepare_move_paths_to_directory},
+    filesystem::{
+        paths_are_on_same_volume, prepare_copy_paths_to_directory, prepare_move_paths_to_directory,
+    },
     view::ExplorerView,
 };
 
@@ -639,47 +636,6 @@ fn drop_should_copy_by_default(source_paths: &[PathBuf], destination: &Path) -> 
         && source_paths
             .iter()
             .any(|source| !paths_are_on_same_volume(source, destination))
-}
-
-fn paths_are_on_same_volume(source: &Path, destination: &Path) -> bool {
-    match (path_volume_key(source), path_volume_key(destination)) {
-        (Some(source), Some(destination)) => source == destination,
-        _ => true,
-    }
-}
-
-#[cfg(windows)]
-fn path_volume_key(path: &Path) -> Option<String> {
-    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let Component::Prefix(prefix) = path.components().next()? else {
-        return None;
-    };
-
-    Some(match prefix.kind() {
-        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-            char::from(letter).to_ascii_uppercase().to_string()
-        }
-        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-            format!(
-                r"\\{}\{}",
-                server.to_string_lossy().to_ascii_lowercase(),
-                share.to_string_lossy().to_ascii_lowercase()
-            )
-        }
-        _ => prefix.as_os_str().to_string_lossy().to_ascii_lowercase(),
-    })
-}
-
-#[cfg(unix)]
-fn path_volume_key(path: &Path) -> Option<u64> {
-    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let metadata = fs::metadata(path).ok()?;
-    Some(metadata.dev())
-}
-
-#[cfg(not(any(windows, unix)))]
-fn path_volume_key(_: &Path) -> Option<()> {
-    None
 }
 
 fn destination_contains_internal_drag_source(

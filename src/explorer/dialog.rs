@@ -1358,7 +1358,9 @@ fn file_operation_current_item_label(progress: Option<&FileOperationProgress>) -
 fn file_operation_item_label(progress: &FileOperationProgress) -> String {
     let action = match progress.phase {
         FileOperationPhase::Preparing => "Preparing",
+        FileOperationPhase::Indexing => "Indexing",
         FileOperationPhase::Copying => "Copying",
+        FileOperationPhase::Verifying => "Verifying",
         FileOperationPhase::Extracting => "Extracting",
         FileOperationPhase::Moving => "Moving",
         FileOperationPhase::Removing => "Removing",

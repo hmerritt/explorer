@@ -15,7 +15,14 @@ use filetime::FileTime;
 use thousands::Separable;
 
 use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, CountingReader};
-use crate::explorer::{entry::FileEntry, sorting::sort_entries};
+use crate::explorer::{
+    entry::FileEntry, resumable_copy::copy_with_delta_progress, sorting::sort_entries,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::path::Prefix;
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const COMPOUND_ARCHIVE_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "tar.xz", "tar.zst"];
@@ -1319,7 +1326,9 @@ impl FileOperationKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FileOperationPhase {
     Preparing,
+    Indexing,
     Copying,
+    Verifying,
     Extracting,
     Moving,
     Removing,
@@ -1362,6 +1371,12 @@ pub(super) enum FileOperationError {
 enum CopyNamePolicy {
     Original,
     UseCopyNamesInSameDirectory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyEngine {
+    Standard,
+    ResumableDelta,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1443,11 +1458,13 @@ enum FileOperationStep {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
+        engine: CopyEngine,
     },
     MoveFile {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
+        copy_engine: CopyEngine,
     },
     ExtractArchive {
         archive: PathBuf,
@@ -1632,16 +1649,19 @@ fn plan_path_operation(
         let conflict = destination.exists();
         stats.total_files += 1;
         stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
+        let copy_engine = copy_engine_for_paths(source, destination);
         match kind {
             FileOperationKind::Copy => steps.push(FileOperationStep::CopyFile {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 conflict,
+                engine: copy_engine,
             }),
             FileOperationKind::Move => steps.push(FileOperationStep::MoveFile {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 conflict,
+                copy_engine,
             }),
             FileOperationKind::Extract => {}
         }
@@ -1788,11 +1808,13 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source,
                 destination,
                 conflict: true,
+                ..
             }
             | FileOperationStep::MoveFile {
                 source,
                 destination,
                 conflict: true,
+                ..
             } => file_conflicts.push(FileConflict {
                 source: source.clone(),
                 destination: destination.clone(),
@@ -1879,6 +1901,7 @@ pub(super) fn execute_file_operation_with_progress(
                 source,
                 destination,
                 conflict,
+                engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     continue;
@@ -1892,6 +1915,7 @@ pub(super) fn execute_file_operation_with_progress(
                     &cancel,
                     &mut progress,
                     &mut on_progress,
+                    *engine,
                 )
                 .map_err(|error| operation_error("copy", source, error))?;
                 operated_destinations.insert(destination.clone());
@@ -1900,6 +1924,7 @@ pub(super) fn execute_file_operation_with_progress(
                 source,
                 destination,
                 conflict,
+                copy_engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     continue;
@@ -1914,6 +1939,7 @@ pub(super) fn execute_file_operation_with_progress(
                         &cancel,
                         &mut progress,
                         &mut on_progress,
+                        *copy_engine,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                     remove_source(source)
@@ -1928,6 +1954,7 @@ pub(super) fn execute_file_operation_with_progress(
                         &cancel,
                         &mut progress,
                         &mut on_progress,
+                        *copy_engine,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                 }
@@ -3052,6 +3079,7 @@ fn move_source_file_with_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    copy_engine: CopyEngine,
 ) -> std::io::Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => {
@@ -3066,7 +3094,14 @@ fn move_source_file_with_progress(
         Err(error) if is_cross_device_error(&error) => {
             progress.phase = FileOperationPhase::Copying;
             on_progress(progress.clone());
-            copy_source_file_with_progress(source, destination, cancel, progress, on_progress)?;
+            copy_source_file_with_progress(
+                source,
+                destination,
+                cancel,
+                progress,
+                on_progress,
+                copy_engine,
+            )?;
             remove_source(source)
         }
         Err(error) => Err(error),
@@ -3074,6 +3109,34 @@ fn move_source_file_with_progress(
 }
 
 fn copy_source_file_with_progress(
+    source: &Path,
+    destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    engine: CopyEngine,
+) -> std::io::Result<()> {
+    match engine {
+        CopyEngine::Standard => {
+            copy_source_file_standard_with_progress(
+                source,
+                destination,
+                cancel,
+                progress,
+                on_progress,
+            )?;
+        }
+        CopyEngine::ResumableDelta => {
+            copy_with_delta_progress(source, destination, cancel, progress, on_progress)?;
+        }
+    }
+
+    progress.completed_files += 1;
+    on_progress(progress.clone());
+    Ok(())
+}
+
+fn copy_source_file_standard_with_progress(
     source: &Path,
     destination: &Path,
     cancel: &Arc<AtomicBool>,
@@ -3089,8 +3152,6 @@ fn copy_source_file_with_progress(
         Ok(()) => {
             preserve_file_metadata(&metadata, &temp_destination)?;
             replace_destination_with_temp(&temp_destination, destination)?;
-            progress.completed_files += 1;
-            on_progress(progress.clone());
             Ok(())
         }
         Err(error) => {
@@ -3132,7 +3193,10 @@ fn copy_source_file_to_temp(
     Ok(())
 }
 
-fn preserve_file_metadata(metadata: &fs::Metadata, destination: &Path) -> std::io::Result<()> {
+pub(super) fn preserve_file_metadata(
+    metadata: &fs::Metadata,
+    destination: &Path,
+) -> std::io::Result<()> {
     fs::set_permissions(destination, metadata.permissions())?;
     let accessed = FileTime::from_last_access_time(metadata);
     let modified = FileTime::from_last_modification_time(metadata);
@@ -3214,12 +3278,18 @@ fn remove_temp_extract_output(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn replace_destination_with_temp(temp: &Path, destination: &Path) -> std::io::Result<()> {
+pub(super) fn replace_destination_with_temp(
+    temp: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     fs::rename(temp, destination)
 }
 
 #[cfg(target_os = "windows")]
-fn replace_destination_with_temp(temp: &Path, destination: &Path) -> std::io::Result<()> {
+pub(super) fn replace_destination_with_temp(
+    temp: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -3302,6 +3372,134 @@ fn copy_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
         Some(extension) => OsString::from(format!("{stem}{suffix}.{extension}")),
         None => OsString::from(format!("{stem}{suffix}")),
     }
+}
+
+fn copy_engine_for_paths(source: &Path, destination: &Path) -> CopyEngine {
+    if paths_are_on_different_known_volumes(source, destination) {
+        CopyEngine::ResumableDelta
+    } else {
+        CopyEngine::Standard
+    }
+}
+
+pub(super) fn paths_are_on_same_volume(source: &Path, destination: &Path) -> bool {
+    match path_volume_relation(source, destination) {
+        Some(same_volume) => same_volume,
+        None => true,
+    }
+}
+
+fn paths_are_on_different_known_volumes(source: &Path, destination: &Path) -> bool {
+    matches!(path_volume_relation(source, destination), Some(false))
+}
+
+fn path_volume_relation(source: &Path, destination: &Path) -> Option<bool> {
+    Some(path_volume_key(source)? == path_volume_key(destination)?)
+}
+
+#[cfg(test)]
+static TEST_VOLUME_KEYS: std::sync::Mutex<Vec<(PathBuf, Option<String>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) struct TestVolumeKeyGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for TestVolumeKeyGuard {
+    fn drop(&mut self) {
+        TEST_VOLUME_KEYS
+            .lock()
+            .expect("test volume keys")
+            .retain(|(path, _)| path != &self.path);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn set_test_path_volume_key(path: &Path, key: Option<&str>) -> TestVolumeKeyGuard {
+    let path = path.to_path_buf();
+    TEST_VOLUME_KEYS
+        .lock()
+        .expect("test volume keys")
+        .push((path.clone(), key.map(str::to_owned)));
+    TestVolumeKeyGuard { path }
+}
+
+#[cfg(test)]
+fn test_path_volume_key(path: &Path) -> Option<Option<String>> {
+    TEST_VOLUME_KEYS
+        .lock()
+        .expect("test volume keys")
+        .iter()
+        .rev()
+        .find(|(prefix, _)| path.starts_with(prefix))
+        .map(|(_, key)| key.clone())
+}
+
+#[cfg(windows)]
+fn path_volume_key(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Some(key) = test_path_volume_key(path) {
+        return key;
+    }
+
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+
+    Some(match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            char::from(letter).to_ascii_uppercase().to_string()
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            format!(
+                r"\\{}\{}",
+                server.to_string_lossy().to_ascii_lowercase(),
+                share.to_string_lossy().to_ascii_lowercase()
+            )
+        }
+        _ => prefix.as_os_str().to_string_lossy().to_ascii_lowercase(),
+    })
+}
+
+#[cfg(unix)]
+fn path_volume_key(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Some(key) = test_path_volume_key(path) {
+        return key;
+    }
+
+    let path = existing_volume_probe_path(path)?;
+    let metadata = fs::metadata(path).ok()?;
+    Some(metadata.dev().to_string())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn path_volume_key(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Some(key) = test_path_volume_key(path) {
+        return key;
+    }
+    None
+}
+
+#[cfg(unix)]
+fn existing_volume_probe_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Some(canonical);
+    }
+
+    let mut current = Some(path);
+    while let Some(path) = current {
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        current = path.parent();
+    }
+
+    None
 }
 
 fn canonicalize_for_operation(path: &Path) -> Result<PathBuf, String> {
@@ -4027,6 +4225,42 @@ mod tests {
         assert_eq!(drive_display_label(Path::new("/")), "/");
     }
 
+    #[test]
+    fn copy_engine_selection_uses_known_volume_difference_only() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&destination_root).expect("create destination root");
+        let source = source_root.join("file.txt");
+        let destination = destination_root.join("file.txt");
+
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let destination_volume =
+            set_test_path_volume_key(&destination_root, Some("destination-volume"));
+        assert_eq!(
+            copy_engine_for_paths(&source, &destination),
+            CopyEngine::ResumableDelta
+        );
+        assert!(!paths_are_on_same_volume(&source, &destination));
+
+        drop(destination_volume);
+        let destination_volume = set_test_path_volume_key(&destination_root, Some("source-volume"));
+        assert_eq!(
+            copy_engine_for_paths(&source, &destination),
+            CopyEngine::Standard
+        );
+        assert!(paths_are_on_same_volume(&source, &destination));
+
+        drop(destination_volume);
+        let _destination_volume = set_test_path_volume_key(&destination_root, None);
+        assert_eq!(
+            copy_engine_for_paths(&source, &destination),
+            CopyEngine::Standard
+        );
+        assert!(paths_are_on_same_volume(&source, &destination));
+    }
+
     fn finished_summary(result: Result<FileOperationOutcome, String>) -> FileOperationSummary {
         match result.expect("file operation") {
             FileOperationOutcome::Finished(summary) => summary,
@@ -4344,6 +4578,55 @@ mod tests {
             vec![destination.join("file.txt")]
         );
         assert_eq!(summary.moved_source_paths, vec![source]);
+    }
+
+    #[test]
+    fn move_conflict_replace_across_known_volumes_uses_resumable_copy_before_removing_source() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir(&destination).expect("create destination");
+        let source = source_root.join("file.txt");
+        fs::write(&source, b"aaaabbbbccccdddd").expect("create source");
+        fs::write(destination.join("file.txt"), b"aaaaXXXXccccdddd").expect("create existing");
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let _destination_volume =
+            set_test_path_volume_key(&destination, Some("destination-volume"));
+        let conflicts = prepared_conflict_batch(prepare_move_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        let summary = execute_file_operation_with_progress(
+            conflicts.into_job(),
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("replace with resumable copy");
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(destination.join("file.txt")).unwrap(),
+            b"aaaabbbbccccdddd"
+        );
+        assert_eq!(
+            summary.destination_paths,
+            vec![destination.join("file.txt")]
+        );
+        assert_eq!(summary.moved_source_paths, vec![source]);
+        assert!(
+            progress_events
+                .iter()
+                .any(|progress| progress.phase == FileOperationPhase::Indexing)
+        );
+        assert!(
+            progress_events
+                .iter()
+                .any(|progress| progress.phase == FileOperationPhase::Verifying)
+        );
     }
 
     #[test]
