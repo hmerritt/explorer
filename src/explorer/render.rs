@@ -5769,10 +5769,39 @@ mod tests {
             .expect("back nav button bounds")
             .center();
         cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
-        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.executor().advance_clock(Duration::from_millis(280));
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("explorer-tooltip").is_some());
+    }
+
+    #[gpui::test]
+    fn icon_button_tooltip_appears_below_and_right_of_cursor(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("utility-paste")
+            .expect("paste utility button bounds")
+            .center();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+
+        let tooltip = cx
+            .debug_bounds("explorer-tooltip")
+            .expect("tooltip bounds after hover delay");
+        assert!(tooltip.origin.x >= position.x + gpui::px(12.0));
+        assert!(tooltip.origin.y >= position.y + gpui::px(18.0));
     }
 
     #[gpui::test]

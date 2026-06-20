@@ -31,7 +31,7 @@ impl Render for ExplorerTooltip {
             .rounded(px(2.0))
             .border_1()
             .border_color(rgb(0x767676))
-            .bg(rgb(0xffffe1))
+            .bg(rgb(0xffffff))
             .shadow_md()
             .text_size(px(12.0))
             .line_height(px(16.0))

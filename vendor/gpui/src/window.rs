@@ -697,6 +697,9 @@ pub(crate) struct TooltipRequest {
     tooltip: AnyTooltip,
 }
 
+const TOOLTIP_CURSOR_OFFSET_X: Pixels = px(12.);
+const TOOLTIP_CURSOR_OFFSET_Y: Pixels = px(18.);
+
 pub(crate) struct DeferredDraw {
     current_view: EntityId,
     priority: usize,
@@ -2146,15 +2149,17 @@ impl Window {
             let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
 
-            let mut tooltip_bounds =
-                Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
+            let mut tooltip_bounds = Bounds::new(
+                mouse_position + point(TOOLTIP_CURSOR_OFFSET_X, TOOLTIP_CURSOR_OFFSET_Y),
+                tooltip_size,
+            );
             let window_bounds = Bounds {
                 origin: Point::default(),
                 size: self.viewport_size(),
             };
 
             if tooltip_bounds.right() > window_bounds.right() {
-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
+                let new_x = mouse_position.x - tooltip_bounds.size.width - TOOLTIP_CURSOR_OFFSET_X;
                 if new_x >= Pixels::ZERO {
                     tooltip_bounds.origin.x = new_x;
                 } else {
@@ -2166,7 +2171,8 @@ impl Window {
             }
 
             if tooltip_bounds.bottom() > window_bounds.bottom() {
-                let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
+                let new_y =
+                    mouse_position.y - tooltip_bounds.size.height - TOOLTIP_CURSOR_OFFSET_Y;
                 if new_y >= Pixels::ZERO {
                     tooltip_bounds.origin.y = new_y;
                 } else {

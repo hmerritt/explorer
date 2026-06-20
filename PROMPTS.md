@@ -3,6 +3,7 @@
 ## 1
 
 - Tooltips
+- Add copy icon at the end of the address-bar (only during breadcrumb)
 
 ## 2
 
