@@ -4,17 +4,20 @@ use std::{
     ops::Range,
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
-    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement,
-    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
+    CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
+    IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
     SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px, rgb,
     transparent_black, uniform_list,
 };
 
+#[cfg(test)]
+use crate::explorer::address_bar::format_address_path;
 use crate::explorer::{
     DirectoryKind,
     address_bar::{
@@ -92,8 +95,6 @@ use crate::explorer::{
         UtilityMenu, normalized_sidebar_width_f32,
     },
 };
-#[cfg(test)]
-use crate::explorer::address_bar::format_address_path;
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::{FileColumnKind, FileViewMode, SettingsState};
 use thousands::Separable;
@@ -123,6 +124,7 @@ const CODEBASE_MAKEUP_SEPARATOR_WIDTH: f32 = 2.0;
 const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
+const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -337,7 +339,12 @@ impl ExplorerView {
             .child(if self.address_bar_is_editing() {
                 editable_directory_bar(self.active_address_focus_handle(), cx)
             } else {
-                directory_bar(breadcrumb, cx)
+                directory_bar(
+                    breadcrumb,
+                    self.directory_bar_hovered,
+                    self.directory_bar_hover_generation,
+                    cx,
+                )
             })
             .child(self.render_search_bar(cx))
     }
@@ -4103,7 +4110,12 @@ fn nav_button(
         .into_any_element()
 }
 
-fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) -> AnyElement {
+fn directory_bar(
+    breadcrumb: VisibleBreadcrumb,
+    hovered: bool,
+    hover_generation: usize,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
     div()
         .id("directory-bar")
         .debug_selector(|| "directory-bar".to_owned())
@@ -4123,6 +4135,16 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) 
             cx.stop_propagation();
             cx.notify();
         }))
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if this.directory_bar_hovered != *hovered {
+                if *hovered {
+                    this.directory_bar_hover_generation =
+                        this.directory_bar_hover_generation.wrapping_add(1);
+                }
+                this.directory_bar_hovered = *hovered;
+                cx.notify();
+            }
+        }))
         .child(
             div()
                 .flex()
@@ -4134,12 +4156,16 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) 
                 .children(directory_bar_children(breadcrumb, cx))
                 .child(div().flex_1().min_w(px(0.0))),
         )
-        .child(directory_copy_address_button(cx))
+        .child(directory_copy_address_button(hovered, hover_generation, cx))
         .into_any_element()
 }
 
-fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
-    div()
+fn directory_copy_address_button(
+    visible: bool,
+    fade_generation: usize,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let button = div()
         .id("directory-copy-address")
         .debug_selector(|| "directory-copy-address".to_owned())
         .flex()
@@ -4165,8 +4191,19 @@ fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
             cx.notify();
         }))
         .tooltip(explorer_tooltip("Copy address"))
-        .child(gpui::img(COPY_ICON.clone()).w(px(16.0)).h(px(16.0)))
-        .into_any_element()
+        .child(gpui::img(COPY_ICON.clone()).w(px(16.0)).h(px(16.0)));
+
+    if visible {
+        button
+            .with_animation(
+                ("directory-copy-address-fade", fade_generation),
+                Animation::new(Duration::from_millis(DIRECTORY_COPY_ADDRESS_FADE_MS)),
+                |button, delta| button.opacity(delta),
+            )
+            .into_any_element()
+    } else {
+        button.opacity(0.0).into_any_element()
+    }
 }
 
 #[cfg(test)]
@@ -6273,6 +6310,62 @@ mod tests {
         cx.read_entity(&view, |view, _| assert!(!view.address_bar_is_editing()));
         assert!(cx.debug_bounds("directory-bar").is_some());
         assert!(cx.debug_bounds("directory-bar-input").is_none());
+    }
+
+    #[gpui::test]
+    fn directory_copy_address_button_fade_restarts_on_address_bar_hover(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, path);
+
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.directory_bar_hovered);
+            assert_eq!(view.directory_bar_hover_generation, 0);
+        });
+
+        let directory_position = cx
+            .debug_bounds("directory-bar")
+            .expect("directory bar bounds")
+            .center();
+        cx.simulate_mouse_move(
+            directory_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.directory_bar_hovered);
+            assert_eq!(view.directory_bar_hover_generation, 1);
+        });
+
+        let outside_position = cx
+            .debug_bounds("back")
+            .expect("back button bounds")
+            .center();
+        cx.simulate_mouse_move(
+            outside_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.directory_bar_hovered);
+            assert_eq!(view.directory_bar_hover_generation, 1);
+        });
+
+        cx.simulate_mouse_move(
+            directory_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.directory_bar_hovered);
+            assert_eq!(view.directory_bar_hover_generation, 2);
+        });
     }
 
     #[cfg(target_os = "windows")]

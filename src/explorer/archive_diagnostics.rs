@@ -962,7 +962,7 @@ mod tests {
             metrics,
             phases: BTreeMap::from([
                 ("entry_copy", Duration::from_millis(900)),
-                ("metadata", Duration::from_millis(50)),
+                ("metadata", Duration::from_millis(100)),
             ]),
             entries: vec![
                 EntryMetric {

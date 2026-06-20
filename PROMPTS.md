@@ -2,6 +2,9 @@
 
 ## 1
 
+- Current directory contextmenu, add Properties button, below Creaded/Modified after a separator.
+- Add Copy file/folder path item to file/folder (inc current folder) contextmenus. Use icon: C:\Users\hrmer\Documents\my\projects\explorer\assets\icons\utility\copy_as_path.svg
+
 ## 2
 
 - Improve readme - add screenshots / branding

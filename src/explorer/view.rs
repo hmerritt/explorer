@@ -73,6 +73,8 @@ pub struct ExplorerView {
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
     pub(super) active_address_bar: Option<AddressBarState>,
+    pub(super) directory_bar_hovered: bool,
+    pub(super) directory_bar_hover_generation: usize,
     #[cfg(target_os = "windows")]
     pub(super) address_slash: crate::settings::AddressSlash,
     pub(super) search: SearchState,
@@ -260,6 +262,8 @@ impl ExplorerView {
             active_rename: None,
             rename_focus_out: None,
             active_address_bar: None,
+            directory_bar_hovered: false,
+            directory_bar_hover_generation: 0,
             #[cfg(target_os = "windows")]
             address_slash: settings.view.address_slash,
             search: SearchState::default(),
