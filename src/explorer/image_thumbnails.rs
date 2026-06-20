@@ -1443,6 +1443,121 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_load_result_variants_account_for_outcomes_and_cache_writes() {
+        let cache_dir = PathBuf::from("cache");
+        let job = ImageThumbnailLoadJob {
+            request: request("generated", "folder"),
+            generation: 7,
+            cache_dir: Some(cache_dir.clone()),
+            cancel: Arc::new(AtomicBool::new(false)),
+            queued_at: Instant::now(),
+        };
+        let generated = ImageThumbnailLoadResult::generated(
+            vec![1, 2, 3],
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(2)),
+            Some(Duration::from_millis(3)),
+            ImageThumbnailExtractionTimings::default(),
+        );
+
+        let write = generated.cache_write_job(&job).expect("cache write job");
+        assert_eq!(write.cache_dir, cache_dir);
+        assert_eq!(write.key, "generated");
+        assert_eq!(write.bytes, vec![1, 2, 3]);
+
+        let uncached_job = ImageThumbnailLoadJob {
+            request: job.request.clone(),
+            generation: job.generation,
+            cache_dir: None,
+            cancel: job.cancel.clone(),
+            queued_at: job.queued_at,
+        };
+        assert!(generated.cache_write_job(&uncached_job).is_none());
+
+        let failed = ImageThumbnailLoadResult::failed(
+            Some(Duration::from_millis(4)),
+            Some(Duration::from_millis(5)),
+            ImageThumbnailExtractionTimings::default(),
+        );
+        let cancelled = ImageThumbnailLoadResult::cancelled();
+        let cancelled_after_cache = ImageThumbnailLoadResult::cancelled_after_cache_read(
+            true,
+            Some(Duration::from_millis(6)),
+        );
+        let cancelled_after_extract = ImageThumbnailLoadResult::cancelled_after_extract(
+            Some(Duration::from_millis(7)),
+            Some(Duration::from_millis(8)),
+            ImageThumbnailExtractionTimings::default(),
+        );
+
+        for result in [
+            &failed,
+            &cancelled,
+            &cancelled_after_cache,
+            &cancelled_after_extract,
+        ] {
+            assert!(result.cache_write_job(&job).is_none());
+        }
+
+        let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
+        batch.record_load_result(&generated);
+        batch.record_load_result(&failed);
+        batch.record_load_result(&cancelled);
+        batch.record_load_result(&cancelled_after_cache);
+        batch.record_load_result(&cancelled_after_extract);
+
+        assert_eq!(batch.generated, 1);
+        assert_eq!(batch.failed, 1);
+        assert_eq!(batch.cancelled, 3);
+        assert_eq!(batch.cache_hits, 1);
+        assert_eq!(batch.cache_misses, 3);
+        assert_eq!(batch.cache_read.count, 4);
+        assert_eq!(batch.extract.count, 3);
+        assert_eq!(batch.cache_write.count, 1);
+    }
+
+    #[test]
+    fn thumbnail_timing_batch_records_optional_events_when_enabled() {
+        let disabled = ImageThumbnailTimingBatch::start();
+        assert_eq!(disabled.now().is_some(), disabled.enabled());
+
+        let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
+        assert!(batch.enabled());
+        let started = batch.now();
+
+        batch.record_request();
+        batch.record_queue_wait(Duration::from_millis(2));
+        batch.record_commit(started);
+        batch.record_discarded();
+        batch.record_cache_write_scheduled();
+        batch.record_request_total(batch.now());
+
+        assert_eq!(batch.requests, 1);
+        assert_eq!(batch.queue_wait.count, 1);
+        assert_eq!(batch.discarded, 1);
+        assert_eq!(batch.cache_writes_scheduled, 1);
+        assert!(batch.request_total.count <= 1);
+
+        batch.finish();
+    }
+
+    #[test]
+    fn thumbnail_errors_are_truncated_and_cancel_flag_is_reported() {
+        let long = "x".repeat(350);
+        let label = command_error_output_label(long.as_bytes());
+        assert_eq!(label.chars().count(), 303);
+        assert!(label.ends_with("..."));
+
+        let cancel = AtomicBool::new(false);
+        assert!(check_thumbnail_cancelled(&cancel).is_ok());
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(
+            check_thumbnail_cancelled(&cancel),
+            Err("Thumbnail loading was cancelled.".to_owned())
+        );
+    }
+
+    #[test]
     fn cached_thumbnail_round_trips_from_disk() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");

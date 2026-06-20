@@ -1281,9 +1281,9 @@ mod tests {
     use super::*;
     use crate::explorer::{
         entry::FileEntry,
-        test_support::{TempDir, selected_names, test_view_with_entries},
+        test_support::{TempDir, selected_names, test_view_entity, test_view_with_entries},
     };
-    use gpui::MouseButton;
+    use gpui::{ClipboardItem, MouseButton, TestAppContext};
     use std::fs;
 
     #[test]
@@ -1793,5 +1793,374 @@ mod tests {
         assert_eq!(selected_names(&view), vec!["c.txt"]);
         assert!(view.active_rename.is_none());
         assert!(view.open_error.is_none());
+    }
+
+    #[gpui::test]
+    fn rename_action_handlers_edit_text_selection_clipboard_and_finish(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["alpha beta.txt"]);
+        let file = temp.path().join("alpha beta.txt");
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&file);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+                assert!(view.active_rename.is_some());
+
+                set_rename_text(view, "alpha beta");
+                view.handle_rename_left(&RenameLeft, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha bet".len().."alpha bet".len()
+                );
+                view.handle_rename_right(&RenameRight, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                view.handle_rename_word_left(&RenameWordLeft, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha ".len().."alpha ".len()
+                );
+                view.handle_rename_word_right(&RenameWordRight, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.handle_rename_select_left(&RenameSelectLeft, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha bet".len().."alpha beta".len()
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.active_rename
+                    .as_mut()
+                    .expect("active rename")
+                    .move_to(0);
+                view.handle_rename_select_right(&RenameSelectRight, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    0.."a".len()
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.handle_rename_select_word_left(&RenameSelectWordLeft, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha ".len().."alpha beta".len()
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.active_rename
+                    .as_mut()
+                    .expect("active rename")
+                    .move_to(0);
+                view.handle_rename_select_word_right(&RenameSelectWordRight, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    0.."alpha ".len()
+                );
+
+                view.handle_rename_home(&RenameHome, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    0..0
+                );
+                view.handle_rename_end(&RenameEnd, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+                view.handle_rename_select_home(&RenameSelectHome, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    0.."alpha beta".len()
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.active_rename
+                    .as_mut()
+                    .expect("active rename")
+                    .move_to(0);
+                view.handle_rename_select_end(&RenameSelectEnd, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_range,
+                    0.."alpha beta".len()
+                );
+
+                view.handle_rename_select_all(&RenameSelectAll, window, cx);
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .selected_text()
+                        .as_deref(),
+                    Some("alpha beta")
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.active_rename
+                    .as_mut()
+                    .expect("active rename")
+                    .selected_range = 0.."alpha".len();
+                view.handle_rename_copy(&RenameCopy, window, cx);
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()),
+                    Some("alpha".to_owned())
+                );
+
+                view.handle_rename_cut(&RenameCut, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().expect("active rename").content,
+                    " beta"
+                );
+
+                cx.write_to_clipboard(ClipboardItem::new_string("gamma\nname".to_owned()));
+                view.handle_rename_paste(&RenamePaste, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().expect("active rename").content,
+                    "gamma name beta"
+                );
+
+                set_rename_text(view, "alpha");
+                view.handle_rename_backspace(&RenameBackspace, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().expect("active rename").content,
+                    "alph"
+                );
+
+                set_rename_text(view, "alpha");
+                view.active_rename
+                    .as_mut()
+                    .expect("active rename")
+                    .move_to(0);
+                view.handle_rename_delete(&RenameDelete, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().expect("active rename").content,
+                    "lpha"
+                );
+
+                set_rename_text(view, "alpha beta");
+                view.handle_rename_backspace_word(&RenameBackspaceWord, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().expect("active rename").content,
+                    "alpha "
+                );
+
+                view.handle_rename_noop(&RenameNoop, window, cx);
+
+                let original_name = view
+                    .active_rename
+                    .as_ref()
+                    .expect("active rename")
+                    .original_name
+                    .clone();
+                set_rename_text(view, &original_name);
+                view.handle_rename_commit(&RenameCommit, window, cx);
+                assert!(view.active_rename.is_none());
+
+                view.select_single_path(&file);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+                assert!(view.active_rename.is_some());
+                view.handle_rename_cancel(&RenameCancel, window, cx);
+                assert!(view.active_rename.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn text_input_handler_routes_to_rename_address_and_search(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["alpha beta.txt", "notes.txt"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                assert!(view.start_test_rename_for_index(0));
+
+                let mut actual_range = None;
+                assert_eq!(
+                    <ExplorerView as EntityInputHandler>::text_for_range(
+                        view,
+                        0.."alpha".len(),
+                        &mut actual_range,
+                        window,
+                        cx,
+                    ),
+                    Some("alpha".to_owned())
+                );
+                assert_eq!(actual_range, Some(0.."alpha".len()));
+
+                <ExplorerView as EntityInputHandler>::replace_text_in_range(
+                    view,
+                    Some(0.."alpha".len()),
+                    "omega\nname",
+                    window,
+                    cx,
+                );
+                assert!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .content
+                        .starts_with("omega name")
+                );
+
+                <ExplorerView as EntityInputHandler>::replace_and_mark_text_in_range(
+                    view,
+                    Some(0.."omega".len()),
+                    "delta",
+                    Some(1..3),
+                    window,
+                    cx,
+                );
+                let rename = view.active_rename.as_ref().expect("active rename");
+                assert_eq!(rename.marked_range, Some(0.."delta".len()));
+                assert_eq!(rename.selected_range, 1..3);
+                assert_eq!(
+                    <ExplorerView as EntityInputHandler>::marked_text_range(view, window, cx),
+                    Some(0.."delta".len())
+                );
+                <ExplorerView as EntityInputHandler>::unmark_text(view, window, cx);
+                assert!(
+                    view.active_rename
+                        .as_ref()
+                        .expect("active rename")
+                        .marked_range
+                        .is_none()
+                );
+                assert!(
+                    <ExplorerView as EntityInputHandler>::bounds_for_range(
+                        view,
+                        0..1,
+                        Bounds::default(),
+                        window,
+                        cx,
+                    )
+                    .is_none()
+                );
+                assert!(
+                    <ExplorerView as EntityInputHandler>::character_index_for_point(
+                        view,
+                        point(px(0.0), px(0.0)),
+                        window,
+                        cx,
+                    )
+                    .is_none()
+                );
+
+                view.cancel_active_rename();
+                assert!(view.start_address_bar_edit(window, cx));
+                let address_len = view
+                    .active_address_bar
+                    .as_ref()
+                    .expect("address edit")
+                    .content
+                    .len();
+                <ExplorerView as EntityInputHandler>::replace_text_in_range(
+                    view,
+                    Some(0..address_len),
+                    "folder\nname",
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    "folder name"
+                );
+                let mut actual_range = None;
+                assert_eq!(
+                    <ExplorerView as EntityInputHandler>::text_for_range(
+                        view,
+                        0.."folder".len(),
+                        &mut actual_range,
+                        window,
+                        cx,
+                    ),
+                    Some("folder".to_owned())
+                );
+
+                view.cancel_address_bar_edit();
+                assert!(view.start_search_edit(window, cx));
+                <ExplorerView as EntityInputHandler>::replace_text_in_range(
+                    view,
+                    Some(0..0),
+                    "note\nquery",
+                    window,
+                    cx,
+                );
+                assert_eq!(view.search_query(), "note query");
+                assert_eq!(view.entries.len(), 0);
+
+                <ExplorerView as EntityInputHandler>::replace_and_mark_text_in_range(
+                    view,
+                    Some(0.."note".len()),
+                    "notes",
+                    Some(0..5),
+                    window,
+                    cx,
+                );
+                assert_eq!(view.search_query(), "notes query");
+                assert_eq!(view.search.marked_range, Some(0.."notes".len()));
+                assert_eq!(
+                    <ExplorerView as EntityInputHandler>::selected_text_range(
+                        view, false, window, cx,
+                    )
+                    .expect("selection")
+                    .range,
+                    0.."notes".len()
+                );
+            });
+        });
+    }
+
+    fn set_rename_text(view: &mut ExplorerView, text: &str) {
+        let rename = view.active_rename.as_mut().expect("active rename");
+        rename.content = text.to_owned();
+        rename.selected_range = text.len()..text.len();
+        rename.selection_reversed = false;
+        rename.marked_range = None;
     }
 }

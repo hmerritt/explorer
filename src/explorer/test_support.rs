@@ -4,7 +4,12 @@ use std::{
     sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
 };
 
-use crate::explorer::{entry::FileEntry, view::ExplorerView};
+use crate::{
+    explorer::{entry::FileEntry, view::ExplorerView},
+    settings::{ExplorerSettings, SettingsState},
+};
+
+use gpui::{Entity, TestAppContext, VisualTestContext};
 
 static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -35,6 +40,30 @@ pub(super) fn test_view_with_entries(names: &[&str]) -> ExplorerView {
     view.read_error = None;
     view.clear_selection();
     view
+}
+
+pub(super) fn test_view_entity<'a>(
+    cx: &'a mut TestAppContext,
+    file_names: &[&str],
+) -> (TempDir, Entity<ExplorerView>, &'a mut VisualTestContext) {
+    let temp = TempDir::new();
+    for file_name in file_names {
+        fs::write(temp.path().join(file_name), b"file").expect("create test file");
+    }
+    let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+    (temp, view, cx)
+}
+
+pub(super) fn test_view_entity_at_path<'a>(
+    cx: &'a mut TestAppContext,
+    path: PathBuf,
+) -> (Entity<ExplorerView>, &'a mut VisualTestContext) {
+    cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+    cx.add_window_view(move |window, cx| {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window);
+        ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+    })
 }
 
 pub(super) struct TempDir {

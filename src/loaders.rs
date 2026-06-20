@@ -148,4 +148,28 @@ mod tests {
         assert_eq!(style.track_color, LINEAR_PROGRESS_TRACK_GREEN);
         assert!(style.height > 0.0);
     }
+
+    #[test]
+    fn cubic_bezier_solver_preserves_progress_endpoints() {
+        assert_eq!(solve_cubic_bezier(0.65, 0.815, 0.735, 0.395, 0.0), 0.0);
+        assert_eq!(solve_cubic_bezier(0.65, 0.815, 0.735, 0.395, 1.0), 1.0);
+        assert_eq!(evaluate_bezier(0.0, 1.0, 0.0), 0.0);
+        assert_eq!(evaluate_bezier(0.0, 1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn cubic_bezier_solver_returns_monotonic_y_values_for_progress_animation() {
+        let samples =
+            [0.1, 0.25, 0.5, 0.75, 0.9].map(|x| solve_cubic_bezier(0.165, 0.84, 0.44, 1.0, x));
+
+        assert!(samples.windows(2).all(|window| window[0] < window[1]));
+        assert!(samples.iter().all(|sample| (0.0..=1.0).contains(sample)));
+    }
+
+    #[test]
+    fn cubic_bezier_derivative_matches_linear_control_points() {
+        assert_eq!(evaluate_bezier_derivative(0.0, 1.0, 0.0), 0.0);
+        assert_eq!(evaluate_bezier_derivative(0.0, 1.0, 0.5), 1.5);
+        assert_eq!(evaluate_bezier_derivative(0.0, 1.0, 1.0), 0.0);
+    }
 }

@@ -717,9 +717,9 @@ mod tests {
     use crate::explorer::{
         clipboard::FileClipboardOperation,
         selection::SelectionModifiers,
-        test_support::{TempDir, selected_names, test_view_with_entries},
+        test_support::{TempDir, selected_names, test_view_entity_at_path, test_view_with_entries},
     };
-    use gpui::{Image, ImageFormat};
+    use gpui::{Image, ImageFormat, TestAppContext};
     use std::{fs, io::Cursor};
 
     #[test]
@@ -1042,6 +1042,120 @@ mod tests {
         assert!(!view.entry_is_cut(Path::new("b.txt")));
     }
 
+    #[gpui::test]
+    fn file_clipboard_paste_conflicts_open_dialog_for_copy_and_cut(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source_dir).expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        let source = source_dir.join("file.txt");
+        fs::write(&source, b"source").expect("create source file");
+        fs::write(destination.join("file.txt"), b"destination").expect("create destination file");
+        let (view, cx) = test_view_entity_at_path(cx, destination);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.paste_file_clipboard(
+                    FileClipboard::new(FileClipboardOperation::Copy, vec![source.clone()]),
+                    cx,
+                );
+                assert!(view.pending_file_conflict.is_some());
+                assert!(view.open_error.is_none());
+
+                view.pending_file_conflict = None;
+                view.clear_active_dialog_window();
+                view.paste_file_clipboard(
+                    FileClipboard::new(FileClipboardOperation::Cut, vec![source.clone()]),
+                    cx,
+                );
+                assert!(view.pending_file_conflict.is_some());
+                assert!(view.open_error.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn delete_confirmation_paths_stage_cancel_and_confirm(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("delete.txt");
+        fs::write(&file, b"delete").expect("create file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.request_trash_paths_with_confirmation(Vec::new(), cx);
+                assert!(view.pending_trash.is_none());
+
+                view.request_trash_paths_with_confirmation(vec![file.clone()], cx);
+                assert_eq!(
+                    view.pending_trash
+                        .as_ref()
+                        .map(|pending| pending.paths.as_slice()),
+                    Some([file.clone()].as_slice())
+                );
+                view.cancel_pending_trash();
+                assert!(view.pending_trash.is_none());
+
+                view.mark_cut_paths(std::slice::from_ref(&file));
+                view.pending_permanent_delete = Some(PendingPermanentDelete {
+                    paths: vec![file.clone()],
+                });
+                view.confirm_pending_permanent_delete(cx);
+                assert!(view.pending_permanent_delete.is_none());
+                assert!(view.open_error.is_none());
+                assert!(!view.entry_is_cut(&file));
+            });
+        });
+
+        assert!(!file.exists());
+    }
+
+    #[gpui::test]
+    fn file_operation_cancel_and_error_completion_update_state(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.handle_prepared_file_command_result_and_open_dialog(
+                    Err("prepare failed".to_owned()),
+                    cx,
+                );
+                assert!(view.active_file_operation.is_none());
+
+                view.resolve_pending_file_conflicts_and_open_progress(ConflictChoice::Skip, cx);
+                assert!(view.active_file_operation.is_none());
+
+                let cancel = Arc::new(AtomicBool::new(false));
+                view.active_file_operation = Some(FileOperationState {
+                    progress: test_progress(),
+                    cancel: cancel.clone(),
+                    task: None,
+                    archive_diagnostics: None,
+                });
+                view.cancel_active_file_operation();
+                assert!(cancel.load(Ordering::Relaxed));
+
+                view.complete_active_file_operation(Err(FileOperationError::Cancelled), cx);
+                assert!(view.active_file_operation.is_none());
+                assert!(view.open_error.is_none());
+
+                view.active_file_operation = Some(FileOperationState {
+                    progress: test_progress(),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    task: None,
+                    archive_diagnostics: None,
+                });
+                view.complete_active_file_operation(
+                    Err(FileOperationError::Failed("copy failed".to_owned())),
+                    cx,
+                );
+                assert!(view.active_file_operation.is_none());
+            });
+        });
+    }
+
     #[test]
     fn successful_cut_paste_moves_files_and_clears_cut_state() {
         let temp = TempDir::new();
@@ -1100,6 +1214,19 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Tiff)
             .expect("encode test tiff");
         bytes.into_inner()
+    }
+
+    fn test_progress() -> crate::explorer::filesystem::FileOperationProgress {
+        crate::explorer::filesystem::FileOperationProgress {
+            kind: crate::explorer::filesystem::FileOperationKind::Copy,
+            phase: crate::explorer::filesystem::FileOperationPhase::Copying,
+            total_bytes: 1,
+            copied_bytes: 0,
+            total_files: 1,
+            completed_files: 0,
+            current_item: None,
+            cancellable: true,
+        }
     }
 
     fn assert_saved_png_image(bytes: &[u8]) {

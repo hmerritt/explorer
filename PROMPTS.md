@@ -6,7 +6,6 @@
 
 ## 2
 
-- Settings option to hide drives (WSL ones you may not want)
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 

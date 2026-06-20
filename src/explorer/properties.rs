@@ -5890,6 +5890,7 @@ fn property_button(
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
+    use crate::settings::{ExplorerSettings, SettingsState};
     use std::{collections::HashSet, io::Cursor, time::Duration};
 
     #[test]
@@ -6020,6 +6021,133 @@ mod tests {
                 (PropertyTab::Frames, "Frames")
             ]
         );
+    }
+
+    #[gpui::test]
+    fn properties_dialog_snapshot_task_loads_target(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        let (title, item_kind, draft_readonly, draft_hidden) = cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                panic!("snapshot should be ready");
+            };
+
+            (
+                snapshot.title.clone(),
+                snapshot.item_kind,
+                dialog.draft.readonly,
+                dialog.draft.hidden,
+            )
+        });
+
+        assert_eq!(title, "a.txt");
+        assert_eq!(item_kind, PropertyItemKind::SingleFile);
+        assert_eq!(draft_readonly, Some(false));
+        assert_eq!(draft_hidden, Some(false));
+    }
+
+    #[gpui::test]
+    fn properties_dialog_details_tab_collects_single_file_details(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Details;
+                dialog.start_details_task(cx);
+                assert!(matches!(
+                    dialog.details_state,
+                    PropertyDetailsState::Loading
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyDetailsState::Ready(groups) = &dialog.details_state else {
+                panic!("details should be ready");
+            };
+
+            assert_eq!(
+                detail_value(groups, PropertyDetailGroupKind::File, "CRC32"),
+                Some("352441c2")
+            );
+            assert_eq!(
+                detail_value(groups, PropertyDetailGroupKind::File, "SHA256"),
+                Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_image_tab_loads_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("image.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Image;
+                dialog.start_image_task(cx);
+                assert!(matches!(dialog.image_state, PropertyImageState::Loading));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyImageState::Ready(preview) = &dialog.image_state else {
+                panic!("image preview should be ready");
+            };
+
+            assert_eq!(preview.width, 4);
+            assert_eq!(preview.height, 2);
+            assert_render_image_size(preview, 4, 2);
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_frames_tab_rejects_non_video_target(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Frames;
+                dialog.start_frames_task(cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyFramesState::Failed(error) = &dialog.frames_state else {
+                panic!("frames should be unavailable");
+            };
+            assert_eq!(error, "Video frames are not available for this item.");
+        });
     }
 
     #[test]
@@ -7388,6 +7516,32 @@ mod tests {
             fs::metadata(file).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    fn test_properties_dialog(
+        cx: &mut gpui::TestAppContext,
+        target: PropertyTarget,
+    ) -> gpui::Entity<PropertiesDialog> {
+        let explorer_root = target
+            .paths
+            .first()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+
+        cx.update(move |cx| {
+            let explorer = cx.new(|_| ExplorerView::new(explorer_root));
+            cx.new(|cx| {
+                PropertiesDialog::new(
+                    target,
+                    explorer.downgrade(),
+                    crate::settings::DEFAULT_DATE_FORMAT.to_owned(),
+                    cx.focus_handle(),
+                    cx,
+                )
+            })
+        })
     }
 
     fn test_property_snapshot_with_file_detail(name: &str, value: &str) -> PropertySnapshot {

@@ -363,3 +363,162 @@ impl ExplorerView {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::explorer::{
+        clipboard::{FileClipboardOperation, file_clipboard_from_item},
+        test_support::{TempDir, selected_names, test_view_entity, test_view_entity_at_path},
+    };
+    use gpui::{ClipboardItem, Image, ImageFormat, TestAppContext};
+    use std::fs;
+
+    #[gpui::test]
+    fn selection_action_handlers_move_extend_and_select_all(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt", "c.txt"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_move_down(&MoveDown, window, cx);
+                assert_eq!(selected_names(view), vec!["a.txt"]);
+
+                view.handle_move_down(&MoveDown, window, cx);
+                assert_eq!(selected_names(view), vec!["b.txt"]);
+
+                view.handle_extend_down(&ExtendDown, window, cx);
+                assert_eq!(selected_names(view), vec!["b.txt", "c.txt"]);
+
+                view.handle_move_home(&MoveHome, window, cx);
+                assert_eq!(selected_names(view), vec!["a.txt"]);
+
+                view.handle_extend_end(&ExtendEnd, window, cx);
+                assert_eq!(selected_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+
+                view.handle_select_all(&SelectAll, window, cx);
+                assert_eq!(selected_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn clipboard_action_handlers_copy_and_mark_cut_selection(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let cut_path = temp.path().join("b.txt");
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(1);
+                view.handle_copy_selected(&CopySelected, window, cx);
+                assert!(view.cut_paths.is_empty());
+
+                view.handle_cut_selected(&CutSelected, window, cx);
+                assert!(view.entry_is_cut(&cut_path));
+            });
+        });
+
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        let clipboard = file_clipboard_from_item(&item).expect("file clipboard");
+        assert_eq!(clipboard.operation, FileClipboardOperation::Cut);
+        assert_eq!(clipboard.paths, vec![cut_path]);
+    }
+
+    #[gpui::test]
+    fn create_item_action_handlers_create_and_select_new_entries(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let root = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, root.clone());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_create_new_folder(&CreateNewFolder, window, cx);
+                assert!(root.join("New folder").is_dir());
+                assert_eq!(selected_names(view), vec!["New folder"]);
+
+                view.handle_create_new_file(&CreateNewFile, window, cx);
+                assert!(root.join("New file").is_file());
+                assert_eq!(selected_names(view), vec!["New file"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn navigation_action_handlers_update_history_and_refresh_entries(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("inside.txt"), b"inside").unwrap();
+        let root = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, child.clone());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_go_up(&GoUp, window, cx);
+                assert_eq!(view.path, root);
+                assert_eq!(selected_names(view), vec!["child"]);
+
+                view.handle_go_back(&GoBack, window, cx);
+                assert_eq!(view.path, child);
+
+                view.handle_go_forward(&GoForward, window, cx);
+                assert_eq!(view.path, root);
+
+                fs::write(root.join("new.txt"), b"new").unwrap();
+                view.handle_refresh(&Refresh, window, cx);
+                assert!(view.entries.iter().any(|entry| entry.name == "new.txt"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn open_settings_action_reports_unavailable_settings_path(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_open_settings(&OpenSettings, window, cx);
+                assert_eq!(
+                    view.open_error.as_deref(),
+                    Some("Could not open settings.json: settings file path is unavailable")
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn permanent_delete_action_stages_selected_paths_for_confirmation(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let selected = temp.path().join("b.txt");
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&selected);
+                view.handle_permanently_delete_selected(&PermanentlyDeleteSelected, window, cx);
+                assert_eq!(
+                    view.pending_permanent_delete
+                        .as_ref()
+                        .map(|pending| pending.paths.as_slice()),
+                    Some([selected.clone()].as_slice())
+                );
+                assert!(view.open_error.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn paste_clipboard_action_saves_clipboard_image(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let root = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, root.clone());
+        let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3, 4]);
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_image(&image)));
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_paste_clipboard(&PasteClipboard, window, cx);
+                assert_eq!(fs::read(root.join("image.png")).unwrap(), vec![1, 2, 3, 4]);
+                assert_eq!(selected_names(view), vec!["image.png"]);
+            });
+        });
+    }
+}

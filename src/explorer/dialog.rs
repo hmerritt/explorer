@@ -1652,7 +1652,7 @@ mod tests {
         view::FileOperationState,
     };
     use crate::settings::{ExplorerSettings, SettingsState};
-    use gpui::TestAppContext;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -2158,6 +2158,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dialog_focus_actions_move_between_confirmation_buttons(cx: &mut TestAppContext) {
+        let pending = PendingPermanentDelete {
+            paths: vec![PathBuf::from("a.txt")],
+        };
+        let (_explorer, dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::PermanentDelete(pending));
+
+        cx.update(|window, app| {
+            dialog.update(app, |dialog, cx| {
+                assert_eq!(dialog.focused_choice, Some(DialogChoice::Primary));
+
+                dialog.handle_focus_secondary(&DialogFocusSecondary, window, cx);
+                assert_eq!(dialog.focused_choice, Some(DialogChoice::Secondary));
+
+                dialog.handle_focus_primary(&DialogFocusPrimary, window, cx);
+                assert_eq!(dialog.focused_choice, Some(DialogChoice::Primary));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn delete_dialog_confirm_removes_pending_file(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("delete-me.txt");
+        fs::write(&file, b"delete").expect("create file");
+        let pending = PendingPermanentDelete {
+            paths: vec![file.clone()],
+        };
+        let (explorer, dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::PermanentDelete(pending.clone()));
+
+        cx.update(|window, app| {
+            explorer.update(app, |view, _| {
+                view.pending_permanent_delete = Some(pending);
+            });
+            dialog.update(app, |dialog, cx| {
+                dialog.handle_confirm(&DialogConfirm, window, cx);
+                assert!(dialog.completed);
+            });
+            explorer.update(app, |view, _| {
+                assert!(view.pending_permanent_delete.is_none());
+                assert!(view.open_error.is_none());
+            });
+        });
+        assert!(!file.exists());
+    }
+
+    #[gpui::test]
+    fn file_operation_dialog_cancel_signals_active_operation(cx: &mut TestAppContext) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = test_progress();
+        let (explorer, dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(progress.clone()));
+
+        cx.update(|window, app| {
+            explorer.update(app, |view, _| {
+                view.active_file_operation = Some(FileOperationState {
+                    progress,
+                    cancel: cancel.clone(),
+                    task: None,
+                    archive_diagnostics: None,
+                });
+            });
+            dialog.update(app, |dialog, cx| {
+                dialog.handle_cancel(&DialogCancel, window, cx);
+                assert!(dialog.completed);
+            });
+            explorer.update(app, |view, _| {
+                assert!(view.active_dialog_window.is_none());
+            });
+        });
+
+        assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    #[gpui::test]
     fn file_operation_dialog_opens_during_explorer_view_update(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (view, cx) = cx.add_window_view(|_, cx| {
@@ -2211,6 +2287,29 @@ mod tests {
 
         assert!(view.pending_permanent_delete.is_some());
         assert!(view.active_dialog_window.is_none());
+    }
+
+    fn test_dialog_entity<'a>(
+        cx: &'a mut TestAppContext,
+        kind: ExplorerDialogKind,
+    ) -> (
+        Entity<ExplorerView>,
+        Entity<ExplorerDialog>,
+        &'a mut VisualTestContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let explorer = cx.update(|cx| cx.new(|_| ExplorerView::new(PathBuf::from("dialog-test"))));
+        let weak_explorer = explorer.downgrade();
+        let (dialog, cx) = cx.add_window_view(move |_, cx| {
+            ExplorerDialog::new(
+                kind,
+                weak_explorer,
+                crate::settings::DEFAULT_DATE_FORMAT.to_owned(),
+                cx.focus_handle(),
+                cx,
+            )
+        });
+        (explorer, dialog, cx)
     }
 
     fn single_conflict_batch() -> FileConflictBatch {

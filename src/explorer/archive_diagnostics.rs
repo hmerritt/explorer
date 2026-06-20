@@ -876,6 +876,186 @@ fn process_cpu_time() -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    #[test]
+    fn counting_reader_tracks_compressed_bytes_and_delegates_seek() {
+        let operation = ArchiveDiagnostics {
+            inner: Arc::new(Mutex::new(OperationState {
+                operation_id: 1,
+                requested_at: Instant::now(),
+                active_started_at: Instant::now(),
+                progress_dialog_at: None,
+                conflict_started_at: None,
+                conflict_wait: Duration::ZERO,
+                reload: Duration::ZERO,
+                metadata_resolution: Duration::ZERO,
+                cancel_requested_at: None,
+                archives: Vec::new(),
+                outcome: "error",
+            })),
+        };
+        let metrics = Arc::new(ArchiveMetrics::default());
+        let handle = ArchiveHandle {
+            operation,
+            archive_id: 0,
+            metrics: metrics.clone(),
+        };
+        let mut reader = CountingReader::new(Cursor::new(b"abcdef".to_vec()), Some(&handle));
+        let mut buffer = [0; 3];
+
+        assert_eq!(reader.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer, b"abc");
+        assert_eq!(metrics.compressed_bytes_read.load(Ordering::Relaxed), 3);
+        assert_eq!(reader.seek(SeekFrom::Start(1)).unwrap(), 1);
+        assert_eq!(reader.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer, b"bcd");
+        assert_eq!(metrics.compressed_bytes_read.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn archive_sampler_finish_returns_initial_and_final_samples() {
+        let metrics = Arc::new(ArchiveMetrics::default());
+        metrics.output_bytes_written.store(10, Ordering::Relaxed);
+        let sampler = ArchiveSampler::start(metrics.clone());
+        metrics.output_bytes_written.store(20, Ordering::Relaxed);
+        metrics.entries_completed.store(2, Ordering::Relaxed);
+
+        let samples = sampler.finish();
+
+        assert!(samples.len() >= 2);
+        assert!(samples.first().unwrap().output_bytes <= samples.last().unwrap().output_bytes);
+        assert_eq!(samples.last().unwrap().output_bytes, 20);
+        assert_eq!(samples.last().unwrap().entries_completed, 2);
+    }
+
+    #[test]
+    fn archive_summary_calculates_rates_stalls_and_slowest_entries() {
+        let metrics = Arc::new(ArchiveMetrics::default());
+        metrics
+            .compressed_bytes_read
+            .store(1_000, Ordering::Relaxed);
+        metrics.decoded_bytes.store(2_000, Ordering::Relaxed);
+        metrics.output_bytes_written.store(3_000, Ordering::Relaxed);
+        metrics.logical_output_bytes.store(4_000, Ordering::Relaxed);
+        metrics.entries_completed.store(3, Ordering::Relaxed);
+        metrics.entries_skipped.store(1, Ordering::Relaxed);
+        metrics.entries_replaced.store(2, Ordering::Relaxed);
+        metrics.files.store(3, Ordering::Relaxed);
+        metrics.directories.store(1, Ordering::Relaxed);
+        metrics.file_creates.store(3, Ordering::Relaxed);
+        metrics.directory_creates.store(1, Ordering::Relaxed);
+        metrics.progress_callbacks.store(4, Ordering::Relaxed);
+        metrics.observer_callbacks.store(5, Ordering::Relaxed);
+        metrics.sampler_wakeups.store(6, Ordering::Relaxed);
+        metrics
+            .diagnostics_nanos
+            .store(2_500_000, Ordering::Relaxed);
+        let archive = ArchiveState {
+            archive_id: 0,
+            format: "zip".to_owned(),
+            backend: "decompress".to_owned(),
+            compressed_size: 500,
+            cpu_started: None,
+            entries_listed: 4,
+            entries_planned: 3,
+            metrics,
+            phases: BTreeMap::from([
+                ("entry_copy", Duration::from_millis(900)),
+                ("metadata", Duration::from_millis(50)),
+            ]),
+            entries: vec![
+                EntryMetric {
+                    index: 0,
+                    path: Some(PathBuf::from("fast.txt")),
+                    size: 10,
+                    elapsed: Duration::from_millis(10),
+                    outcome: "ok",
+                },
+                EntryMetric {
+                    index: 1,
+                    path: Some(PathBuf::from("slow.txt")),
+                    size: 1_048_577,
+                    elapsed: Duration::from_millis(900),
+                    outcome: "ok",
+                },
+                EntryMetric {
+                    index: 2,
+                    path: None,
+                    size: 0,
+                    elapsed: Duration::from_millis(100),
+                    outcome: "skipped",
+                },
+            ],
+            outcome: "ok",
+        };
+        let samples = vec![
+            CounterSample {
+                elapsed: Duration::ZERO,
+                output_bytes: 0,
+                entries_completed: 0,
+            },
+            CounterSample {
+                elapsed: Duration::from_millis(100),
+                output_bytes: 0,
+                entries_completed: 0,
+            },
+            CounterSample {
+                elapsed: Duration::from_millis(800),
+                output_bytes: 0,
+                entries_completed: 0,
+            },
+            CounterSample {
+                elapsed: Duration::from_millis(1_000),
+                output_bytes: 2_000,
+                entries_completed: 2,
+            },
+            CounterSample {
+                elapsed: Duration::from_millis(2_000),
+                output_bytes: 3_000,
+                entries_completed: 3,
+            },
+        ];
+
+        let summary = archive_summary(&archive, &samples);
+
+        assert_eq!(summary.format, "zip");
+        assert_eq!(summary.backend, "decompress");
+        assert_eq!(summary.compressed_read_quality, "direct");
+        assert_eq!(summary.compression_ratio, 8.0);
+        assert_eq!(summary.entries_listed, 4);
+        assert_eq!(summary.entries_planned, 3);
+        assert_eq!(summary.entries_completed, 3);
+        assert_eq!(summary.entries_skipped, 1);
+        assert_eq!(summary.entries_replaced, 2);
+        assert_eq!(summary.files, 3);
+        assert_eq!(summary.directories, 1);
+        assert_eq!(summary.file_creates, 3);
+        assert_eq!(summary.directory_creates, 1);
+        assert_eq!(summary.progress_callbacks, 4);
+        assert_eq!(summary.observer_callbacks, 5);
+        assert_eq!(summary.sampler_wakeups, 6);
+        assert_eq!(summary.diagnostics_overhead_ms, 2.5);
+        assert_eq!(summary.wall_ms, 2_000.0);
+        assert_eq!(summary.time_to_first_output_ms, Some(1_000.0));
+        assert_eq!(summary.time_to_first_completed_entry_ms, Some(1_000.0));
+        assert_eq!(summary.last_output_to_finish_ms, Some(0.0));
+        assert_eq!(summary.stalled_ms, 700.0);
+        assert_eq!(summary.longest_stall_ms, 700.0);
+        assert_eq!(summary.active_ms, 1_300.0);
+        assert_eq!(summary.entry_average_ms, 336.6666666666667);
+        assert_eq!(summary.entry_p50_ms, 100.0);
+        assert_eq!(summary.entry_p95_ms, 900.0);
+        assert_eq!(summary.bottleneck, "entry_copy");
+        assert_eq!(summary.phases_ms["entry_copy"], 900.0);
+        assert_eq!(summary.phases_pct["entry_copy"], 45.0);
+        assert_eq!(summary.size_buckets.zero, 1);
+        assert_eq!(summary.size_buckets.bytes_1m_to_16m, 1);
+        assert_eq!(summary.slowest_entries[0].index, 1);
+        assert_eq!(summary.slowest_entries[0].elapsed_ms, 900.0);
+        assert!(summary.archive_read_mib_s > 0.0);
+        assert!(summary.output_write_mib_s > summary.archive_read_mib_s);
+    }
 
     #[test]
     fn size_buckets_cover_boundaries() {

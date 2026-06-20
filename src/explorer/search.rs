@@ -1063,8 +1063,9 @@ mod tests {
     use crate::explorer::{
         entry::FileEntry,
         navigation::HistoryMode,
-        test_support::{TempDir, test_view_with_entries},
+        test_support::{TempDir, test_view_entity, test_view_with_entries},
     };
+    use gpui::{ClipboardItem, Keystroke, TestAppContext};
     use std::fs;
 
     fn names(entries: &[FileEntry]) -> Vec<&str> {
@@ -1284,5 +1285,176 @@ mod tests {
             view.search.recursive_progress,
             RecursiveSearchProgressSnapshot::Searching(None)
         );
+    }
+
+    #[gpui::test]
+    fn type_to_search_starts_editing_and_ignores_existing_text_input(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["alpha.txt", "notes.txt"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_type_to_search(
+                    &KeyDownEvent {
+                        keystroke: Keystroke::parse("a").unwrap().with_simulated_ime(),
+                        is_held: false,
+                    },
+                    window,
+                    cx,
+                );
+
+                assert!(view.search_is_editing());
+                assert_eq!(view.search_query(), "a");
+                assert_eq!(names(&view.entries), vec!["alpha.txt"]);
+
+                view.handle_type_to_search(
+                    &KeyDownEvent {
+                        keystroke: Keystroke::parse("n").unwrap().with_simulated_ime(),
+                        is_held: false,
+                    },
+                    window,
+                    cx,
+                );
+
+                assert_eq!(view.search_query(), "a");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn search_action_handlers_edit_query_selection_clipboard_and_focus(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["alpha.txt", "beta.txt", "gamma.md"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_search_edit(&SearchEdit, window, cx);
+                assert!(view.search_is_editing());
+                assert!(!view.recursive_search_is_enabled());
+
+                view.handle_recursive_search_edit(&RecursiveSearchEdit, window, cx);
+                assert!(view.recursive_search_is_enabled());
+
+                view.handle_search_edit(&SearchEdit, window, cx);
+                assert!(!view.recursive_search_is_enabled());
+
+                set_search_text(view, "alpha beta");
+                view.handle_search_left(&SearchLeft, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha bet".len().."alpha bet".len()
+                );
+                view.handle_search_right(&SearchRight, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                view.handle_search_word_left(&SearchWordLeft, window, cx);
+                assert_eq!(view.search.selected_range, "alpha ".len().."alpha ".len());
+                view.handle_search_word_right(&SearchWordRight, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                set_search_text(view, "alpha beta");
+                view.handle_search_select_left(&SearchSelectLeft, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha bet".len().."alpha beta".len()
+                );
+                assert!(view.search.selection_reversed);
+
+                set_search_text(view, "alpha beta");
+                view.search.move_to(0);
+                view.handle_search_select_right(&SearchSelectRight, window, cx);
+                assert_eq!(view.search.selected_range, 0.."a".len());
+
+                set_search_text(view, "alpha beta");
+                view.handle_search_select_word_left(&SearchSelectWordLeft, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha ".len().."alpha beta".len()
+                );
+
+                set_search_text(view, "alpha beta");
+                view.search.move_to(0);
+                view.handle_search_select_word_right(&SearchSelectWordRight, window, cx);
+                assert_eq!(view.search.selected_range, 0.."alpha ".len());
+
+                view.handle_search_home(&SearchHome, window, cx);
+                assert_eq!(view.search.selected_range, 0..0);
+                view.handle_search_end(&SearchEnd, window, cx);
+                assert_eq!(
+                    view.search.selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+                view.handle_search_select_home(&SearchSelectHome, window, cx);
+                assert_eq!(view.search.selected_range, 0.."alpha beta".len());
+                assert!(view.search.selection_reversed);
+
+                set_search_text(view, "alpha beta");
+                view.search.move_to(0);
+                view.handle_search_select_end(&SearchSelectEnd, window, cx);
+                assert_eq!(view.search.selected_range, 0.."alpha beta".len());
+
+                view.handle_search_select_all(&SearchSelectAll, window, cx);
+                assert_eq!(view.search.selected_text().as_deref(), Some("alpha beta"));
+
+                set_search_text(view, "alpha beta");
+                view.search.selected_range = 0.."alpha".len();
+                view.handle_search_copy(&SearchCopy, window, cx);
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()),
+                    Some("alpha".to_owned())
+                );
+
+                view.handle_search_cut(&SearchCut, window, cx);
+                assert_eq!(view.search_query(), " beta");
+                assert!(view.entries.is_empty());
+
+                cx.write_to_clipboard(ClipboardItem::new_string("gamma\nmd".to_owned()));
+                view.handle_search_paste(&SearchPaste, window, cx);
+                assert_eq!(view.search_query(), "gamma md beta");
+
+                set_search_text(view, "alpha");
+                view.handle_search_backspace(&SearchBackspace, window, cx);
+                assert_eq!(view.search_query(), "alph");
+
+                set_search_text(view, "alpha");
+                view.search.move_to(0);
+                view.handle_search_delete(&SearchDelete, window, cx);
+                assert_eq!(view.search_query(), "lpha");
+
+                set_search_text(view, "alpha beta");
+                view.handle_search_backspace_word(&SearchBackspaceWord, window, cx);
+                assert_eq!(view.search_query(), "alpha ");
+
+                view.replace_search_text_in_range(Some(0..5), "two\nlines", cx);
+                assert_eq!(view.search_query(), "two lines ");
+
+                view.replace_and_mark_search_text_in_range(Some(0..3), "one", Some(1..2), cx);
+                assert_eq!(view.search_query(), "one lines ");
+                assert_eq!(view.search.marked_range, Some(0..3));
+                assert_eq!(view.search.selected_range, 1..2);
+
+                view.handle_search_cancel(&SearchCancel, window, cx);
+                assert_eq!(view.search_query(), "");
+                assert!(!view.search_is_editing());
+
+                view.handle_search_edit(&SearchEdit, window, cx);
+                view.clear_selection();
+                view.handle_search_commit(&SearchCommit, window, cx);
+                assert!(!view.search_is_editing());
+            });
+        });
+    }
+
+    fn set_search_text(view: &mut ExplorerView, text: &str) {
+        view.search.content = text.to_owned();
+        view.search.selected_range = text.len()..text.len();
+        view.search.selection_reversed = false;
+        view.search.marked_range = None;
+        view.search.recursive_enabled = false;
+        view.apply_search_filter_preserving_selection(&[]);
     }
 }

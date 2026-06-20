@@ -1210,8 +1210,11 @@ impl Element for AddressTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::explorer::{test_support::TempDir, view::ExplorerView};
-    use gpui::{Modifiers, MouseButton};
+    use crate::explorer::{
+        test_support::{TempDir, test_view_entity_at_path},
+        view::ExplorerView,
+    };
+    use gpui::{ClipboardItem, Modifiers, MouseButton, TestAppContext};
     use std::fs;
 
     #[test]
@@ -1684,5 +1687,267 @@ mod tests {
 
         let address = view.active_address_bar.as_ref().expect("address edit");
         assert_eq!(address.selected_range, 0..address.content.len());
+    }
+
+    #[gpui::test]
+    fn address_action_handlers_edit_text_clipboard_suggestions_and_navigation(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_address_edit(&AddressEdit, window, cx);
+                assert!(view.address_bar_is_editing());
+                let address = view.active_address_bar.as_ref().expect("address edit");
+                assert_eq!(address.selected_range, 0..address.content.len());
+
+                view.handle_address_select_all(&AddressSelectAll, window, cx);
+                view.handle_address_copy(&AddressCopy, window, cx);
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()),
+                    Some(temp.path().display().to_string())
+                );
+
+                view.handle_address_cut(&AddressCut, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    ""
+                );
+
+                cx.write_to_clipboard(ClipboardItem::new_string("child\n".to_owned()));
+                view.handle_address_paste(&AddressPaste, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    "child "
+                );
+
+                set_active_address(view, "alpha beta");
+                view.handle_address_left(&AddressLeft, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha bet".len().."alpha bet".len()
+                );
+                view.handle_address_right(&AddressRight, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                view.handle_address_word_left(&AddressWordLeft, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha ".len().."alpha ".len()
+                );
+                view.handle_address_word_right(&AddressWordRight, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+
+                set_active_address(view, "alpha beta");
+                view.handle_address_select_left(&AddressSelectLeft, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha bet".len().."alpha beta".len()
+                );
+
+                set_active_address(view, "alpha beta");
+                view.active_address_bar
+                    .as_mut()
+                    .expect("address edit")
+                    .move_to(0);
+                view.handle_address_select_right(&AddressSelectRight, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    0.."a".len()
+                );
+
+                set_active_address(view, "alpha beta");
+                view.handle_address_select_word_left(&AddressSelectWordLeft, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha ".len().."alpha beta".len()
+                );
+
+                set_active_address(view, "alpha beta");
+                view.active_address_bar
+                    .as_mut()
+                    .expect("address edit")
+                    .move_to(0);
+                view.handle_address_select_word_right(&AddressSelectWordRight, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    0.."alpha ".len()
+                );
+
+                view.handle_address_home(&AddressHome, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    0..0
+                );
+                view.handle_address_end(&AddressEnd, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    "alpha beta".len().."alpha beta".len()
+                );
+                view.handle_address_select_home(&AddressSelectHome, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    0.."alpha beta".len()
+                );
+
+                set_active_address(view, "alpha beta");
+                view.active_address_bar
+                    .as_mut()
+                    .expect("address edit")
+                    .move_to(0);
+                view.handle_address_select_end(&AddressSelectEnd, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .selected_range,
+                    0.."alpha beta".len()
+                );
+
+                set_active_address(view, "alpha");
+                view.handle_address_backspace(&AddressBackspace, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    "alph"
+                );
+
+                set_active_address(view, "alpha");
+                view.active_address_bar
+                    .as_mut()
+                    .expect("address edit")
+                    .move_to(0);
+                view.handle_address_delete(&AddressDelete, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    "lpha"
+                );
+
+                set_active_address(view, "alpha beta");
+                view.handle_address_backspace_word(&AddressBackspaceWord, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    "alpha "
+                );
+
+                set_active_address(view, "ch");
+                view.refresh_address_suggestions();
+                view.handle_address_suggestion_down(&AddressSuggestionDown, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .highlighted_suggestion,
+                    Some(0)
+                );
+                view.handle_address_suggestion_up(&AddressSuggestionUp, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .highlighted_suggestion,
+                    Some(0)
+                );
+
+                view.handle_address_accept_suggestion(&AddressAcceptSuggestion, window, cx);
+                assert_eq!(
+                    view.active_address_bar
+                        .as_ref()
+                        .expect("address edit")
+                        .content,
+                    child.display().to_string()
+                );
+
+                view.handle_address_commit(&AddressCommit, window, cx);
+                assert_eq!(
+                    view.path,
+                    explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+                );
+                assert!(!view.address_bar_is_editing());
+
+                view.navigate_to_directory(temp.path().to_path_buf(), HistoryMode::Record);
+                set_active_address(view, "ch");
+                view.refresh_address_suggestions();
+                view.active_address_bar
+                    .as_mut()
+                    .expect("address edit")
+                    .highlighted_suggestion = Some(0);
+                view.handle_address_right(&AddressRight, window, cx);
+                assert_eq!(view.path, child);
+                assert!(view.address_bar_is_editing());
+
+                set_active_address(view, "missing");
+                view.handle_address_commit(&AddressCommit, window, cx);
+                assert!(view.address_bar_is_editing());
+                assert!(view.open_error.is_some());
+
+                view.handle_address_cancel(&AddressCancel, window, cx);
+                assert!(!view.address_bar_is_editing());
+            });
+        });
+    }
+
+    fn set_active_address(view: &mut ExplorerView, text: &str) {
+        let mut address = AddressBarState::new(text.to_owned(), None);
+        address.move_to(text.len());
+        view.active_address_bar = Some(address);
+        view.refresh_address_suggestions();
     }
 }
