@@ -2,7 +2,7 @@ use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -4143,7 +4143,9 @@ fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
             this.close_context_menu();
             this.open_utility_menu = None;
             if this.commit_active_rename_before_interaction(window, cx) {
-                cx.write_to_clipboard(ClipboardItem::new_string(this.path.display().to_string()));
+                cx.write_to_clipboard(ClipboardItem::new_string(copied_directory_address(
+                    &this.path,
+                )));
             }
             cx.stop_propagation();
             cx.notify();
@@ -4151,6 +4153,20 @@ fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
         .tooltip(explorer_tooltip("Copy address"))
         .child(gpui::img(COPY_ICON.clone()).w(px(16.0)).h(px(16.0)))
         .into_any_element()
+}
+
+fn copied_directory_address(path: &Path) -> String {
+    let address = path.display().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        address.replace('\\', "/")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        address
+    }
 }
 
 fn editable_directory_bar(
@@ -5286,7 +5302,12 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use gpui::{
         AppContext, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
@@ -5325,13 +5346,13 @@ mod tests {
         available_filename_text_width, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        drop_indicator_target_width, entry_row_hover_enabled, filename_text_width,
-        folder_status_summary, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
-        is_alt_entry_double_click, is_normal_entry_click, lines_of_code_tooltip,
-        open_current_folder_context_menu_from_event, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, text_cell_width,
+        copied_directory_address, drop_indicator_target_width, entry_row_hover_enabled,
+        filename_text_width, folder_status_summary, git_branch_tooltip, git_divergence_label,
+        git_divergence_tooltip, is_alt_entry_double_click, is_normal_entry_click,
+        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -5916,13 +5937,36 @@ mod tests {
         assert!(tooltip.origin.y >= position.y + gpui::px(18.0));
     }
 
+    #[test]
+    fn copied_directory_address_formats_platform_path() {
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                copied_directory_address(Path::new(r"C:\Users\Ada\Documents")),
+                "C:/Users/Ada/Documents"
+            );
+            assert_eq!(
+                copied_directory_address(Path::new(r"\\server\share\dir")),
+                "//server/share/dir"
+            );
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                copied_directory_address(Path::new("/Users/Ada/Documents")),
+                "/Users/Ada/Documents"
+            );
+        }
+    }
+
     #[gpui::test]
     fn directory_copy_address_button_copies_current_path_without_editing(
         cx: &mut gpui::TestAppContext,
     ) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
-        let expected = path.display().to_string();
+        let expected = copied_directory_address(&path);
         let (view, cx) = test_view_entity_at_path(cx, path);
 
         cx.run_until_parked();
