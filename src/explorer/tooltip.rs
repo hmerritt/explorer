@@ -45,8 +45,14 @@ impl Render for ExplorerTooltip {
     }
 }
 
-pub(super) fn explorer_tooltip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    move |_, cx| cx.new(|_| ExplorerTooltip::new(label)).into()
+pub(super) fn explorer_tooltip(
+    label: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    let label = label.into();
+    move |_, cx| {
+        let label = label.clone();
+        cx.new(|_| ExplorerTooltip::new(label)).into()
+    }
 }
 
 #[cfg(test)]

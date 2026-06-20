@@ -4937,6 +4937,7 @@ fn render_codebase_makeup_status(summary: &CodebaseSummary) -> AnyElement {
     let Some(dominant_language) = summary.languages.first() else {
         return div().into_any_element();
     };
+    let total_code = summary.total_code.separate_with_commas();
 
     div()
         .flex()
@@ -4946,9 +4947,15 @@ fn render_codebase_makeup_status(summary: &CodebaseSummary) -> AnyElement {
         .flex_shrink_0()
         .child(render_codebase_makeup_bar(summary))
         .child(status_bar_separator())
-        .child(div().flex_shrink_0().child(SharedString::from(
-            summary.total_code.separate_with_commas(),
-        )))
+        .child(
+            div()
+                .id("codebase-lines-of-code")
+                .debug_selector(|| "codebase-lines-of-code".to_owned())
+                .flex_shrink_0()
+                .cursor_default()
+                .tooltip(explorer_tooltip(lines_of_code_tooltip(summary.total_code)))
+                .child(SharedString::from(total_code)),
+        )
         .child(status_bar_separator())
         .child(div().flex_shrink_0().child(SharedString::from(format!(
             "{}% {}",
@@ -4979,7 +4986,10 @@ fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
         .bg(rgb(CODEBASE_MAKEUP_SEPARATOR_COLOR))
         .child(
             canvas(
-                move |_, _, _| segments,
+                {
+                    let segments = segments.clone();
+                    move |_, _, _| segments
+                },
                 |bounds, segments, window, _| {
                     for segment in segments {
                         if segment.width <= 0.0 {
@@ -5002,6 +5012,28 @@ fn render_codebase_makeup_bar(summary: &CodebaseSummary) -> Div {
                 },
             )
             .size_full(),
+        )
+        .children(
+            summary
+                .languages
+                .iter()
+                .zip(segments)
+                .enumerate()
+                .filter_map(|(ix, (language, segment))| {
+                    (segment.width > 0.0).then(|| {
+                        div()
+                            .id(("codebase-makeup-segment", ix))
+                            .debug_selector(move || format!("codebase-makeup-segment-{ix}"))
+                            .absolute()
+                            .left(px(segment.left))
+                            .top(px(0.0))
+                            .h_full()
+                            .w(px(segment.width))
+                            .cursor_default()
+                            .tooltip(explorer_tooltip(language.name.clone()))
+                            .into_any_element()
+                    })
+                }),
         )
 }
 
@@ -5066,6 +5098,8 @@ fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
                 GIT_ICON.clone(),
                 git_divergence_label(divergence),
                 false,
+                "git-divergence-status",
+                Some(git_divergence_tooltip(divergence)),
             ))
             .child(status_bar_separator())
         })
@@ -5073,12 +5107,22 @@ fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
             GIT_BRANCH_ICON.clone(),
             status.branch.clone(),
             true,
+            "git-branch-status",
+            Some(git_branch_tooltip(&status.branch)),
         ))
         .into_any_element()
 }
 
-fn status_bar_icon_label(icon: Arc<Image>, label: String, flexible: bool) -> AnyElement {
+fn status_bar_icon_label(
+    icon: Arc<Image>,
+    label: String,
+    flexible: bool,
+    debug_selector: &'static str,
+    tooltip: Option<SharedString>,
+) -> AnyElement {
     div()
+        .id(debug_selector)
+        .debug_selector(move || debug_selector.to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -5086,6 +5130,7 @@ fn status_bar_icon_label(icon: Arc<Image>, label: String, flexible: bool) -> Any
         .min_w(px(0.0))
         .when(!flexible, |this| this.flex_shrink_0())
         .when(flexible, |this| this.flex_shrink().overflow_hidden())
+        .cursor_default()
         .child(image_icon(
             icon,
             STATUS_BAR_GIT_ICON_SIZE,
@@ -5097,6 +5142,9 @@ fn status_bar_icon_label(icon: Arc<Image>, label: String, flexible: bool) -> Any
                 .truncate()
                 .child(SharedString::from(label)),
         )
+        .when_some(tooltip, |this, tooltip| {
+            this.tooltip(explorer_tooltip(tooltip))
+        })
         .into_any_element()
 }
 
@@ -5106,6 +5154,25 @@ fn git_divergence_label(divergence: GitDivergence) -> String {
         divergence.outgoing.separate_with_commas(),
         divergence.incoming.separate_with_commas()
     )
+}
+
+fn git_branch_tooltip(branch: &str) -> SharedString {
+    SharedString::from(format!("Current Branch: {branch}"))
+}
+
+fn git_divergence_tooltip(divergence: GitDivergence) -> SharedString {
+    SharedString::from(format!(
+        "{} outgoing / {} incoming commits",
+        divergence.outgoing.separate_with_commas(),
+        divergence.incoming.separate_with_commas()
+    ))
+}
+
+fn lines_of_code_tooltip(total_code: usize) -> SharedString {
+    SharedString::from(format!(
+        "{} Lines of Code",
+        total_code.separate_with_commas()
+    ))
 }
 
 fn status_bar_separator() -> Div {
@@ -5183,6 +5250,7 @@ mod tests {
     use gpui::{
         AppContext, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
         KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
+        SharedString,
     };
 
     use crate::explorer::context_menu::{
@@ -5194,12 +5262,14 @@ mod tests {
             FileClipboard, FileClipboardOperation, clipboard_item_can_paste,
             clipboard_item_for_files,
         },
+        codebase_summary::{CodebaseLanguageSummary, CodebaseSummary},
         constants::{
             COLUMN_NAME_MIN_WIDTH, COLUMN_TYPE_WIDTH, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
             NAV_BUTTON_ACTIVE_OPACITY,
         },
         entry::FileEntry,
+        git_status::{GitDivergence, GitRepositoryStatus},
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind},
         test_support::TempDir,
@@ -5215,11 +5285,12 @@ mod tests {
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         drop_indicator_target_width, entry_row_hover_enabled, filename_text_width,
-        folder_status_summary, git_divergence_label, is_alt_entry_double_click,
-        is_normal_entry_click, open_current_folder_context_menu_from_event,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
+        folder_status_summary, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
+        is_alt_entry_double_click, is_normal_entry_click, lines_of_code_tooltip,
+        open_current_folder_context_menu_from_event, recursive_result_text_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, text_cell_width,
     };
 
     #[test]
@@ -5805,6 +5876,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn git_branch_status_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        assert_status_bar_tooltip(cx, "git-branch-status");
+    }
+
+    #[gpui::test]
+    fn git_divergence_status_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        assert_status_bar_tooltip(cx, "git-divergence-status");
+    }
+
+    #[gpui::test]
+    fn codebase_lines_of_code_status_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        assert_status_bar_tooltip(cx, "codebase-lines-of-code");
+    }
+
+    #[gpui::test]
+    fn codebase_first_language_segment_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        assert_status_bar_tooltip(cx, "codebase-makeup-segment-0");
+    }
+
+    #[gpui::test]
+    fn codebase_second_language_segment_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        assert_status_bar_tooltip(cx, "codebase-makeup-segment-1");
+    }
+
+    #[gpui::test]
     fn view_menu_large_icons_updates_global_view_mode(cx: &mut gpui::TestAppContext) {
         cx.set_global(crate::settings::SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
@@ -6230,11 +6326,92 @@ mod tests {
     #[test]
     fn git_divergence_label_separates_outgoing_and_incoming_counts() {
         assert_eq!(
-            git_divergence_label(crate::explorer::git_status::GitDivergence {
+            git_divergence_label(GitDivergence {
                 outgoing: 1_234,
                 incoming: 56,
             }),
             "1,234 / 56"
+        );
+    }
+
+    #[test]
+    fn status_bar_tooltip_labels_use_requested_wording_and_count_formatting() {
+        assert_eq!(
+            git_branch_tooltip("main"),
+            SharedString::from("Current Branch: main")
+        );
+        assert_eq!(
+            git_divergence_tooltip(GitDivergence {
+                outgoing: 1_234,
+                incoming: 56,
+            }),
+            SharedString::from("1,234 outgoing / 56 incoming commits")
+        );
+        assert_eq!(
+            lines_of_code_tooltip(12_345),
+            SharedString::from("12,345 Lines of Code")
+        );
+    }
+
+    fn assert_status_bar_tooltip(cx: &mut gpui::TestAppContext, selector: &'static str) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path.clone(), focus_handle);
+            view.git_status = Some(GitRepositoryStatus {
+                repo_root: path.clone(),
+                branch: "main".to_owned(),
+                divergence: Some(GitDivergence {
+                    outgoing: 12,
+                    incoming: 3,
+                }),
+            });
+            view.codebase_summary = Some(CodebaseSummary {
+                repo_root: path,
+                total_code: 12_345,
+                languages: vec![
+                    CodebaseLanguageSummary {
+                        name: "Rust".to_owned(),
+                        code: 10_000,
+                        percentage: 81,
+                        color: 0xde3c10,
+                    },
+                    CodebaseLanguageSummary {
+                        name: "TOML".to_owned(),
+                        code: 2_345,
+                        percentage: 19,
+                        color: 0x9c4221,
+                    },
+                ],
+            });
+            view
+        });
+
+        cx.run_until_parked();
+        hover_selector_until_tooltip(cx, selector);
+    }
+
+    fn hover_selector_until_tooltip(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        assert!(
+            cx.debug_bounds("explorer-tooltip").is_none(),
+            "tooltip should be hidden before hovering {selector}"
+        );
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} bounds"))
+            .center();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("explorer-tooltip").is_some(),
+            "{selector} should show tooltip after hover delay"
         );
     }
 
