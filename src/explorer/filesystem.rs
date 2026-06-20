@@ -242,6 +242,60 @@ pub(crate) fn drive_display_label(path: &Path) -> String {
     }
 }
 
+pub(super) fn path_is_filesystem_root(path: &Path) -> bool {
+    path.has_root() && path.parent().is_none()
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn path_is_wsl_unc(path: &Path) -> bool {
+    windows_wsl_unc_prefix(path).is_some()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn path_is_wsl_unc(_: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn path_is_wsl_unc_root(path: &Path) -> bool {
+    path_is_wsl_unc(path) && path_has_no_components_below_prefix_root(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn path_is_wsl_unc_root(_: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wsl_unc_prefix(path: &Path) -> Option<()> {
+    use std::path::Prefix;
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+
+    let server = match prefix.kind() {
+        Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => server,
+        _ => return None,
+    };
+
+    let server = server.to_string_lossy();
+    (server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$"))
+        .then_some(())
+}
+
+#[cfg(target_os = "windows")]
+fn path_has_no_components_below_prefix_root(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Prefix(_))) {
+        return false;
+    }
+    if matches!(components.clone().next(), Some(Component::RootDir)) {
+        components.next();
+    }
+    components.next().is_none()
+}
+
 #[cfg(target_os = "windows")]
 fn windows_volume_label(path: &Path) -> Option<String> {
     use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
@@ -3675,6 +3729,36 @@ mod tests {
         let roots = wsl_drive_roots_from_distribution_names(["", "  ", "Ubuntu"]);
 
         assert_eq!(roots, vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu\\")]);
+    }
+
+    #[test]
+    fn filesystem_root_detection_requires_absolute_root() {
+        let root = if cfg!(target_os = "windows") {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+
+        assert!(path_is_filesystem_root(&root));
+        assert!(!path_is_filesystem_root(Path::new("relative")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wsl_unc_detection_distinguishes_root_from_subdirectories() {
+        let root = PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\");
+        let legacy_root = PathBuf::from(r"\\wsl$\Ubuntu\");
+        let home = PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\home");
+        let normal_unc = PathBuf::from(r"\\server\share\");
+
+        assert!(path_is_wsl_unc(&root));
+        assert!(path_is_wsl_unc_root(&root));
+        assert!(path_is_wsl_unc(&legacy_root));
+        assert!(path_is_wsl_unc_root(&legacy_root));
+        assert!(path_is_wsl_unc(&home));
+        assert!(!path_is_wsl_unc_root(&home));
+        assert!(!path_is_wsl_unc(&normal_unc));
+        assert!(!path_is_wsl_unc_root(&normal_unc));
     }
 
     #[test]

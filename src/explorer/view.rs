@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -23,7 +24,10 @@ use crate::explorer::{
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
-    filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
+    filesystem::{
+        FileConflictBatch, FileOperationProgress, load_entries, path_is_filesystem_root,
+        path_is_wsl_unc_root,
+    },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
@@ -44,6 +48,9 @@ pub struct ExplorerView {
     pub(super) path: PathBuf,
     pub(super) entries: Vec<FileEntry>,
     pub(super) all_entries: Vec<FileEntry>,
+    pub(super) directory_load_generation: u64,
+    pub(super) directory_load_task: Option<Task<()>>,
+    pub(super) loading_path: Option<PathBuf>,
     pub(super) selection: SelectionState,
     pub(super) read_error: Option<String>,
     pub(super) open_error: Option<String>,
@@ -178,10 +185,23 @@ pub(super) struct PendingTrash {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerContentBranch {
     Error,
+    Loading,
     Empty,
     SearchWorking,
     NoSearchMatches,
     List,
+}
+
+#[derive(Clone, Debug)]
+struct DirectoryLoadState {
+    path: PathBuf,
+    generation: u64,
+    selected_paths: Vec<PathBuf>,
+    select_after_load: Vec<PathBuf>,
+    mode: ReloadMode,
+    schedule_metadata: bool,
+    refresh_search: bool,
+    restart_watcher: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,9 +222,19 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
-        let mut view = Self::new_inner_with_settings(initial_path, Some(focus_handle), &settings);
-        view.restart_directory_watcher(cx);
-        view.schedule_entry_metadata_resolution(cx);
+        let mut view =
+            Self::new_unloaded_inner_with_settings(initial_path, Some(focus_handle), &settings);
+        view.reload_async_with_options(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: true,
+            },
+            Vec::new(),
+            true,
+            false,
+            true,
+            cx,
+        );
         view.observe_icon_caches(cx);
         view.observe_image_thumbnail_cache(cx);
         view
@@ -223,7 +253,18 @@ impl ExplorerView {
         Self::new_inner_with_settings(initial_path, focus_handle, &ExplorerSettings::default())
     }
 
+    #[cfg(test)]
     fn new_inner_with_settings(
+        initial_path: PathBuf,
+        focus_handle: Option<FocusHandle>,
+        settings: &ExplorerSettings,
+    ) -> Self {
+        let mut view = Self::new_unloaded_inner_with_settings(initial_path, focus_handle, settings);
+        view.reload();
+        view
+    }
+
+    fn new_unloaded_inner_with_settings(
         initial_path: PathBuf,
         focus_handle: Option<FocusHandle>,
         settings: &ExplorerSettings,
@@ -232,6 +273,9 @@ impl ExplorerView {
             path: initial_path,
             entries: Vec::new(),
             all_entries: Vec::new(),
+            directory_load_generation: 0,
+            directory_load_task: None,
+            loading_path: None,
             selection: SelectionState::default(),
             read_error: None,
             open_error: None,
@@ -300,7 +344,7 @@ impl ExplorerView {
             git_status_generation: 0,
             git_status_task: None,
         };
-        view.reload();
+        view.apply_effective_view_mode();
         view
     }
 
@@ -350,9 +394,17 @@ impl ExplorerView {
 
         if hidden_changed {
             self.invalidate_recursive_search_cache();
-            self.reload();
-            self.schedule_entry_metadata_resolution(cx);
-            self.refresh_search_after_external_change(cx);
+            self.reload_async_with_options(
+                ReloadMode {
+                    preserve_selection: true,
+                    rebuild_sidebar: true,
+                },
+                Vec::new(),
+                true,
+                true,
+                false,
+                cx,
+            );
         } else {
             if folder_size_changed {
                 if self.show_folder_size {
@@ -387,9 +439,51 @@ impl ExplorerView {
 
     fn reload_inner(&mut self, mode: ReloadMode) {
         let total_started = Instant::now();
+        self.cancel_directory_load();
+        let selected_paths = self.prepare_directory_reload(mode);
+
+        let load_started = Instant::now();
+        match load_entries(&self.path, self.show_hidden_files) {
+            Ok(entries) => {
+                crate::debug_options::log_nav_timing(
+                    load_started.elapsed(),
+                    format_args!(
+                        "reload.load_entries path={:?} ok=true entries={}",
+                        self.path,
+                        entries.len()
+                    ),
+                );
+                self.apply_loaded_entries(mode, selected_paths, Vec::new(), entries);
+            }
+            Err(error) => {
+                crate::debug_options::log_nav_timing(
+                    load_started.elapsed(),
+                    format_args!(
+                        "reload.load_entries path={:?} ok=false error={error}",
+                        self.path
+                    ),
+                );
+                self.apply_directory_load_error(error);
+            }
+        }
+        self.finish_directory_reload_layout();
+        crate::debug_options::log_nav_timing(
+            total_started.elapsed(),
+            format_args!(
+                "reload.total path={:?} entries={} all_entries={} read_error={}",
+                self.path,
+                self.entries.len(),
+                self.all_entries.len(),
+                self.read_error.is_some()
+            ),
+        );
+    }
+
+    fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
         self.context_menu = None;
         self.open_error = None;
+        self.read_error = None;
         let selected_paths_started = Instant::now();
         let selected_paths = if mode.preserve_selection {
             self.selected_paths()
@@ -414,71 +508,223 @@ impl ExplorerView {
             );
         }
 
-        let load_started = Instant::now();
-        match load_entries(&self.path, self.show_hidden_files) {
-            Ok(entries) => {
-                crate::debug_options::log_nav_timing(
-                    load_started.elapsed(),
-                    format_args!(
-                        "reload.load_entries path={:?} ok=true entries={}",
-                        self.path,
-                        entries.len()
-                    ),
-                );
-                self.read_error = None;
-                let filter_started = Instant::now();
-                if self.search_is_active() {
-                    self.all_entries = entries;
-                    self.apply_search_filter_preserving_selection(&selected_paths);
-                } else {
-                    self.entries = entries.clone();
-                    self.all_entries = entries;
-                    if mode.preserve_selection {
-                        self.restore_selection_from_paths(&selected_paths);
-                    } else {
-                        self.selection = SelectionState::default();
-                    }
-                }
-                crate::debug_options::log_nav_timing(
-                    filter_started.elapsed(),
-                    format_args!(
-                        "reload.search_filter path={:?} query={:?} visible={} selected={}",
-                        self.path,
-                        self.search_query(),
-                        self.entries.len(),
-                        self.selection.selected_indices.len()
-                    ),
-                );
-            }
-            Err(error) => {
-                crate::debug_options::log_nav_timing(
-                    load_started.elapsed(),
-                    format_args!(
-                        "reload.load_entries path={:?} ok=false error={error}",
-                        self.path
-                    ),
-                );
-                self.all_entries.clear();
-                self.entries.clear();
-                self.clear_selection();
-                self.read_error = Some(error.to_string());
+        self.entries.clear();
+        self.all_entries.clear();
+        self.clear_selection();
+        self.set_horizontal_scroll_offset(0.0);
+        self.horizontal_scrollbar_drag = None;
+        self.apply_effective_view_mode();
+
+        selected_paths
+    }
+
+    fn apply_loaded_entries(
+        &mut self,
+        mode: ReloadMode,
+        selected_paths: Vec<PathBuf>,
+        select_after_load: Vec<PathBuf>,
+        entries: Vec<FileEntry>,
+    ) {
+        self.read_error = None;
+        let filter_started = Instant::now();
+        if self.search_is_active() {
+            self.all_entries = entries;
+            self.apply_search_filter_preserving_selection(&selected_paths);
+        } else {
+            self.entries = entries.clone();
+            self.all_entries = entries;
+            if mode.preserve_selection {
+                self.restore_selection_from_paths(&selected_paths);
+            } else {
+                self.selection = SelectionState::default();
             }
         }
+        if !select_after_load.is_empty() {
+            self.restore_selection_from_paths(&select_after_load);
+        }
+        crate::debug_options::log_nav_timing(
+            filter_started.elapsed(),
+            format_args!(
+                "reload.search_filter path={:?} query={:?} visible={} selected={}",
+                self.path,
+                self.search_query(),
+                self.entries.len(),
+                self.selection.selected_indices.len()
+            ),
+        );
+    }
+
+    fn apply_directory_load_error(&mut self, error: io::Error) {
+        self.all_entries.clear();
+        self.entries.clear();
+        self.clear_selection();
+        self.read_error = Some(error.to_string());
+    }
+
+    fn finish_directory_reload_layout(&mut self) {
         if self.entries.is_empty() {
             self.set_horizontal_scroll_offset(0.0);
             self.horizontal_scrollbar_drag = None;
         }
         self.apply_effective_view_mode();
+    }
+
+    pub(super) fn reload_async_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
+        self.reload_async_with_options(
+            ReloadMode {
+                preserve_selection: true,
+                rebuild_sidebar: true,
+            },
+            Vec::new(),
+            true,
+            false,
+            false,
+            cx,
+        );
+    }
+
+    pub(super) fn reload_for_navigation_async(
+        &mut self,
+        select_after_load: Vec<PathBuf>,
+        restart_watcher: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_async_with_options(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: false,
+            },
+            select_after_load,
+            true,
+            false,
+            restart_watcher,
+            cx,
+        );
+    }
+
+    fn refresh_async_with_entry_metadata_resolution(
+        &mut self,
+        refresh_search: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.invalidate_current_folder_size_cache(cx);
+        self.reload_async_with_options(
+            ReloadMode {
+                preserve_selection: true,
+                rebuild_sidebar: true,
+            },
+            Vec::new(),
+            true,
+            refresh_search,
+            false,
+            cx,
+        );
+    }
+
+    pub(super) fn reload_async_with_options(
+        &mut self,
+        mode: ReloadMode,
+        select_after_load: Vec<PathBuf>,
+        schedule_metadata: bool,
+        refresh_search: bool,
+        restart_watcher: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let total_started = Instant::now();
+        self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
+        let generation = self.directory_load_generation;
+        self.directory_load_task = None;
+        self.loading_path = Some(self.path.clone());
+
+        let selected_paths = self.prepare_directory_reload(mode);
+        let state = DirectoryLoadState {
+            path: self.path.clone(),
+            generation,
+            selected_paths,
+            select_after_load,
+            mode,
+            schedule_metadata,
+            refresh_search,
+            restart_watcher,
+        };
+        let path = state.path.clone();
+        let show_hidden_files = self.show_hidden_files;
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
-            format_args!(
-                "reload.total path={:?} entries={} all_entries={} read_error={}",
-                self.path,
-                self.entries.len(),
-                self.all_entries.len(),
-                self.read_error.is_some()
-            ),
+            format_args!("reload.async_start path={path:?} generation={generation}"),
         );
+
+        let task = cx.spawn(async move |this, cx| {
+            let load_started = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { load_entries(&path, show_hidden_files) }
+                })
+                .await;
+            crate::debug_options::log_nav_timing(
+                load_started.elapsed(),
+                format_args!(
+                    "reload.async_load path={:?} generation={} ok={}",
+                    state.path,
+                    state.generation,
+                    result.is_ok()
+                ),
+            );
+
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.apply_directory_load_result(state, result, cx) {
+                    cx.notify();
+                }
+            });
+        });
+        self.directory_load_task = Some(task);
+    }
+
+    fn apply_directory_load_result(
+        &mut self,
+        state: DirectoryLoadState,
+        result: io::Result<Vec<FileEntry>>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.directory_load_generation != state.generation || self.path != state.path {
+            return false;
+        }
+
+        self.directory_load_task = None;
+        self.loading_path = None;
+
+        match result {
+            Ok(entries) => {
+                self.apply_loaded_entries(
+                    state.mode,
+                    state.selected_paths,
+                    state.select_after_load,
+                    entries,
+                );
+            }
+            Err(error) => self.apply_directory_load_error(error),
+        }
+        self.finish_directory_reload_layout();
+
+        if state.refresh_search {
+            self.refresh_search_after_external_change(cx);
+        }
+        if state.schedule_metadata {
+            self.schedule_entry_metadata_resolution(cx);
+        }
+        if state.restart_watcher {
+            self.restart_directory_watcher(cx);
+        }
+
+        true
+    }
+
+    fn cancel_directory_load(&mut self) {
+        self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
+        self.directory_load_task = None;
+        self.loading_path = None;
     }
 
     pub(super) fn reload_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
@@ -487,9 +733,14 @@ impl ExplorerView {
     }
 
     pub(super) fn refresh_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
-        self.reload();
-        self.invalidate_current_folder_size_cache(cx);
-        self.schedule_entry_metadata_resolution(cx);
+        self.refresh_async_with_entry_metadata_resolution(false, cx);
+    }
+
+    pub(super) fn refresh_with_entry_metadata_and_search_resolution(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_async_with_entry_metadata_resolution(true, cx);
     }
 
     pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
@@ -503,6 +754,11 @@ impl ExplorerView {
         self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
         let generation = self.codebase_summary_generation;
         let path = self.path.clone();
+        if path_is_wsl_unc_root(&path) {
+            self.codebase_summary = None;
+            self.codebase_summary_task = None;
+            return;
+        }
         let Some(repo_root) = find_git_repository_root(&path) else {
             self.codebase_summary = None;
             self.codebase_summary_task = None;
@@ -540,6 +796,11 @@ impl ExplorerView {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         let path = self.path.clone();
+        if path_is_wsl_unc_root(&path) {
+            self.git_status = None;
+            self.git_status_task = None;
+            return;
+        }
         let Some(repo_root) = find_git_repository_root(&path) else {
             self.git_status = None;
             self.git_status_task = None;
@@ -609,6 +870,9 @@ impl ExplorerView {
     pub(super) fn schedule_folder_sizes(&mut self, cx: &mut Context<Self>) {
         self.cancel_folder_size_task();
         if !self.show_folder_size {
+            return;
+        }
+        if path_is_filesystem_root(&self.path) || path_is_wsl_unc_root(&self.path) {
             return;
         }
 
@@ -1044,10 +1308,10 @@ pub(super) fn sidebar_width_for_drag(start_width: f32, pointer_delta_x: f32) -> 
     normalized_sidebar_width_f32(start_width + pointer_delta_x)
 }
 
-#[derive(Clone, Copy)]
-struct ReloadMode {
-    preserve_selection: bool,
-    rebuild_sidebar: bool,
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReloadMode {
+    pub(super) preserve_selection: bool,
+    pub(super) rebuild_sidebar: bool,
 }
 
 pub(super) fn tab_label_for_path(path: &Path) -> String {
@@ -1066,13 +1330,20 @@ pub(super) fn tab_label_for_path(path: &Path) -> String {
 }
 
 impl ExplorerView {
+    pub(super) fn is_directory_loading(&self) -> bool {
+        self.loading_path.as_deref() == Some(self.path.as_path())
+            && self.directory_load_task.is_some()
+    }
+
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
-        self.all_entries.is_empty() && self.read_error.is_none()
+        self.all_entries.is_empty() && self.read_error.is_none() && !self.is_directory_loading()
     }
 
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {
         if self.read_error.is_some() {
             ExplorerContentBranch::Error
+        } else if self.is_directory_loading() {
+            ExplorerContentBranch::Loading
         } else if self.recursive_search_is_working() {
             ExplorerContentBranch::SearchWorking
         } else if self.should_show_empty_folder_message() {
@@ -1895,6 +2166,125 @@ mod tests {
             view.content_branch(),
             ExplorerContentBranch::NoSearchMatches
         );
+    }
+
+    #[gpui::test]
+    fn async_directory_load_shows_loading_until_entries_apply(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("file.txt"), b"file").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.reload_async_with_entry_metadata_resolution(cx);
+                assert_eq!(view.content_branch(), ExplorerContentBranch::Loading);
+                assert!(!view.should_show_empty_folder_message());
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+            assert_eq!(view.entries.len(), 1);
+            assert_eq!(view.entries[0].name, "file.txt");
+            assert!(view.loading_path.is_none());
+            assert!(view.directory_load_task.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn async_directory_load_failure_sets_read_error(cx: &mut gpui::TestAppContext) {
+        let missing = std::env::temp_dir().join("explorer-missing-directory-for-async-load-test");
+        let _ = std::fs::remove_dir_all(&missing);
+        let missing_path = missing.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("unused"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = missing_path.clone();
+                view.reload_async_with_entry_metadata_resolution(cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.content_branch(), ExplorerContentBranch::Error);
+            assert!(view.read_error.is_some());
+            assert!(view.entries.is_empty());
+            assert!(view.loading_path.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn stale_async_directory_load_result_is_ignored(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("current"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = PathBuf::from("current");
+                view.directory_load_generation = 2;
+                let state = DirectoryLoadState {
+                    path: PathBuf::from("stale"),
+                    generation: 1,
+                    selected_paths: Vec::new(),
+                    select_after_load: Vec::new(),
+                    mode: ReloadMode {
+                        preserve_selection: false,
+                        rebuild_sidebar: false,
+                    },
+                    schedule_metadata: true,
+                    refresh_search: true,
+                    restart_watcher: true,
+                };
+
+                assert!(!view.apply_directory_load_result(
+                    state,
+                    Ok(vec![FileEntry::test("stale.txt", false, Some(1), None)]),
+                    cx,
+                ));
+                assert!(view.entries.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn folder_sizes_are_not_scheduled_for_filesystem_roots(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FolderSizeCache::new());
+        let root = if cfg!(target_os = "windows") {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+        let root_path = root.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("unused"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = root_path.clone();
+                view.show_folder_size = true;
+                view.all_entries = vec![FileEntry::test("folder", true, None, None)];
+                view.entries = view.all_entries.clone();
+                view.schedule_folder_sizes(cx);
+                assert!(view.folder_size_task.is_none());
+            });
+        });
     }
 
     #[test]

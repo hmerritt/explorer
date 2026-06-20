@@ -454,7 +454,7 @@ impl ExplorerTabs {
     fn reload_all_tabs(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             let _ = tab.view.update(cx, |view, cx| {
-                view.reload_with_entry_metadata_resolution(cx);
+                view.reload_async_with_entry_metadata_resolution(cx);
                 cx.notify();
             });
         }

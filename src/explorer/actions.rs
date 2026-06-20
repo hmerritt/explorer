@@ -278,8 +278,7 @@ impl ExplorerView {
     }
 
     pub(super) fn handle_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_with_entry_metadata_resolution(cx);
-        self.refresh_search_after_external_change(cx);
+        self.refresh_with_entry_metadata_and_search_resolution(cx);
         cx.notify();
     }
 
@@ -371,7 +370,7 @@ mod tests {
         clipboard::{FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names, test_view_entity, test_view_entity_at_path},
     };
-    use gpui::{ClipboardItem, Image, ImageFormat, TestAppContext};
+    use gpui::{AppContext, ClipboardItem, Image, ImageFormat, TestAppContext};
     use std::fs;
 
     #[gpui::test]
@@ -455,18 +454,38 @@ mod tests {
             view.update(app, |view, cx| {
                 view.handle_go_up(&GoUp, window, cx);
                 assert_eq!(view.path, root);
-                assert_eq!(selected_names(view), vec!["child"]);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["child"]);
+        });
 
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
                 view.handle_go_back(&GoBack, window, cx);
                 assert_eq!(view.path, child);
+            });
+        });
+        cx.run_until_parked();
 
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
                 view.handle_go_forward(&GoForward, window, cx);
                 assert_eq!(view.path, root);
+            });
+        });
+        cx.run_until_parked();
 
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
                 fs::write(root.join("new.txt"), b"new").unwrap();
                 view.handle_refresh(&Refresh, window, cx);
-                assert!(view.entries.iter().any(|entry| entry.name == "new.txt"));
             });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.entries.iter().any(|entry| entry.name == "new.txt"));
         });
     }
 

@@ -50,6 +50,7 @@ pub(super) const LARGE_ICON_ROW_GAP: f32 = 2.0;
 pub(super) const EMPTY_FOLDER_TEXT_SIZE: f32 = 12.0;
 pub(super) const EMPTY_FOLDER_TOP_MARGIN: f32 = 20.0;
 pub(super) const EMPTY_FOLDER_MESSAGE: &str = "This folder is empty.";
+pub(super) const FOLDER_LOADING_MESSAGE: &str = "Working on it...";
 pub(super) const OPEN_ERROR_VERTICAL_PADDING: f32 = 8.0;
 pub(super) const OPEN_ERROR_HORIZONTAL_PADDING: f32 = 16.0;
 pub(super) const STATUS_BAR_HEIGHT: f32 = 24.0;

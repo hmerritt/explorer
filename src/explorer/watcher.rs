@@ -64,8 +64,7 @@ fn spawn_watcher_task(
             let should_continue = this
                 .update(cx, |explorer, cx| {
                     if explorer.path() == watched_path {
-                        explorer.reload();
-                        explorer.schedule_entry_metadata_resolution(cx);
+                        explorer.reload_async_with_entry_metadata_resolution(cx);
                         cx.notify();
                     }
                 })

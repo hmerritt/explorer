@@ -10,7 +10,7 @@ use crate::explorer::filesystem::format_open_error;
 use crate::explorer::{
     entry::FileEntry,
     selection::SelectionModifiers,
-    view::{EntryClickSequence, ExplorerView},
+    view::{EntryClickSequence, ExplorerView, ReloadMode},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,26 +58,25 @@ impl ExplorerView {
 
         if path == self.path {
             let reload_started = Instant::now();
-            self.reload();
             if let Some(cx) = cx.as_deref_mut() {
-                self.schedule_entry_metadata_resolution(cx);
+                self.reload_async_with_options(
+                    ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    Vec::new(),
+                    true,
+                    true,
+                    true,
+                    cx,
+                );
+            } else {
+                self.reload();
             }
             crate::debug_options::log_nav_timing(
                 reload_started.elapsed(),
                 format_args!("navigate.reload same_path=true path={:?}", self.path),
             );
-            if let Some(cx) = cx.as_deref_mut() {
-                let refresh_started = Instant::now();
-                self.refresh_search_after_external_change(cx);
-                crate::debug_options::log_nav_timing(
-                    refresh_started.elapsed(),
-                    format_args!(
-                        "navigate.refresh_search same_path=true path={:?}",
-                        self.path
-                    ),
-                );
-                self.restart_directory_watcher(cx);
-            }
             crate::debug_options::log_nav_timing(
                 total_started.elapsed(),
                 format_args!(
@@ -115,19 +114,23 @@ impl ExplorerView {
         );
 
         let reload_started = Instant::now();
-        self.reload_for_navigation();
         if let Some(cx) = cx.as_deref_mut() {
-            self.schedule_entry_metadata_resolution(cx);
+            self.reload_for_navigation_async(
+                select_entry_after_reload.clone().into_iter().collect(),
+                true,
+                cx,
+            );
+        } else {
+            self.reload_for_navigation();
         }
         crate::debug_options::log_nav_timing(
             reload_started.elapsed(),
             format_args!("navigate.reload same_path=false path={:?}", self.path),
         );
-        if let Some(cx) = cx.as_deref_mut() {
-            self.restart_directory_watcher(cx);
-        }
 
-        if let Some(path) = select_entry_after_reload {
+        if cx.is_none()
+            && let Some(path) = select_entry_after_reload
+        {
             let selection_started = Instant::now();
             self.select_single_path(&path);
             crate::debug_options::log_nav_timing(
