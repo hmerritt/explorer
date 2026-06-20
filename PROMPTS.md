@@ -2,8 +2,6 @@
 
 ## 1
 
-- Settings option for windows-only to set default slash (back/forward). Default to forward. This setting changes addres bar behaviour to show back/forward slashes (also normalizes to whatever option was set)
-
 ## 2
 
 - Improve readme - add screenshots / branding

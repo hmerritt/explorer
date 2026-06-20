@@ -73,6 +73,8 @@ pub struct ExplorerView {
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
     pub(super) active_address_bar: Option<AddressBarState>,
+    #[cfg(target_os = "windows")]
+    pub(super) address_slash: crate::settings::AddressSlash,
     pub(super) search: SearchState,
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
@@ -258,6 +260,8 @@ impl ExplorerView {
             active_rename: None,
             rename_focus_out: None,
             active_address_bar: None,
+            #[cfg(target_os = "windows")]
+            address_slash: settings.view.address_slash,
             search: SearchState::default(),
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
@@ -302,6 +306,10 @@ impl ExplorerView {
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
+        #[cfg(target_os = "windows")]
+        {
+            self.address_slash = settings.view.address_slash;
+        }
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
 

@@ -2,7 +2,7 @@ use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
     ops::Range,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -92,6 +92,8 @@ use crate::explorer::{
         UtilityMenu, normalized_sidebar_width_f32,
     },
 };
+#[cfg(test)]
+use crate::explorer::address_bar::format_address_path;
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::{FileColumnKind, FileViewMode, SettingsState};
 use thousands::Separable;
@@ -4155,9 +4157,9 @@ fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
             this.close_context_menu();
             this.open_utility_menu = None;
             if this.commit_active_rename_before_interaction(window, cx) {
-                cx.write_to_clipboard(ClipboardItem::new_string(copied_directory_address(
-                    &this.path,
-                )));
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    this.address_text_for_path(&this.path),
+                ));
             }
             cx.stop_propagation();
             cx.notify();
@@ -4167,18 +4169,9 @@ fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
         .into_any_element()
 }
 
-fn copied_directory_address(path: &Path) -> String {
-    let address = path.display().to_string();
-
-    #[cfg(target_os = "windows")]
-    {
-        address.replace('\\', "/")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        address
-    }
+#[cfg(test)]
+fn copied_directory_address(path: &std::path::Path) -> String {
+    format_address_path(path, crate::settings::AddressSlash::Forward)
 }
 
 fn editable_directory_bar(
@@ -5477,13 +5470,14 @@ mod tests {
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, drop_indicator_target_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, git_branch_tooltip, git_divergence_label,
-        git_divergence_tooltip, is_alt_entry_double_click, is_normal_entry_click,
-        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
+        filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
+        git_divergence_label, git_divergence_tooltip, is_alt_entry_double_click,
+        is_normal_entry_click, lines_of_code_tooltip, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
         sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
+    use crate::settings::AddressSlash;
 
     #[test]
     fn nav_button_active_opacity_dims_button() {
@@ -6241,6 +6235,19 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn address_path_formatting_supports_backslashes_on_windows() {
+        assert_eq!(
+            format_address_path(Path::new(r"C:/Users/Ada/Documents"), AddressSlash::Back),
+            r"C:\Users\Ada\Documents"
+        );
+        assert_eq!(
+            format_address_path(Path::new(r"//server/share/dir"), AddressSlash::Back),
+            r"\\server\share\dir"
+        );
+    }
+
     #[gpui::test]
     fn directory_copy_address_button_copies_current_path_without_editing(
         cx: &mut gpui::TestAppContext,
@@ -6266,6 +6273,37 @@ mod tests {
         cx.read_entity(&view, |view, _| assert!(!view.address_bar_is_editing()));
         assert!(cx.debug_bounds("directory-bar").is_some());
         assert!(cx.debug_bounds("directory-bar-input").is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn directory_copy_address_button_uses_configured_backslashes_on_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let expected = format_address_path(&path, AddressSlash::Back);
+        let (view, cx) = test_view_entity_at_path(cx, path);
+
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.address_slash = AddressSlash::Back;
+            });
+        });
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("directory-copy-address")
+            .expect("directory copy address button bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(expected)
+        );
+        cx.read_entity(&view, |view, _| assert!(!view.address_bar_is_editing()));
     }
 
     #[gpui::test]

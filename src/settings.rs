@@ -69,6 +69,14 @@ pub enum DriveHideKind {
     Wsl,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressSlash {
+    #[default]
+    Forward,
+    Back,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ExplorerSettings {
@@ -290,6 +298,9 @@ pub struct TabSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ViewSettings {
+    #[cfg(target_os = "windows")]
+    #[serde(default)]
+    pub address_slash: AddressSlash,
     #[serde(default = "default_date_format")]
     pub date_format: String,
     #[serde(
@@ -376,6 +387,8 @@ impl Default for TabSettings {
 impl Default for ViewSettings {
     fn default() -> Self {
         Self {
+            #[cfg(target_os = "windows")]
+            address_slash: AddressSlash::Forward,
             date_format: default_date_format(),
             file_columns: default_file_columns(),
             font: default_font(),
@@ -1958,6 +1971,8 @@ mod tests {
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        #[cfg(target_os = "windows")]
+        assert_eq!(settings.view.address_slash, AddressSlash::Forward);
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
@@ -2011,6 +2026,8 @@ mod tests {
         assert!(settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        #[cfg(target_os = "windows")]
+        assert_eq!(settings.view.address_slash, AddressSlash::Forward);
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
@@ -2023,6 +2040,16 @@ mod tests {
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn address_slash_deserializes_backslashes() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{"address_slash":"back"}}"#)
+                .expect("deserialize settings");
+
+        assert_eq!(settings.view.address_slash, AddressSlash::Back);
     }
 
     #[test]

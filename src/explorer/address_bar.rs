@@ -29,6 +29,7 @@ use crate::explorer::{
     },
     view::ExplorerView,
 };
+use crate::settings::AddressSlash;
 
 pub(super) const ADDRESS_SUGGESTION_ROW_HEIGHT: f32 = 30.0;
 pub(super) const ADDRESS_SUGGESTION_VISIBLE_ROWS: usize = 10;
@@ -535,8 +536,10 @@ impl ExplorerView {
         }
 
         let focus_handle = cx.focus_handle();
-        let mut address =
-            AddressBarState::new(self.path.display().to_string(), Some(focus_handle.clone()));
+        let mut address = AddressBarState::new(
+            self.address_text_for_path(&self.path),
+            Some(focus_handle.clone()),
+        );
         address.suggestions =
             folder_suggestions_for_input(&address.content, &self.path, self.show_hidden_files);
 
@@ -554,6 +557,18 @@ impl ExplorerView {
     pub(super) fn cancel_address_bar_edit(&mut self) {
         if let Some(mut address) = self.active_address_bar.take() {
             address.focus_out = None;
+        }
+    }
+
+    pub(super) fn address_text_for_path(&self, path: &Path) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            format_address_path(path, self.address_slash)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            format_address_path(path, AddressSlash::Forward)
         }
     }
 
@@ -581,9 +596,10 @@ impl ExplorerView {
     }
 
     fn navigate_to_address_suggestion_inline(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let address_text = self.address_text_for_path(&path);
         self.navigate_to_directory_with_watcher(path.clone(), HistoryMode::Record, cx);
         if let Some(address) = self.active_address_bar.as_mut() {
-            address.content = path.display().to_string();
+            address.content = address_text;
             address.selected_range = address.content.len()..address.content.len();
             address.selection_reversed = false;
             address.marked_range = None;
@@ -653,15 +669,20 @@ impl ExplorerView {
     }
 
     fn accept_address_suggestion(&mut self) -> bool {
+        let Some(path) = self.active_address_bar.as_ref().and_then(|address| {
+            let index = address.highlighted_suggestion.or(Some(0));
+            index
+                .and_then(|index| address.suggestions.get(index))
+                .map(|suggestion| suggestion.path.clone())
+        }) else {
+            return false;
+        };
+        let address_text = self.address_text_for_path(&path);
+
         let Some(address) = self.active_address_bar.as_mut() else {
             return false;
         };
-        let index = address.highlighted_suggestion.or(Some(0));
-        let Some(suggestion) = index.and_then(|index| address.suggestions.get(index)) else {
-            return false;
-        };
-
-        address.content = suggestion.path.display().to_string();
+        address.content = address_text;
         address.selected_range = address.content.len()..address.content.len();
         address.selection_reversed = false;
         address.marked_range = None;
@@ -828,6 +849,24 @@ impl ExplorerView {
             address.delete_previous_word_or_selection();
             self.refresh_address_suggestions();
         }
+    }
+}
+
+pub(super) fn format_address_path(path: &Path, slash: AddressSlash) -> String {
+    let address = path.display().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        match slash {
+            AddressSlash::Forward => address.replace('\\', "/"),
+            AddressSlash::Back => address.replace('/', "\\"),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = slash;
+        address
     }
 }
 
@@ -1214,6 +1253,7 @@ mod tests {
         test_support::{TempDir, test_view_entity_at_path},
         view::ExplorerView,
     };
+    use crate::settings::AddressSlash;
     use gpui::{ClipboardItem, Modifiers, MouseButton, TestAppContext};
     use std::fs;
 
@@ -1502,12 +1542,36 @@ mod tests {
         let temp = TempDir::new();
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.active_address_bar = Some(AddressBarState::new(
-            temp.path().display().to_string(),
+            view.address_text_for_path(temp.path()),
             None,
         ));
 
         let address = view.active_address_bar.as_ref().unwrap();
+        assert_eq!(
+            address.content,
+            format_address_path(temp.path(), AddressSlash::Forward)
+        );
         assert_eq!(address.selected_range, 0..address.content.len());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn address_start_uses_configured_backslashes_on_windows(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, path.clone());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.address_slash = AddressSlash::Back;
+                assert!(view.start_address_bar_edit(window, cx));
+                let address = view.active_address_bar.as_ref().expect("address edit");
+                assert_eq!(
+                    address.content,
+                    format_address_path(&path, AddressSlash::Back)
+                );
+            });
+        });
     }
 
     #[test]
@@ -1541,6 +1605,28 @@ mod tests {
             .highlighted_suggestion = Some(0);
 
         assert_eq!(view.highlighted_address_suggestion_path(), Some(child));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn accept_address_suggestion_uses_configured_backslashes_on_windows() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.address_slash = AddressSlash::Back;
+        let mut address = AddressBarState::new("ch".to_owned(), None);
+        address.suggestions = folder_suggestions_for_input(&address.content, temp.path(), true);
+        view.active_address_bar = Some(address);
+
+        assert!(view.accept_address_suggestion());
+
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(
+            address.content,
+            format_address_path(&child, AddressSlash::Back)
+        );
     }
 
     #[test]
@@ -1590,6 +1676,31 @@ mod tests {
 
         assert_eq!(view.path, captured_path);
         assert!(view.active_address_bar.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn inline_address_suggestion_uses_configured_backslashes_on_windows(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.address_slash = AddressSlash::Back;
+                view.active_address_bar = Some(AddressBarState::new("ch".to_owned(), None));
+
+                view.navigate_to_address_suggestion_inline(child.clone(), cx);
+
+                assert_eq!(view.path, child);
+                let address = view.active_address_bar.as_ref().expect("address edit");
+                assert_eq!(
+                    address.content,
+                    format_address_path(&child, AddressSlash::Back)
+                );
+            });
+        });
     }
 
     fn address_suggestions_for_test(count: usize) -> Vec<AddressBarSuggestion> {
@@ -1709,7 +1820,7 @@ mod tests {
                 view.handle_address_copy(&AddressCopy, window, cx);
                 assert_eq!(
                     cx.read_from_clipboard().and_then(|item| item.text()),
-                    Some(temp.path().display().to_string())
+                    Some(format_address_path(temp.path(), AddressSlash::Forward))
                 );
 
                 view.handle_address_cut(&AddressCut, window, cx);
@@ -1912,7 +2023,7 @@ mod tests {
                         .as_ref()
                         .expect("address edit")
                         .content,
-                    child.display().to_string()
+                    format_address_path(&child, AddressSlash::Forward)
                 );
 
                 view.handle_address_commit(&AddressCommit, window, cx);
