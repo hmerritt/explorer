@@ -80,6 +80,7 @@ pub mod benchmark_support {
         list_archive, load_entries, plan_archives, prepare_archive_extraction,
     };
     pub use super::image_preview::benchmark_support::*;
+    pub use super::properties::benchmark_support::*;
     pub use super::recursive_search::benchmark_support::*;
 
     pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {

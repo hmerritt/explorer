@@ -5,7 +5,8 @@ metadata materialization, cached and uncached full searches, and cancellation.
 The navigation-pipeline benchmark measures basic directory entry loading for a
 small Documents-like folder with hidden entries. The image-thumbnail benchmark
 measures cold thumbnail extraction for large raster/SVG/TIFF files and parallel
-JPEG batch extraction.
+JPEG batch extraction. The properties benchmark measures fast directory
+properties snapshots separately from exact recursive totals.
 
 Run it with:
 
@@ -13,6 +14,7 @@ Run it with:
 cargo bench --features benchmarks --bench recursive_search
 cargo bench --features benchmarks --bench navigation_pipeline
 cargo bench --features benchmarks --bench image_thumbnails
+cargo bench --features benchmarks --bench properties
 ```
 
 The first run creates a deterministic 25,000-file fixture under
@@ -29,6 +31,9 @@ The navigation benchmark creates its fixture under
 
 The image-thumbnail benchmark creates deterministic large PNG, JPEG, TIFF, SVG,
 and batch JPEG fixtures under `target/image-thumbnails-benchmark-v2`.
+
+The properties benchmark creates a deterministic large directory fixture under
+`target/properties-benchmark-v1`.
 
 ## Archive extraction
 

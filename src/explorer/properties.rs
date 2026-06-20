@@ -5,7 +5,10 @@ use std::{
     io::{BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, SystemTime},
 };
 
@@ -20,6 +23,7 @@ use gpui::{
     Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations,
     WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
+use jwalk::WalkDirGeneric;
 use sha2::{Digest, Sha256, Sha512};
 use thousands::Separable;
 
@@ -93,6 +97,8 @@ const PROPERTIES_ROW_CONTAINS_ID: &str = "properties-property-row-contains";
 const PROPERTIES_ROW_CREATED_ID: &str = "properties-property-row-created";
 const PROPERTIES_ROW_MODIFIED_ID: &str = "properties-property-row-modified";
 const PROPERTIES_ROW_ACCESSED_ID: &str = "properties-property-row-accessed";
+const PROPERTIES_CALCULATING_LABEL: &str = "Calculating...";
+const PROPERTY_TREE_CANCELLATION_CHECK_INTERVAL: usize = 4096;
 #[cfg(test)]
 const PROPERTIES_GENERAL_PROPERTY_ROW_IDS: &[&str] = &[
     PROPERTIES_ROW_TYPE_ID,
@@ -118,10 +124,10 @@ pub(super) struct PropertySnapshot {
     pub(super) item_kind: PropertyItemKind,
     pub(super) type_label: MixedValue<String>,
     pub(super) location: MixedValue<String>,
-    pub(super) size: u64,
-    pub(super) size_on_disk: u64,
-    pub(super) contains: Option<PropertyContains>,
-    pub(super) selection_counts: Option<PropertyContains>,
+    pub(super) size: PropertyValue<u64>,
+    pub(super) size_on_disk: PropertyValue<u64>,
+    pub(super) contains: Option<PropertyValue<PropertyContains>>,
+    pub(super) selection_counts: Option<PropertyValue<PropertyContains>>,
     pub(super) created: MixedValue<SystemTime>,
     pub(super) modified: MixedValue<SystemTime>,
     pub(super) accessed: MixedValue<SystemTime>,
@@ -155,6 +161,29 @@ pub(super) enum MixedValue<T> {
     None,
     Single(T),
     Mixed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum PropertyValue<T> {
+    Loading,
+    Ready(T),
+}
+
+impl<T> PropertyValue<T> {
+    fn ready(value: T) -> Self {
+        Self::Ready(value)
+    }
+
+    fn as_ready(&self) -> Option<&T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            Self::Loading => None,
+        }
+    }
+
+    fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -369,6 +398,7 @@ pub(super) struct PropertiesDialog {
     active_tab: PropertyTab,
     snapshot_state: PropertySnapshotState,
     snapshot_generation: u64,
+    tree_summary_generation: u64,
     details_state: PropertyDetailsState,
     details_generation: u64,
     code_state: PropertyCodeState,
@@ -386,6 +416,8 @@ pub(super) struct PropertiesDialog {
     frames_scrollbar_hovered: bool,
     frames_scrollbar_drag: Option<ScrollbarDrag>,
     snapshot_task: Option<Task<()>>,
+    tree_summary_task: Option<Task<()>>,
+    tree_summary_cancel: Option<Arc<AtomicBool>>,
     details_task: Option<Task<()>>,
     code_task: Option<Task<()>>,
     image_task: Option<Task<()>>,
@@ -471,6 +503,7 @@ impl PropertiesDialog {
             active_tab: PropertyTab::General,
             snapshot_state: PropertySnapshotState::Loading,
             snapshot_generation: 0,
+            tree_summary_generation: 0,
             details_state: PropertyDetailsState::NotStarted,
             details_generation: 0,
             code_state: PropertyCodeState::NotStarted,
@@ -488,6 +521,8 @@ impl PropertiesDialog {
             frames_scrollbar_hovered: false,
             frames_scrollbar_drag: None,
             snapshot_task: None,
+            tree_summary_task: None,
+            tree_summary_cancel: None,
             details_task: None,
             code_task: None,
             image_task: None,
@@ -511,6 +546,7 @@ impl PropertiesDialog {
     }
 
     fn start_snapshot_task(&mut self, cx: &mut Context<Self>) {
+        self.cancel_tree_summary_task();
         self.snapshot_state = PropertySnapshotState::Loading;
         self.reset_details_state();
         self.reset_code_state();
@@ -524,7 +560,8 @@ impl PropertiesDialog {
                 .spawn(async move {
                     let path_count = target.paths.len();
                     let started = Instant::now();
-                    let result = collect_property_snapshot_with_date_format(target, &date_format);
+                    let result =
+                        collect_property_snapshot_fast_with_date_format(target, &date_format);
                     match &result {
                         Ok(snapshot) => crate::debug_options::log_property_timing(
                             started.elapsed(),
@@ -592,6 +629,7 @@ impl PropertiesDialog {
     }
 
     fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
+        self.cancel_tree_summary_task();
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
@@ -611,6 +649,103 @@ impl PropertiesDialog {
             PropertyTab::Frames => self.start_frames_task(cx),
             PropertyTab::General => {}
         }
+        self.start_tree_summary_task(cx);
+    }
+
+    fn start_tree_summary_task(&mut self, cx: &mut Context<Self>) {
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        if !snapshot_needs_tree_summary(snapshot) {
+            return;
+        }
+
+        self.tree_summary_generation = self.tree_summary_generation.wrapping_add(1);
+        let generation = self.tree_summary_generation;
+        let target = snapshot.target.clone();
+        let date_format = self.date_format.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.tree_summary_cancel = Some(cancel.clone());
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let cancel = cancel.clone();
+                    async move {
+                        let path_count = target.paths.len();
+                        let started = Instant::now();
+                        let result = collect_property_snapshot_full_with_date_format(
+                            target,
+                            &date_format,
+                            &cancel,
+                        );
+                        match &result {
+                            Ok(snapshot) => crate::debug_options::log_property_timing(
+                                started.elapsed(),
+                                format_args!(
+                                    "tree summary ready paths={} details={} title={:?}",
+                                    path_count,
+                                    detail_count(&snapshot.details),
+                                    snapshot.title
+                                ),
+                            ),
+                            Err(error) => crate::debug_options::log_property_timing(
+                                started.elapsed(),
+                                format_args!(
+                                    "tree summary failed paths={} error={:?}",
+                                    path_count, error
+                                ),
+                            ),
+                        }
+                        result
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.tree_summary_generation != generation
+                    || dialog
+                        .tree_summary_cancel
+                        .as_ref()
+                        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                {
+                    return;
+                }
+
+                dialog.tree_summary_task = None;
+                dialog.tree_summary_cancel = None;
+                if let Ok(snapshot) = result {
+                    dialog.apply_tree_summary_snapshot(snapshot);
+                    cx.notify();
+                }
+            });
+        });
+        self.tree_summary_task = Some(task);
+    }
+
+    fn cancel_tree_summary_task(&mut self) {
+        self.tree_summary_generation = self.tree_summary_generation.wrapping_add(1);
+        if let Some(cancel) = self.tree_summary_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.tree_summary_task = None;
+    }
+
+    fn apply_tree_summary_snapshot(&mut self, tree_snapshot: PropertySnapshot) {
+        let PropertySnapshotState::Ready(snapshot) = &mut self.snapshot_state else {
+            return;
+        };
+        if snapshot.target != tree_snapshot.target {
+            return;
+        }
+
+        snapshot.size = tree_snapshot.size;
+        snapshot.size_on_disk = tree_snapshot.size_on_disk;
+        snapshot.contains = tree_snapshot.contains;
+        snapshot.selection_counts = tree_snapshot.selection_counts;
+        snapshot.details = tree_snapshot.details;
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        self.clear_details_render_cache();
     }
 
     fn clear_details_render_cache(&mut self) {
@@ -1002,11 +1137,13 @@ impl PropertiesDialog {
 
     fn close(&mut self, window: &mut Window, _: &mut Context<Self>) {
         self.completed = true;
+        self.cancel_tree_summary_task();
         window.remove_window();
     }
 
     fn release(&mut self, _cx: &mut App) {
         self.completed = true;
+        self.cancel_tree_summary_task();
         #[cfg(target_os = "linux")]
         if let Some(handle) = self.default_app_picker.take() {
             let _ = handle.update(_cx, |_, window, _| window.remove_window());
@@ -1044,7 +1181,7 @@ impl PropertiesDialog {
                 .spawn(async move {
                     let outcome = apply_property_draft(&target.paths, &plan);
                     let snapshot =
-                        collect_property_snapshot_with_date_format(target, &date_format).ok();
+                        collect_property_snapshot_fast_with_date_format(target, &date_format).ok();
                     (outcome, snapshot)
                 })
                 .await;
@@ -1170,9 +1307,9 @@ impl PropertiesDialog {
         let task = cx.spawn(async move |this, cx| {
             let snapshot = cx
                 .background_executor()
-                .spawn(
-                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
-                )
+                .spawn(async move {
+                    collect_property_snapshot_fast_with_date_format(target, &date_format)
+                })
                 .await
                 .ok();
 
@@ -1240,9 +1377,9 @@ impl PropertiesDialog {
                 .await;
             let snapshot = cx
                 .background_executor()
-                .spawn(
-                    async move { collect_property_snapshot_with_date_format(target, &date_format) },
-                )
+                .spawn(async move {
+                    collect_property_snapshot_fast_with_date_format(target, &date_format)
+                })
                 .await
                 .ok();
 
@@ -1736,20 +1873,20 @@ impl PropertiesDialog {
             .child(property_row(
                 PROPERTIES_ROW_SIZE_ID,
                 "Size:",
-                property_size_label(snapshot.size),
+                property_size_value_label(&snapshot.size),
                 cx,
             ))
             .child(property_row(
                 PROPERTIES_ROW_SIZE_ON_DISK_ID,
                 "Size on disk:",
-                property_size_label(snapshot.size_on_disk),
+                property_size_value_label(&snapshot.size_on_disk),
                 cx,
             ));
         if let Some(contains) = snapshot.contains.as_ref() {
             body = body.child(property_row(
                 PROPERTIES_ROW_CONTAINS_ID,
                 "Contains:",
-                contains_label(contains),
+                contains_value_label(contains),
                 cx,
             ));
         }
@@ -1797,7 +1934,7 @@ impl PropertiesDialog {
 
     fn render_title_row(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
         let title_text = if let Some(counts) = snapshot.selection_counts.as_ref() {
-            selection_count_label(counts)
+            selection_count_value_label(counts)
         } else {
             snapshot.title.clone()
         };
@@ -2093,7 +2230,8 @@ impl PropertiesDialog {
 
     fn render_code(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
         let has_code_tab =
-            single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind).is_some();
+            single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind)
+                .is_some();
         if !has_code_tab {
             return centered_message("Code information is not available for this item.");
         }
@@ -2773,12 +2911,39 @@ fn properties_window_title(paths: &[PathBuf]) -> String {
 
 #[cfg(test)]
 fn collect_property_snapshot(target: PropertyTarget) -> Result<PropertySnapshot, String> {
-    collect_property_snapshot_with_date_format(target, crate::settings::DEFAULT_DATE_FORMAT)
+    let cancel = AtomicBool::new(false);
+    collect_property_snapshot_full_with_date_format(
+        target,
+        crate::settings::DEFAULT_DATE_FORMAT,
+        &cancel,
+    )
+}
+
+fn collect_property_snapshot_fast_with_date_format(
+    target: PropertyTarget,
+    date_format: &str,
+) -> Result<PropertySnapshot, String> {
+    collect_property_snapshot_with_date_format(target, date_format, PropertyTreeMode::Fast)
+}
+
+fn collect_property_snapshot_full_with_date_format(
+    target: PropertyTarget,
+    date_format: &str,
+    cancel: &AtomicBool,
+) -> Result<PropertySnapshot, String> {
+    collect_property_snapshot_with_date_format(target, date_format, PropertyTreeMode::Full(cancel))
+}
+
+#[derive(Clone, Copy)]
+enum PropertyTreeMode<'a> {
+    Fast,
+    Full(&'a AtomicBool),
 }
 
 fn collect_property_snapshot_with_date_format(
     target: PropertyTarget,
     date_format: &str,
+    tree_mode: PropertyTreeMode<'_>,
 ) -> Result<PropertySnapshot, String> {
     if target.paths.is_empty() {
         return Err("No items selected.".to_owned());
@@ -2786,7 +2951,7 @@ fn collect_property_snapshot_with_date_format(
 
     let mut items = Vec::new();
     for path in &target.paths {
-        items.push(collect_property_item(path, date_format));
+        items.push(collect_property_item(path, date_format, tree_mode)?);
     }
 
     let title = property_title(&target.paths);
@@ -2803,11 +2968,8 @@ fn collect_property_snapshot_with_date_format(
     let unix_mode = mixed_from_iter(items.iter().map(|item| item.unix_mode));
     let permission_summary =
         mixed_from_iter(items.iter().map(|item| item.permission_summary.clone()));
-    let size = items.iter().map(|item| item.size.unwrap_or(0)).sum();
-    let size_on_disk = items
-        .iter()
-        .map(|item| item.size_on_disk.unwrap_or(0))
-        .sum();
+    let size = property_value_sum(items.iter().map(|item| item.size.as_ref()));
+    let size_on_disk = property_value_sum(items.iter().map(|item| item.size_on_disk.as_ref()));
     let contains = if items.len() == 1 {
         items[0].contains.clone()
     } else {
@@ -2871,10 +3033,10 @@ struct PropertyItem {
     is_dir: bool,
     type_label: Option<String>,
     location: Option<String>,
-    size: Option<u64>,
-    size_on_disk: Option<u64>,
-    contains: Option<PropertyContains>,
-    selection_counts: Option<PropertyContains>,
+    size: Option<PropertyValue<u64>>,
+    size_on_disk: Option<PropertyValue<u64>>,
+    contains: Option<PropertyValue<PropertyContains>>,
+    selection_counts: Option<PropertyValue<PropertyContains>>,
     created: Option<SystemTime>,
     modified: Option<SystemTime>,
     accessed: Option<SystemTime>,
@@ -2888,40 +3050,80 @@ struct PropertyItem {
     details: Vec<PropertyDetailGroup>,
 }
 
-fn collect_property_item(path: &Path, date_format: &str) -> PropertyItem {
+fn collect_property_item(
+    path: &Path,
+    date_format: &str,
+    tree_mode: PropertyTreeMode<'_>,
+) -> Result<PropertyItem, String> {
     let link_metadata = fs::symlink_metadata(path).ok();
-    let metadata = fs::metadata(path).ok().or_else(|| link_metadata.clone());
+    let metadata = property_target_metadata(path, link_metadata.as_ref());
     let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
     let exists = metadata.is_some();
+    let is_directory_link = link_metadata
+        .as_ref()
+        .is_some_and(metadata_is_directory_link);
     let entry = link_metadata.as_ref().and_then(|metadata| {
         crate::explorer::FileEntry::from_path_with_link_metadata(
             path.to_path_buf(),
             metadata.clone(),
         )
     });
-    let tree_summary = collect_property_tree_summary(path);
-    let size = tree_summary
-        .map(|summary| summary.size)
-        .or_else(|| metadata.as_ref().map(|metadata| metadata.len()));
-    let size_on_disk = tree_summary
-        .map(|summary| summary.size_on_disk)
-        .or_else(|| {
-            metadata
-                .as_ref()
-                .map(|metadata| size_on_disk(path, metadata).unwrap_or_else(|| metadata.len()))
-        });
-    let contains = if is_dir {
-        tree_summary.map(|summary| PropertyContains {
-            files: summary.files,
-            folders: summary.folders.saturating_sub(1),
+
+    let recursive_summary_is_pending =
+        is_dir && !is_directory_link && matches!(tree_mode, PropertyTreeMode::Fast);
+    let tree_summary = if recursive_summary_is_pending {
+        None
+    } else if metadata.is_some() {
+        collect_property_tree_summary(path, tree_mode)?
+    } else {
+        None
+    };
+    let size = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else {
+        tree_summary
+            .map(|summary| PropertyValue::ready(summary.size))
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .map(|metadata| PropertyValue::ready(metadata.len()))
+            })
+    };
+    let size_on_disk = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else {
+        tree_summary
+            .map(|summary| PropertyValue::ready(summary.size_on_disk))
+            .or_else(|| {
+                metadata.as_ref().map(|metadata| {
+                    PropertyValue::ready(
+                        size_on_disk(path, metadata).unwrap_or_else(|| metadata.len()),
+                    )
+                })
+            })
+    };
+    let contains = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else if is_dir {
+        tree_summary.map(|summary| {
+            PropertyValue::ready(PropertyContains {
+                files: summary.files,
+                folders: summary.folders.saturating_sub(1),
+            })
         })
     } else {
         None
     };
-    let selection_counts = tree_summary.map(|summary| PropertyContains {
-        files: summary.files,
-        folders: summary.folders,
-    });
+    let selection_counts = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else {
+        tree_summary.map(|summary| {
+            PropertyValue::ready(PropertyContains {
+                files: summary.files,
+                folders: summary.folders,
+            })
+        })
+    };
     let readonly = metadata
         .as_ref()
         .map(|metadata| metadata.permissions().readonly());
@@ -2931,12 +3133,15 @@ fn collect_property_item(path: &Path, date_format: &str) -> PropertyItem {
         path,
         entry.as_ref(),
         metadata.as_ref(),
-        size,
-        size_on_disk,
+        size.as_ref().and_then(PropertyValue::as_ready).copied(),
+        size_on_disk
+            .as_ref()
+            .and_then(PropertyValue::as_ready)
+            .copied(),
         date_format,
     );
 
-    PropertyItem {
+    Ok(PropertyItem {
         path: path.to_path_buf(),
         exists,
         is_dir,
@@ -2963,7 +3168,7 @@ fn collect_property_item(path: &Path, date_format: &str) -> PropertyItem {
         permission_summary: permission_summary(metadata.as_ref()),
         shortcut,
         details,
-    }
+    })
 }
 
 fn property_title(paths: &[PathBuf]) -> String {
@@ -3001,18 +3206,43 @@ fn property_item_kind(items: &[PropertyItem]) -> PropertyItemKind {
     }
 }
 
-fn selection_counts_summary(items: &[PropertyItem]) -> Option<PropertyContains> {
+fn property_value_sum<'a>(
+    values: impl IntoIterator<Item = Option<&'a PropertyValue<u64>>>,
+) -> PropertyValue<u64> {
+    let mut sum = 0u64;
+    let mut loading = false;
+    for value in values {
+        match value {
+            Some(PropertyValue::Ready(value)) => sum = sum.saturating_add(*value),
+            Some(PropertyValue::Loading) => loading = true,
+            None => {}
+        }
+    }
+
+    if loading {
+        PropertyValue::Loading
+    } else {
+        PropertyValue::Ready(sum)
+    }
+}
+
+fn selection_counts_summary(items: &[PropertyItem]) -> Option<PropertyValue<PropertyContains>> {
     let mut files = 0;
     let mut folders = 0;
     let mut has_counts = false;
     for item in items {
         if let Some(counts) = &item.selection_counts {
-            has_counts = true;
-            files += counts.files;
-            folders += counts.folders;
+            match counts {
+                PropertyValue::Loading => return Some(PropertyValue::Loading),
+                PropertyValue::Ready(counts) => {
+                    has_counts = true;
+                    files += counts.files;
+                    folders += counts.folders;
+                }
+            }
         }
     }
-    has_counts.then_some(PropertyContains { files, folders })
+    has_counts.then_some(PropertyValue::Ready(PropertyContains { files, folders }))
 }
 
 fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp> {
@@ -3026,19 +3256,90 @@ fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp>
     default_application_for_file(&item.path).map(PropertyDefaultApp::from)
 }
 
-fn collect_property_tree_summary(path: &Path) -> Option<PropertyTreeSummary> {
-    let link_metadata = fs::symlink_metadata(path).ok()?;
-    let metadata = fs::metadata(path)
-        .ok()
-        .unwrap_or_else(|| link_metadata.clone());
-    Some(property_tree_summary_from_metadata(
-        path,
-        &link_metadata,
-        &metadata,
-    ))
+fn property_target_metadata(
+    path: &Path,
+    link_metadata: Option<&fs::Metadata>,
+) -> Option<fs::Metadata> {
+    let link_metadata = link_metadata?;
+    if link_metadata.file_type().is_symlink() || metadata_is_directory_link(link_metadata) {
+        fs::metadata(path)
+            .ok()
+            .or_else(|| Some(link_metadata.clone()))
+    } else {
+        Some(link_metadata.clone())
+    }
 }
 
-fn property_tree_summary_from_metadata(
+fn collect_property_tree_summary(
+    path: &Path,
+    tree_mode: PropertyTreeMode<'_>,
+) -> Result<Option<PropertyTreeSummary>, String> {
+    let Some(link_metadata) = fs::symlink_metadata(path).ok() else {
+        return Ok(None);
+    };
+    let metadata = property_target_metadata(path, Some(&link_metadata))
+        .unwrap_or_else(|| link_metadata.clone());
+    let mut summary = property_tree_entry_summary_from_metadata(path, &link_metadata, &metadata);
+    if !metadata.is_dir() || metadata_is_directory_link(&link_metadata) {
+        return Ok(Some(summary));
+    }
+
+    let PropertyTreeMode::Full(cancel) = tree_mode else {
+        return Ok(Some(summary));
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".to_owned());
+    }
+
+    for (index, entry_result) in WalkDirGeneric::<((), Option<PropertyTreeSummary>)>::new(path)
+        .sort(false)
+        .skip_hidden(false)
+        .follow_links(false)
+        .min_depth(1)
+        .process_read_dir(|_, _, _, children| {
+            for child in children.iter_mut() {
+                let Ok(entry) = child else {
+                    continue;
+                };
+                let child_path = entry.path();
+                let Ok(link_metadata) = entry.metadata() else {
+                    entry.read_children_path = None;
+                    continue;
+                };
+                let metadata = property_target_metadata(&child_path, Some(&link_metadata))
+                    .unwrap_or_else(|| link_metadata.clone());
+                if metadata.is_dir() && metadata_is_directory_link(&link_metadata) {
+                    entry.read_children_path = None;
+                }
+                entry.client_state = Some(property_tree_entry_summary_from_metadata(
+                    &child_path,
+                    &link_metadata,
+                    &metadata,
+                ));
+            }
+        })
+        .into_iter()
+        .enumerate()
+    {
+        if index % PROPERTY_TREE_CANCELLATION_CHECK_INTERVAL == 0 && cancel.load(Ordering::Relaxed)
+        {
+            return Err("Cancelled".to_owned());
+        }
+        let Ok(entry) = entry_result else {
+            continue;
+        };
+        if let Some(entry_summary) = entry.client_state {
+            summary.add(entry_summary);
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".to_owned());
+    }
+    Ok(Some(summary))
+}
+
+fn property_tree_entry_summary_from_metadata(
     path: &Path,
     link_metadata: &fs::Metadata,
     metadata: &fs::Metadata,
@@ -3050,13 +3351,6 @@ fn property_tree_summary_from_metadata(
     if is_dir {
         summary.folders += 1;
         if !is_directory_link {
-            if let Ok(entries) = fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    if let Some(child) = collect_property_tree_summary(&entry.path()) {
-                        summary.add(child);
-                    }
-                }
-            }
             return summary;
         }
     } else {
@@ -5666,12 +5960,26 @@ fn location_label(snapshot: &PropertySnapshot) -> Option<String> {
     }
 }
 
+fn selection_count_value_label(counts: &PropertyValue<PropertyContains>) -> String {
+    match counts {
+        PropertyValue::Loading => PROPERTIES_CALCULATING_LABEL.to_owned(),
+        PropertyValue::Ready(counts) => selection_count_label(counts),
+    }
+}
+
 fn selection_count_label(counts: &PropertyContains) -> String {
     match (counts.files, counts.folders) {
         (0, 0) => count_label(0, "File", "Files"),
         (0, folders) => count_label(folders, "Folder", "Folders"),
         (files, 0) => count_label(files, "File", "Files"),
         _ => contains_label(counts),
+    }
+}
+
+fn contains_value_label(contains: &PropertyValue<PropertyContains>) -> String {
+    match contains {
+        PropertyValue::Loading => PROPERTIES_CALCULATING_LABEL.to_owned(),
+        PropertyValue::Ready(contains) => contains_label(contains),
     }
 }
 
@@ -5695,6 +6003,13 @@ fn non_empty_property_value(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn property_size_value_label(size: &PropertyValue<u64>) -> String {
+    match size {
+        PropertyValue::Loading => PROPERTIES_CALCULATING_LABEL.to_owned(),
+        PropertyValue::Ready(size) => property_size_label(*size),
+    }
+}
+
 fn property_size_label(size: u64) -> String {
     let label = format_size(Some(size));
     if label.ends_with(" bytes") {
@@ -5702,6 +6017,19 @@ fn property_size_label(size: u64) -> String {
     } else {
         format!("{label} ({} bytes)", size.separate_with_commas())
     }
+}
+
+fn snapshot_needs_tree_summary(snapshot: &PropertySnapshot) -> bool {
+    snapshot.size.is_loading()
+        || snapshot.size_on_disk.is_loading()
+        || snapshot
+            .contains
+            .as_ref()
+            .is_some_and(PropertyValue::is_loading)
+        || snapshot
+            .selection_counts
+            .as_ref()
+            .is_some_and(PropertyValue::is_loading)
 }
 
 fn detail_groups_for_render(
@@ -5866,10 +6194,7 @@ enum GitDivergenceSide {
     Incoming,
 }
 
-fn git_divergence_value(
-    divergence: Option<GitDivergence>,
-    side: GitDivergenceSide,
-) -> String {
+fn git_divergence_value(divergence: Option<GitDivergence>, side: GitDivergenceSide) -> String {
     let Some(divergence) = divergence else {
         return "Not configured".to_owned();
     };
@@ -6317,6 +6642,76 @@ fn property_button(
         .child(label)
 }
 
+#[cfg(feature = "benchmarks")]
+pub mod benchmark_support {
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{
+        PropertyTarget, PropertyValue, collect_property_snapshot_fast_with_date_format,
+        collect_property_snapshot_full_with_date_format,
+    };
+
+    pub fn collect_properties_fast(path: &Path) -> u64 {
+        collect_property_snapshot_fast_with_date_format(
+            PropertyTarget {
+                paths: vec![path.to_path_buf()],
+            },
+            crate::settings::DEFAULT_DATE_FORMAT,
+        )
+        .map(snapshot_fingerprint)
+        .unwrap_or_default()
+    }
+
+    pub fn collect_properties_full(path: &Path) -> u64 {
+        let cancel = AtomicBool::new(false);
+        collect_property_snapshot_full_with_date_format(
+            PropertyTarget {
+                paths: vec![path.to_path_buf()],
+            },
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &cancel,
+        )
+        .map(snapshot_fingerprint)
+        .unwrap_or_default()
+    }
+
+    fn snapshot_fingerprint(snapshot: super::PropertySnapshot) -> u64 {
+        value_fingerprint(&snapshot.size)
+            .saturating_add(value_fingerprint(&snapshot.size_on_disk))
+            .saturating_add(
+                snapshot
+                    .contains
+                    .as_ref()
+                    .map(counts_fingerprint)
+                    .unwrap_or_default(),
+            )
+            .saturating_add(
+                snapshot
+                    .selection_counts
+                    .as_ref()
+                    .map(counts_fingerprint)
+                    .unwrap_or_default(),
+            )
+    }
+
+    fn value_fingerprint(value: &PropertyValue<u64>) -> u64 {
+        match value {
+            PropertyValue::Loading => 1,
+            PropertyValue::Ready(value) => value.saturating_add(2),
+        }
+    }
+
+    fn counts_fingerprint(value: &PropertyValue<super::PropertyContains>) -> u64 {
+        match value {
+            PropertyValue::Loading => 3,
+            PropertyValue::Ready(counts) => (counts.files as u64)
+                .saturating_mul(31)
+                .saturating_add((counts.folders as u64).saturating_mul(17)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6362,8 +6757,8 @@ mod tests {
 
         assert_eq!(snapshot.item_kind, PropertyItemKind::SingleFile);
         assert_eq!(snapshot.title, "a.txt");
-        assert_eq!(snapshot.size, 3);
-        assert!(snapshot.size_on_disk >= snapshot.size);
+        assert_eq!(snapshot.size, PropertyValue::Ready(3));
+        assert!(snapshot.size_on_disk.as_ready().unwrap() >= snapshot.size.as_ready().unwrap());
         assert!(matches!(snapshot.type_label, MixedValue::Single(_)));
         assert!(snapshot.contains.is_none());
     }
@@ -6387,13 +6782,13 @@ mod tests {
         assert_eq!(snapshot.item_kind, PropertyItemKind::SingleFolder);
         assert_eq!(
             snapshot.contains,
-            Some(PropertyContains {
+            Some(PropertyValue::Ready(PropertyContains {
                 files: 2,
                 folders: 2
-            })
+            }))
         );
-        assert_eq!(snapshot.size, 3);
-        assert!(snapshot.size_on_disk >= snapshot.size);
+        assert_eq!(snapshot.size, PropertyValue::Ready(3));
+        assert!(snapshot.size_on_disk.as_ready().unwrap() >= snapshot.size.as_ready().unwrap());
         assert!(snapshot.selection_counts.is_none());
     }
 
@@ -6416,16 +6811,16 @@ mod tests {
         assert_eq!(snapshot.item_kind, PropertyItemKind::MultipleItems);
         assert_eq!(
             snapshot.selection_counts,
-            Some(PropertyContains {
+            Some(PropertyValue::Ready(PropertyContains {
                 files: 2,
                 folders: 2
-            })
+            }))
         );
         assert!(snapshot.contains.is_none());
-        assert_eq!(snapshot.size, 3);
-        assert!(snapshot.size_on_disk >= snapshot.size);
+        assert_eq!(snapshot.size, PropertyValue::Ready(3));
+        assert!(snapshot.size_on_disk.as_ready().unwrap() >= snapshot.size.as_ready().unwrap());
         assert_eq!(
-            selection_count_label(snapshot.selection_counts.as_ref().unwrap()),
+            selection_count_value_label(snapshot.selection_counts.as_ref().unwrap()),
             "2 Files, 2 Folders"
         );
         assert_eq!(type_of_file_label(&snapshot), "Multiple Types");
@@ -6433,6 +6828,147 @@ mod tests {
             location_label(&snapshot),
             Some(format!("All in {}", temp.path().display()))
         );
+    }
+
+    #[test]
+    fn fast_folder_snapshot_marks_recursive_totals_loading() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let child = folder.join("child");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"a").unwrap();
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("b.txt"), b"bb").unwrap();
+
+        let snapshot = collect_property_snapshot_fast_with_date_format(
+            PropertyTarget {
+                paths: vec![folder],
+            },
+            crate::settings::DEFAULT_DATE_FORMAT,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.item_kind, PropertyItemKind::SingleFolder);
+        assert_eq!(snapshot.size, PropertyValue::Loading);
+        assert_eq!(snapshot.size_on_disk, PropertyValue::Loading);
+        assert_eq!(snapshot.contains, Some(PropertyValue::Loading));
+        assert!(snapshot.selection_counts.is_none());
+        assert_eq!(property_size_value_label(&snapshot.size), "Calculating...");
+        assert_eq!(
+            contains_value_label(snapshot.contains.as_ref().unwrap()),
+            "Calculating..."
+        );
+        assert_eq!(
+            detail_value(&snapshot.details, PropertyDetailGroupKind::File, "Size"),
+            None
+        );
+    }
+
+    #[test]
+    fn fast_multiselect_marks_counts_loading_when_folder_selected() {
+        let temp = TempDir::new();
+        let file = temp.path().join("root.txt");
+        let folder = temp.path().join("folder");
+        fs::write(&file, b"a").unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("inside.txt"), b"bb").unwrap();
+
+        let snapshot = collect_property_snapshot_fast_with_date_format(
+            PropertyTarget {
+                paths: vec![file, folder],
+            },
+            crate::settings::DEFAULT_DATE_FORMAT,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.item_kind, PropertyItemKind::MultipleItems);
+        assert_eq!(snapshot.size, PropertyValue::Loading);
+        assert_eq!(snapshot.selection_counts, Some(PropertyValue::Loading));
+        assert!(snapshot.contains.is_none());
+        assert_eq!(
+            selection_count_value_label(snapshot.selection_counts.as_ref().unwrap()),
+            "Calculating..."
+        );
+    }
+
+    #[test]
+    fn full_tree_summary_respects_pre_cancelled_flag() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"a").unwrap();
+        let cancel = AtomicBool::new(true);
+
+        let error = collect_property_snapshot_full_with_date_format(
+            PropertyTarget {
+                paths: vec![folder],
+            },
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &cancel,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Cancelled");
+    }
+
+    #[cfg(any(unix, target_os = "windows"))]
+    #[test]
+    fn full_tree_summary_counts_directory_links_without_recursing() {
+        let temp = TempDir::new();
+        let root = temp.path().join("root");
+        let target = temp.path().join("target");
+        let linked = root.join("linked");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("target-file.txt"), b"abc").unwrap();
+        if create_directory_symlink(&target, &linked).is_err() {
+            return;
+        }
+
+        let snapshot = collect_property_snapshot(PropertyTarget { paths: vec![root] }).unwrap();
+
+        assert_eq!(
+            snapshot.contains,
+            Some(PropertyValue::Ready(PropertyContains {
+                files: 0,
+                folders: 1
+            }))
+        );
+    }
+
+    #[gpui::test]
+    fn applying_tree_summary_preserves_dirty_draft(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"a").unwrap();
+
+        let target = PropertyTarget {
+            paths: vec![folder],
+        };
+        let fast_snapshot = collect_property_snapshot_fast_with_date_format(
+            target.clone(),
+            crate::settings::DEFAULT_DATE_FORMAT,
+        )
+        .unwrap();
+        let full_snapshot = collect_property_snapshot(target.clone()).unwrap();
+        let dialog = test_properties_dialog(cx, target);
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.set_ready_snapshot(fast_snapshot, cx);
+                dialog.cancel_tree_summary_task();
+                dialog.draft.hidden = Some(true);
+
+                dialog.apply_tree_summary_snapshot(full_snapshot);
+
+                assert_eq!(dialog.draft.hidden, Some(true));
+                let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                    panic!("snapshot should be ready");
+                };
+                assert_eq!(snapshot.size, PropertyValue::Ready(1));
+            });
+        });
     }
 
     #[test]
@@ -6608,18 +7144,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn properties_dialog_code_tab_loads_git_and_language_summary(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn properties_dialog_code_tab_loads_git_and_language_summary(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let repo = init_property_test_repo(temp.path());
         let source = "fn main() {}\n";
         fs::write(temp.path().join("main.rs"), source).unwrap();
         commit_on_ref(&repo, Some("HEAD"), "main.rs", source, "initial", &[]);
 
-        let dialog = test_properties_dialog(cx, PropertyTarget {
-            paths: vec![temp.path().to_path_buf()],
-        });
+        let dialog = test_properties_dialog(
+            cx,
+            PropertyTarget {
+                paths: vec![temp.path().to_path_buf()],
+            },
+        );
         cx.run_until_parked();
 
         cx.update(|cx| {
@@ -8104,6 +8641,16 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
     fn init_property_test_repo(path: &Path) -> Repository {
         let repo = Repository::init(path).expect("init repo");
         repo.set_head("refs/heads/main").expect("set HEAD branch");
@@ -8145,8 +8692,8 @@ mod tests {
             item_kind: PropertyItemKind::SingleFile,
             type_label: MixedValue::None,
             location: MixedValue::None,
-            size: 0,
-            size_on_disk: 0,
+            size: PropertyValue::Ready(0),
+            size_on_disk: PropertyValue::Ready(0),
             contains: None,
             selection_counts: None,
             created: MixedValue::None,
