@@ -326,6 +326,8 @@ pub enum FileColumnKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FileColumnSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_width: Option<u32>,
     pub order: Vec<FileColumnKind>,
     pub widths: BTreeMap<FileColumnKind, u32>,
 }
@@ -611,6 +613,20 @@ pub(crate) fn set_file_column_width(
     });
 }
 
+pub(crate) fn set_name_column_width(value: u32, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| {
+        settings.view.file_columns.name_width = Some(normalized_name_column_width(value));
+        normalize_file_column_settings(&mut settings.view.file_columns);
+    });
+}
+
+pub(crate) fn clear_name_column_width(cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| {
+        settings.view.file_columns.name_width = None;
+        normalize_file_column_settings(&mut settings.view.file_columns);
+    });
+}
+
 pub(crate) fn reorder_file_column(
     dragged: FileColumnKind,
     target: FileColumnKind,
@@ -628,6 +644,10 @@ pub(crate) fn normalized_sidebar_width(value: u32) -> u32 {
 
 pub(crate) fn normalized_file_column_width(value: u32) -> u32 {
     value.max(FILE_COLUMN_MIN_WIDTH)
+}
+
+pub(crate) fn normalized_name_column_width(value: u32) -> u32 {
+    value.max(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
 }
 
 pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> bool {
@@ -1471,8 +1491,48 @@ fn sync_settings_document(document: &mut Value, settings: &ExplorerSettings) {
                 sync_context_menu(document.entry(key.clone()).or_insert(Value::Null), settings)
             }
             "sidebar" => sync_sidebar(document.entry(key.clone()).or_insert(Value::Null), settings),
+            "view" => sync_view(document.entry(key.clone()).or_insert(Value::Null), settings),
             _ => merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value),
         }
+    }
+}
+
+fn sync_view(document: &mut Value, settings: &ExplorerSettings) {
+    let known =
+        serde_json::to_value(&settings.view).expect("ViewSettings serialization cannot fail");
+    let Some(document) = document.as_object_mut() else {
+        *document = known;
+        return;
+    };
+    let known = known
+        .as_object()
+        .expect("serialized ViewSettings is an object");
+
+    for (key, value) in known {
+        if key == "file_columns" {
+            sync_file_columns(document.entry(key.clone()).or_insert(Value::Null), settings);
+        } else {
+            merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
+        }
+    }
+}
+
+fn sync_file_columns(document: &mut Value, settings: &ExplorerSettings) {
+    let known = serde_json::to_value(&settings.view.file_columns)
+        .expect("FileColumnSettings serialization cannot fail");
+    let Some(document) = document.as_object_mut() else {
+        *document = known;
+        return;
+    };
+
+    let known = known
+        .as_object()
+        .expect("serialized FileColumnSettings is an object");
+    for (key, value) in known {
+        merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
+    }
+    if settings.view.file_columns.name_width.is_none() {
+        document.remove("name_width");
     }
 }
 
@@ -1676,6 +1736,7 @@ fn default_file_columns() -> FileColumnSettings {
         widths.insert(*kind, default_file_column_width(*kind));
     }
     FileColumnSettings {
+        name_width: None,
         order: default_file_column_order().to_vec(),
         widths,
     }
@@ -1775,6 +1836,12 @@ fn file_column_settings_from_value(value: Value) -> FileColumnSettings {
         }
     }
 
+    settings.name_width = object
+        .get("name_width")
+        .and_then(Value::as_u64)
+        .and_then(|width| u32::try_from(width).ok())
+        .map(normalized_name_column_width);
+
     normalize_file_column_settings(&mut settings);
     settings
 }
@@ -1803,6 +1870,7 @@ fn normalize_file_column_settings(settings: &mut FileColumnSettings) {
         normalized_widths.insert(kind, normalized_file_column_width(width));
     }
     settings.widths = normalized_widths;
+    settings.name_width = settings.name_width.map(normalized_name_column_width);
 }
 
 pub(crate) fn resolved_font_family(value: &str) -> SharedString {
@@ -1908,6 +1976,7 @@ mod tests {
                 .get(&FileColumnKind::DateModified),
             Some(&default_file_column_width(FileColumnKind::DateModified))
         );
+        assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, StartLocation::Downloads);
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
@@ -1949,6 +2018,7 @@ mod tests {
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
+        assert_eq!(settings.view.file_columns.name_width, None);
         assert!(settings.contextmenu.items.is_empty());
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
@@ -2018,7 +2088,7 @@ mod tests {
     #[test]
     fn file_column_settings_ignore_unknowns_dedupe_and_append_missing_defaults() {
         let settings: ExplorerSettings = serde_json::from_str(
-            r#"{"view":{"file_columns":{"order":["size","unknown","size"],"widths":{"size":10,"unknown":999}}}}"#,
+            r#"{"view":{"file_columns":{"name_width":10,"order":["size","unknown","size"],"widths":{"size":10,"unknown":999}}}}"#,
         )
         .expect("deserialize file columns");
 
@@ -2037,6 +2107,10 @@ mod tests {
         assert_eq!(
             settings.view.file_columns.widths[&FileColumnKind::Type],
             default_file_column_width(FileColumnKind::Type)
+        );
+        assert_eq!(
+            settings.view.file_columns.name_width,
+            Some(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
         );
     }
 
@@ -2061,6 +2135,61 @@ mod tests {
                 .file_columns
                 .widths[&FileColumnKind::Type],
             FILE_COLUMN_MIN_WIDTH
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn set_name_column_width_persists_clamped_value(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("name-column-width").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| {
+            set_name_column_width(10, cx);
+        });
+
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .view
+                .file_columns
+                .name_width,
+            Some(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn clear_name_column_width_removes_persisted_key(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("clear-name-column-width").join(SETTINGS_FILE_NAME);
+        let mut settings = ExplorerSettings::default();
+        settings.view.file_columns.name_width = Some(320);
+        cx.set_global(SettingsState {
+            value: settings.clone(),
+            document: settings_document(&settings),
+            path: path.clone(),
+            _watcher: None,
+        });
+        save_settings_to_path(&path, &settings).expect("save settings");
+
+        cx.update(|cx| {
+            clear_name_column_width(cx);
+        });
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("name_width"));
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .view
+                .file_columns
+                .name_width,
+            None
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2115,6 +2244,7 @@ mod tests {
         assert!(json.contains(
             "\n      \"widths\": {\"date_modified\": 150, \"size\": 120, \"type\": 150}"
         ));
+        assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
         assert!(json.contains("\n    \"native_icons\": true"));
         assert!(json.contains("\n    \"show_folder_sizes\": false"));

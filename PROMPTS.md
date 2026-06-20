@@ -2,7 +2,7 @@
 
 ## 1
 
-- Ability to Re-size name column. On column right-click, revert back to auto-size (current behaviour). So only set a width when user manually re-sizes, otherwise keep current auto-size behaviour
+- Settings option for windows-only to set default slash (back/forward). Default to forward. This setting changes addres bar behaviour to show back/forward slashes (also normalizes to whatever option was set)
 
 ## 2
 
@@ -12,7 +12,6 @@
 
 ## 3
 
-- Settings option for windows-only to set default slash (back/forward). Default to forward. This setting changes addres bar behaviour to show back/forward slashes (also normalizes to whatever option was set)
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu

@@ -1049,6 +1049,21 @@ mod tests {
     }
 
     #[test]
+    fn pointer_drag_intent_uses_manual_name_column_boundary() {
+        let mut view = test_view_with_entries(&["a.txt"]);
+        view.file_columns.name_width = Some(400);
+
+        assert_eq!(
+            view.pointer_drag_intent(gpui::point(px(399.0), px(1.0)), size(px(900.0), px(100.0))),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            view.pointer_drag_intent(gpui::point(px(401.0), px(1.0)), size(px(900.0), px(100.0))),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
     fn whitespace_resolves_to_rubber_band() {
         assert_eq!(
             pointer_drag_intent_at(1.0, ROW_HEIGHT * 5.0, 0.0, 800.0, 5, &BTreeSet::from([4])),

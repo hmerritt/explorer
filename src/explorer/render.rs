@@ -88,8 +88,8 @@ use crate::explorer::{
     sidebar::{SidebarItem, SidebarItemKind},
     tooltip::explorer_tooltip,
     view::{
-        ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu,
-        normalized_sidebar_width_f32,
+        ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
+        UtilityMenu, normalized_sidebar_width_f32,
     },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
@@ -1054,7 +1054,7 @@ impl ExplorerView {
         .into_any_element()
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let scroll_left = if self.content_branch() == ExplorerContentBranch::List {
             self.visible_horizontal_scroll_offset()
         } else {
@@ -1068,7 +1068,11 @@ impl ExplorerView {
             .h_full()
             .w_full()
             .min_w(px(self.minimum_file_columns_width()))
-            .child(name_header_cell());
+            .child(name_header_cell(
+                self.name_column_width(window),
+                self.name_column_is_manual_width(),
+                cx.entity(),
+            ));
 
         for kind in self.file_columns.order.iter().copied() {
             header_row = header_row.child(self.render_file_column_header_cell(kind, cx));
@@ -1691,8 +1695,15 @@ impl ExplorerView {
             .collect::<Vec<_>>();
 
         let name_cell = if self.rename_is_active_for_path(&entry.path) {
-            rename_name_cell(&entry, app_icon, self.active_rename_focus_handle(), cx)
-                .into_any_element()
+            rename_name_cell(
+                &entry,
+                app_icon,
+                self.active_rename_focus_handle(),
+                self.name_column_width(window),
+                self.name_column_is_manual_width(),
+                cx,
+            )
+            .into_any_element()
         } else {
             let name_cell = name_cell(
                 &entry,
@@ -1700,6 +1711,7 @@ impl ExplorerView {
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
                 self.name_column_width(window),
+                self.name_column_is_manual_width(),
                 &self.font,
                 window,
             )
@@ -2354,7 +2366,7 @@ impl Render for ExplorerView {
                             .h_full()
                             .overflow_hidden()
                             .when(self.view_mode == FileViewMode::Details, |this| {
-                                this.child(self.render_header(cx))
+                                this.child(self.render_header(window, cx))
                             })
                             .child(
                                 match self.content_branch() {
@@ -4514,17 +4526,25 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                         match event.button {
                             MouseButton::Left => {
                                 let _ = entity.update(cx, |this, cx| {
-                                    let Some((kind, width)) = this.finish_file_column_resize()
-                                    else {
+                                    let Some(result) = this.finish_file_column_resize() else {
                                         return;
                                     };
 
-                                    crate::settings::set_file_column_width(kind, width, cx);
+                                    match result {
+                                        FileColumnResizeResult::Name(width) => {
+                                            crate::settings::set_name_column_width(width, cx);
+                                        }
+                                        FileColumnResizeResult::Column(kind, width) => {
+                                            crate::settings::set_file_column_width(kind, width, cx);
+                                        }
+                                    }
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
                             }
-                            MouseButton::Right if bounds.contains(&event.position) => {
+                            MouseButton::Right | MouseButton::Middle
+                                if bounds.contains(&event.position) =>
+                            {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     let (kind, width) = this.reset_file_column_width(kind);
@@ -4543,20 +4563,118 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
         .into_any_element()
 }
 
-fn name_header_cell() -> Div {
-    div()
+fn name_header_cell(width: f32, manual_width: bool, entity: Entity<ExplorerView>) -> Div {
+    let cell = div()
         .relative()
         .flex()
         .items_start()
         .h_full()
-        .flex_1()
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(36.0))
         .pt(px(8.0))
         .border_r_1()
-        .border_color(rgb(0xe7e7e7))
-        .child("Name")
+        .border_color(rgb(0xe7e7e7));
+    let cell = if manual_width {
+        cell.w(px(width)).flex_shrink_0()
+    } else {
+        cell.flex_1()
+    };
+
+    cell.child("Name")
+        .child(name_column_resize_handle(width, entity))
+}
+
+fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyElement {
+    div()
+        .debug_selector(|| "explorer-header-name-resizer".to_owned())
+        .absolute()
+        .top(px(0.0))
+        .right(px(-(FILE_COLUMN_RESIZE_HIT_WIDTH / 2.0)))
+        .w(px(FILE_COLUMN_RESIZE_HIT_WIDTH))
+        .h_full()
+        .cursor(CursorStyle::ResizeColumn)
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseDownEvent, _, _, cx| {
+                            if event.button != MouseButton::Left
+                                || !bounds.contains(&event.position)
+                            {
+                                return;
+                            }
+
+                            let _ = entity.update(cx, |this, cx| {
+                                this.close_context_menu();
+                                this.begin_name_column_resize(f32::from(event.position.x), width);
+                                cx.stop_propagation();
+                                cx.notify();
+                            });
+                        }
+                    });
+
+                    window.on_mouse_event({
+                        let entity = entity.clone();
+                        move |event: &MouseMoveEvent, _, _, cx| {
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                return;
+                            }
+
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.file_column_resize_drag.is_none() {
+                                    return;
+                                }
+
+                                if this.update_file_column_resize(f32::from(event.position.x)) {
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            });
+                        }
+                    });
+
+                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                        match event.button {
+                            MouseButton::Left => {
+                                let _ = entity.update(cx, |this, cx| {
+                                    let Some(result) = this.finish_file_column_resize() else {
+                                        return;
+                                    };
+
+                                    match result {
+                                        FileColumnResizeResult::Name(width) => {
+                                            crate::settings::set_name_column_width(width, cx);
+                                        }
+                                        FileColumnResizeResult::Column(kind, width) => {
+                                            crate::settings::set_file_column_width(kind, width, cx);
+                                        }
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                });
+                            }
+                            MouseButton::Right | MouseButton::Middle
+                                if bounds.contains(&event.position) =>
+                            {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    this.reset_name_column_width();
+                                    crate::settings::clear_name_column_width(cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                });
+                            }
+                            _ => {}
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 fn name_cell(
@@ -4565,6 +4683,7 @@ fn name_cell(
     show_file_name_extensions: bool,
     show_full_path: bool,
     name_column_width: f32,
+    manual_width: bool,
     font: &gpui::Font,
     window: &Window,
 ) -> Div {
@@ -4580,15 +4699,20 @@ fn name_cell(
         font,
         window,
     );
-    div()
+    let cell = div()
         .flex()
         .items_center()
         .h_full()
-        .flex_1()
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
-        .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(entry_icon(entry, app_icon))
+        .pl(px(NAME_CELL_LEFT_PADDING));
+    let cell = if manual_width {
+        cell.w(px(name_column_width)).flex_shrink_0()
+    } else {
+        cell.flex_1()
+    };
+
+    cell.child(entry_icon(entry, app_icon))
         .child(if show_full_path {
             let full_path = truncated_text_with_size(
                 &entry.path.display().to_string(),
@@ -4638,6 +4762,8 @@ fn rename_name_cell(
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
     focus_handle: Option<FocusHandle>,
+    name_column_width: f32,
+    manual_width: bool,
     cx: &mut Context<ExplorerView>,
 ) -> Div {
     let entity = cx.entity();
@@ -4698,16 +4824,20 @@ fn rename_name_cell(
         )
         .child(rename_text_element(entity));
 
-    div()
+    let cell = div()
         .flex()
         .items_center()
         .h_full()
-        .flex_1()
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
-        .pl(px(NAME_CELL_LEFT_PADDING))
-        .child(entry_icon(entry, app_icon))
-        .child(input)
+        .pl(px(NAME_CELL_LEFT_PADDING));
+    let cell = if manual_width {
+        cell.w(px(name_column_width)).flex_shrink_0()
+    } else {
+        cell.flex_1()
+    };
+
+    cell.child(entry_icon(entry, app_icon)).child(input)
 }
 
 fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
@@ -5867,6 +5997,157 @@ mod tests {
                 .widths[&crate::settings::FileColumnKind::Type]),
             default_width
         );
+    }
+
+    #[gpui::test]
+    fn dragging_name_column_resizer_sets_and_persists_manual_width(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let start = cx
+            .debug_bounds("explorer-header-name-resizer")
+            .expect("name column resizer bounds")
+            .center();
+        let end = gpui::point(start.x + gpui::px(80.0), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.file_columns.name_width.is_some_and(|width| {
+                width > crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32
+            }));
+            assert_eq!(view.file_column_resize_drag, None);
+        });
+        assert!(cx.read(|cx| {
+            cx.global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .file_columns
+                .name_width
+                .is_some_and(|width| {
+                    width > crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32
+                })
+        }));
+    }
+
+    #[gpui::test]
+    fn right_clicking_name_column_resizer_restores_auto_width(cx: &mut gpui::TestAppContext) {
+        reset_name_column_resizer_with_button(cx, MouseButton::Right);
+    }
+
+    #[gpui::test]
+    fn middle_clicking_name_column_resizer_restores_auto_width(cx: &mut gpui::TestAppContext) {
+        reset_name_column_resizer_with_button(cx, MouseButton::Middle);
+    }
+
+    fn reset_name_column_resizer_with_button(cx: &mut gpui::TestAppContext, button: MouseButton) {
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.view.file_columns.name_width = Some(360);
+        cx.set_global(crate::settings::SettingsState::for_test(settings));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.file_columns.name_width = Some(360);
+            view.begin_name_column_resize(360.0, 360.0);
+            view
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-header-name-resizer")
+            .expect("name column resizer bounds")
+            .center();
+        cx.simulate_mouse_down(position, button, Modifiers::default());
+        cx.simulate_mouse_up(position, button, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.file_columns.name_width, None);
+            assert_eq!(view.file_column_resize_drag, None);
+        });
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .file_columns
+                .name_width),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn middle_clicking_file_column_resizers_restores_and_persists_default_widths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let custom_widths = [
+            (crate::settings::FileColumnKind::DateModified, 333),
+            (crate::settings::FileColumnKind::Type, 312),
+            (crate::settings::FileColumnKind::Size, 222),
+        ];
+        let mut settings = crate::settings::ExplorerSettings::default();
+        for (kind, width) in custom_widths {
+            settings.view.file_columns.widths.insert(kind, width);
+        }
+        cx.set_global(crate::settings::SettingsState::for_test(settings));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            for (kind, width) in custom_widths {
+                view.file_columns.widths.insert(kind, width);
+            }
+            view
+        });
+
+        cx.run_until_parked();
+        for selector in [
+            "explorer-header-date-modified-resizer",
+            "explorer-header-type-resizer",
+            "explorer-header-size-resizer",
+        ] {
+            let position = cx
+                .debug_bounds(selector)
+                .expect("file column resizer bounds")
+                .center();
+            cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::default());
+            cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::default());
+        }
+
+        cx.read_entity(&view, |view, _| {
+            for (kind, _) in custom_widths {
+                assert_eq!(
+                    view.file_columns.widths[&kind],
+                    crate::settings::default_file_column_width(kind)
+                );
+            }
+            assert_eq!(view.file_column_resize_drag, None);
+        });
+        for (kind, _) in custom_widths {
+            assert_eq!(
+                cx.read(|cx| cx
+                    .global::<crate::settings::SettingsState>()
+                    .value
+                    .view
+                    .file_columns
+                    .widths[&kind]),
+                crate::settings::default_file_column_width(kind)
+            );
+        }
     }
 
     #[test]

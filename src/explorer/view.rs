@@ -126,9 +126,21 @@ pub(super) struct SidebarResizeDrag {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct FileColumnResizeDrag {
-    pub(super) kind: FileColumnKind,
+    pub(super) target: FileColumnResizeTarget,
     pub(super) start_pointer_x: f32,
     pub(super) start_width: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FileColumnResizeTarget {
+    Name,
+    Column(FileColumnKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FileColumnResizeResult {
+    Name(u32),
+    Column(FileColumnKind, u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -298,10 +310,23 @@ impl ExplorerView {
             self.sidebar_width = settings.sidebar.width as f32;
         }
         if let Some(drag) = self.file_column_resize_drag {
-            let width = self.file_columns.widths.get(&drag.kind).copied();
+            let name_width = self.file_columns.name_width;
+            let column_width = match drag.target {
+                FileColumnResizeTarget::Name => None,
+                FileColumnResizeTarget::Column(kind) => {
+                    self.file_columns.widths.get(&kind).copied()
+                }
+            };
             self.file_columns = settings.view.file_columns.clone();
-            if let Some(width) = width {
-                self.file_columns.widths.insert(drag.kind, width);
+            match drag.target {
+                FileColumnResizeTarget::Name => {
+                    self.file_columns.name_width = name_width;
+                }
+                FileColumnResizeTarget::Column(kind) => {
+                    if let Some(width) = column_width {
+                        self.file_columns.widths.insert(kind, width);
+                    }
+                }
             }
         } else {
             self.file_columns = settings.view.file_columns.clone();
@@ -799,9 +824,21 @@ impl ExplorerView {
         crate::explorer::columns::effective_name_column_width(viewport_width, &self.file_columns)
     }
 
+    pub(super) fn name_column_is_manual_width(&self) -> bool {
+        self.file_columns.name_width.is_some()
+    }
+
+    pub(super) fn begin_name_column_resize(&mut self, pointer_x: f32, start_width: f32) {
+        self.file_column_resize_drag = Some(FileColumnResizeDrag {
+            target: FileColumnResizeTarget::Name,
+            start_pointer_x: pointer_x,
+            start_width,
+        });
+    }
+
     pub(super) fn begin_file_column_resize(&mut self, kind: FileColumnKind, pointer_x: f32) {
         self.file_column_resize_drag = Some(FileColumnResizeDrag {
-            kind,
+            target: FileColumnResizeTarget::Column(kind),
             start_pointer_x: pointer_x,
             start_width: self.file_column_width(kind),
         });
@@ -812,37 +849,74 @@ impl ExplorerView {
             return false;
         };
 
-        let width = crate::settings::normalized_file_column_width(
-            (drag.start_width + pointer_x - drag.start_pointer_x)
-                .round()
-                .max(0.0) as u32,
-        );
-        let current_width = self
-            .file_columns
-            .widths
-            .get(&drag.kind)
-            .copied()
-            .unwrap_or_else(|| crate::settings::default_file_column_width(drag.kind));
+        let raw_width = (drag.start_width + pointer_x - drag.start_pointer_x)
+            .round()
+            .max(0.0) as u32;
+        let width = match drag.target {
+            FileColumnResizeTarget::Name => {
+                crate::settings::normalized_name_column_width(raw_width)
+            }
+            FileColumnResizeTarget::Column(_) => {
+                crate::settings::normalized_file_column_width(raw_width)
+            }
+        };
+        let current_width = match drag.target {
+            FileColumnResizeTarget::Name => self.file_columns.name_width.unwrap_or_else(|| {
+                crate::settings::normalized_name_column_width(
+                    drag.start_width.round().max(0.0) as u32
+                )
+            }),
+            FileColumnResizeTarget::Column(kind) => self
+                .file_columns
+                .widths
+                .get(&kind)
+                .copied()
+                .unwrap_or_else(|| crate::settings::default_file_column_width(kind)),
+        };
         if current_width == width {
             return false;
         }
 
-        self.file_columns.widths.insert(drag.kind, width);
+        match drag.target {
+            FileColumnResizeTarget::Name => self.file_columns.name_width = Some(width),
+            FileColumnResizeTarget::Column(kind) => {
+                self.file_columns.widths.insert(kind, width);
+            }
+        }
         true
     }
 
-    pub(super) fn finish_file_column_resize(&mut self) -> Option<(FileColumnKind, u32)> {
+    pub(super) fn finish_file_column_resize(&mut self) -> Option<FileColumnResizeResult> {
         let drag = self.file_column_resize_drag.take()?;
-        let width = self
-            .file_columns
-            .widths
-            .get(&drag.kind)
-            .copied()
-            .unwrap_or_else(|| crate::settings::default_file_column_width(drag.kind));
-        Some((
-            drag.kind,
-            crate::settings::normalized_file_column_width(width),
-        ))
+        match drag.target {
+            FileColumnResizeTarget::Name => {
+                let width = self.file_columns.name_width.unwrap_or_else(|| {
+                    crate::settings::normalized_name_column_width(
+                        drag.start_width.round().max(0.0) as u32
+                    )
+                });
+                Some(FileColumnResizeResult::Name(
+                    crate::settings::normalized_name_column_width(width),
+                ))
+            }
+            FileColumnResizeTarget::Column(kind) => {
+                let width = self
+                    .file_columns
+                    .widths
+                    .get(&kind)
+                    .copied()
+                    .unwrap_or_else(|| crate::settings::default_file_column_width(kind));
+                Some(FileColumnResizeResult::Column(
+                    kind,
+                    crate::settings::normalized_file_column_width(width),
+                ))
+            }
+        }
+    }
+
+    pub(super) fn reset_name_column_width(&mut self) {
+        self.file_column_resize_drag = None;
+        self.file_columns.name_width = None;
     }
 
     pub(super) fn reset_file_column_width(
@@ -1649,6 +1723,46 @@ mod tests {
             view.file_columns.widths[&FileColumnKind::Type],
             crate::settings::default_file_column_width(FileColumnKind::Type)
         );
+        assert_eq!(view.file_column_resize_drag, None);
+    }
+
+    #[test]
+    fn name_column_resize_sets_manual_width_and_finishes() {
+        let mut view = ExplorerView::new(PathBuf::from("resize-name-column"));
+        view.begin_name_column_resize(300.0, 312.0);
+
+        assert!(view.update_file_column_resize(420.0));
+
+        assert_eq!(view.file_columns.name_width, Some(432));
+        assert_eq!(
+            view.finish_file_column_resize(),
+            Some(FileColumnResizeResult::Name(432))
+        );
+        assert_eq!(view.file_column_resize_drag, None);
+    }
+
+    #[test]
+    fn name_column_resize_clamps_to_minimum() {
+        let mut view = ExplorerView::new(PathBuf::from("resize-name-column-min"));
+        view.begin_name_column_resize(300.0, 312.0);
+
+        assert!(view.update_file_column_resize(0.0));
+
+        assert_eq!(
+            view.file_columns.name_width,
+            Some(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
+        );
+    }
+
+    #[test]
+    fn reset_name_column_width_restores_auto_and_clears_drag() {
+        let mut view = ExplorerView::new(PathBuf::from("reset-name-column"));
+        view.file_columns.name_width = Some(360);
+        view.begin_name_column_resize(300.0, 360.0);
+
+        view.reset_name_column_width();
+
+        assert_eq!(view.file_columns.name_width, None);
         assert_eq!(view.file_column_resize_drag, None);
     }
 
