@@ -33,6 +33,16 @@ pub(super) fn scan_codebase_summary(path: &Path) -> Option<CodebaseSummary> {
     })
 }
 
+pub(super) fn scan_direct_codebase_summary(path: &Path) -> Option<CodebaseSummary> {
+    let repo_root = direct_git_repository_root(path)?;
+    let (total_code, languages) = language_summary_for_repository(&repo_root);
+    Some(CodebaseSummary {
+        repo_root,
+        total_code,
+        languages,
+    })
+}
+
 pub(super) fn find_git_repository_root(path: &Path) -> Option<PathBuf> {
     let mut current = path;
     loop {
@@ -42,6 +52,10 @@ pub(super) fn find_git_repository_root(path: &Path) -> Option<PathBuf> {
 
         current = current.parent()?;
     }
+}
+
+pub(super) fn direct_git_repository_root(path: &Path) -> Option<PathBuf> {
+    path.join(".git").is_dir().then(|| path.to_path_buf())
 }
 
 fn language_summary_for_repository(repo_root: &Path) -> (usize, Vec<CodebaseLanguageSummary>) {
@@ -207,6 +221,20 @@ mod tests {
     }
 
     #[test]
+    fn direct_git_root_detection_accepts_exact_repository_root_only() {
+        let temp = TempDir::new();
+        let nested = temp.path().join("src");
+        std::fs::create_dir(temp.path().join(".git")).expect("create git dir");
+        std::fs::create_dir(&nested).expect("create nested dir");
+
+        assert_eq!(
+            direct_git_repository_root(temp.path()),
+            Some(temp.path().to_path_buf())
+        );
+        assert_eq!(direct_git_repository_root(&nested), None);
+    }
+
+    #[test]
     fn language_summary_keeps_total_sorted_languages_and_percentages() {
         let summaries = language_summaries(
             [
@@ -335,5 +363,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Rust", 1, 100)]
         );
+    }
+
+    #[test]
+    fn direct_repository_scan_does_not_walk_up_from_nested_folder() {
+        let temp = TempDir::new();
+        let nested = temp.path().join("src");
+        std::fs::create_dir(temp.path().join(".git")).expect("create git dir");
+        std::fs::create_dir(&nested).expect("create src dir");
+        std::fs::write(nested.join("main.rs"), "fn main() {}\n").expect("write source");
+
+        assert!(scan_direct_codebase_summary(temp.path()).is_some());
+        assert_eq!(scan_direct_codebase_summary(&nested), None);
+        assert!(scan_codebase_summary(&nested).is_some());
     }
 }

@@ -9,6 +9,14 @@ pub(super) struct GitRepositoryStatus {
     pub(super) divergence: Option<GitDivergence>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GitRepositoryCodeInfo {
+    pub(super) repo_root: PathBuf,
+    pub(super) branch: String,
+    pub(super) commit_count: usize,
+    pub(super) divergence: Option<GitDivergence>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GitDivergence {
     pub(super) outgoing: usize,
@@ -29,6 +37,22 @@ pub(super) fn scan_git_repository_status(path: &Path) -> Option<GitRepositorySta
     })
 }
 
+pub(super) fn scan_git_repository_code_info(path: &Path) -> Option<GitRepositoryCodeInfo> {
+    let repo = Repository::open(path).ok()?;
+    let repo_root = repo.workdir()?.to_path_buf();
+    let head = repo.head().ok()?;
+    let branch = head_label(&head)?;
+    let commit_count = head_commit_count(&repo, &head)?;
+    let divergence = branch_divergence(&repo, &head);
+
+    Some(GitRepositoryCodeInfo {
+        repo_root,
+        branch,
+        commit_count,
+        divergence,
+    })
+}
+
 fn head_label(head: &Reference<'_>) -> Option<String> {
     if head.is_branch() {
         return head.shorthand().map(ToOwned::to_owned);
@@ -37,6 +61,13 @@ fn head_label(head: &Reference<'_>) -> Option<String> {
     head.target()
         .map(|oid| format!("detached {}", short_oid(oid)))
         .or_else(|| head.shorthand().map(ToOwned::to_owned))
+}
+
+fn head_commit_count(repo: &Repository, head: &Reference<'_>) -> Option<usize> {
+    let oid = head.target()?;
+    let mut revwalk = repo.revwalk().ok()?;
+    revwalk.push(oid).ok()?;
+    Some(revwalk.filter_map(Result::ok).count())
 }
 
 fn short_oid(oid: git2::Oid) -> String {
@@ -144,6 +175,83 @@ mod tests {
                     outgoing: 1,
                     incoming: 1,
                 }),
+            })
+        );
+    }
+
+    #[test]
+    fn git_code_info_counts_head_history() {
+        let temp = TempDir::new();
+        let repo = init_test_repo(temp.path());
+        let initial_oid = commit_on_ref(&repo, Some("HEAD"), "file.txt", "initial", "initial", &[]);
+        let initial = repo.find_commit(initial_oid).expect("find initial commit");
+        commit_on_ref(
+            &repo,
+            Some("HEAD"),
+            "file.txt",
+            "second",
+            "second",
+            &[&initial],
+        );
+
+        assert_eq!(
+            scan_git_repository_code_info(temp.path()),
+            Some(GitRepositoryCodeInfo {
+                repo_root: temp.path().to_path_buf(),
+                branch: "main".to_owned(),
+                commit_count: 2,
+                divergence: None,
+            })
+        );
+    }
+
+    #[test]
+    fn git_code_info_includes_upstream_divergence() {
+        let temp = TempDir::new();
+        let repo = init_test_repo(temp.path());
+        repo.remote("origin", "https://example.invalid/repo.git")
+            .expect("create remote");
+        let initial_oid = commit_on_ref(&repo, Some("HEAD"), "file.txt", "initial", "initial", &[]);
+        repo.reference(
+            "refs/remotes/origin/main",
+            initial_oid,
+            true,
+            "create origin/main",
+        )
+        .expect("create upstream ref");
+        repo.find_branch("main", BranchType::Local)
+            .expect("find local branch")
+            .set_upstream(Some("origin/main"))
+            .expect("set upstream");
+
+        let initial = repo.find_commit(initial_oid).expect("find initial commit");
+        commit_on_ref(
+            &repo,
+            Some("HEAD"),
+            "file.txt",
+            "local",
+            "local",
+            &[&initial],
+        );
+        commit_on_ref(
+            &repo,
+            Some("refs/remotes/origin/main"),
+            "file.txt",
+            "remote",
+            "remote",
+            &[&initial],
+        );
+        drop(initial);
+
+        let code_info = scan_git_repository_code_info(temp.path()).expect("git code info");
+
+        assert_eq!(code_info.branch, "main");
+        assert_eq!(code_info.commit_count, 2);
+        assert_eq!(
+            code_info.divergence,
+            Some(GitDivergence {
+                outgoing: 1,
+                incoming: 1,
             })
         );
     }

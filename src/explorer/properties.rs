@@ -28,6 +28,10 @@ use crate::explorer::image_preview::svg_raster_dimensions;
 use crate::explorer::{
     DialogCancel, DialogConfirm,
     app_icons::NativeIconSize,
+    codebase_summary::{
+        CodebaseLanguageSummary, CodebaseSummary, direct_git_repository_root,
+        language_segment_widths, scan_direct_codebase_summary,
+    },
     constants::{
         SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
         SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
@@ -35,6 +39,7 @@ use crate::explorer::{
     },
     entry::{DirectoryLinkKind, EntryKind},
     formatting::{format_size, format_timestamp},
+    git_status::{GitDivergence, GitRepositoryCodeInfo, scan_git_repository_code_info},
     icons::{
         copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
         folder_icon_sized, image_icon,
@@ -67,6 +72,14 @@ const PROPERTIES_BUTTON_MIN_WIDTH: f32 = 78.0;
 const PROPERTIES_LABEL_WIDTH: f32 = 108.0;
 const PROPERTIES_ITEM_ICON_SIZE: f32 = 32.0;
 const PROPERTIES_OPEN_WITH_ICON_SIZE: f32 = 20.0;
+const PROPERTIES_CODE_MAKEUP_BAR_WIDTH: f32 = 320.0;
+const PROPERTIES_CODE_MAKEUP_BAR_HEIGHT: f32 = 10.0;
+const PROPERTIES_CODE_MAKEUP_BAR_RADIUS: f32 = 5.0;
+const PROPERTIES_CODE_MAKEUP_SEPARATOR_WIDTH: f32 = 1.0;
+const PROPERTIES_CODE_MAKEUP_SEPARATOR_COLOR: u32 = 0xffffff;
+const PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH: f32 = 178.0;
+const PROPERTIES_CODE_LANGUAGE_LOC_WIDTH: f32 = 86.0;
+const PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE: f32 = 10.0;
 const PROPERTIES_FRAME_LIST_GAP: f32 = 16.0;
 const PROPERTIES_FRAME_LABEL_GAP: f32 = 4.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
@@ -255,6 +268,7 @@ pub(super) struct PropertyDetail {
 enum PropertyTab {
     General,
     Details,
+    Code,
     Image,
     Frames,
 }
@@ -262,6 +276,7 @@ enum PropertyTab {
 const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
     (PropertyTab::General, "General"),
     (PropertyTab::Details, "Details"),
+    (PropertyTab::Code, "Code"),
     (PropertyTab::Image, "Image"),
     (PropertyTab::Frames, "Frames"),
 ];
@@ -278,6 +293,20 @@ enum PropertyDetailsState {
     NotStarted,
     Loading,
     Ready(Vec<PropertyDetailGroup>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PropertyCodeState {
+    NotStarted,
+    Loading,
+    Ready(PropertyCodeSummary),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PropertyCodeSummary {
+    git: GitRepositoryCodeInfo,
+    codebase: CodebaseSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +371,8 @@ pub(super) struct PropertiesDialog {
     snapshot_generation: u64,
     details_state: PropertyDetailsState,
     details_generation: u64,
+    code_state: PropertyCodeState,
+    code_generation: u64,
     details_render_cache_key: Option<PropertyDetailsRenderCacheKey>,
     details_render_cache: Vec<PropertyDetailGroup>,
     details_scroll_handle: ScrollHandle,
@@ -356,6 +387,7 @@ pub(super) struct PropertiesDialog {
     frames_scrollbar_drag: Option<ScrollbarDrag>,
     snapshot_task: Option<Task<()>>,
     details_task: Option<Task<()>>,
+    code_task: Option<Task<()>>,
     image_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
@@ -441,6 +473,8 @@ impl PropertiesDialog {
             snapshot_generation: 0,
             details_state: PropertyDetailsState::NotStarted,
             details_generation: 0,
+            code_state: PropertyCodeState::NotStarted,
+            code_generation: 0,
             details_render_cache_key: None,
             details_render_cache: Vec::new(),
             details_scroll_handle: ScrollHandle::new(),
@@ -455,6 +489,7 @@ impl PropertiesDialog {
             frames_scrollbar_drag: None,
             snapshot_task: None,
             details_task: None,
+            code_task: None,
             image_task: None,
             frames_task: None,
             apply_task: None,
@@ -478,6 +513,7 @@ impl PropertiesDialog {
     fn start_snapshot_task(&mut self, cx: &mut Context<Self>) {
         self.snapshot_state = PropertySnapshotState::Loading;
         self.reset_details_state();
+        self.reset_code_state();
         self.reset_image_state();
         self.reset_frames_state();
         let target = self.target.clone();
@@ -533,6 +569,12 @@ impl PropertiesDialog {
         self.set_details_scroll_top(0.0);
     }
 
+    fn reset_code_state(&mut self) {
+        self.code_generation = self.code_generation.wrapping_add(1);
+        self.code_state = PropertyCodeState::NotStarted;
+        self.code_task = None;
+    }
+
     fn reset_image_state(&mut self) {
         self.image_generation = self.image_generation.wrapping_add(1);
         self.image_state = PropertyImageState::NotStarted;
@@ -554,6 +596,7 @@ impl PropertiesDialog {
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
         self.reset_details_state();
+        self.reset_code_state();
         self.reset_image_state();
         self.reset_frames_state();
         if let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state {
@@ -563,6 +606,7 @@ impl PropertiesDialog {
         }
         match self.active_tab {
             PropertyTab::Details => self.start_details_task(cx),
+            PropertyTab::Code => self.start_code_task(cx),
             PropertyTab::Image => self.start_image_task(cx),
             PropertyTab::Frames => self.start_frames_task(cx),
             PropertyTab::General => {}
@@ -634,6 +678,66 @@ impl PropertiesDialog {
             });
         });
         self.details_task = Some(task);
+    }
+
+    fn start_code_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.code_state, PropertyCodeState::NotStarted) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        let Some(repo_root) =
+            single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind)
+                .map(Path::to_path_buf)
+        else {
+            self.code_state = PropertyCodeState::Failed(
+                "Code information is not available for this item.".to_owned(),
+            );
+            return;
+        };
+
+        self.code_state = PropertyCodeState::Loading;
+        let generation = self.code_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let repo_root = repo_root.clone();
+                    async move { collect_property_code_summary(&repo_root) }
+                })
+                .await;
+
+            match &result {
+                Ok(summary) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "code ready path={} branch={} commits={} languages={}",
+                        repo_root.display(),
+                        summary.git.branch,
+                        summary.git.commit_count,
+                        summary.codebase.languages.len()
+                    ),
+                ),
+                Err(error) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!("code failed path={} error={}", repo_root.display(), error),
+                ),
+            }
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.code_generation == generation {
+                    dialog.code_task = None;
+                    dialog.code_state = match result {
+                        Ok(summary) => PropertyCodeState::Ready(summary),
+                        Err(error) => PropertyCodeState::Failed(error),
+                    };
+                    cx.notify();
+                }
+            });
+        });
+        self.code_task = Some(task);
     }
 
     fn start_image_task(&mut self, cx: &mut Context<Self>) {
@@ -1177,6 +1281,8 @@ impl PropertiesDialog {
             self.active_tab = tab;
             if tab == PropertyTab::Details {
                 self.start_details_task(cx);
+            } else if tab == PropertyTab::Code {
+                self.start_code_task(cx);
             } else if tab == PropertyTab::Image {
                 self.start_image_task(cx);
             } else if tab == PropertyTab::Frames {
@@ -1551,6 +1657,7 @@ impl PropertiesDialog {
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
                 PropertyTab::General => self.render_general(&snapshot, window, cx),
                 PropertyTab::Details => self.render_details(&snapshot, cx),
+                PropertyTab::Code => self.render_code(&snapshot, cx),
                 PropertyTab::Image => self.render_image(&snapshot),
                 PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
@@ -1978,6 +2085,125 @@ impl PropertiesDialog {
             .when(loading_details, |this| {
                 this.child(linear_indeterminate(
                     "properties-details-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn render_code(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+        let has_code_tab =
+            single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind).is_some();
+        if !has_code_tab {
+            return centered_message("Code information is not available for this item.");
+        }
+
+        let loading_code = matches!(
+            self.code_state,
+            PropertyCodeState::NotStarted | PropertyCodeState::Loading
+        );
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .w_full()
+            .id("properties-code-body")
+            .overflow_y_scroll()
+            .p(px(PROPERTIES_PANEL_PADDING));
+
+        match &self.code_state {
+            PropertyCodeState::NotStarted | PropertyCodeState::Loading => {
+                body = body.child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child("Loading code information..."),
+                );
+            }
+            PropertyCodeState::Failed(error) => {
+                body = body.child(
+                    div()
+                        .min_w(px(0.0))
+                        .w_full()
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child(SharedString::from(error.clone())),
+                );
+            }
+            PropertyCodeState::Ready(summary) => {
+                body = body
+                    .child(detail_group_header("Git"))
+                    .child(property_row(
+                        "properties-code-row-repository",
+                        "Repository:",
+                        summary.git.repo_root.display().to_string(),
+                        cx,
+                    ))
+                    .child(property_row(
+                        "properties-code-row-branch",
+                        "Branch:",
+                        summary.git.branch.clone(),
+                        cx,
+                    ))
+                    .child(property_row(
+                        "properties-code-row-commit-count",
+                        "Commit count:",
+                        summary.git.commit_count.separate_with_commas(),
+                        cx,
+                    ))
+                    .child(property_row(
+                        "properties-code-row-outgoing",
+                        "Outgoing commits:",
+                        git_divergence_value(summary.git.divergence, GitDivergenceSide::Outgoing),
+                        cx,
+                    ))
+                    .child(property_row(
+                        "properties-code-row-incoming",
+                        "Incoming commits:",
+                        git_divergence_value(summary.git.divergence, GitDivergenceSide::Incoming),
+                        cx,
+                    ))
+                    .child(detail_group_header("Language Makeup"))
+                    .child(property_row(
+                        "properties-code-row-total-loc",
+                        "Total LoC:",
+                        summary.codebase.total_code.separate_with_commas(),
+                        cx,
+                    ));
+
+                if summary.codebase.languages.is_empty() {
+                    body = body.child(
+                        div()
+                            .min_w(px(0.0))
+                            .w_full()
+                            .pt(px(8.0))
+                            .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                            .child("No language makeup is available."),
+                    );
+                } else {
+                    body = body
+                        .child(properties_code_makeup_bar(&summary.codebase))
+                        .child(code_language_header());
+                    for (index, language) in summary.codebase.languages.iter().enumerate() {
+                        body = body.child(code_language_row(index, language, cx));
+                    }
+                }
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .when(loading_code, |this| {
+                this.child(linear_indeterminate(
+                    "properties-code-linear-progress",
                     LinearProgressStyle::explorer_copy_green(),
                 ))
             })
@@ -3069,11 +3295,31 @@ fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) 
     path_may_have_video_metadata(path).then_some(path)
 }
 
+fn single_folder_direct_git_repository_root(
+    target: &PropertyTarget,
+    item_kind: PropertyItemKind,
+) -> Option<&Path> {
+    if !matches!(item_kind, PropertyItemKind::SingleFolder) {
+        return None;
+    }
+    let path = target.paths.first()?.as_path();
+    direct_git_repository_root(path).map(|_| path)
+}
+
 fn single_file_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     if !matches!(item_kind, PropertyItemKind::SingleFile) {
         return None;
     }
     target.paths.first().map(PathBuf::as_path)
+}
+
+fn collect_property_code_summary(repo_root: &Path) -> Result<PropertyCodeSummary, String> {
+    let git = scan_git_repository_code_info(repo_root)
+        .ok_or_else(|| "Git information is not available.".to_owned())?;
+    let codebase = scan_direct_codebase_summary(repo_root)
+        .ok_or_else(|| "Language makeup is not available.".to_owned())?;
+
+    Ok(PropertyCodeSummary { git, codebase })
 }
 
 fn collect_single_file_detail_groups(
@@ -5512,9 +5758,14 @@ fn property_tabs_for_snapshot(
 fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>) -> bool {
     match tab {
         PropertyTab::General | PropertyTab::Details => true,
+        PropertyTab::Code => snapshot.is_some_and(snapshot_has_code_tab),
         PropertyTab::Image => snapshot.is_some_and(snapshot_has_image_tab),
         PropertyTab::Frames => snapshot.is_some_and(snapshot_has_frames_tab),
     }
+}
+
+fn snapshot_has_code_tab(snapshot: &PropertySnapshot) -> bool {
+    single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind).is_some()
 }
 
 fn snapshot_has_image_tab(snapshot: &PropertySnapshot) -> bool {
@@ -5609,6 +5860,167 @@ fn frame_thumbnail_id(index: usize) -> (&'static str, usize) {
     ("properties-frame-thumbnail", index)
 }
 
+#[derive(Clone, Copy)]
+enum GitDivergenceSide {
+    Outgoing,
+    Incoming,
+}
+
+fn git_divergence_value(
+    divergence: Option<GitDivergence>,
+    side: GitDivergenceSide,
+) -> String {
+    let Some(divergence) = divergence else {
+        return "Not configured".to_owned();
+    };
+    match side {
+        GitDivergenceSide::Outgoing => divergence.outgoing,
+        GitDivergenceSide::Incoming => divergence.incoming,
+    }
+    .separate_with_commas()
+}
+
+fn properties_code_makeup_bar(summary: &CodebaseSummary) -> AnyElement {
+    let separator_count = summary.languages.len().saturating_sub(1);
+    let separator_width = PROPERTIES_CODE_MAKEUP_SEPARATOR_WIDTH * separator_count as f32;
+    let language_width = (PROPERTIES_CODE_MAKEUP_BAR_WIDTH - separator_width).max(0.0);
+    let widths = language_segment_widths(&summary.languages, summary.total_code, language_width);
+    let segments = summary
+        .languages
+        .iter()
+        .zip(widths)
+        .filter_map(|(language, width)| {
+            (width > 0.0).then(|| {
+                div()
+                    .h_full()
+                    .w(px(width))
+                    .flex_shrink_0()
+                    .bg(rgb(language.color))
+                    .into_any_element()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    div()
+        .id("properties-code-language-makeup-bar")
+        .mt(px(8.0))
+        .mb(px(8.0))
+        .h(px(PROPERTIES_CODE_MAKEUP_BAR_HEIGHT))
+        .w(px(PROPERTIES_CODE_MAKEUP_BAR_WIDTH))
+        .max_w_full()
+        .flex()
+        .flex_row()
+        .gap(px(PROPERTIES_CODE_MAKEUP_SEPARATOR_WIDTH))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .rounded(px(PROPERTIES_CODE_MAKEUP_BAR_RADIUS))
+        .bg(rgb(PROPERTIES_CODE_MAKEUP_SEPARATOR_COLOR))
+        .children(segments)
+        .into_any_element()
+}
+
+fn code_language_header() -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .min_h(px(26.0))
+        .border_b_1()
+        .border_color(rgb(PROPERTIES_BORDER))
+        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+        .child(
+            div()
+                .w(px(PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH))
+                .flex_shrink_0()
+                .child("Language"),
+        )
+        .child(
+            div()
+                .w(px(PROPERTIES_CODE_LANGUAGE_LOC_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .justify_end()
+                .child("LoC"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .justify_end()
+                .child("Percentage"),
+        )
+        .into_any_element()
+}
+
+fn code_language_row(
+    index: usize,
+    language: &CodebaseLanguageSummary,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    let copied_label = language.name.clone();
+    let copied_value = format!(
+        "{} LoC, {}%",
+        language.code.separate_with_commas(),
+        language.percentage
+    );
+
+    div()
+        .id(("properties-code-language-row", index))
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            copy_property_to_clipboard(&copied_label, &copied_value, cx);
+            cx.stop_propagation();
+        }))
+        .child(
+            div()
+                .w(px(PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .w(px(PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE))
+                        .h(px(PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE))
+                        .mr(px(6.0))
+                        .rounded(px(PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE / 2.0))
+                        .bg(rgb(language.color)),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .child(SharedString::from(language.name.clone())),
+                ),
+        )
+        .child(
+            div()
+                .w(px(PROPERTIES_CODE_LANGUAGE_LOC_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .justify_end()
+                .child(SharedString::from(language.code.separate_with_commas())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .justify_end()
+                .child(SharedString::from(format!("{}%", language.percentage))),
+        )
+        .into_any_element()
+}
+
 fn tab_button(
     label: &'static str,
     tab: PropertyTab,
@@ -5619,6 +6031,7 @@ fn tab_button(
     let id = match tab {
         PropertyTab::General => "properties-tab-general",
         PropertyTab::Details => "properties-tab-details",
+        PropertyTab::Code => "properties-tab-code",
         PropertyTab::Image => "properties-tab-image",
         PropertyTab::Frames => "properties-tab-frames",
     };
@@ -5909,6 +6322,7 @@ mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
     use crate::settings::{ExplorerSettings, SettingsState};
+    use git2::{Commit, Oid, Repository, Signature};
     use std::{collections::HashSet, io::Cursor, time::Duration};
 
     #[test]
@@ -6053,12 +6467,13 @@ mod tests {
     }
 
     #[test]
-    fn properties_dialog_defines_general_details_image_and_frames_tabs() {
+    fn properties_dialog_defines_general_details_code_image_and_frames_tabs() {
         assert_eq!(
             PROPERTY_TABS,
             &[
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details"),
+                (PropertyTab::Code, "Code"),
                 (PropertyTab::Image, "Image"),
                 (PropertyTab::Frames, "Frames")
             ]
@@ -6190,6 +6605,109 @@ mod tests {
             };
             assert_eq!(error, "Video frames are not available for this item.");
         });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_code_tab_loads_git_and_language_summary(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let repo = init_property_test_repo(temp.path());
+        let source = "fn main() {}\n";
+        fs::write(temp.path().join("main.rs"), source).unwrap();
+        commit_on_ref(&repo, Some("HEAD"), "main.rs", source, "initial", &[]);
+
+        let dialog = test_properties_dialog(cx, PropertyTarget {
+            paths: vec![temp.path().to_path_buf()],
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Code;
+                dialog.start_code_task(cx);
+                assert!(matches!(dialog.code_state, PropertyCodeState::Loading));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyCodeState::Ready(summary) = &dialog.code_state else {
+                panic!("code summary should be ready");
+            };
+
+            assert_eq!(summary.git.branch, "main");
+            assert_eq!(summary.git.commit_count, 1);
+            assert_eq!(summary.git.divergence, None);
+            assert_eq!(summary.codebase.total_code, 1);
+            assert_eq!(
+                summary
+                    .codebase
+                    .languages
+                    .iter()
+                    .map(|language| (language.name.as_str(), language.code, language.percentage))
+                    .collect::<Vec<_>>(),
+                vec![("Rust", 1, 100)]
+            );
+        });
+    }
+
+    #[test]
+    fn code_tab_is_visible_only_for_direct_git_root_folder() {
+        let temp = TempDir::new();
+        let nested = temp.path().join("src");
+        let file_path = temp.path().join("main.rs");
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::create_dir(&nested).unwrap();
+        fs::write(&file_path, "fn main() {}\n").unwrap();
+
+        let root = collect_property_snapshot(PropertyTarget {
+            paths: vec![temp.path().to_path_buf()],
+        })
+        .unwrap();
+        let nested = collect_property_snapshot(PropertyTarget {
+            paths: vec![nested],
+        })
+        .unwrap();
+        let file = collect_property_snapshot(PropertyTarget {
+            paths: vec![file_path.clone()],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![temp.path().to_path_buf(), file_path],
+        })
+        .unwrap();
+
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&root)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Code, "Code")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&nested)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&file)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&mixed)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
     }
 
     #[test]
@@ -7584,6 +8102,37 @@ mod tests {
                 )
             })
         })
+    }
+
+    fn init_property_test_repo(path: &Path) -> Repository {
+        let repo = Repository::init(path).expect("init repo");
+        repo.set_head("refs/heads/main").expect("set HEAD branch");
+        repo
+    }
+
+    fn commit_on_ref(
+        repo: &Repository,
+        update_ref: Option<&str>,
+        file_name: &str,
+        content: &str,
+        message: &str,
+        parents: &[&Commit<'_>],
+    ) -> Oid {
+        let signature =
+            Signature::now("Explorer Tests", "explorer@example.com").expect("create signature");
+        let parent_tree = parents.first().and_then(|parent| parent.tree().ok());
+        let mut builder = repo
+            .treebuilder(parent_tree.as_ref())
+            .expect("create tree builder");
+        let blob = repo.blob(content.as_bytes()).expect("write blob");
+        builder
+            .insert(file_name, blob, 0o100644)
+            .expect("insert tree entry");
+        let tree_oid = builder.write().expect("write tree");
+        let tree = repo.find_tree(tree_oid).expect("find tree");
+
+        repo.commit(update_ref, &signature, &signature, message, &tree, parents)
+            .expect("commit")
     }
 
     fn test_property_snapshot_with_file_detail(name: &str, value: &str) -> PropertySnapshot {
