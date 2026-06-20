@@ -1378,6 +1378,42 @@ mod tests {
     }
 
     #[test]
+    fn tiff_thumbnail_chunked_sampler_handles_white_is_zero_grayscale() {
+        let temp = TempDir::new();
+        let path = temp.path().join("white-is-zero.tif");
+        let mut data = Vec::new();
+        for _ in 0..4 {
+            data.extend_from_slice(&[0, 0, 255, 255]);
+        }
+        fs::write(&path, tiff_white_is_zero_gray8_deflate_bytes(4, 4, 1, &data)).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let thumbnail = load_image_thumbnail_png_with_cancel_timed(&path, 128, &cancel, true);
+
+        assert!(thumbnail.result.is_ok());
+        assert!(thumbnail.timings.tiff_ifd_scan.is_some());
+        assert!(thumbnail.timings.tiff_raw_sample.is_none());
+        assert!(thumbnail.timings.tiff_chunk_decode.is_some());
+        assert!(thumbnail.timings.tiff_chunk_sample.is_some());
+        assert!(thumbnail.timings.raster_decode.is_none());
+        let decoded = image::load_from_memory(&thumbnail.result.unwrap())
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (128, 128));
+
+        let white = decoded.get_pixel(16, 64);
+        assert!(
+            white[0] > 240 && white[1] > 240 && white[2] > 240 && white[3] == 255,
+            "expected encoded zero to render white, got {white:?}"
+        );
+        let black = decoded.get_pixel(96, 64);
+        assert!(
+            black[0] < 16 && black[1] < 16 && black[2] < 16 && black[3] == 255,
+            "expected encoded 255 to render black, got {black:?}"
+        );
+    }
+
+    #[test]
     fn tiff_thumbnail_falls_back_to_content_sniffing_for_png_payload() {
         let temp = TempDir::new();
         let path = temp.path().join("actually-png.tif");
@@ -1580,6 +1616,43 @@ mod tests {
             data.extend_from_slice(cmyk);
         }
         encode_tiff::<tiff::encoder::colortype::CMYK8, u8>(width, height, 16, &data)
+    }
+
+    struct WhiteGray8;
+
+    impl tiff::encoder::colortype::ColorType for WhiteGray8 {
+        type Inner = u8;
+
+        const TIFF_VALUE: tiff::tags::PhotometricInterpretation =
+            tiff::tags::PhotometricInterpretation::WhiteIsZero;
+        const BITS_PER_SAMPLE: &'static [u16] = &[8];
+        const SAMPLE_FORMAT: &'static [tiff::tags::SampleFormat] =
+            &[tiff::tags::SampleFormat::Uint];
+
+        fn horizontal_predict(row: &[Self::Inner], result: &mut Vec<Self::Inner>) {
+            result.extend_from_slice(row);
+        }
+    }
+
+    fn tiff_white_is_zero_gray8_deflate_bytes(
+        width: u32,
+        height: u32,
+        rows_per_strip: u32,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let cursor = Cursor::new(&mut bytes);
+            let mut encoder = tiff::encoder::TiffEncoder::new(cursor)
+                .unwrap()
+                .with_compression(tiff::encoder::Compression::Deflate(
+                    tiff::encoder::DeflateLevel::Fast,
+                ));
+            let mut image = encoder.new_image::<WhiteGray8>(width, height).unwrap();
+            image.rows_per_strip(rows_per_strip).unwrap();
+            image.write_data(data).unwrap();
+        }
+        bytes
     }
 
     fn encode_tiff<C, T>(width: u32, height: u32, rows_per_strip: u32, data: &[T]) -> Vec<u8>
