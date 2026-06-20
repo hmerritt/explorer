@@ -1649,7 +1649,7 @@ fn plan_path_operation(
         let conflict = destination.exists();
         stats.total_files += 1;
         stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
-        let copy_engine = copy_engine_for_paths(source, destination);
+        let copy_engine = copy_engine_for_paths(source, destination, conflict);
         match kind {
             FileOperationKind::Copy => steps.push(FileOperationStep::CopyFile {
                 source: source.to_path_buf(),
@@ -3374,8 +3374,8 @@ fn copy_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
     }
 }
 
-fn copy_engine_for_paths(source: &Path, destination: &Path) -> CopyEngine {
-    if paths_are_on_different_known_volumes(source, destination) {
+fn copy_engine_for_paths(source: &Path, destination: &Path, conflict: bool) -> CopyEngine {
+    if conflict || paths_are_on_different_known_volumes(source, destination) {
         CopyEngine::ResumableDelta
     } else {
         CopyEngine::Standard
@@ -4239,7 +4239,7 @@ mod tests {
         let destination_volume =
             set_test_path_volume_key(&destination_root, Some("destination-volume"));
         assert_eq!(
-            copy_engine_for_paths(&source, &destination),
+            copy_engine_for_paths(&source, &destination, false),
             CopyEngine::ResumableDelta
         );
         assert!(!paths_are_on_same_volume(&source, &destination));
@@ -4247,18 +4247,26 @@ mod tests {
         drop(destination_volume);
         let destination_volume = set_test_path_volume_key(&destination_root, Some("source-volume"));
         assert_eq!(
-            copy_engine_for_paths(&source, &destination),
+            copy_engine_for_paths(&source, &destination, false),
             CopyEngine::Standard
         );
         assert!(paths_are_on_same_volume(&source, &destination));
+        assert_eq!(
+            copy_engine_for_paths(&source, &destination, true),
+            CopyEngine::ResumableDelta
+        );
 
         drop(destination_volume);
         let _destination_volume = set_test_path_volume_key(&destination_root, None);
         assert_eq!(
-            copy_engine_for_paths(&source, &destination),
+            copy_engine_for_paths(&source, &destination, false),
             CopyEngine::Standard
         );
         assert!(paths_are_on_same_volume(&source, &destination));
+        assert_eq!(
+            copy_engine_for_paths(&source, &destination, true),
+            CopyEngine::ResumableDelta
+        );
     }
 
     fn finished_summary(result: Result<FileOperationOutcome, String>) -> FileOperationSummary {
@@ -4531,6 +4539,43 @@ mod tests {
         assert_eq!(
             summary.destination_paths,
             vec![destination.join("file.txt")]
+        );
+    }
+
+    #[test]
+    fn copy_conflict_replace_on_same_volume_uses_resumable_copy() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"aaaabbbbccccdddd").expect("create source");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(destination.join("file.txt"), b"aaaaXXXXccccdddd").expect("create existing");
+        let conflicts = prepared_conflict_batch(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        let summary = execute_file_operation_with_progress(
+            conflicts.into_job(),
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("replace with resumable copy");
+
+        assert_eq!(
+            fs::read(destination.join("file.txt")).unwrap(),
+            b"aaaabbbbccccdddd"
+        );
+        assert_eq!(
+            summary.destination_paths,
+            vec![destination.join("file.txt")]
+        );
+        assert!(
+            progress_events
+                .iter()
+                .any(|progress| progress.phase == FileOperationPhase::Verifying)
         );
     }
 

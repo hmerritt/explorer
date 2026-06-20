@@ -150,6 +150,25 @@ fn copy_with_delta_progress_impl(
     let source_len = metadata.len();
     let identity = OperationIdentity::new(source, destination, &metadata, block_size)?;
     let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
+
+    if destination.is_file()
+        && destination_is_identical_to_source(
+            source,
+            destination,
+            source_len,
+            block_size,
+            cancel,
+            progress,
+            on_progress,
+        )?
+    {
+        preserve_file_metadata(&metadata, destination)?;
+        sync_file(destination);
+        sync_parent_directory(destination);
+        cleanup_sidecars(&sidecars);
+        return Ok(());
+    }
+
     let journal_matches = read_journal(&sidecars.journal)
         .ok()
         .flatten()
@@ -649,6 +668,51 @@ fn verify_and_repair(
     Ok(())
 }
 
+fn destination_is_identical_to_source(
+    source: &Path,
+    destination: &Path,
+    source_len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> io::Result<bool> {
+    let destination_len = fs::metadata(destination)?.len();
+    if destination_len != source_len {
+        return Ok(false);
+    }
+
+    progress.phase = FileOperationPhase::Verifying;
+    progress.current_item = Some(source.to_path_buf());
+    on_progress(progress.clone());
+
+    let mut source = File::open(source)?;
+    let mut destination = File::open(destination)?;
+    let mut source_buffer = vec![0; block_size];
+    let mut destination_buffer = vec![0; block_size];
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+
+        let source_read = source.read(&mut source_buffer)?;
+        let destination_read = destination.read(&mut destination_buffer)?;
+        if source_read != destination_read {
+            return Ok(false);
+        }
+        if source_read == 0 {
+            return Ok(true);
+        }
+
+        if strong_hash(&source_buffer[..source_read])
+            != strong_hash(&destination_buffer[..destination_read])
+        {
+            return Ok(false);
+        }
+    }
+}
+
 fn verify_pass(
     source: &Path,
     scratch: &Path,
@@ -761,6 +825,12 @@ fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "file operation cancelled")
 }
 
+fn sync_file(path: &Path) {
+    if let Ok(file) = File::open(path) {
+        let _ = file.sync_all();
+    }
+}
+
 #[cfg(unix)]
 fn sync_parent_directory(path: &Path) {
     if let Some(parent) = path.parent()
@@ -780,6 +850,7 @@ mod tests {
         filesystem::{FileOperationKind, FileOperationProgress},
         test_support::TempDir,
     };
+    use filetime::FileTime;
 
     fn test_progress(total_bytes: u64) -> FileOperationProgress {
         FileOperationProgress {
@@ -873,6 +944,103 @@ mod tests {
     }
 
     #[test]
+    fn identical_destination_is_no_op_and_cleans_matching_sidecars() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"same content").expect("write source");
+        fs::write(&destination, b"same content").expect("write destination");
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 4);
+        fs::write(&sidecars.partial, b"stale partial").expect("write partial sidecar");
+        fs::write(&sidecars.next, b"stale next").expect("write next sidecar");
+        write_matching_journal_for_test(&source, &destination, 4);
+        let mut progress = test_progress(12);
+
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect("identical no-op");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"same content");
+        assert_eq!(progress.copied_bytes, 0);
+        assert!(!sidecars.partial.exists());
+        assert!(!sidecars.next.exists());
+        assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
+    fn identical_destination_preserves_source_metadata_without_data_copy() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"same content").expect("write source");
+        fs::write(&destination, b"same content").expect("write destination");
+        let source_modified = FileTime::from_unix_time(1_700_000_000, 0);
+        let destination_modified = FileTime::from_unix_time(1_600_000_000, 0);
+        filetime::set_file_mtime(&source, source_modified).expect("set source mtime");
+        filetime::set_file_mtime(&destination, destination_modified)
+            .expect("set destination mtime");
+        let mut progress = test_progress(12);
+
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect("identical metadata no-op");
+
+        let destination_metadata = fs::metadata(&destination).expect("destination metadata");
+        assert_eq!(
+            FileTime::from_last_modification_time(&destination_metadata),
+            source_modified
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"same content");
+        assert_eq!(progress.copied_bytes, 0);
+    }
+
+    #[test]
+    fn delta_copy_reuses_matching_blocks_and_literals_changed_block() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let basis = temp.path().join("basis.bin");
+        let scratch = temp.path().join("scratch.bin");
+        fs::write(&source, b"aaaabbbbccccdddd").expect("write source");
+        fs::write(&basis, b"aaaaXXXXccccdddd").expect("write basis");
+        let signatures =
+            build_basis_signatures(&basis, 4, &Arc::new(AtomicBool::new(false))).expect("basis");
+        let mut basis_file = File::open(&basis).expect("open basis");
+        let mut output = File::create(&scratch).expect("create scratch");
+        let mut progress = test_progress(16);
+        let mut stats = DeltaCopyStats::default();
+
+        scan_source_to_output(
+            &source,
+            &signatures,
+            Some(&mut basis_file),
+            &mut output,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            &mut stats,
+        )
+        .expect("delta scan");
+
+        drop(output);
+        assert_eq!(fs::read(&scratch).unwrap(), b"aaaabbbbccccdddd");
+        assert_eq!(stats.reused_blocks, 3);
+        assert_eq!(stats.literal_bytes, 4);
+    }
+
+    #[test]
     fn cancelled_resumable_copy_preserves_sidecars_and_later_resumes() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
@@ -955,5 +1123,13 @@ mod tests {
         let identity =
             OperationIdentity::new(source, destination, &metadata, block_size).expect("identity");
         sidecar_paths(destination, &identity.journal.operation_key)
+    }
+
+    fn write_matching_journal_for_test(source: &Path, destination: &Path, block_size: usize) {
+        let metadata = fs::metadata(source).expect("source metadata");
+        let identity =
+            OperationIdentity::new(source, destination, &metadata, block_size).expect("identity");
+        let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
+        write_journal(&sidecars.journal, &identity.journal).expect("write journal");
     }
 }
