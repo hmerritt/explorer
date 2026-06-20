@@ -2,6 +2,8 @@
 
 ## 1
 
+- When opening the root of a WSL drive, it takes a long time. But when directly opening a sub-directory of WSL (user's home directory) it opens instantly. Why does the root take so long to open, and let's try to fix it. "//wsl.localhost/Ubuntu-24.04/"
+
 ## 2
 
 - Improve readme - add screenshots / branding

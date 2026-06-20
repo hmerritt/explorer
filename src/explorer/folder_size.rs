@@ -1,13 +1,17 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, Metadata},
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use gpui::{App, Global};
+use jwalk::{Parallelism, WalkDirGeneric};
 
 const FOLDER_SIZE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
@@ -76,9 +80,23 @@ pub(super) enum FolderSizeError {
     Unavailable,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FolderSizeCalculation {
+    pub(super) path: PathBuf,
+    pub(super) size: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FolderSizeEntryState {
+    #[default]
+    Directory,
+    Size(u64),
+    Unavailable,
+}
+
 pub(super) fn calculate_folder_size(
     path: &Path,
-    cancel: &AtomicBool,
+    cancel: Arc<AtomicBool>,
 ) -> Result<u64, FolderSizeError> {
     if cancel.load(Ordering::Relaxed) {
         return Err(FolderSizeError::Cancelled);
@@ -89,21 +107,287 @@ pub(super) fn calculate_folder_size(
         return Ok(metadata.len());
     }
 
-    if metadata.is_dir() {
-        let mut size = 0;
-        let entries = fs::read_dir(path).map_err(|_| FolderSizeError::Unavailable)?;
-        for entry in entries {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(FolderSizeError::Cancelled);
-            }
-
-            let entry = entry.map_err(|_| FolderSizeError::Unavailable)?;
-            size += calculate_folder_size(&entry.path(), cancel)?;
-        }
-        Ok(size)
-    } else {
-        Ok(metadata.len())
+    if !metadata.is_dir() {
+        return Ok(metadata.len());
     }
+
+    let mut size = 0u64;
+    let walker = WalkDirGeneric::<((), FolderSizeEntryState)>::new(path)
+        .skip_hidden(false)
+        .follow_links(false)
+        .sort(false)
+        .process_read_dir({
+            let cancel = cancel.clone();
+            move |depth, _, _, children| {
+                if cancel.load(Ordering::Relaxed) {
+                    children.clear();
+                    return;
+                }
+
+                if depth.is_some() {
+                    prepare_folder_size_entries(children);
+                }
+            }
+        });
+
+    for entry in walker {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FolderSizeError::Cancelled);
+        }
+
+        let entry = entry.map_err(|_| FolderSizeError::Unavailable)?;
+        if entry.read_children_error.is_some() {
+            return Err(FolderSizeError::Unavailable);
+        }
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        match entry.client_state {
+            FolderSizeEntryState::Size(contribution) => {
+                size = size.saturating_add(contribution);
+            }
+            FolderSizeEntryState::Directory => {}
+            FolderSizeEntryState::Unavailable => return Err(FolderSizeError::Unavailable),
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        Err(FolderSizeError::Cancelled)
+    } else {
+        Ok(size)
+    }
+}
+
+pub(super) fn calculate_folder_sizes(
+    root: &Path,
+    targets: Vec<PathBuf>,
+    cancel: Arc<AtomicBool>,
+    on_calculation: impl FnMut(FolderSizeCalculation),
+) -> Result<(), FolderSizeError> {
+    calculate_folder_sizes_with_parallelism(root, targets, cancel, None, on_calculation)
+}
+
+fn calculate_folder_sizes_with_parallelism(
+    root: &Path,
+    targets: Vec<PathBuf>,
+    cancel: Arc<AtomicBool>,
+    parallelism: Option<Parallelism>,
+    mut on_calculation: impl FnMut(FolderSizeCalculation),
+) -> Result<(), FolderSizeError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FolderSizeError::Cancelled);
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let target_paths = targets.into_iter().collect::<HashSet<_>>();
+    let mut current_target = None;
+    let mut current_size = 0u64;
+    let mut current_unavailable = false;
+    let mut walker = WalkDirGeneric::<((), FolderSizeEntryState)>::new(root)
+        .skip_hidden(false)
+        .follow_links(false)
+        .sort(false)
+        .process_read_dir({
+            let root = root.to_path_buf();
+            let target_paths = target_paths.clone();
+            let cancel = cancel.clone();
+            move |depth, path, _, children| {
+                if cancel.load(Ordering::Relaxed) {
+                    children.clear();
+                    return;
+                }
+
+                let reading_root = depth == Some(0) && path == root.as_path();
+                if depth.is_some() {
+                    prepare_folder_size_entries(children);
+                }
+                if reading_root {
+                    for child in children.iter_mut() {
+                        let Ok(entry) = child else {
+                            continue;
+                        };
+                        if entry.file_type().is_dir() && !target_paths.contains(&entry.path()) {
+                            entry.read_children_path = None;
+                        }
+                    }
+                }
+            }
+        });
+    if let Some(parallelism) = parallelism {
+        walker = walker.parallelism(parallelism);
+    }
+
+    for entry in walker {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FolderSizeError::Cancelled);
+        }
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if let Some(path) = error.path() {
+                    if let Some(target) = target_for_path(root, path, &target_paths) {
+                        begin_target(
+                            target,
+                            &mut current_target,
+                            &mut current_size,
+                            &mut current_unavailable,
+                            &mut on_calculation,
+                        );
+                        current_unavailable = true;
+                        continue;
+                    }
+                    if direct_child_path(root, path).is_some() {
+                        flush_current_target(
+                            &mut current_target,
+                            &mut current_size,
+                            &mut current_unavailable,
+                            &mut on_calculation,
+                        );
+                        continue;
+                    }
+                }
+                return Err(FolderSizeError::Unavailable);
+            }
+        };
+        let path = entry.path();
+        if entry.depth() == 0 {
+            if entry.read_children_error.is_some() {
+                return Err(FolderSizeError::Unavailable);
+            }
+            continue;
+        }
+        let direct_child = direct_child_path(root, &path);
+        let target = direct_child
+            .as_ref()
+            .filter(|path| target_paths.contains(*path))
+            .cloned();
+        let Some(target) = target else {
+            if direct_child.is_some() {
+                flush_current_target(
+                    &mut current_target,
+                    &mut current_size,
+                    &mut current_unavailable,
+                    &mut on_calculation,
+                );
+            }
+            continue;
+        };
+
+        begin_target(
+            target.clone(),
+            &mut current_target,
+            &mut current_size,
+            &mut current_unavailable,
+            &mut on_calculation,
+        );
+
+        if entry.read_children_error.is_some() {
+            current_unavailable = true;
+        }
+
+        if path == target {
+            continue;
+        }
+
+        match entry.client_state {
+            FolderSizeEntryState::Size(size) => {
+                current_size = current_size.saturating_add(size);
+            }
+            FolderSizeEntryState::Directory => {}
+            FolderSizeEntryState::Unavailable => {
+                current_unavailable = true;
+            }
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FolderSizeError::Cancelled);
+    }
+
+    flush_current_target(
+        &mut current_target,
+        &mut current_size,
+        &mut current_unavailable,
+        &mut on_calculation,
+    );
+    Ok(())
+}
+
+fn begin_target(
+    target: PathBuf,
+    current_target: &mut Option<PathBuf>,
+    current_size: &mut u64,
+    current_unavailable: &mut bool,
+    on_calculation: &mut impl FnMut(FolderSizeCalculation),
+) {
+    if current_target.as_ref() == Some(&target) {
+        return;
+    }
+
+    flush_current_target(
+        current_target,
+        current_size,
+        current_unavailable,
+        on_calculation,
+    );
+    *current_target = Some(target);
+}
+
+fn flush_current_target(
+    current_target: &mut Option<PathBuf>,
+    current_size: &mut u64,
+    current_unavailable: &mut bool,
+    on_calculation: &mut impl FnMut(FolderSizeCalculation),
+) {
+    if let Some(path) = current_target.take()
+        && !*current_unavailable
+    {
+        let calculation = FolderSizeCalculation {
+            path,
+            size: *current_size,
+        };
+        on_calculation(calculation);
+    }
+    *current_size = 0;
+    *current_unavailable = false;
+}
+
+fn prepare_folder_size_entries(
+    children: &mut [jwalk::Result<jwalk::DirEntry<((), FolderSizeEntryState)>>],
+) {
+    for child in children.iter_mut() {
+        let Ok(entry) = child else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            entry.client_state = FolderSizeEntryState::Unavailable;
+            entry.read_children_path = None;
+            continue;
+        };
+        if metadata_is_directory_link(&metadata) || !metadata.is_dir() {
+            entry.client_state = FolderSizeEntryState::Size(metadata.len());
+            entry.read_children_path = None;
+        } else {
+            entry.client_state = FolderSizeEntryState::Directory;
+        };
+    }
+}
+
+fn target_for_path(root: &Path, path: &Path, target_paths: &HashSet<PathBuf>) -> Option<PathBuf> {
+    let target = direct_child_path(root, path)?;
+    target_paths.contains(&target).then_some(target)
+}
+
+fn direct_child_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let mut components = path.strip_prefix(root).ok()?.components();
+    let Component::Normal(name) = components.next()? else {
+        return None;
+    };
+    Some(root.join(name))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -163,9 +447,96 @@ mod tests {
         fs::create_dir(&nested).expect("create nested folder");
         fs::write(folder.join("a.txt"), b"abc").expect("create first file");
         fs::write(nested.join("b.txt"), b"defg").expect("create second file");
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
 
-        assert_eq!(calculate_folder_size(&folder, &cancel), Ok(7));
+        assert_eq!(calculate_folder_size(&folder, cancel), Ok(7));
+    }
+
+    #[test]
+    fn batched_folder_sizes_sum_multiple_visible_siblings() {
+        let temp = TempDir::new();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let nested = first.join("nested");
+        fs::create_dir(&first).expect("create first folder");
+        fs::create_dir(&second).expect("create second folder");
+        fs::create_dir(&nested).expect("create nested folder");
+        fs::write(first.join("a.txt"), b"abc").expect("create first file");
+        fs::write(nested.join("b.txt"), b"defg").expect("create nested file");
+        fs::write(second.join("c.txt"), b"hello").expect("create second file");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let calculations =
+            collect_folder_sizes(temp.path(), vec![first.clone(), second.clone()], cancel)
+                .expect("calculate folder sizes");
+        let sizes = calculation_map(calculations);
+
+        assert_eq!(sizes.get(&first), Some(&7));
+        assert_eq!(sizes.get(&second), Some(&5));
+    }
+
+    #[test]
+    fn batched_folder_sizes_emit_completed_target_before_returning() {
+        let temp = TempDir::new();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir(&first).expect("create first folder");
+        fs::create_dir(&second).expect("create second folder");
+        fs::write(first.join("a.txt"), b"a").expect("create first file");
+        fs::write(second.join("b.txt"), b"b").expect("create second file");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_from_callback = cancel.clone();
+        let mut calculations = Vec::new();
+
+        let result = calculate_folder_sizes_with_parallelism(
+            temp.path(),
+            vec![first.clone(), second.clone()],
+            cancel,
+            Some(Parallelism::Serial),
+            |calculation| {
+                calculations.push(calculation);
+                cancel_from_callback.store(true, Ordering::Relaxed);
+            },
+        );
+
+        assert_eq!(result, Err(FolderSizeError::Cancelled));
+        assert_eq!(calculations.len(), 1);
+        assert_eq!(calculations[0].size, 1);
+    }
+
+    #[test]
+    fn batched_folder_sizes_ignore_root_level_non_targets() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        let other = temp.path().join("other");
+        fs::create_dir(&target).expect("create target folder");
+        fs::create_dir(&other).expect("create other folder");
+        fs::write(target.join("target.txt"), b"abc").expect("create target file");
+        fs::write(other.join("other.txt"), b"ignored").expect("create other file");
+        fs::write(temp.path().join("root.txt"), b"ignored").expect("create root file");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let calculations = collect_folder_sizes(temp.path(), vec![target.clone()], cancel)
+            .expect("calculate folder sizes");
+        let sizes = calculation_map(calculations);
+
+        assert_eq!(sizes.len(), 1);
+        assert_eq!(sizes.get(&target), Some(&3));
+    }
+
+    #[test]
+    fn folder_size_counts_dotfiles() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create folder");
+        fs::write(folder.join(".hidden"), b"abc").expect("create hidden file");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        assert_eq!(calculate_folder_size(&folder, cancel.clone()), Ok(3));
+        let calculations = collect_folder_sizes(temp.path(), vec![folder.clone()], cancel)
+            .expect("calculate folder sizes");
+        let sizes = calculation_map(calculations);
+        assert_eq!(sizes.get(&folder), Some(&3));
     }
 
     #[test]
@@ -174,21 +545,81 @@ mod tests {
         let folder = temp.path().join("folder");
         fs::create_dir(&folder).expect("create folder");
         fs::write(folder.join("a.txt"), b"abc").expect("create file");
-        let cancel = AtomicBool::new(true);
+        let cancel = Arc::new(AtomicBool::new(true));
 
         assert_eq!(
-            calculate_folder_size(&folder, &cancel),
+            calculate_folder_size(&folder, cancel.clone()),
             Err(FolderSizeError::Cancelled)
         );
+        assert!(matches!(
+            calculate_folder_sizes(temp.path(), vec![folder], cancel, |_| {}),
+            Err(FolderSizeError::Cancelled)
+        ));
     }
 
     #[test]
     fn folder_size_reports_unavailable_for_missing_path() {
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
 
         assert_eq!(
-            calculate_folder_size(&PathBuf::from("missing-folder"), &cancel),
+            calculate_folder_size(&PathBuf::from("missing-folder"), cancel),
             Err(FolderSizeError::Unavailable)
         );
+    }
+
+    #[test]
+    fn folder_size_does_not_descend_into_directory_symlink() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let target = temp.path().join("target");
+        let link = folder.join("link");
+        fs::create_dir(&folder).expect("create folder");
+        fs::create_dir(&target).expect("create target");
+        fs::write(target.join("inside-target.txt"), b"not counted").expect("create target file");
+        if create_directory_symlink(&target, &link).is_err() {
+            return;
+        }
+        let link_size = fs::symlink_metadata(&link)
+            .expect("read link metadata")
+            .len();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        assert_eq!(
+            calculate_folder_size(&folder, cancel.clone()),
+            Ok(link_size)
+        );
+        let calculations = collect_folder_sizes(temp.path(), vec![folder.clone()], cancel)
+            .expect("calculate folder sizes");
+        let sizes = calculation_map(calculations);
+        assert_eq!(sizes.get(&folder), Some(&link_size));
+    }
+
+    fn collect_folder_sizes(
+        root: &Path,
+        targets: Vec<PathBuf>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<FolderSizeCalculation>, FolderSizeError> {
+        let mut calculations = Vec::new();
+        calculate_folder_sizes(root, targets, cancel, |calculation| {
+            calculations.push(calculation);
+        })?;
+        Ok(calculations)
+    }
+
+    fn calculation_map(calculations: Vec<FolderSizeCalculation>) -> HashMap<PathBuf, u64> {
+        calculations
+            .into_iter()
+            .map(|calculation| (calculation.path, calculation.size))
+            .collect()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 }

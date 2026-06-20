@@ -451,7 +451,7 @@ impl ExplorerDialog {
                     .spawn({
                         let path = path.clone();
                         let cancel = cancel.clone();
-                        async move { calculate_folder_size(&path, &cancel) }
+                        async move { calculate_folder_size(&path, cancel) }
                     })
                     .await;
 

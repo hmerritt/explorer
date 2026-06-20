@@ -4,10 +4,12 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use futures::FutureExt;
 use gpui::{
     AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Subscription, Task,
     UniformListScrollHandle, point, px,
@@ -22,7 +24,7 @@ use crate::explorer::{
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     filesystem::{FileConflictBatch, FileOperationProgress, load_entries},
-    folder_size::{FolderSizeCache, FolderSizeError, calculate_folder_size},
+    folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
@@ -35,6 +37,8 @@ use crate::explorer::{
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileViewMode, SidebarSettings,
 };
+
+const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
@@ -639,49 +643,29 @@ impl ExplorerView {
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.folder_size_cancel = Some(cancel.clone());
+        let (calculation_tx, calculation_rx) = mpsc::channel();
         let task = cx.spawn(async move |this, cx| {
-            for path in missing {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let calculation_path = path.clone();
-                let calculation_cancel = cancel.clone();
-                let result =
-                    cx.background_executor()
-                        .spawn(async move {
-                            calculate_folder_size(&calculation_path, &calculation_cancel)
-                        })
-                        .await;
-
-                let should_continue = this
-                    .update(cx, |explorer, cx| {
-                        if explorer.path != root
-                            || explorer.folder_size_generation != generation
-                            || !explorer.show_folder_size
-                        {
-                            return false;
-                        }
-
-                        match result {
-                            Ok(size) => {
-                                if let Some(cache) = cx.try_global::<FolderSizeCache>() {
-                                    cache.insert(path.clone(), size);
-                                }
-                                if explorer.apply_folder_size(&path, size) {
-                                    cx.notify();
-                                }
-                                true
-                            }
-                            Err(FolderSizeError::Cancelled) => false,
-                            Err(FolderSizeError::Unavailable) => true,
-                        }
+            let calculation_root = root.clone();
+            let calculation_task = cx.background_executor().spawn({
+                let cancel = cancel.clone();
+                async move {
+                    calculate_folder_sizes(&calculation_root, missing, cancel, |calculation| {
+                        let _ = calculation_tx.send(calculation);
                     })
-                    .unwrap_or(false);
-                if !should_continue {
-                    break;
+                }
+            });
+            let calculation_task = calculation_task.fuse();
+            futures::pin_mut!(calculation_task);
+
+            loop {
+                Self::drain_folder_size_calculations(&this, cx, &calculation_rx, &root, generation);
+                futures::select! {
+                    _ = calculation_task => break,
+                    _ = cx.background_executor().timer(FOLDER_SIZE_PROGRESS_INTERVAL).fuse() => {}
                 }
             }
+
+            Self::drain_folder_size_calculations(&this, cx, &calculation_rx, &root, generation);
 
             let _ = this.update(cx, |explorer, _| {
                 if explorer.folder_size_generation == generation {
@@ -691,6 +675,50 @@ impl ExplorerView {
             });
         });
         self.folder_size_task = Some(task);
+    }
+
+    fn drain_folder_size_calculations(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        calculation_rx: &mpsc::Receiver<FolderSizeCalculation>,
+        root: &Path,
+        generation: u64,
+    ) {
+        let mut calculations = Vec::new();
+        while let Ok(calculation) = calculation_rx.try_recv() {
+            calculations.push(calculation);
+        }
+        if calculations.is_empty() {
+            return;
+        }
+
+        let _ = this.update(cx, |explorer, cx| {
+            if explorer.apply_folder_size_calculations(root, generation, calculations, cx) {
+                cx.notify();
+            }
+        });
+    }
+
+    fn apply_folder_size_calculations(
+        &mut self,
+        root: &Path,
+        generation: u64,
+        calculations: Vec<FolderSizeCalculation>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.path != root || self.folder_size_generation != generation || !self.show_folder_size
+        {
+            return false;
+        }
+
+        let mut changed = false;
+        for calculation in calculations {
+            if let Some(cache) = cx.try_global::<FolderSizeCache>() {
+                cache.insert(calculation.path.clone(), calculation.size);
+            }
+            changed |= self.apply_folder_size(&calculation.path, calculation.size);
+        }
+        changed
     }
 
     fn cancel_folder_size_task(&mut self) {
@@ -1650,6 +1678,46 @@ mod tests {
         assert_eq!(
             cx.read_global::<FolderSizeCache, _>(|cache, _| cache.get(&folder)),
             Some(3)
+        );
+    }
+
+    #[gpui::test]
+    fn streamed_folder_size_result_updates_view_and_cache(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FolderSizeCache::new());
+        let temp = crate::explorer::test_support::TempDir::new();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let path = temp.path().to_path_buf();
+        let root = path.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.show_folder_size = true;
+                let generation = view.folder_size_generation;
+                assert!(view.apply_folder_size_calculations(
+                    &root,
+                    generation,
+                    vec![FolderSizeCalculation {
+                        path: folder.clone(),
+                        size: 7,
+                    }],
+                    cx,
+                ));
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.all_entries[0].size, Some(7));
+            assert_eq!(view.entries[0].size, Some(7));
+        });
+        assert_eq!(
+            cx.read_global::<FolderSizeCache, _>(|cache, _| cache.get(&folder)),
+            Some(7)
         );
     }
 
