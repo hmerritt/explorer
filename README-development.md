@@ -39,6 +39,18 @@ Explorer as a GUI application instead of a terminal-launched executable. Release
 builds generate the app icon from `assets/explorer.png`, include an `Info.plist`, and
 ad-hoc sign the bundle so its local signing metadata is coherent.
 
+For a local user install after building from source on macOS, run:
+
+```sh
+cargo build --release
+./install-macos.sh
+open "$HOME/Applications/Explorer.app"
+```
+
+The installer creates or updates `~/Applications/Explorer.app` by default. Set
+`EXPLORER_BINARY_PATH` to install a non-default build output, or
+`EXPLORER_INSTALL_DIR` to install into another user-writable directory.
+
 A better long-term macOS distribution should use a Developer ID certificate,
 notarize with Apple, staple the notarization ticket, and package as a `.dmg` or
 `.app.zip`. Apple documents this flow in
