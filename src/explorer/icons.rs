@@ -134,6 +134,7 @@ png_icon!(PICTURES_SIDEBAR_ICON, "sidebar", "pictures.png");
 png_icon!(VIDEOS_SIDEBAR_ICON, "sidebar", "videos.png");
 
 svg_icon!(COPY_ICON, "utility", "copy.svg");
+svg_icon!(COPY_AS_PATH_ICON, "utility", "copy_as_path.svg");
 svg_icon!(CUT_ICON, "utility", "cut.svg");
 svg_icon!(DELETE_ICON, "utility", "delete.svg");
 svg_icon!(DETAILS_ICON, "utility", "details.svg");

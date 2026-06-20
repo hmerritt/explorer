@@ -67,13 +67,13 @@ use crate::explorer::{
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
-        COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON,
-        GIT_BRANCH_ICON, GIT_ICON, LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon,
-        OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, directory_kind_icon,
-        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
-        drive_icon, drive_windows_icon, drive_wsl_icon, executable_icon_sized, file_icon,
-        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font,
+        COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON,
+        FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, LARGE_ICONS_ICON, NEW_ITEM_ICON,
+        NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON,
+        directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
+        directory_shortcut_icon_sized, drive_icon, drive_windows_icon, drive_wsl_icon,
+        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
+        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
@@ -3783,6 +3783,10 @@ fn context_menu_icon_element(
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
         ContextMenuIcon::Copy => gpui::img(COPY_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::CopyAsPath => gpui::img(COPY_AS_PATH_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),

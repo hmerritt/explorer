@@ -1385,7 +1385,11 @@ mod tests {
         for _ in 0..4 {
             data.extend_from_slice(&[0, 0, 255, 255]);
         }
-        fs::write(&path, tiff_white_is_zero_gray8_deflate_bytes(4, 4, 1, &data)).unwrap();
+        fs::write(
+            &path,
+            tiff_white_is_zero_gray8_deflate_bytes(4, 4, 1, &data),
+        )
+        .unwrap();
         let cancel = AtomicBool::new(false);
 
         let thumbnail = load_image_thumbnail_png_with_cancel_timed(&path, 128, &cancel, true);

@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use gpui::{Context, Pixels, Point, Window};
+use gpui::{ClipboardItem, Context, Pixels, Point, Window};
 
 use crate::explorer::{
     DirectoryKind,
@@ -67,6 +67,7 @@ pub(super) enum ContextMenuIconSlot {
 pub(super) enum ContextMenuIcon {
     Cut,
     Copy,
+    CopyAsPath,
     Paste,
     Delete,
     Rename,
@@ -107,6 +108,9 @@ pub(super) enum ContextMenuCommand {
     OpenSelectedDirectoriesInNewTabs,
     CutSelected,
     CopySelected,
+    CopyPath {
+        path: PathBuf,
+    },
     Paste,
     DeleteSelected,
     RenameSelected,
@@ -363,6 +367,11 @@ impl ExplorerView {
             }
             ContextMenuCommand::CutSelected => self.cut_selected_to_clipboard(cx),
             ContextMenuCommand::CopySelected => self.copy_selected_to_clipboard(cx),
+            ContextMenuCommand::CopyPath { path } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(self.address_text_for_path(&path)));
+                self.cut_paths.clear();
+                self.open_error = None;
+            }
             ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
             ContextMenuCommand::DeleteSelected => self.trash_selected_paths(cx),
             ContextMenuCommand::RenameSelected => {
@@ -584,6 +593,16 @@ pub(super) fn entry_context_menu_items(
     can_rename: bool,
     use_native_file_icon: bool,
 ) -> Vec<ContextMenuItem> {
+    let selected_entries = test_context_menu_entries(
+        &single_directory_open_target,
+        selected_count,
+        selected_file_count,
+        selected_directory_count,
+    );
+    let targets = selected_entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
     entry_context_menu_items_with_custom(
         single_directory_open_target,
         selected_count,
@@ -592,9 +611,59 @@ pub(super) fn entry_context_menu_items(
         can_rename,
         use_native_file_icon,
         &[],
-        &[],
-        &[],
+        &targets,
+        &selected_entries,
     )
+}
+
+#[cfg(test)]
+fn test_context_menu_entries(
+    single_directory_open_target: &Option<PathBuf>,
+    selected_count: usize,
+    selected_file_count: usize,
+    selected_directory_count: usize,
+) -> Vec<FileEntry> {
+    let mut entries = Vec::new();
+
+    for index in 0..selected_file_count.min(selected_count) {
+        entries.push(test_context_menu_entry(
+            PathBuf::from(format!("file-{}.txt", index + 1)),
+            false,
+        ));
+    }
+
+    for index in 0..selected_directory_count.min(selected_count.saturating_sub(entries.len())) {
+        let path = if index == 0 {
+            single_directory_open_target
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("folder-1"))
+        } else {
+            PathBuf::from(format!("folder-{}", index + 1))
+        };
+        entries.push(test_context_menu_entry(path, true));
+    }
+
+    entries
+}
+
+#[cfg(test)]
+fn test_context_menu_entry(path: PathBuf, is_dir: bool) -> FileEntry {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(if is_dir { "folder" } else { "file.txt" })
+        .to_owned();
+    FileEntry {
+        path,
+        name,
+        kind: if is_dir {
+            crate::explorer::entry::EntryKind::Directory
+        } else {
+            crate::explorer::entry::EntryKind::File
+        },
+        modified: None,
+        size: (!is_dir).then_some(1),
+    }
 }
 
 fn entry_context_menu_items_with_custom(
@@ -688,6 +757,17 @@ fn entry_context_menu_items_with_custom(
             command: ContextMenuCommand::CopySelected,
             enabled: true,
         },
+    ]);
+    if selected_count == 1
+        && let Some(entry) = selected_entries.first()
+    {
+        items.push(copy_path_context_menu_item(
+            "context-menu-entry-copy-path",
+            &entry.path,
+            directory_new_tab_target(entry).is_some(),
+        ));
+    }
+    items.extend([
         ContextMenuItem::Separator,
         ContextMenuItem::Action {
             id: "context-menu-entry-delete".to_owned(),
@@ -733,8 +813,13 @@ fn folder_context_menu_items_with_custom(
         .map(|metadata| (metadata.created().ok(), metadata.modified().ok()))
         .unwrap_or((None, None));
 
-    let mut items =
-        folder_context_menu_items_from_times_with_format(can_paste, created, modified, date_format);
+    let mut items = folder_context_menu_items_from_times_with_format(
+        path,
+        can_paste,
+        created,
+        modified,
+        date_format,
+    );
     insert_custom_items_after_first_separator(
         &mut items,
         custom_items,
@@ -751,6 +836,7 @@ pub(super) fn folder_context_menu_items_from_times(
     modified: Option<SystemTime>,
 ) -> Vec<ContextMenuItem> {
     folder_context_menu_items_from_times_with_format(
+        Path::new("folder"),
         can_paste,
         created,
         modified,
@@ -759,6 +845,7 @@ pub(super) fn folder_context_menu_items_from_times(
 }
 
 fn folder_context_menu_items_from_times_with_format(
+    path: &Path,
     can_paste: bool,
     created: Option<SystemTime>,
     modified: Option<SystemTime>,
@@ -793,6 +880,7 @@ fn folder_context_menu_items_from_times_with_format(
                 },
             ],
         },
+        copy_path_context_menu_item("context-menu-folder-copy-path", path, true),
         ContextMenuItem::Separator,
         ContextMenuItem::Detail {
             label: "Created",
@@ -805,6 +893,22 @@ fn folder_context_menu_items_from_times_with_format(
             icon_slot: ContextMenuIconSlot::Collapse,
         },
     ]
+}
+
+fn copy_path_context_menu_item(id: &str, path: &Path, is_folder: bool) -> ContextMenuItem {
+    ContextMenuItem::Action {
+        id: id.to_owned(),
+        icon: Some(ContextMenuIcon::CopyAsPath),
+        label: if is_folder {
+            "Copy folder path".to_owned()
+        } else {
+            "Copy file path".to_owned()
+        },
+        command: ContextMenuCommand::CopyPath {
+            path: path.to_path_buf(),
+        },
+        enabled: true,
+    }
 }
 
 fn insert_custom_items_after_first_separator(
@@ -1340,7 +1444,7 @@ mod tests {
     fn folder_menu_contains_expected_items_and_icons() {
         let items = folder_context_menu_items_from_times(false, None, None);
 
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 6);
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
@@ -1364,7 +1468,19 @@ mod tests {
         assert_eq!(*icon, Some(ContextMenuIcon::New));
         assert_eq!(*label, "New");
         assert_eq!(children.len(), 2);
-        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert_eq!(
+            items[2],
+            ContextMenuItem::Action {
+                id: "context-menu-folder-copy-path".to_owned(),
+                icon: Some(ContextMenuIcon::CopyAsPath),
+                label: "Copy folder path".to_owned(),
+                command: ContextMenuCommand::CopyPath {
+                    path: PathBuf::from("folder")
+                },
+                enabled: true,
+            }
+        );
+        assert!(matches!(items[3], ContextMenuItem::Separator));
     }
 
     #[test]
@@ -1502,6 +1618,13 @@ mod tests {
                     command: ContextMenuCommand::CopySelected,
                     enabled: true,
                 },
+                ContextMenuItem::Action {
+                    id: "context-menu-entry-copy-path".to_owned(),
+                    icon: Some(ContextMenuIcon::CopyAsPath),
+                    label: "Copy folder path".to_owned(),
+                    command: ContextMenuCommand::CopyPath { path: path.clone() },
+                    enabled: true,
+                },
                 ContextMenuItem::Separator,
                 ContextMenuItem::Action {
                     id: "context-menu-entry-delete".to_owned(),
@@ -1573,6 +1696,24 @@ mod tests {
                 enabled: true,
                 ..
             })
+        ));
+        assert!(matches!(
+            items.iter().find(|item| matches!(
+                item,
+                ContextMenuItem::Action {
+                    command: ContextMenuCommand::CopyPath { .. },
+                    ..
+                }
+            )),
+            Some(ContextMenuItem::Action {
+                id,
+                icon: Some(ContextMenuIcon::CopyAsPath),
+                label,
+                command: ContextMenuCommand::CopyPath { path },
+                enabled: true,
+            }) if id == "context-menu-entry-copy-path"
+                && label == "Copy file path"
+                && path == Path::new("file-1.txt")
         ));
     }
 
@@ -1853,6 +1994,13 @@ mod tests {
             item,
             ContextMenuItem::Action {
                 command: ContextMenuCommand::RenameSelected,
+                ..
+            }
+        )));
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::CopyPath { .. },
                 ..
             }
         )));
@@ -2616,16 +2764,23 @@ mod tests {
             &configured,
         );
 
-        assert!(matches!(items[2], ContextMenuItem::Separator));
         assert!(matches!(
-            &items[3],
+            items[2],
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::CopyPath { .. },
+                ..
+            }
+        ));
+        assert!(matches!(items[3], ContextMenuItem::Separator));
+        assert!(matches!(
+            &items[4],
             ContextMenuItem::Action {
                 command: ContextMenuCommand::RunCustom { targets, .. },
                 ..
             } if targets == &[directory]
         ));
         assert!(menu_has_label(&items, "Png or directory"));
-        assert!(matches!(items[5], ContextMenuItem::Separator));
+        assert!(matches!(items[6], ContextMenuItem::Separator));
         assert!(!menu_has_label(&items, "Implicit entry-only"));
         assert!(!menu_has_label(&items, "Text-only directory"));
         assert!(!menu_has_label(&items, "Folder-only directory"));
@@ -2771,7 +2926,7 @@ mod tests {
         let items = folder_context_menu_items_from_times(true, None, None);
 
         assert_eq!(
-            items[3],
+            items[4],
             ContextMenuItem::Detail {
                 label: "Created",
                 value: String::new(),
@@ -2779,7 +2934,7 @@ mod tests {
             }
         );
         assert_eq!(
-            items[4],
+            items[5],
             ContextMenuItem::Detail {
                 label: "Modified",
                 value: String::new(),
@@ -2796,7 +2951,7 @@ mod tests {
             folder_context_menu_items_from_times(true, Some(created.into()), Some(modified.into()));
 
         assert_eq!(
-            items[3],
+            items[4],
             ContextMenuItem::Detail {
                 label: "Created",
                 value: "2026/06/01 09:15".to_owned(),
@@ -2804,7 +2959,7 @@ mod tests {
             }
         );
         assert_eq!(
-            items[4],
+            items[5],
             ContextMenuItem::Detail {
                 label: "Modified",
                 value: "2026/06/02 10:30".to_owned(),
@@ -2817,13 +2972,14 @@ mod tests {
     fn detail_rows_use_configured_date_format() {
         let timestamp = Local.with_ymd_and_hms(2026, 2, 5, 9, 15, 0).unwrap();
         let items = folder_context_menu_items_from_times_with_format(
+            Path::new("folder"),
             true,
             Some(timestamp.into()),
             Some(timestamp.into()),
             "%d %B %Y",
         );
 
-        for item in &items[3..=4] {
+        for item in &items[4..=5] {
             assert!(matches!(
                 item,
                 ContextMenuItem::Detail { value, .. } if value == "05 February 2026"

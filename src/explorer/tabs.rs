@@ -2014,10 +2014,10 @@ mod tests {
         let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_other_column(cx, "explorer-entry-0");
         let menu_position = cx
-            .debug_bounds("context-menu")
-            .expect("context menu")
+            .debug_bounds("context-menu-entry-cut")
+            .expect("context menu row")
             .center();
 
         cx.simulate_mouse_down(menu_position, MouseButton::Right, Modifiers::default());
@@ -2128,6 +2128,7 @@ mod tests {
                 }
             )));
         });
+        assert!(cx.debug_bounds("context-menu-entry-copy-path").is_none());
     }
 
     #[gpui::test]
@@ -2167,6 +2168,62 @@ mod tests {
             assert_eq!(
                 clipboard,
                 Some(FileClipboard::new(FileClipboardOperation::Copy, vec![path]))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn file_context_menu_copy_path_copies_selected_file_path(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let path = temp.path().join("a.txt");
+        let expected = cx.read_entity(&view, |view, _| view.address_text_for_path(&path));
+
+        right_click_entry_other_column(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-copy-path");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a.txt"]);
+            assert!(view.context_menu.is_none());
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard().and_then(|item| item.text()),
+                Some(expected)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn current_folder_context_menu_copy_path_copies_current_folder_path(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let expected = cx.read_entity(&view, |view, _| view.address_text_for_path(temp.path()));
+        let second = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        let start = gpui::point(
+            second.left() + gpui::px(10.0),
+            second.bottom() + gpui::px(20.0),
+        );
+        let end = gpui::point(
+            second.left() + gpui::px(100.0),
+            second.bottom() + gpui::px(40.0),
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Right, Modifiers::default());
+        click_selector(cx, "context-menu-folder-copy-path");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
+            assert!(view.context_menu.is_none());
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard().and_then(|item| item.text()),
+                Some(expected)
             );
         });
     }
