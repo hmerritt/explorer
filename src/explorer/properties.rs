@@ -379,6 +379,34 @@ impl ExplorerView {
             return;
         }
 
+        self.open_properties_for_paths(paths, cx);
+    }
+
+    pub(super) fn handle_open_properties(
+        &mut self,
+        _: &crate::explorer::OpenProperties,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.commit_active_rename_before_interaction(window, cx) {
+            return;
+        }
+
+        let paths = self.selected_or_current_property_paths();
+        self.open_properties_for_paths(paths, cx);
+        cx.notify();
+    }
+
+    fn selected_or_current_property_paths(&self) -> Vec<PathBuf> {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            vec![self.path.clone()]
+        } else {
+            paths
+        }
+    }
+
+    fn open_properties_for_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.close_context_menu();
         self.open_utility_menu = None;
         match open_properties_window(
@@ -390,16 +418,6 @@ impl ExplorerView {
             Ok(_) => self.open_error = None,
             Err(error) => self.open_error = Some(format!("Failed to open Properties: {error}")),
         }
-    }
-
-    pub(super) fn handle_open_properties(
-        &mut self,
-        _: &crate::explorer::OpenProperties,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_selected_properties(window, cx);
-        cx.notify();
     }
 }
 
@@ -5892,6 +5910,30 @@ mod tests {
     use crate::explorer::test_support::TempDir;
     use crate::settings::{ExplorerSettings, SettingsState};
     use std::{collections::HashSet, io::Cursor, time::Duration};
+
+    #[test]
+    fn open_properties_target_uses_selected_entries() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+        fs::write(temp.path().join("b.txt"), b"def").unwrap();
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let index = view.entry_index_by_path(&file).unwrap();
+        view.select_single_index(index);
+
+        assert_eq!(view.selected_or_current_property_paths(), vec![file]);
+    }
+
+    #[test]
+    fn open_properties_target_falls_back_to_current_directory() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"abc").unwrap();
+        let path = temp.path().to_path_buf();
+        let view = ExplorerView::new(path.clone());
+
+        assert_eq!(view.selected_or_current_property_paths(), vec![path]);
+    }
 
     #[test]
     fn snapshot_formats_single_file_core_fields() {

@@ -2,7 +2,6 @@
 
 ## 1
 
-- Alt+Enter in current directory to open current directories properties dialog
 - Ability to Re-size name column. On column right-click, revert back to auto-size (current behaviour). So only set a width when user manually re-sizes, otherwise keep current auto-size behaviour
 
 ## 2
