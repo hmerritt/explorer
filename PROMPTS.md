@@ -2,8 +2,6 @@
 
 ## 1
 
-- Current directory contextmenu, add Properties button, below Creaded/Modified after a separator.
-
 ## 2
 
 - Improve readme - add screenshots / branding

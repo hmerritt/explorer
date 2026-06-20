@@ -115,6 +115,9 @@ pub(super) enum ContextMenuCommand {
     DeleteSelected,
     RenameSelected,
     PropertiesSelected,
+    PropertiesForPath {
+        path: PathBuf,
+    },
     NewFile,
     NewFolder,
     RunCustom {
@@ -379,6 +382,9 @@ impl ExplorerView {
             }
             ContextMenuCommand::PropertiesSelected => {
                 self.open_selected_properties(window, cx);
+            }
+            ContextMenuCommand::PropertiesForPath { path } => {
+                self.open_properties_for_paths(vec![path], cx);
             }
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
@@ -891,6 +897,16 @@ fn folder_context_menu_items_from_times_with_format(
             label: "Modified",
             value: format_timestamp(modified, date_format),
             icon_slot: ContextMenuIconSlot::Collapse,
+        },
+        ContextMenuItem::Separator,
+        ContextMenuItem::Action {
+            id: "context-menu-folder-properties".to_owned(),
+            icon: Some(ContextMenuIcon::Properties),
+            label: "Properties".to_owned(),
+            command: ContextMenuCommand::PropertiesForPath {
+                path: path.to_path_buf(),
+            },
+            enabled: true,
         },
     ]
 }
@@ -1444,7 +1460,7 @@ mod tests {
     fn folder_menu_contains_expected_items_and_icons() {
         let items = folder_context_menu_items_from_times(false, None, None);
 
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 8);
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
@@ -1481,6 +1497,19 @@ mod tests {
             }
         );
         assert!(matches!(items[3], ContextMenuItem::Separator));
+        assert!(matches!(items[6], ContextMenuItem::Separator));
+        assert_eq!(
+            items[7],
+            ContextMenuItem::Action {
+                id: "context-menu-folder-properties".to_owned(),
+                icon: Some(ContextMenuIcon::Properties),
+                label: "Properties".to_owned(),
+                command: ContextMenuCommand::PropertiesForPath {
+                    path: PathBuf::from("folder")
+                },
+                enabled: true,
+            }
+        );
     }
 
     #[test]

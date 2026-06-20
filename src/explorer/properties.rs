@@ -470,7 +470,11 @@ impl ExplorerView {
         }
     }
 
-    fn open_properties_for_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(super) fn open_properties_for_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         self.close_context_menu();
         self.open_utility_menu = None;
         match open_properties_window(
