@@ -20,7 +20,7 @@ use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, Co
 use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
-        CopyDurability, CopyOptions, copy_file_contents_parallel,
+        CopyDurability, CopyOptions, copy_file_contents_parallel_with_progress,
         copy_with_delta_progress_with_options, destination_content_matches_source,
         destination_quick_matches_source,
     },
@@ -3832,9 +3832,16 @@ fn copy_source_file_to_temp(
     let mut source_file = File::open(source)?;
     let destination_file = File::create(temp_destination)?;
     if source_len >= COPY_BUFFER_SIZE as u64 * 8 {
-        let copied = copy_file_contents_parallel(source, &destination_file, source_len, cancel)?;
-        progress.copied_bytes = progress.copied_bytes.saturating_add(copied);
-        on_progress(progress.clone());
+        copy_file_contents_parallel_with_progress(
+            source,
+            &destination_file,
+            source_len,
+            cancel,
+            |bytes| {
+                progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+                on_progress(progress.clone());
+            },
+        )?;
         if options.should_sync() {
             destination_file.sync_all()?;
         }
@@ -5121,6 +5128,43 @@ mod tests {
                 .iter()
                 .any(|progress| progress.copied_bytes > 0)
         );
+        assert_eq!(
+            progress_events.last().map(|progress| progress.phase),
+            Some(FileOperationPhase::Finished)
+        );
+    }
+
+    #[test]
+    fn progress_copy_reports_intermediate_bytes_for_parallel_large_file() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let data = vec![5; COPY_BUFFER_SIZE * 9 + 128];
+        fs::write(&source, &data).expect("create source");
+        let total_bytes = data.len() as u64;
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let mut progress_events = Vec::new();
+
+        let summary = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("copy with live progress");
+
+        let copied = destination.join("large.bin");
+        assert_eq!(fs::read(&copied).unwrap(), data);
+        assert_eq!(summary.destination_paths, vec![copied]);
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Copying
+                && progress.copied_bytes > 0
+                && progress.copied_bytes < total_bytes
+        }));
         assert_eq!(
             progress_events.last().map(|progress| progress.phase),
             Some(FileOperationPhase::Finished)

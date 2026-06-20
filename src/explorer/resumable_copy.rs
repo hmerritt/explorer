@@ -7,8 +7,9 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use filetime::FileTime;
@@ -27,6 +28,7 @@ const JOURNAL_VERSION: u32 = 1;
 const LITERAL_FLUSH_SIZE: usize = 64 * 1024;
 const PARALLEL_COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const PARALLEL_COPY_THRESHOLD: u64 = 8 * 1024 * 1024;
+const PARALLEL_COPY_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum CopyDurability {
@@ -769,10 +771,11 @@ fn copy_source_literals_buffered(
     stats: &mut DeltaCopyStats,
 ) -> io::Result<()> {
     if source_len >= PARALLEL_COPY_THRESHOLD {
-        let copied = copy_file_contents_parallel(source, output, source_len, cancel)?;
-        stats.literal_bytes = stats.literal_bytes.saturating_add(copied);
-        progress.copied_bytes = progress.copied_bytes.saturating_add(copied);
-        on_progress(progress.clone());
+        copy_file_contents_parallel_with_progress(source, output, source_len, cancel, |bytes| {
+            stats.literal_bytes = stats.literal_bytes.saturating_add(bytes);
+            progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+            on_progress(progress.clone());
+        })?;
         return Ok(());
     }
 
@@ -1015,11 +1018,46 @@ fn verify_offsets(
     Ok(verified.load(Ordering::Relaxed))
 }
 
-pub(super) fn copy_file_contents_parallel(
+pub(super) fn copy_file_contents_parallel_with_progress(
     source: &Path,
     output: &File,
     source_len: u64,
     cancel: &Arc<AtomicBool>,
+    mut on_chunk_copied: impl FnMut(u64),
+) -> io::Result<u64> {
+    let (progress_tx, progress_rx) = mpsc::channel::<u64>();
+    let (result_tx, result_rx) = mpsc::channel::<io::Result<u64>>();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result =
+                copy_file_contents_parallel_impl(source, output, source_len, cancel, progress_tx);
+            let _ = result_tx.send(result);
+        });
+
+        loop {
+            match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
+                Ok(result) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_chunk_copied);
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_chunk_copied);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other("parallel copy worker disconnected"));
+                }
+            }
+        }
+    })
+}
+
+fn copy_file_contents_parallel_impl(
+    source: &Path,
+    output: &File,
+    source_len: u64,
+    cancel: &Arc<AtomicBool>,
+    progress_tx: mpsc::Sender<u64>,
 ) -> io::Result<u64> {
     output.set_len(source_len)?;
     if source_len == 0 {
@@ -1031,9 +1069,9 @@ pub(super) fn copy_file_contents_parallel(
     let chunk_size = PARALLEL_COPY_CHUNK_SIZE as u64;
     let chunk_count = source_len.div_ceil(chunk_size);
 
-    (0..chunk_count)
-        .into_par_iter()
-        .try_for_each(|chunk_index| {
+    (0..chunk_count).into_par_iter().try_for_each_with(
+        progress_tx,
+        |progress_tx, chunk_index| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
@@ -1042,10 +1080,22 @@ pub(super) fn copy_file_contents_parallel(
             let len = (source_len - offset).min(chunk_size) as usize;
             let mut buffer = vec![0; len];
             read_exact_at(&source, offset, &mut buffer)?;
-            write_all_at(&output, offset, &buffer)
-        })?;
+            write_all_at(&output, offset, &buffer)?;
+            let _ = progress_tx.send(len as u64);
+            Ok(())
+        },
+    )?;
 
     Ok(source_len)
+}
+
+fn drain_parallel_copy_progress(
+    progress_rx: &mpsc::Receiver<u64>,
+    on_chunk_copied: &mut impl FnMut(u64),
+) {
+    while let Ok(bytes) = progress_rx.try_recv() {
+        on_chunk_copied(bytes);
+    }
 }
 
 fn files_equal_parallel(
@@ -1469,6 +1519,36 @@ mod tests {
         assert!(!sidecars.partial.exists());
         assert!(!sidecars.next.exists());
         assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
+    fn parallel_copy_reports_each_completed_chunk() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let data = vec![13; PARALLEL_COPY_CHUNK_SIZE * 2 + 123];
+        fs::write(&source, &data).expect("write source");
+        let output = File::create(&destination).expect("create destination");
+        let mut chunks = Vec::new();
+
+        let copied = copy_file_contents_parallel_with_progress(
+            &source,
+            &output,
+            data.len() as u64,
+            &Arc::new(AtomicBool::new(false)),
+            |bytes| chunks.push(bytes),
+        )
+        .expect("parallel copy");
+
+        drop(output);
+        assert_eq!(copied, data.len() as u64);
+        assert_eq!(chunks.iter().copied().sum::<u64>(), copied);
+        assert!(
+            chunks.len() >= 2,
+            "expected multiple chunk progress events, got {chunks:?}"
+        );
+        assert!(chunks.iter().all(|bytes| *bytes > 0));
+        assert_eq!(fs::read(&destination).unwrap(), data);
     }
 
     #[test]
