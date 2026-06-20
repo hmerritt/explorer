@@ -37,6 +37,7 @@ mod tabs;
 #[cfg(test)]
 mod test_support;
 mod text_input;
+mod tooltip;
 mod video;
 mod view;
 mod watcher;

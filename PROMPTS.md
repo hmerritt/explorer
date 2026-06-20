@@ -2,10 +2,11 @@
 
 ## 1
 
-- Improve readme - add screenshots / branding
+- Tooltips
 
 ## 2
 
+- Improve readme - add screenshots / branding
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 
@@ -14,7 +15,6 @@
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu
-- Tooltips
 - Split-screen (see Zed)
 - rsync copy/sync builtin
 - Shell-extension system

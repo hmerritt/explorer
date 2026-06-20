@@ -85,6 +85,7 @@ use crate::explorer::{
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
+    tooltip::explorer_tooltip,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, UtilityMenu,
         normalized_sidebar_width_f32,
@@ -288,6 +289,7 @@ impl ExplorerView {
             .child(nav_button(
                 "back",
                 NavIcon::Back,
+                "Back",
                 self.can_go_back(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
@@ -298,6 +300,7 @@ impl ExplorerView {
             .child(nav_button(
                 "forward",
                 NavIcon::Forward,
+                "Forward",
                 self.can_go_forward(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
@@ -308,6 +311,7 @@ impl ExplorerView {
             .child(nav_button(
                 "up",
                 NavIcon::Up,
+                "Up",
                 self.can_go_up(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
@@ -318,6 +322,7 @@ impl ExplorerView {
             .child(nav_button(
                 "refresh",
                 NavIcon::Refresh,
+                "Refresh",
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
@@ -431,6 +436,7 @@ impl ExplorerView {
             .child(search_bar_icon_button(
                 "recursive-search-toggle",
                 RECURSIVE_SEARCH_ICON,
+                "Search subfolders",
                 self.recursive_search_is_enabled(),
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.toggle_recursive_search(cx);
@@ -490,6 +496,7 @@ impl ExplorerView {
             .child(utility_icon_button(
                 "utility-cut",
                 CUT_ICON.clone(),
+                "Cut",
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
@@ -504,6 +511,7 @@ impl ExplorerView {
             .child(utility_icon_button(
                 "utility-copy",
                 COPY_ICON.clone(),
+                "Copy",
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
@@ -518,6 +526,7 @@ impl ExplorerView {
             .child(utility_icon_button(
                 "utility-paste",
                 PASTE_ICON.clone(),
+                "Paste",
                 can_paste,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
@@ -532,6 +541,7 @@ impl ExplorerView {
             .child(utility_icon_button(
                 "utility-rename",
                 RENAME_ICON.clone(),
+                "Rename",
                 can_rename,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
@@ -546,6 +556,7 @@ impl ExplorerView {
             .child(utility_icon_button(
                 "utility-delete",
                 DELETE_ICON.clone(),
+                "Delete",
                 has_selection,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
@@ -2142,11 +2153,13 @@ impl ExplorerView {
 fn search_bar_icon_button(
     id: &'static str,
     icon: &'static str,
+    tooltip: &'static str,
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -2162,6 +2175,7 @@ fn search_bar_icon_button(
             cx.stop_propagation();
         })
         .on_click(on_click)
+        .tooltip(explorer_tooltip(tooltip))
         .child(
             div()
                 .font(nav_icon_font())
@@ -3217,11 +3231,13 @@ fn utility_view_icon() -> gpui::Img {
 fn utility_icon_button(
     id: &'static str,
     icon: Arc<Image>,
+    tooltip: &'static str,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -3234,6 +3250,7 @@ fn utility_icon_button(
                 .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
                 .on_click(on_click)
         })
+        .tooltip(explorer_tooltip(tooltip))
         .child(
             gpui::img(icon)
                 .w(px(16.0))
@@ -4037,11 +4054,13 @@ fn utility_menu_glyph_icon(icon: &'static str) -> AnyElement {
 fn nav_button(
     id: &'static str,
     icon: NavIcon,
+    tooltip: &'static str,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -4054,6 +4073,7 @@ fn nav_button(
                 .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
                 .on_click(on_click)
         })
+        .tooltip(explorer_tooltip(tooltip))
         .child(
             div()
                 .font(nav_icon_font())
@@ -5158,7 +5178,7 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    use std::{collections::BTreeSet, fs, path::PathBuf};
+    use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
 
     use gpui::{
         AppContext, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
@@ -5728,6 +5748,31 @@ mod tests {
     fn utility_text_button_icon_geometry_fits_button() {
         assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
         assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
+    }
+
+    #[gpui::test]
+    fn disabled_icon_button_still_shows_tooltip(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("back")
+            .expect("back nav button bounds")
+            .center();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-tooltip").is_some());
     }
 
     #[gpui::test]
