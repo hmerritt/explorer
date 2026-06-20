@@ -2,9 +2,9 @@
 
 ## 1
 
-- Drive total size + used, GB and percentages
 - rsync copy/sync builtin
-- Windows only: Hide the following top-level drive directories (even if Hidden Items is true): $RECYCLEBIN , Recovery , System Volume Information , Documents and Settings
+- Copy speed and ETA figures in dialog
+- Drive total size + used, GB and percentages
 
 ## 2
 

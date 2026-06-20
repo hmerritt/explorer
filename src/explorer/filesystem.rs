@@ -879,13 +879,14 @@ fn visible_directory_entry_candidate(
     options: EntryLoadOptions,
 ) -> DirectoryEntryCandidate {
     let name = entry.file_name();
-    if is_always_hidden_metadata_entry_name(&name) {
+    let path = entry.path();
+    if is_always_hidden_entry(&name, &path) {
         return DirectoryEntryCandidate::Hidden;
     }
 
     if !options.hide_hidden_entries {
         return DirectoryEntryCandidate::Visible {
-            path: entry.path(),
+            path,
             link_metadata: None,
         };
     }
@@ -894,7 +895,6 @@ fn visible_directory_entry_candidate(
         return DirectoryEntryCandidate::Hidden;
     }
 
-    let path = entry.path();
     let Ok(link_metadata) = fs::symlink_metadata(&path) else {
         return DirectoryEntryCandidate::Skipped;
     };
@@ -936,7 +936,7 @@ pub(super) fn should_hide_directory_entry(entry: &fs::DirEntry, show_hidden_file
 }
 
 pub(super) fn should_hide_entry(name: &OsStr, path: &Path, show_hidden_files: bool) -> bool {
-    is_always_hidden_metadata_entry_name(name) || !show_hidden_files && is_hidden_entry(name, path)
+    is_always_hidden_entry(name, path) || (!show_hidden_files && is_hidden_entry(name, path))
 }
 
 pub(super) fn should_hide_entry_with_metadata(
@@ -945,14 +945,64 @@ pub(super) fn should_hide_entry_with_metadata(
     show_hidden_files: bool,
     metadata: &fs::Metadata,
 ) -> bool {
+    is_always_hidden_entry(name, path)
+        || (!show_hidden_files && is_hidden_entry_with_metadata(name, path, metadata))
+}
+
+fn is_always_hidden_entry(name: &OsStr, path: &Path) -> bool {
     is_always_hidden_metadata_entry_name(name)
-        || !show_hidden_files && is_hidden_entry_with_metadata(name, path, metadata)
+        || is_windows_drive_root_protected_directory(name, path)
 }
 
 fn is_always_hidden_metadata_entry_name(name: &OsStr) -> bool {
     name == OsStr::new(".localized")
         || name == OsStr::new(".DS_Store")
         || name == OsStr::new(MACOSX_ARCHIVE_METADATA_DIRECTORY)
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_drive_root_protected_directory(name: &OsStr, path: &Path) -> bool {
+    is_windows_drive_root_protected_directory_name(name)
+        && path_is_direct_child_of_windows_drive_root(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_windows_drive_root_protected_directory(_: &OsStr, _: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_drive_root_protected_directory_name(name: &OsStr) -> bool {
+    const PROTECTED_NAMES: &[&str] = &[
+        "$RECYCLEBIN",
+        "$Recycle.Bin",
+        "Config.Msi",
+        "Recovery",
+        "System Volume Information",
+        "Documents and Settings",
+    ];
+
+    let name = name.to_string_lossy();
+    PROTECTED_NAMES
+        .iter()
+        .any(|protected_name| name.eq_ignore_ascii_case(protected_name))
+}
+
+#[cfg(target_os = "windows")]
+fn path_is_direct_child_of_windows_drive_root(path: &Path) -> bool {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return false;
+    };
+    match prefix.kind() {
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+        _ => return false,
+    }
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn is_hidden_entry(name: &OsStr, path: &Path) -> bool {
@@ -4599,6 +4649,65 @@ mod tests {
         assert!(!path_is_wsl_unc_root(&home));
         assert!(!path_is_wsl_unc(&normal_unc));
         assert!(!path_is_wsl_unc_root(&normal_unc));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_root_protected_directories_are_always_hidden() {
+        let protected_entries = [
+            ("$RECYCLEBIN", r"C:\$RECYCLEBIN"),
+            ("$Recycle.Bin", r"C:\$Recycle.Bin"),
+            ("Config.Msi", r"C:\Config.Msi"),
+            ("Recovery", r"C:\Recovery"),
+            ("System Volume Information", r"C:\System Volume Information"),
+            ("Documents and Settings", r"C:\Documents and Settings"),
+        ];
+
+        for (name, path) in protected_entries {
+            assert!(
+                should_hide_entry(std::ffi::OsStr::new(name), Path::new(path), true),
+                "{name} should stay hidden when Hidden Items is enabled"
+            );
+            assert!(
+                should_hide_entry(std::ffi::OsStr::new(name), Path::new(path), false),
+                "{name} should be hidden when Hidden Items is disabled"
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_root_protected_directory_filter_is_case_insensitive() {
+        assert!(should_hide_entry(
+            std::ffi::OsStr::new("sYsTeM VoLuMe InFoRmAtIoN"),
+            Path::new(r"C:\sYsTeM VoLuMe InFoRmAtIoN"),
+            true,
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_root_protected_directory_filter_only_applies_to_drive_root_children() {
+        assert!(!should_hide_entry(
+            std::ffi::OsStr::new("Recovery"),
+            Path::new(r"C:\Users\Recovery"),
+            true,
+        ));
+        assert!(!should_hide_entry(
+            std::ffi::OsStr::new("Recovery"),
+            Path::new(r"\\server\share\Recovery"),
+            true,
+        ));
+        assert!(!should_hide_entry(
+            std::ffi::OsStr::new("Recovery"),
+            Path::new(r"\\wsl.localhost\Ubuntu\Recovery"),
+            true,
+        ));
+        assert!(!should_hide_entry(
+            std::ffi::OsStr::new("Recovery-old"),
+            Path::new(r"C:\Recovery-old"),
+            true,
+        ));
     }
 
     #[test]
