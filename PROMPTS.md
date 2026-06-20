@@ -3,7 +3,7 @@
 ## 1
 
 - Tooltips
-- Add copy icon at the end of the address-bar (only during breadcrumb)
+- Alt+Enter in current directory to open current directories properties dialog
 
 ## 2
 

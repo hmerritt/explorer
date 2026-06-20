@@ -7,11 +7,12 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, Entity,
-    ExternalPaths, FocusHandle, Focusable, Image, IntoElement, ListHorizontalSizingBehavior,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    NavigationDirection, Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun,
-    Window, canvas, div, list, prelude::*, px, rgb, transparent_black, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, Focusable, Image, IntoElement,
+    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px, rgb,
+    transparent_black, uniform_list,
 };
 
 use crate::explorer::{
@@ -28,12 +29,12 @@ use crate::explorer::{
     codebase_summary::{CodebaseSummary, language_segment_widths},
     columns::file_column_label,
     constants::{
-        COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT,
-        DIRECTORY_BAR_HORIZONTAL_PADDING, DIRECTORY_BAR_RADIUS,
-        DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE,
-        EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
-        FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, HEADER_HEIGHT, LARGE_ICON_SIZE,
-        LARGE_ICON_TEXT_LINE_HEIGHT, LARGE_ICON_TEXT_ROWS, LARGE_ICON_TEXT_SIZE,
+        COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_COPY_BUTTON_GAP, DIRECTORY_BAR_COPY_BUTTON_SIZE,
+        DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
+        DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
+        DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
+        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, HEADER_HEIGHT,
+        LARGE_ICON_SIZE, LARGE_ICON_TEXT_LINE_HEIGHT, LARGE_ICON_TEXT_ROWS, LARGE_ICON_TEXT_SIZE,
         LARGE_ICON_TEXT_TOP_GAP, LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH,
         NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
         NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
@@ -4108,7 +4109,47 @@ fn directory_bar(breadcrumb: VisibleBreadcrumb, cx: &mut Context<ExplorerView>) 
             cx.stop_propagation();
             cx.notify();
         }))
-        .children(directory_bar_children(breadcrumb, cx))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .children(directory_bar_children(breadcrumb, cx))
+                .child(div().flex_1().min_w(px(0.0))),
+        )
+        .child(directory_copy_address_button(cx))
+        .into_any_element()
+}
+
+fn directory_copy_address_button(cx: &mut Context<ExplorerView>) -> AnyElement {
+    div()
+        .id("directory-copy-address")
+        .debug_selector(|| "directory-copy-address".to_owned())
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(DIRECTORY_BAR_COPY_BUTTON_SIZE))
+        .h(px(DIRECTORY_BAR_COPY_BUTTON_SIZE))
+        .ml(px(DIRECTORY_BAR_COPY_BUTTON_GAP))
+        .flex_shrink_0()
+        .rounded(px(4.0))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_context_menu();
+            this.open_utility_menu = None;
+            if this.commit_active_rename_before_interaction(window, cx) {
+                cx.write_to_clipboard(ClipboardItem::new_string(this.path.display().to_string()));
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .tooltip(explorer_tooltip("Copy address"))
+        .child(gpui::img(COPY_ICON.clone()).w(px(16.0)).h(px(16.0)))
         .into_any_element()
 }
 
@@ -5272,7 +5313,7 @@ mod tests {
         git_status::{GitDivergence, GitRepositoryStatus},
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind},
-        test_support::TempDir,
+        test_support::{TempDir, test_view_entity_at_path},
         view::ExplorerView,
     };
 
@@ -5873,6 +5914,52 @@ mod tests {
             .expect("tooltip bounds after hover delay");
         assert!(tooltip.origin.x >= position.x + gpui::px(12.0));
         assert!(tooltip.origin.y >= position.y + gpui::px(18.0));
+    }
+
+    #[gpui::test]
+    fn directory_copy_address_button_copies_current_path_without_editing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let expected = path.display().to_string();
+        let (view, cx) = test_view_entity_at_path(cx, path);
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("directory-copy-address")
+            .expect("directory copy address button bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(expected)
+        );
+        cx.read_entity(&view, |view, _| assert!(!view.address_bar_is_editing()));
+        assert!(cx.debug_bounds("directory-bar").is_some());
+        assert!(cx.debug_bounds("directory-bar-input").is_none());
+    }
+
+    #[gpui::test]
+    fn directory_copy_address_button_is_hidden_while_editing(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, path);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| assert!(view.address_bar_is_editing()));
+        assert!(cx.debug_bounds("directory-copy-address").is_none());
+        assert!(cx.debug_bounds("directory-bar-input").is_some());
     }
 
     #[gpui::test]

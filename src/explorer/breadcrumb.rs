@@ -3,9 +3,10 @@ use std::path::{Component, Path, PathBuf};
 use gpui::{Font, TextRun, Window, px, rgb};
 
 use crate::explorer::constants::{
-    DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HORIZONTAL_PADDING,
-    DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE,
-    NAV_BUTTON_SIZE, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP, SEARCH_BAR_RESERVED_WIDTH,
+    DIRECTORY_BAR_COPY_BUTTON_GAP, DIRECTORY_BAR_COPY_BUTTON_SIZE, DIRECTORY_BAR_ELLIPSIS,
+    DIRECTORY_BAR_HORIZONTAL_PADDING, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING,
+    DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE, NAV_BUTTON_SIZE, NAVBAR_HORIZONTAL_PADDING,
+    NAVBAR_ITEM_GAP, SEARCH_BAR_RESERVED_WIDTH,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,7 +128,8 @@ pub(super) fn directory_bar_available_width(window_width: f32) -> f32 {
         window_width - (NAVBAR_HORIZONTAL_PADDING * 2.0) - (NAV_BUTTON_SIZE * 4.0);
     let directory_bar_width =
         navbar_content_width - (NAVBAR_ITEM_GAP * 4.0) - SEARCH_BAR_RESERVED_WIDTH;
-    (directory_bar_width - (DIRECTORY_BAR_HORIZONTAL_PADDING * 2.0)).max(0.0)
+    let copy_button_width = DIRECTORY_BAR_COPY_BUTTON_SIZE + DIRECTORY_BAR_COPY_BUTTON_GAP;
+    (directory_bar_width - (DIRECTORY_BAR_HORIZONTAL_PADDING * 2.0) - copy_button_width).max(0.0)
 }
 
 pub(super) fn visible_breadcrumb_for_path(
@@ -316,6 +318,24 @@ mod tests {
                 start_index: 0,
                 show_ellipsis: false
             }
+        );
+    }
+
+    #[test]
+    fn directory_bar_available_width_reserves_copy_button_slot() {
+        let window_width = 800.0;
+        let width_without_copy_button = window_width
+            - (NAVBAR_HORIZONTAL_PADDING * 2.0)
+            - (NAV_BUTTON_SIZE * 4.0)
+            - (NAVBAR_ITEM_GAP * 4.0)
+            - SEARCH_BAR_RESERVED_WIDTH
+            - (DIRECTORY_BAR_HORIZONTAL_PADDING * 2.0);
+
+        assert_eq!(
+            directory_bar_available_width(window_width),
+            width_without_copy_button
+                - DIRECTORY_BAR_COPY_BUTTON_SIZE
+                - DIRECTORY_BAR_COPY_BUTTON_GAP
         );
     }
 
