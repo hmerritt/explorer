@@ -6,17 +6,25 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
 
 use filetime::FileTime;
+use rayon::prelude::*;
 use thousands::Separable;
 
 use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, CountingReader};
 use crate::explorer::{
-    entry::FileEntry, resumable_copy::copy_with_delta_progress, sorting::sort_entries,
+    entry::FileEntry,
+    resumable_copy::{
+        CopyDurability, CopyOptions, copy_file_contents_parallel,
+        copy_with_delta_progress_with_options, destination_content_matches_source,
+        destination_quick_matches_source,
+    },
+    sorting::sort_entries,
 };
 
 #[cfg(unix)]
@@ -32,6 +40,7 @@ const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
 const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
 const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static COPY_PARALLELISM_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
@@ -1015,6 +1024,7 @@ pub mod benchmark_support {
     use crate::explorer::FileEntry;
 
     pub struct PreparedArchiveExtraction(super::FileOperationJob);
+    pub struct PreparedCopyOperation(super::FileOperationJob);
 
     pub fn load_entries(path: &Path, show_hidden_files: bool) -> Vec<FileEntry> {
         super::load_entries(path, show_hidden_files).expect("load benchmark entries")
@@ -1086,6 +1096,71 @@ pub mod benchmark_support {
         )
         .expect("execute archive progress benchmark");
         callbacks
+    }
+
+    pub fn copy_paths(paths: &[PathBuf], destination: &Path) {
+        let prepared = super::prepare_copy_paths_to_directory(paths, destination)
+            .expect("prepare copy benchmark");
+        let job = match prepared {
+            super::PreparedFileOperation::Ready(job) => job,
+            super::PreparedFileOperation::Conflicts(conflicts) => conflicts.into_job(),
+        };
+        super::execute_file_operation_with_progress(
+            job,
+            super::ConflictChoice::Replace,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |_| {},
+        )
+        .expect("execute copy benchmark");
+    }
+
+    pub fn prepare_copy(paths: &[PathBuf], destination: &Path) -> PreparedCopyOperation {
+        let prepared = super::prepare_copy_paths_to_directory(paths, destination)
+            .expect("prepare copy benchmark");
+        PreparedCopyOperation(match prepared {
+            super::PreparedFileOperation::Ready(job) => job,
+            super::PreparedFileOperation::Conflicts(conflicts) => conflicts.into_job(),
+        })
+    }
+
+    pub fn execute_prepared_copy(prepared: PreparedCopyOperation) {
+        super::execute_file_operation_with_progress(
+            prepared.0,
+            super::ConflictChoice::Replace,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |_| {},
+        )
+        .expect("execute prepared copy benchmark");
+    }
+
+    pub fn copy_with_cancel_after_progress(paths: &[PathBuf], destination: &Path) -> bool {
+        let prepared = super::prepare_copy_paths_to_directory(paths, destination)
+            .expect("prepare cancellable copy benchmark");
+        let job = match prepared {
+            super::PreparedFileOperation::Ready(job) => job,
+            super::PreparedFileOperation::Conflicts(conflicts) => conflicts.into_job(),
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut requested_cancel = false;
+        let result = super::execute_file_operation_with_progress(
+            job,
+            super::ConflictChoice::Replace,
+            cancel.clone(),
+            |progress| {
+                if progress.copied_bytes > 0 && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        );
+        matches!(result, Err(super::FileOperationError::Cancelled))
+    }
+
+    pub fn set_copy_parallelism(parallelism: Option<usize>) {
+        super::COPY_PARALLELISM_OVERRIDE.store(
+            parallelism.unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 
@@ -1379,6 +1454,15 @@ enum CopyEngine {
     ResumableDelta,
 }
 
+fn copy_options_for_operation() -> CopyOptions {
+    let durability = if crate::debug_options::copy_fast_enabled() {
+        CopyDurability::Fast
+    } else {
+        CopyDurability::Safe
+    };
+    CopyOptions::rsync_update(durability)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FileOperationJob {
     pub(super) kind: FileOperationKind,
@@ -1473,6 +1557,36 @@ enum FileOperationStep {
         diagnostics: Option<ArchiveHandle>,
     },
     RemoveEmptyDirectory(PathBuf),
+}
+
+#[derive(Clone, Debug)]
+enum ParallelFileTask {
+    Copy {
+        source: PathBuf,
+        destination: PathBuf,
+        engine: CopyEngine,
+    },
+    Move {
+        source: PathBuf,
+        destination: PathBuf,
+        conflict: bool,
+        copy_engine: CopyEngine,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ParallelFileTaskResult {
+    destination: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+enum ParallelFileTaskEvent {
+    Phase {
+        phase: FileOperationPhase,
+        current_item: Option<PathBuf>,
+    },
+    Bytes(u64),
+    Completed,
 }
 
 fn prepare_file_operation(
@@ -1850,12 +1964,463 @@ fn execute_file_operation(
     })
 }
 
+fn execute_copy_move_operation_with_progress(
+    job: FileOperationJob,
+    conflict_choice: ConflictChoice,
+    cancel: Arc<AtomicBool>,
+    mut on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
+    let copy_options = copy_options_for_operation();
+    let mut operated_destinations = HashSet::new();
+    let mut progress = job.initial_progress();
+    on_progress(progress.clone());
+
+    let create_directories = job
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            FileOperationStep::CreateDirectory(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !create_directories.is_empty() {
+        progress.phase = FileOperationPhase::Preparing;
+        on_progress(progress.clone());
+        create_directories.par_iter().try_for_each(|path| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(FileOperationError::Cancelled);
+            }
+            fs::create_dir_all(path).map_err(|error| operation_error("create", path, error))
+        })?;
+    }
+
+    let file_tasks = job
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            FileOperationStep::CopyFile {
+                source,
+                destination,
+                conflict,
+                engine,
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    None
+                } else {
+                    Some(ParallelFileTask::Copy {
+                        source: source.clone(),
+                        destination: destination.clone(),
+                        engine: *engine,
+                    })
+                }
+            }
+            FileOperationStep::MoveFile {
+                source,
+                destination,
+                conflict,
+                copy_engine,
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    None
+                } else {
+                    Some(ParallelFileTask::Move {
+                        source: source.clone(),
+                        destination: destination.clone(),
+                        conflict: *conflict,
+                        copy_engine: *copy_engine,
+                    })
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let task_results = run_parallel_file_tasks(
+        &file_tasks,
+        job.kind,
+        copy_options,
+        cancel.clone(),
+        &mut progress,
+        &mut on_progress,
+    )?;
+    for result in task_results {
+        operated_destinations.insert(result.destination);
+    }
+
+    for step in &job.steps {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress);
+            return Err(FileOperationError::Cancelled);
+        }
+
+        if let FileOperationStep::RemoveEmptyDirectory(path) = step {
+            progress.phase = FileOperationPhase::Removing;
+            progress.current_item = Some(path.clone());
+            on_progress(progress.clone());
+            remove_empty_directory(path).map_err(|error| operation_error("remove", path, error))?;
+        }
+    }
+
+    finish_file_operation_summary(job, operated_destinations, progress, on_progress)
+}
+
+fn run_parallel_file_tasks(
+    tasks: &[ParallelFileTask],
+    kind: FileOperationKind,
+    copy_options: CopyOptions,
+    cancel: Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<Vec<ParallelFileTaskResult>, FileOperationError> {
+    if tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let [task] = tasks {
+        return run_single_file_task(task, kind, copy_options, cancel, progress, on_progress)
+            .map(|result| vec![result]);
+    }
+
+    let parallelism = file_operation_parallelism(tasks.len());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(parallelism)
+        .thread_name(|index| format!("explorer-copy-{index}"))
+        .build()
+        .map_err(|error| FileOperationError::Failed(error.to_string()))?;
+    let (event_tx, event_rx) = mpsc::channel::<ParallelFileTaskEvent>();
+    let (result_tx, result_rx) =
+        mpsc::channel::<Result<Vec<ParallelFileTaskResult>, FileOperationError>>();
+
+    std::thread::scope(|scope| {
+        let tasks = tasks.to_vec();
+        let cancel_for_workers = cancel.clone();
+        scope.spawn(move || {
+            let result = pool.install(|| {
+                tasks
+                    .par_iter()
+                    .map(|task| {
+                        let result = run_parallel_file_task(
+                            task,
+                            kind,
+                            copy_options,
+                            cancel_for_workers.clone(),
+                            event_tx.clone(),
+                        );
+                        if result.is_err() {
+                            cancel_for_workers.store(true, Ordering::Relaxed);
+                        }
+                        result
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            });
+            let _ = result_tx.send(result);
+        });
+
+        loop {
+            match result_rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(result) => {
+                    drain_parallel_file_task_events(&event_rx, progress, on_progress);
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_parallel_file_task_events(&event_rx, progress, on_progress);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(FileOperationError::Failed(
+                        "File operation worker disconnected".to_owned(),
+                    ));
+                }
+            }
+        }
+    })
+}
+
+fn run_single_file_task(
+    task: &ParallelFileTask,
+    kind: FileOperationKind,
+    copy_options: CopyOptions,
+    cancel: Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<ParallelFileTaskResult, FileOperationError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FileOperationError::Cancelled);
+    }
+
+    match task {
+        ParallelFileTask::Copy {
+            source,
+            destination,
+            engine,
+        } => {
+            progress.phase = FileOperationPhase::Copying;
+            progress.current_item = Some(source.clone());
+            on_progress(progress.clone());
+            copy_source_file_with_progress(
+                source,
+                destination,
+                &cancel,
+                progress,
+                on_progress,
+                *engine,
+                copy_options,
+            )
+            .map_err(|error| operation_error("copy", source, error))?;
+            Ok(ParallelFileTaskResult {
+                destination: destination.clone(),
+            })
+        }
+        ParallelFileTask::Move {
+            source,
+            destination,
+            conflict,
+            copy_engine,
+        } => {
+            if *conflict {
+                progress.phase = FileOperationPhase::Copying;
+                progress.current_item = Some(source.clone());
+                on_progress(progress.clone());
+                copy_source_file_with_progress(
+                    source,
+                    destination,
+                    &cancel,
+                    progress,
+                    on_progress,
+                    *copy_engine,
+                    copy_options,
+                )
+                .map_err(|error| operation_error("move", source, error))?;
+                remove_source(source).map_err(|error| operation_error("remove", source, error))?;
+            } else {
+                progress.phase = if kind == FileOperationKind::Move {
+                    FileOperationPhase::Moving
+                } else {
+                    FileOperationPhase::Copying
+                };
+                progress.current_item = Some(source.clone());
+                on_progress(progress.clone());
+                move_source_file_with_progress(
+                    source,
+                    destination,
+                    &cancel,
+                    progress,
+                    on_progress,
+                    *copy_engine,
+                    copy_options,
+                )
+                .map_err(|error| operation_error("move", source, error))?;
+            }
+            Ok(ParallelFileTaskResult {
+                destination: destination.clone(),
+            })
+        }
+    }
+}
+
+fn run_parallel_file_task(
+    task: &ParallelFileTask,
+    kind: FileOperationKind,
+    copy_options: CopyOptions,
+    cancel: Arc<AtomicBool>,
+    event_tx: mpsc::Sender<ParallelFileTaskEvent>,
+) -> Result<ParallelFileTaskResult, FileOperationError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FileOperationError::Cancelled);
+    }
+
+    let (source, destination, phase) = match task {
+        ParallelFileTask::Copy {
+            source,
+            destination,
+            ..
+        } => (source, destination, FileOperationPhase::Copying),
+        ParallelFileTask::Move {
+            source,
+            destination,
+            conflict,
+            ..
+        } => (
+            source,
+            destination,
+            if *conflict {
+                FileOperationPhase::Copying
+            } else {
+                FileOperationPhase::Moving
+            },
+        ),
+    };
+    let _ = event_tx.send(ParallelFileTaskEvent::Phase {
+        phase,
+        current_item: Some(source.clone()),
+    });
+
+    let mut task_progress = FileOperationProgress {
+        kind,
+        phase,
+        total_bytes: 0,
+        copied_bytes: 0,
+        total_files: 0,
+        completed_files: 0,
+        current_item: Some(source.clone()),
+        cancellable: true,
+    };
+    let mut last_bytes = 0u64;
+    let mut last_phase = phase;
+    let mut last_item = Some(source.clone());
+    let mut publish_worker_progress = |progress: FileOperationProgress| {
+        if progress.phase != last_phase || progress.current_item != last_item {
+            last_phase = progress.phase;
+            last_item = progress.current_item.clone();
+            let _ = event_tx.send(ParallelFileTaskEvent::Phase {
+                phase: progress.phase,
+                current_item: progress.current_item,
+            });
+        }
+        if progress.copied_bytes > last_bytes {
+            let delta = progress.copied_bytes - last_bytes;
+            last_bytes = progress.copied_bytes;
+            let _ = event_tx.send(ParallelFileTaskEvent::Bytes(delta));
+        }
+    };
+
+    match task {
+        ParallelFileTask::Copy {
+            source,
+            destination,
+            engine,
+        } => copy_source_file_with_progress(
+            source,
+            destination,
+            &cancel,
+            &mut task_progress,
+            &mut publish_worker_progress,
+            *engine,
+            copy_options,
+        )
+        .map_err(|error| operation_error("copy", source, error))?,
+        ParallelFileTask::Move {
+            source,
+            destination,
+            conflict,
+            copy_engine,
+        } => {
+            if *conflict {
+                copy_source_file_with_progress(
+                    source,
+                    destination,
+                    &cancel,
+                    &mut task_progress,
+                    &mut publish_worker_progress,
+                    *copy_engine,
+                    copy_options,
+                )
+                .map_err(|error| operation_error("move", source, error))?;
+                remove_source(source).map_err(|error| operation_error("remove", source, error))?;
+            } else {
+                move_source_file_with_progress(
+                    source,
+                    destination,
+                    &cancel,
+                    &mut task_progress,
+                    &mut publish_worker_progress,
+                    *copy_engine,
+                    copy_options,
+                )
+                .map_err(|error| operation_error("move", source, error))?;
+            }
+        }
+    }
+
+    let _ = event_tx.send(ParallelFileTaskEvent::Completed);
+    Ok(ParallelFileTaskResult {
+        destination: destination.clone(),
+    })
+}
+
+fn drain_parallel_file_task_events(
+    event_rx: &mpsc::Receiver<ParallelFileTaskEvent>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) {
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            ParallelFileTaskEvent::Phase {
+                phase,
+                current_item,
+            } => {
+                progress.phase = phase;
+                progress.current_item = current_item;
+            }
+            ParallelFileTaskEvent::Bytes(bytes) => {
+                progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+            }
+            ParallelFileTaskEvent::Completed => {
+                progress.completed_files = progress.completed_files.saturating_add(1);
+            }
+        }
+        on_progress(progress.clone());
+    }
+}
+
+fn file_operation_parallelism(task_count: usize) -> usize {
+    let override_parallelism = COPY_PARALLELISM_OVERRIDE.load(Ordering::Relaxed);
+    if override_parallelism > 0 {
+        return task_count.max(1).min(override_parallelism.max(1));
+    }
+
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4);
+    task_count.max(1).min(available.max(1)).min(16)
+}
+
+fn finish_file_operation_summary(
+    job: FileOperationJob,
+    operated_destinations: HashSet<PathBuf>,
+    mut progress: FileOperationProgress,
+    mut on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
+    let mut summary = FileOperationSummary::default();
+    summary.archive_diagnostics = job.archive_diagnostics.clone();
+    for root in &job.roots {
+        if root.source_is_dir {
+            if root.destination.exists() {
+                summary.destination_paths.push(root.destination.clone());
+            }
+        } else if operated_destinations.contains(&root.destination) {
+            summary.destination_paths.push(root.destination.clone());
+        }
+
+        if job.kind == FileOperationKind::Move && !root.source.exists() {
+            summary.moved_source_paths.push(root.source.clone());
+        }
+    }
+
+    progress.phase = FileOperationPhase::Finished;
+    progress.current_item = None;
+    progress.copied_bytes = progress.copied_bytes.max(progress.total_bytes);
+    progress.completed_files = progress.completed_files.max(progress.total_files);
+    progress.cancellable = false;
+    on_progress(progress);
+    Ok(summary)
+}
+
 pub(super) fn execute_file_operation_with_progress(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
+    if job.kind != FileOperationKind::Extract {
+        return execute_copy_move_operation_with_progress(
+            job,
+            conflict_choice,
+            cancel,
+            on_progress,
+        );
+    }
+
     let operation_diagnostics = job.archive_diagnostics.clone();
     let archive_timings_enabled = crate::debug_options::archive_timings_enabled();
     let archive_count = if job.kind == FileOperationKind::Extract && archive_timings_enabled {
@@ -1873,6 +2438,7 @@ pub(super) fn execute_file_operation_with_progress(
         )
     });
     let mut operated_destinations = HashSet::new();
+    let copy_options = copy_options_for_operation();
     let mut progress = job.initial_progress();
     on_progress(progress.clone());
 
@@ -1916,6 +2482,7 @@ pub(super) fn execute_file_operation_with_progress(
                     &mut progress,
                     &mut on_progress,
                     *engine,
+                    copy_options,
                 )
                 .map_err(|error| operation_error("copy", source, error))?;
                 operated_destinations.insert(destination.clone());
@@ -1940,6 +2507,7 @@ pub(super) fn execute_file_operation_with_progress(
                         &mut progress,
                         &mut on_progress,
                         *copy_engine,
+                        copy_options,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                     remove_source(source)
@@ -1955,6 +2523,7 @@ pub(super) fn execute_file_operation_with_progress(
                         &mut progress,
                         &mut on_progress,
                         *copy_engine,
+                        copy_options,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                 }
@@ -3080,6 +3649,7 @@ fn move_source_file_with_progress(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     copy_engine: CopyEngine,
+    copy_options: CopyOptions,
 ) -> std::io::Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => {
@@ -3101,6 +3671,7 @@ fn move_source_file_with_progress(
                 progress,
                 on_progress,
                 copy_engine,
+                copy_options,
             )?;
             remove_source(source)
         }
@@ -3115,6 +3686,7 @@ fn copy_source_file_with_progress(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     engine: CopyEngine,
+    options: CopyOptions,
 ) -> std::io::Result<()> {
     match engine {
         CopyEngine::Standard => {
@@ -3124,10 +3696,18 @@ fn copy_source_file_with_progress(
                 cancel,
                 progress,
                 on_progress,
+                options,
             )?;
         }
         CopyEngine::ResumableDelta => {
-            copy_with_delta_progress(source, destination, cancel, progress, on_progress)?;
+            copy_with_delta_progress_with_options(
+                source,
+                destination,
+                cancel,
+                progress,
+                on_progress,
+                options,
+            )?;
         }
     }
 
@@ -3142,16 +3722,45 @@ fn copy_source_file_standard_with_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> std::io::Result<()> {
     let metadata = fs::metadata(source)?;
+    if destination.is_file()
+        && destination_quick_matches_source(&metadata, destination).unwrap_or(false)
+        && destination_content_matches_source(
+            source,
+            destination,
+            metadata.len(),
+            COPY_BUFFER_SIZE,
+            cancel,
+        )?
+    {
+        preserve_file_metadata(&metadata, destination)?;
+        if options.should_sync() {
+            sync_file_best_effort(destination);
+            sync_parent_directory_best_effort(destination);
+        }
+        return Ok(());
+    }
+
     let temp_destination = temp_destination_for(destination)?;
-    let copy_result =
-        copy_source_file_to_temp(source, &temp_destination, cancel, progress, on_progress);
+    let copy_result = copy_source_file_to_temp(
+        source,
+        &temp_destination,
+        metadata.len(),
+        cancel,
+        progress,
+        on_progress,
+        options,
+    );
 
     match copy_result {
         Ok(()) => {
             preserve_file_metadata(&metadata, &temp_destination)?;
             replace_destination_with_temp(&temp_destination, destination)?;
+            if options.should_sync() {
+                sync_parent_directory_best_effort(destination);
+            }
             Ok(())
         }
         Err(error) => {
@@ -3164,12 +3773,25 @@ fn copy_source_file_standard_with_progress(
 fn copy_source_file_to_temp(
     source: &Path,
     temp_destination: &Path,
+    source_len: u64,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> std::io::Result<()> {
     let mut source_file = File::open(source)?;
-    let mut destination_file = File::create(temp_destination)?;
+    let destination_file = File::create(temp_destination)?;
+    if source_len >= COPY_BUFFER_SIZE as u64 * 8 {
+        let copied = copy_file_contents_parallel(source, &destination_file, source_len, cancel)?;
+        progress.copied_bytes = progress.copied_bytes.saturating_add(copied);
+        on_progress(progress.clone());
+        if options.should_sync() {
+            destination_file.sync_all()?;
+        }
+        return Ok(());
+    }
+
+    let mut destination_file = destination_file;
     let mut buffer = vec![0; COPY_BUFFER_SIZE];
 
     loop {
@@ -3189,7 +3811,9 @@ fn copy_source_file_to_temp(
         on_progress(progress.clone());
     }
 
-    destination_file.sync_all()?;
+    if options.should_sync() {
+        destination_file.sync_all()?;
+    }
     Ok(())
 }
 
@@ -3202,6 +3826,24 @@ pub(super) fn preserve_file_metadata(
     let modified = FileTime::from_last_modification_time(metadata);
     filetime::set_file_times(destination, accessed, modified)
 }
+
+fn sync_file_best_effort(path: &Path) {
+    if let Ok(file) = File::open(path) {
+        let _ = file.sync_all();
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory_best_effort(path: &Path) {
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory_best_effort(_: &Path) {}
 
 fn temp_destination_for(destination: &Path) -> std::io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
@@ -4516,6 +5158,79 @@ mod tests {
             b"data"
         );
         assert_eq!(copied.destination_paths, vec![destination.join("folder")]);
+    }
+
+    #[test]
+    fn copy_directory_update_leaves_destination_only_files() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).expect("create source");
+        fs::create_dir_all(destination.join("folder").join("nested")).expect("create destination");
+        fs::write(source.join("nested").join("file.txt"), b"source").expect("write source");
+        fs::write(
+            destination.join("folder").join("nested").join("extra.txt"),
+            b"extra",
+        )
+        .expect("write extra");
+
+        let copied = copy_paths_to_directory(std::slice::from_ref(&source), &destination)
+            .expect("copy directory");
+        let copied = finished_summary(Ok(copied));
+
+        assert_eq!(
+            fs::read(destination.join("folder").join("nested").join("file.txt")).unwrap(),
+            b"source"
+        );
+        assert_eq!(
+            fs::read(destination.join("folder").join("nested").join("extra.txt")).unwrap(),
+            b"extra"
+        );
+        assert_eq!(copied.destination_paths, vec![destination.join("folder")]);
+    }
+
+    #[test]
+    fn parallel_copy_multiple_files_preserves_root_summary_order() {
+        let temp = TempDir::new();
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let sources = (0..8)
+            .map(|index| {
+                let source = temp.path().join(format!("file-{index}.txt"));
+                fs::write(&source, format!("content-{index}")).expect("write source");
+                source
+            })
+            .collect::<Vec<_>>();
+        let mut progress_events = Vec::new();
+        let job = ready_job(prepare_copy_paths_to_directory(&sources, &destination));
+
+        let summary = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("copy files");
+
+        for (index, source) in sources.iter().enumerate() {
+            assert_eq!(
+                fs::read(destination.join(source.file_name().unwrap())).unwrap(),
+                format!("content-{index}").as_bytes()
+            );
+        }
+        assert_eq!(
+            summary.destination_paths,
+            sources
+                .iter()
+                .map(|source| destination.join(source.file_name().unwrap()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            progress_events
+                .last()
+                .map(|progress| progress.completed_files),
+            Some(8)
+        );
     }
 
     #[test]

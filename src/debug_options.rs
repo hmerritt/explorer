@@ -14,6 +14,7 @@ const DEBUG_ICONS: u8 = 1 << 2;
 const DEBUG_ARCHIVE: u8 = 1 << 3;
 const DEBUG_ARCHIVE_VERBOSE: u8 = 1 << 4;
 const DEBUG_PROPERTIES: u8 = 1 << 5;
+const DEBUG_COPY_FAST: u8 = 1 << 6;
 const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE | DEBUG_PROPERTIES;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
@@ -133,6 +134,10 @@ impl DebugOptions {
         self.flags & DEBUG_PROPERTIES != 0
     }
 
+    pub(crate) fn copy_fast(self) -> bool {
+        self.flags & DEBUG_COPY_FAST != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
@@ -155,6 +160,10 @@ impl DebugOptions {
 
     fn enable_properties(&mut self) {
         self.flags |= DEBUG_PROPERTIES;
+    }
+
+    fn enable_copy_fast(&mut self) {
+        self.flags |= DEBUG_COPY_FAST;
     }
 
     fn enable_all(&mut self) {
@@ -213,6 +222,13 @@ pub(crate) fn properties_timings_enabled() -> bool {
     .properties_timings()
 }
 
+pub(crate) fn copy_fast_enabled() -> bool {
+    DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .copy_fast()
+}
+
 #[cfg(feature = "benchmarks")]
 pub(crate) fn set_archive_debug_for_benchmark(enabled: bool, verbose: bool) {
     let flags = if verbose {
@@ -222,6 +238,17 @@ pub(crate) fn set_archive_debug_for_benchmark(enabled: bool, verbose: bool) {
     } else {
         0
     };
+    PROCESS_DEBUG_FLAGS.store(flags, Ordering::Relaxed);
+}
+
+#[cfg(feature = "benchmarks")]
+pub(crate) fn set_copy_fast_for_benchmark(enabled: bool) {
+    let mut flags = PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed);
+    if enabled {
+        flags |= DEBUG_COPY_FAST;
+    } else {
+        flags &= !DEBUG_COPY_FAST;
+    }
     PROCESS_DEBUG_FLAGS.store(flags, Ordering::Relaxed);
 }
 
@@ -327,9 +354,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
             "archive" | "extract" => options.enable_archive(),
             "archive-verbose" | "extract-verbose" => options.enable_archive_verbose(),
             "properties" | "property" | "props" => options.enable_properties(),
+            "copy-fast" => options.enable_copy_fast(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, properties, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, properties, copy-fast, all, or *."
             )),
         }
     }
@@ -436,6 +464,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_copy_fast_without_enabling_it_from_all() {
+        let (copy_options, copy_warnings) =
+            parse_debug_options(args(&["explorer", "--debug=copy-fast"]));
+        let (all_options, all_warnings) = parse_debug_options(args(&["explorer", "--debug=all"]));
+
+        assert!(copy_options.copy_fast());
+        assert!(!copy_options.nav_timings());
+        assert!(!all_options.copy_fast());
+        assert!(copy_warnings.is_empty());
+        assert!(all_warnings.is_empty());
+    }
+
+    #[test]
     fn parses_all_aliases() {
         let (all_options, all_warnings) =
             parse_debug_options(args(&["explorer", "--debug", "all"]));
@@ -469,6 +510,7 @@ mod tests {
         assert!(warnings[0].contains("icons"));
         assert!(warnings[0].contains("archive"));
         assert!(warnings[0].contains("properties"));
+        assert!(warnings[0].contains("copy-fast"));
     }
 
     #[test]

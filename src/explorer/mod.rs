@@ -77,8 +77,10 @@ pub(crate) use image_thumbnails::initialize as initialize_image_thumbnail_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
     pub use super::filesystem::benchmark_support::{
-        execute_prepared_archive_extraction, extract_archives, extract_archives_with_progress,
-        list_archive, load_entries, plan_archives, prepare_archive_extraction,
+        copy_paths, copy_with_cancel_after_progress, execute_prepared_archive_extraction,
+        execute_prepared_copy, extract_archives, extract_archives_with_progress, list_archive,
+        load_entries, plan_archives, prepare_archive_extraction, prepare_copy,
+        set_copy_parallelism,
     };
     pub use super::image_preview::benchmark_support::*;
     pub use super::properties::benchmark_support::*;
@@ -86,6 +88,10 @@ pub mod benchmark_support {
 
     pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {
         crate::debug_options::set_archive_debug_for_benchmark(enabled, verbose);
+    }
+
+    pub fn set_copy_fast(enabled: bool) {
+        crate::debug_options::set_copy_fast_for_benchmark(enabled);
     }
 }
 pub use tabs::ExplorerTabs;

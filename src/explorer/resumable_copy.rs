@@ -1,16 +1,18 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::OsStr,
     fs::{self, File},
-    io::{self, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::UNIX_EPOCH,
 };
 
+use filetime::FileTime;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -23,6 +25,48 @@ pub(super) const RESUMABLE_COPY_BLOCK_SIZE: usize = 1024 * 1024;
 
 const JOURNAL_VERSION: u32 = 1;
 const LITERAL_FLUSH_SIZE: usize = 64 * 1024;
+const PARALLEL_COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const PARALLEL_COPY_THRESHOLD: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum CopyDurability {
+    #[default]
+    Safe,
+    Fast,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum CopySyncMode {
+    ExplorerReplace,
+    #[default]
+    RsyncUpdate,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CopyOptions {
+    pub(super) sync_mode: CopySyncMode,
+    pub(super) durability: CopyDurability,
+}
+
+impl CopyOptions {
+    pub(super) fn explorer_safe() -> Self {
+        Self {
+            sync_mode: CopySyncMode::ExplorerReplace,
+            durability: CopyDurability::Safe,
+        }
+    }
+
+    pub(super) fn rsync_update(durability: CopyDurability) -> Self {
+        Self {
+            sync_mode: CopySyncMode::RsyncUpdate,
+            durability,
+        }
+    }
+
+    pub(super) fn should_sync(self) -> bool {
+        self.durability == CopyDurability::Safe
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct CopyJournal {
@@ -95,12 +139,125 @@ impl RollingChecksum {
     }
 }
 
+struct BufferedByteReader {
+    file: File,
+    buffer: Vec<u8>,
+    position: usize,
+    filled: usize,
+}
+
+impl BufferedByteReader {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            buffer: vec![0; RESUMABLE_COPY_BLOCK_SIZE],
+            position: 0,
+            filled: 0,
+        }
+    }
+
+    fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        if self.position == self.filled {
+            self.filled = self.file.read(&mut self.buffer)?;
+            self.position = 0;
+            if self.filled == 0 {
+                return Ok(None);
+            }
+        }
+
+        let byte = self.buffer[self.position];
+        self.position += 1;
+        Ok(Some(byte))
+    }
+}
+
+#[derive(Debug)]
+struct RollingWindow {
+    bytes: Vec<u8>,
+    start: usize,
+    len: usize,
+}
+
+impl RollingWindow {
+    fn new(capacity: usize) -> Self {
+        Self {
+            bytes: vec![0; capacity],
+            start: 0,
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn clear(&mut self) {
+        self.start = 0;
+        self.len = 0;
+    }
+
+    fn push_back(&mut self, byte: u8) {
+        debug_assert!(self.len < self.bytes.len());
+        let index = (self.start + self.len) % self.bytes.len();
+        self.bytes[index] = byte;
+        self.len += 1;
+    }
+
+    fn pop_front(&mut self) -> Option<u8> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let byte = self.bytes[self.start];
+        self.start = (self.start + 1) % self.bytes.len();
+        self.len -= 1;
+        Some(byte)
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(self.len);
+        if self.len == 0 {
+            return output;
+        }
+
+        let first_len = (self.bytes.len() - self.start).min(self.len);
+        output.extend_from_slice(&self.bytes[self.start..self.start + first_len]);
+        if first_len < self.len {
+            output.extend_from_slice(&self.bytes[..self.len - first_len]);
+        }
+        output
+    }
+}
+
+#[allow(dead_code)]
 pub(super) fn copy_with_delta_progress(
     source: &Path,
     destination: &Path,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+) -> io::Result<()> {
+    copy_with_delta_progress_with_options(
+        source,
+        destination,
+        cancel,
+        progress,
+        on_progress,
+        CopyOptions::explorer_safe(),
+    )
+}
+
+pub(super) fn copy_with_delta_progress_with_options(
+    source: &Path,
+    destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> io::Result<()> {
     copy_with_delta_progress_impl(
         source,
@@ -109,6 +266,7 @@ pub(super) fn copy_with_delta_progress(
         cancel,
         progress,
         on_progress,
+        options,
     )
 }
 
@@ -128,6 +286,7 @@ pub(super) fn copy_with_delta_progress_for_test(
         cancel,
         progress,
         on_progress,
+        CopyOptions::explorer_safe(),
     )
 }
 
@@ -138,6 +297,7 @@ fn copy_with_delta_progress_impl(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> io::Result<()> {
     if block_size == 0 {
         return Err(io::Error::new(
@@ -151,22 +311,38 @@ fn copy_with_delta_progress_impl(
     let identity = OperationIdentity::new(source, destination, &metadata, block_size)?;
     let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
 
-    if destination.is_file()
-        && destination_is_identical_to_source(
-            source,
-            destination,
-            source_len,
-            block_size,
-            cancel,
-            progress,
-            on_progress,
-        )?
-    {
-        preserve_file_metadata(&metadata, destination)?;
-        sync_file(destination);
-        sync_parent_directory(destination);
-        cleanup_sidecars(&sidecars);
-        return Ok(());
+    if destination.is_file() {
+        let same_data = match options.sync_mode {
+            CopySyncMode::RsyncUpdate => {
+                destination_quick_matches_source(&metadata, destination).unwrap_or(false)
+                    && destination_content_matches_source(
+                        source,
+                        destination,
+                        source_len,
+                        block_size,
+                        cancel,
+                    )?
+            }
+            CopySyncMode::ExplorerReplace => destination_is_identical_to_source(
+                source,
+                destination,
+                source_len,
+                block_size,
+                cancel,
+                progress,
+                on_progress,
+            )?,
+        };
+
+        if same_data {
+            preserve_file_metadata(&metadata, destination)?;
+            if options.should_sync() {
+                sync_file(destination);
+                sync_parent_directory(destination);
+            }
+            cleanup_sidecars(&sidecars);
+            return Ok(());
+        }
     }
 
     let journal_matches = read_journal(&sidecars.journal)
@@ -187,7 +363,7 @@ fn copy_with_delta_progress_impl(
     }
     .or_else(|| destination.is_file().then(|| destination.to_path_buf()));
 
-    let copy_result = write_delta_scratch(
+    let stats = match write_delta_scratch(
         source,
         basis.as_deref(),
         &sidecars.next,
@@ -196,31 +372,42 @@ fn copy_with_delta_progress_impl(
         cancel,
         progress,
         on_progress,
-    );
+        options,
+    ) {
+        Ok(stats) => stats,
+        Err(error) => {
+            preserve_scratch_as_partial(&sidecars);
+            return Err(error);
+        }
+    };
 
-    if let Err(error) = copy_result {
-        preserve_scratch_as_partial(&sidecars);
-        return Err(error);
-    }
+    if options.durability == CopyDurability::Safe
+        || basis.is_some()
+        || stats.literal_bytes != source_len
+        || stats.reused_blocks != 0
+    {
+        let verify_result = verify_and_repair(
+            source,
+            &sidecars.next,
+            source_len,
+            block_size,
+            cancel,
+            progress,
+            on_progress,
+            options,
+        );
 
-    let verify_result = verify_and_repair(
-        source,
-        &sidecars.next,
-        source_len,
-        block_size,
-        cancel,
-        progress,
-        on_progress,
-    );
-
-    if let Err(error) = verify_result {
-        preserve_scratch_as_partial(&sidecars);
-        return Err(error);
+        if let Err(error) = verify_result {
+            preserve_scratch_as_partial(&sidecars);
+            return Err(error);
+        }
     }
 
     preserve_file_metadata(&metadata, &sidecars.next)?;
     replace_destination_with_temp(&sidecars.next, destination)?;
-    sync_parent_directory(destination);
+    if options.should_sync() {
+        sync_parent_directory(destination);
+    }
     cleanup_sidecars(&sidecars);
     Ok(())
 }
@@ -289,6 +476,30 @@ fn source_modified_fingerprint(metadata: &fs::Metadata) -> String {
         },
         Err(_) => "unknown".to_owned(),
     }
+}
+
+pub(super) fn destination_quick_matches_source(
+    source_metadata: &fs::Metadata,
+    destination: &Path,
+) -> io::Result<bool> {
+    let destination_metadata = fs::metadata(destination)?;
+    Ok(source_metadata.len() == destination_metadata.len()
+        && FileTime::from_last_modification_time(source_metadata)
+            == FileTime::from_last_modification_time(&destination_metadata))
+}
+
+pub(super) fn destination_content_matches_source(
+    source: &Path,
+    destination: &Path,
+    source_len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<bool> {
+    if fs::metadata(destination)?.len() != source_len {
+        return Ok(false);
+    }
+
+    files_equal_parallel(source, destination, source_len, block_size, cancel)
 }
 
 fn operation_key(
@@ -366,6 +577,7 @@ fn write_delta_scratch(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> io::Result<DeltaCopyStats> {
     if scratch.exists() {
         fs::remove_file(scratch)?;
@@ -397,6 +609,7 @@ fn write_delta_scratch(
         &signatures,
         basis_file.as_mut(),
         &mut output,
+        source_len,
         block_size,
         cancel,
         progress,
@@ -404,12 +617,16 @@ fn write_delta_scratch(
         &mut stats,
     );
     if let Err(error) = scan_result {
-        let _ = output.sync_all();
+        if options.should_sync() {
+            let _ = output.sync_all();
+        }
         return Err(error);
     }
 
     output.set_len(source_len)?;
-    output.sync_all()?;
+    if options.should_sync() {
+        output.sync_all()?;
+    }
     Ok(stats)
 }
 
@@ -418,35 +635,43 @@ fn build_basis_signatures(
     block_size: usize,
     cancel: &Arc<AtomicBool>,
 ) -> io::Result<HashMap<u32, Vec<BlockSignature>>> {
-    let mut file = File::open(basis)?;
-    let mut signatures = HashMap::new();
-    let mut offset = 0u64;
-    let mut buffer = vec![0; block_size];
+    let file = Arc::new(File::open(basis)?);
+    let len = file.metadata()?.len();
+    let block_size_u64 = block_size as u64;
+    let block_count = len.div_ceil(block_size_u64);
+    let signatures = (0..block_count)
+        .into_par_iter()
+        .map(|block_index| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
 
-    loop {
+            let offset = block_index.saturating_mul(block_size_u64);
+            let read_len = (len - offset).min(block_size_u64) as usize;
+            let mut buffer = vec![0; read_len];
+            read_exact_at(&file, offset, &mut buffer)?;
+            let weak = RollingChecksum::new(&buffer).value();
+            Ok((
+                weak,
+                BlockSignature {
+                    offset,
+                    len: read_len,
+                    strong: strong_hash(&buffer),
+                },
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    let mut by_weak = HashMap::with_capacity(signatures.len());
+    for (weak, signature) in signatures {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-
-        let bytes = &buffer[..read];
-        let weak = RollingChecksum::new(bytes).value();
-        signatures
-            .entry(weak)
-            .or_insert_with(Vec::new)
-            .push(BlockSignature {
-                offset,
-                len: read,
-                strong: strong_hash(bytes),
-            });
-        offset = offset.saturating_add(read as u64);
+        by_weak.entry(weak).or_insert_with(Vec::new).push(signature);
     }
 
-    Ok(signatures)
+    Ok(by_weak)
 }
 
 fn scan_source_to_output(
@@ -454,6 +679,7 @@ fn scan_source_to_output(
     signatures: &HashMap<u32, Vec<BlockSignature>>,
     mut basis_file: Option<&mut File>,
     output: &mut File,
+    source_len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -461,16 +687,24 @@ fn scan_source_to_output(
     stats: &mut DeltaCopyStats,
 ) -> io::Result<()> {
     if signatures.is_empty() {
-        return copy_source_literals_buffered(source, output, cancel, progress, on_progress, stats);
+        return copy_source_literals_buffered(
+            source,
+            output,
+            source_len,
+            cancel,
+            progress,
+            on_progress,
+            stats,
+        );
     }
 
-    let mut source = BufReader::new(File::open(source)?);
-    let mut window = VecDeque::with_capacity(block_size);
+    let mut source = BufferedByteReader::new(File::open(source)?);
+    let mut window = RollingWindow::new(block_size);
     let mut pending_literal = Vec::with_capacity(LITERAL_FLUSH_SIZE);
     fill_window(&mut source, &mut window, block_size)?;
 
     if window.len() == block_size {
-        let mut weak = RollingChecksum::new(&window_bytes(&window));
+        let mut weak = RollingChecksum::new(&window.to_vec());
 
         while window.len() == block_size {
             if cancel.load(Ordering::Relaxed) {
@@ -488,7 +722,7 @@ fn scan_source_to_output(
                 window.clear();
                 fill_window(&mut source, &mut window, block_size)?;
                 if window.len() == block_size {
-                    weak = RollingChecksum::new(&window_bytes(&window));
+                    weak = RollingChecksum::new(&window.to_vec());
                 }
             } else {
                 let removed = window.pop_front().expect("full window");
@@ -497,21 +731,18 @@ fn scan_source_to_output(
                     flush_literal(output, &mut pending_literal, progress, on_progress, stats)?;
                 }
 
-                let mut byte = [0u8; 1];
-                match source.read(&mut byte)? {
-                    0 => break,
-                    1 => {
-                        window.push_back(byte[0]);
-                        weak.roll(removed, byte[0]);
-                    }
-                    _ => unreachable!(),
+                if let Some(byte) = source.read_byte()? {
+                    window.push_back(byte);
+                    weak.roll(removed, byte);
+                } else {
+                    break;
                 }
             }
         }
     }
 
     if !window.is_empty() {
-        let tail = window_bytes(&window);
+        let tail = window.to_vec();
         let weak = RollingChecksum::new(&tail).value();
         if let Some(signature) = matching_signature_bytes(&tail, signatures, weak) {
             flush_literal(output, &mut pending_literal, progress, on_progress, stats)?;
@@ -531,11 +762,20 @@ fn scan_source_to_output(
 fn copy_source_literals_buffered(
     source: &Path,
     output: &mut File,
+    source_len: u64,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     stats: &mut DeltaCopyStats,
 ) -> io::Result<()> {
+    if source_len >= PARALLEL_COPY_THRESHOLD {
+        let copied = copy_file_contents_parallel(source, output, source_len, cancel)?;
+        stats.literal_bytes = stats.literal_bytes.saturating_add(copied);
+        progress.copied_bytes = progress.copied_bytes.saturating_add(copied);
+        on_progress(progress.clone());
+        return Ok(());
+    }
+
     let mut source = File::open(source)?;
     let mut buffer = vec![0; RESUMABLE_COPY_BLOCK_SIZE];
 
@@ -560,27 +800,26 @@ fn copy_source_literals_buffered(
 }
 
 fn fill_window(
-    source: &mut impl Read,
-    window: &mut VecDeque<u8>,
+    source: &mut BufferedByteReader,
+    window: &mut RollingWindow,
     block_size: usize,
 ) -> io::Result<()> {
     while window.len() < block_size {
-        let mut byte = [0u8; 1];
-        match source.read(&mut byte)? {
-            0 => break,
-            1 => window.push_back(byte[0]),
-            _ => unreachable!(),
+        match source.read_byte()? {
+            Some(byte) => window.push_back(byte),
+            None => break,
         }
     }
     Ok(())
 }
 
 fn matching_signature(
-    window: &VecDeque<u8>,
+    window: &RollingWindow,
     signatures: &HashMap<u32, Vec<BlockSignature>>,
     weak: u32,
 ) -> Option<BlockSignature> {
-    let bytes = window_bytes(window);
+    signatures.get(&weak)?;
+    let bytes = window.to_vec();
     matching_signature_bytes(&bytes, signatures, weak)
 }
 
@@ -595,10 +834,6 @@ fn matching_signature_bytes(
         .iter()
         .find(|signature| signature.len == bytes.len() && signature.strong == strong)
         .cloned()
-}
-
-fn window_bytes(window: &VecDeque<u8>) -> Vec<u8> {
-    window.iter().copied().collect()
 }
 
 fn flush_literal(
@@ -622,20 +857,21 @@ fn flush_literal(
 }
 
 fn copy_basis_block(
-    basis: &mut File,
+    basis: &File,
     output: &mut File,
     signature: &BlockSignature,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> io::Result<()> {
-    basis.seek(SeekFrom::Start(signature.offset))?;
     let mut remaining = signature.len;
     let mut buffer = vec![0; remaining.min(64 * 1024)];
+    let mut offset = signature.offset;
     while remaining > 0 {
         let read_len = remaining.min(buffer.len());
-        basis.read_exact(&mut buffer[..read_len])?;
+        read_exact_at(basis, offset, &mut buffer[..read_len])?;
         output.write_all(&buffer[..read_len])?;
         remaining -= read_len;
+        offset = offset.saturating_add(read_len as u64);
     }
 
     progress.copied_bytes = progress.copied_bytes.saturating_add(signature.len as u64);
@@ -651,13 +887,17 @@ fn verify_and_repair(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
 ) -> io::Result<()> {
     progress.phase = FileOperationPhase::Verifying;
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    verify_pass(source, scratch, source_len, block_size, cancel, true)?;
-    let verified = verify_pass(source, scratch, source_len, block_size, cancel, false)?;
+    let repaired = verify_repair_pass(source, scratch, source_len, block_size, cancel)?;
+    if options.should_sync() {
+        sync_file(scratch);
+    }
+    let verified = verify_offsets(source, scratch, &repaired, block_size, cancel)?;
     if !verified {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -686,100 +926,238 @@ fn destination_is_identical_to_source(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    let mut source = File::open(source)?;
-    let mut destination = File::open(destination)?;
-    let mut source_buffer = vec![0; block_size];
-    let mut destination_buffer = vec![0; block_size];
-
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(cancelled_error());
-        }
-
-        let source_read = source.read(&mut source_buffer)?;
-        let destination_read = destination.read(&mut destination_buffer)?;
-        if source_read != destination_read {
-            return Ok(false);
-        }
-        if source_read == 0 {
-            return Ok(true);
-        }
-
-        if strong_hash(&source_buffer[..source_read])
-            != strong_hash(&destination_buffer[..destination_read])
-        {
-            return Ok(false);
-        }
-    }
+    files_equal_parallel(source, destination, source_len, block_size, cancel)
 }
 
-fn verify_pass(
+fn verify_repair_pass(
     source: &Path,
     scratch: &Path,
     source_len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
-    repair: bool,
-) -> io::Result<bool> {
-    let mut source = File::open(source)?;
-    let mut scratch_file = if repair {
+) -> io::Result<Vec<(u64, usize)>> {
+    let source = Arc::new(File::open(source)?);
+    let scratch_file = Arc::new(
         fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(scratch)?
-    } else {
-        fs::OpenOptions::new().read(true).open(scratch)?
-    };
+            .open(scratch)?,
+    );
+    let block_size_u64 = block_size as u64;
+    let block_count = source_len.div_ceil(block_size_u64);
+    let repaired = Mutex::new(Vec::new());
 
-    let mut offset = 0u64;
-    let mut all_verified = true;
-    while offset < source_len {
+    (0..block_count)
+        .into_par_iter()
+        .try_for_each(|block_index| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
+
+            let offset = block_index.saturating_mul(block_size_u64);
+            let len = (source_len - offset).min(block_size_u64) as usize;
+            let mut source_block = vec![0; len];
+            let mut scratch_block = vec![0; len];
+            read_exact_at(&source, offset, &mut source_block)?;
+            let scratch_read = read_at(&scratch_file, offset, &mut scratch_block)?;
+            scratch_block.truncate(scratch_read);
+
+            let matches = source_block.len() == scratch_block.len()
+                && strong_hash(&source_block) == strong_hash(&scratch_block);
+            if !matches {
+                write_all_at(&scratch_file, offset, &source_block)?;
+                repaired
+                    .lock()
+                    .map_err(|_| io::Error::other("verification state poisoned"))?
+                    .push((offset, len));
+            }
+
+            Ok(())
+        })?;
+
+    scratch_file.set_len(source_len)?;
+    repaired
+        .into_inner()
+        .map_err(|_| io::Error::other("verification state poisoned"))
+}
+
+fn verify_offsets(
+    source: &Path,
+    scratch: &Path,
+    offsets: &[(u64, usize)],
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<bool> {
+    if offsets.is_empty() {
+        return Ok(true);
+    }
+
+    let source = Arc::new(File::open(source)?);
+    let scratch = Arc::new(File::open(scratch)?);
+    let verified = std::sync::atomic::AtomicBool::new(true);
+
+    offsets.par_iter().try_for_each(|(offset, len)| {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
-        let len = (source_len - offset).min(block_size as u64) as usize;
-        let source_block = read_exact_block(&mut source, offset, len)?;
-        let scratch_block = read_available_block(&mut scratch_file, offset, len)?;
-        let matches = source_block.len() == scratch_block.len()
-            && strong_hash(&source_block) == strong_hash(&scratch_block);
-
-        if !matches {
-            all_verified = false;
-            if repair {
-                scratch_file.seek(SeekFrom::Start(offset))?;
-                scratch_file.write_all(&source_block)?;
-            }
+        let len = (*len).min(block_size);
+        let mut source_block = vec![0; len];
+        let mut scratch_block = vec![0; len];
+        read_exact_at(&source, *offset, &mut source_block)?;
+        read_exact_at(&scratch, *offset, &mut scratch_block)?;
+        if strong_hash(&source_block) != strong_hash(&scratch_block) {
+            verified.store(false, Ordering::Relaxed);
         }
+        Ok(())
+    })?;
 
-        offset = offset.saturating_add(len as u64);
-    }
-
-    if repair {
-        scratch_file.set_len(source_len)?;
-        scratch_file.sync_all()?;
-    }
-
-    Ok(all_verified || repair)
+    Ok(verified.load(Ordering::Relaxed))
 }
 
-fn read_exact_block(file: &mut File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0; len];
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut buffer)?;
-    Ok(buffer)
+pub(super) fn copy_file_contents_parallel(
+    source: &Path,
+    output: &File,
+    source_len: u64,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<u64> {
+    output.set_len(source_len)?;
+    if source_len == 0 {
+        return Ok(0);
+    }
+
+    let source = Arc::new(File::open(source)?);
+    let output = Arc::new(output.try_clone()?);
+    let chunk_size = PARALLEL_COPY_CHUNK_SIZE as u64;
+    let chunk_count = source_len.div_ceil(chunk_size);
+
+    (0..chunk_count)
+        .into_par_iter()
+        .try_for_each(|chunk_index| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
+
+            let offset = chunk_index.saturating_mul(chunk_size);
+            let len = (source_len - offset).min(chunk_size) as usize;
+            let mut buffer = vec![0; len];
+            read_exact_at(&source, offset, &mut buffer)?;
+            write_all_at(&output, offset, &buffer)
+        })?;
+
+    Ok(source_len)
 }
 
-fn read_available_block(file: &mut File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0; len];
-    file.seek(SeekFrom::Start(offset))?;
-    let read = file.read(&mut buffer)?;
-    buffer.truncate(read);
-    Ok(buffer)
+fn files_equal_parallel(
+    source: &Path,
+    destination: &Path,
+    len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<bool> {
+    if len == 0 {
+        return Ok(true);
+    }
+
+    let source = Arc::new(File::open(source)?);
+    let destination = Arc::new(File::open(destination)?);
+    let block_size = block_size as u64;
+    let block_count = len.div_ceil(block_size);
+    let equal = std::sync::atomic::AtomicBool::new(true);
+
+    (0..block_count)
+        .into_par_iter()
+        .try_for_each(|block_index| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
+            if !equal.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            let offset = block_index.saturating_mul(block_size);
+            let read_len = (len - offset).min(block_size) as usize;
+            let mut source_block = vec![0; read_len];
+            let mut destination_block = vec![0; read_len];
+            read_exact_at(&source, offset, &mut source_block)?;
+            read_exact_at(&destination, offset, &mut destination_block)?;
+            if source_block != destination_block {
+                equal.store(false, Ordering::Relaxed);
+            }
+            Ok(())
+        })?;
+
+    Ok(equal.load(Ordering::Relaxed))
+}
+
+fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+    let mut read_total = 0usize;
+    while read_total < buffer.len() {
+        let read = read_at(
+            file,
+            offset.saturating_add(read_total as u64),
+            &mut buffer[read_total..],
+        )?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected end of file",
+            ));
+        }
+        read_total += read;
+    }
+    Ok(())
+}
+
+fn write_all_at(file: &File, offset: u64, buffer: &[u8]) -> io::Result<()> {
+    let mut written_total = 0usize;
+    while written_total < buffer.len() {
+        let written = write_at(
+            file,
+            offset.saturating_add(written_total as u64),
+            &buffer[written_total..],
+        )?;
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write file chunk",
+            ));
+        }
+        written_total += written;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(unix)]
+fn write_at(file: &File, offset: u64, buffer: &[u8]) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.write_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &File, offset: u64, buffer: &[u8]) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_write(buffer, offset)
 }
 
 fn strong_hash(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
+    *blake3::hash(bytes).as_bytes()
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
@@ -881,7 +1259,10 @@ mod tests {
         fs::write(&basis, b"aaaabbbbccccdddd").expect("write basis");
         let signatures = build_basis_signatures(&basis, 4, &Arc::new(AtomicBool::new(false)))
             .expect("signatures");
-        let window = VecDeque::from(Vec::from(&b"bbbb"[..]));
+        let mut window = RollingWindow::new(4);
+        for byte in b"bbbb" {
+            window.push_back(*byte);
+        }
 
         let signature =
             matching_signature(&window, &signatures, RollingChecksum::new(b"bbbb").value())
@@ -906,6 +1287,7 @@ mod tests {
             &HashMap::new(),
             None,
             &mut output,
+            12,
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
@@ -937,6 +1319,7 @@ mod tests {
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
             &mut |_| {},
+            CopyOptions::explorer_safe(),
         )
         .expect("verify and repair");
 
@@ -1007,6 +1390,88 @@ mod tests {
     }
 
     #[test]
+    fn rsync_update_quick_match_skips_rewrite_after_content_confirmation() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"same content").expect("write source");
+        fs::write(&destination, b"same content").expect("write destination");
+        let modified = FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source, modified).expect("set source mtime");
+        filetime::set_file_mtime(&destination, modified).expect("set destination mtime");
+        let metadata = fs::metadata(&destination).expect("destination metadata before");
+        let mut progress = test_progress(12);
+
+        copy_with_delta_progress_impl(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::rsync_update(CopyDurability::Safe),
+        )
+        .expect("quick skip");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"same content");
+        assert_eq!(progress.copied_bytes, 0);
+        assert_eq!(fs::metadata(&destination).unwrap().len(), metadata.len());
+    }
+
+    #[test]
+    fn rsync_update_does_not_skip_same_size_same_mtime_changed_content() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"aaaabbbb").expect("write source");
+        fs::write(&destination, b"aaaaXXXX").expect("write destination");
+        let modified = FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source, modified).expect("set source mtime");
+        filetime::set_file_mtime(&destination, modified).expect("set destination mtime");
+        let mut progress = test_progress(8);
+
+        copy_with_delta_progress_impl(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::rsync_update(CopyDurability::Safe),
+        )
+        .expect("delta update");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"aaaabbbb");
+        assert!(progress.copied_bytes > 0);
+    }
+
+    #[test]
+    fn fast_durability_copies_literal_file_without_sidecars() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, vec![11; 128 * 1024]).expect("write source");
+        let mut progress = test_progress(128 * 1024);
+
+        copy_with_delta_progress_impl(
+            &source,
+            &destination,
+            1024,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::rsync_update(CopyDurability::Fast),
+        )
+        .expect("fast copy");
+
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
+        assert!(!sidecars.partial.exists());
+        assert!(!sidecars.next.exists());
+        assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
     fn delta_copy_reuses_matching_blocks_and_literals_changed_block() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
@@ -1026,6 +1491,7 @@ mod tests {
             &signatures,
             Some(&mut basis_file),
             &mut output,
+            16,
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,

@@ -15,6 +15,7 @@ cargo bench --features benchmarks --bench recursive_search
 cargo bench --features benchmarks --bench navigation_pipeline
 cargo bench --features benchmarks --bench image_thumbnails
 cargo bench --features benchmarks --bench properties
+cargo bench --features benchmarks --bench resumable_copy
 ```
 
 The first run creates a deterministic 25,000-file fixture under
@@ -34,6 +35,10 @@ and batch JPEG fixtures under `target/image-thumbnails-benchmark-v2`.
 
 The properties benchmark creates a deterministic large directory fixture under
 `target/properties-benchmark-v1`.
+
+The resumable-copy benchmark creates deterministic large-file, many-small-file,
+same-size edit, shifted insert, and cancel/resume fixtures under
+`target/resumable-copy-benchmark-v1`.
 
 ## Archive extraction
 
