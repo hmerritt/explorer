@@ -514,12 +514,14 @@ fn copy_with_delta_progress_impl(
     }
 
     let stats = if let Some(partial) = resume_partial.as_deref() {
-        progress.phase = FileOperationPhase::Copying;
+        progress.phase = FileOperationPhase::Resuming;
         progress.current_item = Some(source.to_path_buf());
         on_progress(progress.clone());
 
         let valid_prefix = validate_partial_prefix(source, partial, source_len, cancel)?;
         seed_resume_progress(valid_prefix, progress, on_progress);
+        progress.phase = FileOperationPhase::Copying;
+        on_progress(progress.clone());
         append_source_remainder_to_partial(
             source,
             partial,
@@ -2584,6 +2586,20 @@ mod tests {
         )
         .expect("resume copy");
 
+        let resuming_index = progress_events
+            .iter()
+            .position(|progress| progress.phase == FileOperationPhase::Resuming)
+            .expect("resuming progress event");
+        let seeded_copying_index = progress_events
+            .iter()
+            .position(|progress| {
+                progress.phase == FileOperationPhase::Copying && progress.copied_bytes >= prefix_len
+            })
+            .expect("seeded copying progress event");
+        assert!(
+            resuming_index < seeded_copying_index,
+            "resume validation should be reported before resumed copying"
+        );
         let first_copied = progress_events
             .iter()
             .find(|progress| {

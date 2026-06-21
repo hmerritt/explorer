@@ -24,6 +24,7 @@ use crate::explorer::{
     },
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
+use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::SettingsState;
 
 actions!(
@@ -129,6 +130,12 @@ enum DeleteDialogIconKind {
     File,
     Folder,
     Mixed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileOperationProgressBarMode {
+    Determinate,
+    Indeterminate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1323,21 +1330,42 @@ fn render_file_operation_progress_bar(progress: Option<&FileOperationProgress>) 
         .unwrap_or(0.0);
     let fill_width = percent * PROGRESS_DIALOG_BAR_WIDTH;
 
-    div()
+    let progress_bar = div()
         .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
         .w(px(PROGRESS_DIALOG_BAR_WIDTH))
         .h(px(PROGRESS_DIALOG_BAR_HEIGHT))
         .border_1()
         .border_color(rgb(0x8a8a8a))
         .bg(rgb(0xffffff))
-        .overflow_hidden()
-        .child(
+        .overflow_hidden();
+
+    match file_operation_progress_bar_mode(progress) {
+        FileOperationProgressBarMode::Determinate => progress_bar.child(
             div()
                 .h_full()
                 .w(px(fill_width))
                 .bg(rgb(SHELL_PROGRESS_GREEN)),
-        )
-        .into_any_element()
+        ),
+        FileOperationProgressBarMode::Indeterminate => {
+            let mut style = LinearProgressStyle::explorer_copy_green();
+            style.height = PROGRESS_DIALOG_BAR_HEIGHT;
+            progress_bar.child(linear_indeterminate(
+                "file-operation-resuming-progress",
+                style,
+            ))
+        }
+    }
+    .into_any_element()
+}
+
+fn file_operation_progress_bar_mode(
+    progress: Option<&FileOperationProgress>,
+) -> FileOperationProgressBarMode {
+    if progress.is_some_and(|progress| progress.phase == FileOperationPhase::Resuming) {
+        FileOperationProgressBarMode::Indeterminate
+    } else {
+        FileOperationProgressBarMode::Determinate
+    }
 }
 
 fn file_operation_current_item_label(progress: Option<&FileOperationProgress>) -> String {
@@ -1359,6 +1387,7 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
     let action = match progress.phase {
         FileOperationPhase::Preparing => "Preparing",
         FileOperationPhase::Indexing => "Indexing",
+        FileOperationPhase::Resuming => "Resuming",
         FileOperationPhase::Copying => "Copying",
         FileOperationPhase::Verifying => "Verifying",
         FileOperationPhase::Extracting => "Extracting",
@@ -2177,6 +2206,42 @@ mod tests {
         assert_eq!(
             file_operation_item_label(&progress),
             "Verifying 0 of 1 items (8 bytes of 12 bytes)"
+        );
+    }
+
+    #[test]
+    fn progress_dialog_resuming_status_uses_resuming_label() {
+        let mut progress = test_progress();
+        progress.phase = FileOperationPhase::Resuming;
+        progress.total_bytes = 12;
+        progress.copied_bytes = 4;
+        progress.work_total_bytes = 12;
+        progress.work_completed_bytes = 4;
+
+        assert_eq!(
+            file_operation_item_label(&progress),
+            "Resuming 0 of 1 items (4 bytes of 12 bytes)"
+        );
+    }
+
+    #[test]
+    fn progress_dialog_bar_mode_is_indeterminate_only_while_resuming() {
+        let mut progress = test_progress();
+
+        assert_eq!(
+            file_operation_progress_bar_mode(Some(&progress)),
+            FileOperationProgressBarMode::Determinate
+        );
+
+        progress.phase = FileOperationPhase::Resuming;
+        assert_eq!(
+            file_operation_progress_bar_mode(Some(&progress)),
+            FileOperationProgressBarMode::Indeterminate
+        );
+
+        assert_eq!(
+            file_operation_progress_bar_mode(None),
+            FileOperationProgressBarMode::Determinate
         );
     }
 

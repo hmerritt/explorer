@@ -1452,6 +1452,7 @@ impl FileOperationKind {
 pub(super) enum FileOperationPhase {
     Preparing,
     Indexing,
+    Resuming,
     Copying,
     Verifying,
     Extracting,
