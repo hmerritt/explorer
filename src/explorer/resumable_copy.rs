@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::explorer::filesystem::{
-    FileOperationPhase, FileOperationProgress, preserve_file_metadata,
+    FileOperationPhase, FileOperationProgress, paths_are_on_same_volume, preserve_file_metadata,
     replace_destination_with_temp,
 };
 
@@ -29,6 +29,8 @@ const LITERAL_FLUSH_SIZE: usize = 64 * 1024;
 const PARALLEL_COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const PARALLEL_COPY_THRESHOLD: u64 = 8 * 1024 * 1024;
 const PARALLEL_COPY_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const VERIFICATION_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const PARALLEL_VERIFICATION_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum CopyDurability {
@@ -104,6 +106,12 @@ struct BlockSignature {
 struct DeltaCopyStats {
     reused_blocks: usize,
     literal_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerificationStrategy {
+    Sequential,
+    Parallel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -517,7 +525,7 @@ pub(super) fn destination_content_matches_source_with_progress(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    files_equal_parallel_with_progress(
+    files_equal_with_progress(
         source,
         destination,
         source_len,
@@ -958,7 +966,7 @@ fn destination_is_identical_to_source(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    files_equal_parallel_with_progress(
+    files_equal_with_progress(
         source,
         destination,
         source_len,
@@ -979,6 +987,75 @@ fn verify_repair_pass(
     cancel: &Arc<AtomicBool>,
     mut on_block_verified: impl FnMut(u64),
 ) -> io::Result<Vec<(u64, usize)>> {
+    match verification_strategy(source, scratch, source_len) {
+        VerificationStrategy::Sequential => verify_repair_pass_sequential(
+            source,
+            scratch,
+            source_len,
+            block_size,
+            cancel,
+            &mut on_block_verified,
+        ),
+        VerificationStrategy::Parallel => verify_repair_pass_parallel(
+            source,
+            scratch,
+            source_len,
+            block_size,
+            cancel,
+            on_block_verified,
+        ),
+    }
+}
+
+fn verify_repair_pass_sequential(
+    source: &Path,
+    scratch: &Path,
+    source_len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    on_chunk_verified: &mut impl FnMut(u64),
+) -> io::Result<Vec<(u64, usize)>> {
+    let mut source = File::open(source)?;
+    let mut scratch_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(scratch)?;
+    let chunk_size = verification_chunk_size(block_size);
+    let mut source_block = vec![0; chunk_size];
+    let mut scratch_block = vec![0; chunk_size];
+    let mut repaired = Vec::new();
+    let mut offset = 0u64;
+
+    while offset < source_len {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+
+        let len = (source_len - offset).min(chunk_size as u64) as usize;
+        source.read_exact(&mut source_block[..len])?;
+        scratch_file.seek(SeekFrom::Start(offset))?;
+        let scratch_read = read_exact_or_short(&mut scratch_file, &mut scratch_block[..len])?;
+        let matches = scratch_read == len && source_block[..len] == scratch_block[..scratch_read];
+        if !matches {
+            write_all_at(&scratch_file, offset, &source_block[..len])?;
+            repaired.push((offset, len));
+        }
+        on_chunk_verified(len as u64);
+        offset = offset.saturating_add(len as u64);
+    }
+
+    scratch_file.set_len(source_len)?;
+    Ok(repaired)
+}
+
+fn verify_repair_pass_parallel(
+    source: &Path,
+    scratch: &Path,
+    source_len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    mut on_chunk_verified: impl FnMut(u64),
+) -> io::Result<Vec<(u64, usize)>> {
     let (progress_tx, progress_rx) = mpsc::channel::<u64>();
     let (result_tx, result_rx) = mpsc::channel::<io::Result<Vec<(u64, usize)>>>();
 
@@ -998,11 +1075,11 @@ fn verify_repair_pass(
         loop {
             match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
                 Ok(result) => {
-                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                    drain_parallel_copy_progress(&progress_rx, &mut on_chunk_verified);
                     return result;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                    drain_parallel_copy_progress(&progress_rx, &mut on_chunk_verified);
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(io::Error::other("parallel repair worker disconnected"));
@@ -1027,29 +1104,27 @@ fn verify_repair_pass_impl(
             .write(true)
             .open(scratch)?,
     );
-    let block_size_u64 = block_size as u64;
-    let block_count = source_len.div_ceil(block_size_u64);
+    let chunk_size = verification_chunk_size(block_size);
+    let chunk_size_u64 = chunk_size as u64;
+    let chunk_count = source_len.div_ceil(chunk_size_u64);
     let repaired = Mutex::new(Vec::new());
 
-    (0..block_count)
-        .into_par_iter()
-        .try_for_each(|block_index| {
+    (0..chunk_count).into_par_iter().try_for_each_init(
+        || (vec![0; chunk_size], vec![0; chunk_size]),
+        |(source_block, scratch_block), block_index| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
-            let offset = block_index.saturating_mul(block_size_u64);
-            let len = (source_len - offset).min(block_size_u64) as usize;
-            let mut source_block = vec![0; len];
-            let mut scratch_block = vec![0; len];
-            read_exact_at(&source, offset, &mut source_block)?;
-            let scratch_read = read_at(&scratch_file, offset, &mut scratch_block)?;
-            scratch_block.truncate(scratch_read);
+            let offset = block_index.saturating_mul(chunk_size_u64);
+            let len = (source_len - offset).min(chunk_size_u64) as usize;
+            read_exact_at(&source, offset, &mut source_block[..len])?;
+            let scratch_read = read_at_or_eof(&scratch_file, offset, &mut scratch_block[..len])?;
 
-            let matches = source_block.len() == scratch_block.len()
-                && strong_hash(&source_block) == strong_hash(&scratch_block);
+            let matches =
+                scratch_read == len && source_block[..len] == scratch_block[..scratch_read];
             if !matches {
-                write_all_at(&scratch_file, offset, &source_block)?;
+                write_all_at(&scratch_file, offset, &source_block[..len])?;
                 repaired
                     .lock()
                     .map_err(|_| io::Error::other("verification state poisoned"))?
@@ -1058,7 +1133,8 @@ fn verify_repair_pass_impl(
             let _ = progress_tx.send(len as u64);
 
             Ok(())
-        })?;
+        },
+    )?;
 
     scratch_file.set_len(source_len)?;
     repaired
@@ -1081,21 +1157,24 @@ fn verify_offsets(
     let scratch = Arc::new(File::open(scratch)?);
     let verified = std::sync::atomic::AtomicBool::new(true);
 
-    offsets.par_iter().try_for_each(|(offset, len)| {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(cancelled_error());
-        }
+    offsets.par_iter().try_for_each_init(
+        || (Vec::new(), Vec::new()),
+        |(source_block, scratch_block), (offset, len)| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
 
-        let len = (*len).min(block_size);
-        let mut source_block = vec![0; len];
-        let mut scratch_block = vec![0; len];
-        read_exact_at(&source, *offset, &mut source_block)?;
-        read_exact_at(&scratch, *offset, &mut scratch_block)?;
-        if strong_hash(&source_block) != strong_hash(&scratch_block) {
-            verified.store(false, Ordering::Relaxed);
-        }
-        Ok(())
-    })?;
+            let len = (*len).min(block_size);
+            source_block.resize(len, 0);
+            scratch_block.resize(len, 0);
+            read_exact_at(&source, *offset, source_block)?;
+            read_exact_at(&scratch, *offset, scratch_block)?;
+            if source_block != scratch_block {
+                verified.store(false, Ordering::Relaxed);
+            }
+            Ok(())
+        },
+    )?;
 
     Ok(verified.load(Ordering::Relaxed))
 }
@@ -1180,6 +1259,83 @@ fn drain_parallel_copy_progress(
     }
 }
 
+fn verification_strategy(source: &Path, destination: &Path, len: u64) -> VerificationStrategy {
+    if len >= PARALLEL_VERIFICATION_MAX_BYTES || !paths_are_on_same_volume(source, destination) {
+        VerificationStrategy::Sequential
+    } else {
+        VerificationStrategy::Parallel
+    }
+}
+
+fn verification_chunk_size(block_size: usize) -> usize {
+    block_size.max(VERIFICATION_CHUNK_SIZE)
+}
+
+fn files_equal_with_progress(
+    source: &Path,
+    destination: &Path,
+    len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    mut on_block_verified: impl FnMut(u64),
+) -> io::Result<bool> {
+    match verification_strategy(source, destination, len) {
+        VerificationStrategy::Sequential => files_equal_sequential(
+            source,
+            destination,
+            len,
+            block_size,
+            cancel,
+            &mut on_block_verified,
+        ),
+        VerificationStrategy::Parallel => files_equal_parallel_with_progress(
+            source,
+            destination,
+            len,
+            block_size,
+            cancel,
+            on_block_verified,
+        ),
+    }
+}
+
+fn files_equal_sequential(
+    source: &Path,
+    destination: &Path,
+    len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    on_chunk_verified: &mut impl FnMut(u64),
+) -> io::Result<bool> {
+    if len == 0 {
+        return Ok(true);
+    }
+
+    let mut source = File::open(source)?;
+    let mut destination = File::open(destination)?;
+    let chunk_size = verification_chunk_size(block_size);
+    let mut source_block = vec![0; chunk_size];
+    let mut destination_block = vec![0; chunk_size];
+    let mut offset = 0u64;
+
+    while offset < len {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+
+        let read_len = (len - offset).min(chunk_size as u64) as usize;
+        source.read_exact(&mut source_block[..read_len])?;
+        destination.read_exact(&mut destination_block[..read_len])?;
+        if source_block[..read_len] != destination_block[..read_len] {
+            return Ok(false);
+        }
+        on_chunk_verified(read_len as u64);
+        offset = offset.saturating_add(read_len as u64);
+    }
+
+    Ok(true)
+}
+
 fn files_equal_parallel_with_progress(
     source: &Path,
     destination: &Path,
@@ -1237,13 +1393,14 @@ fn files_equal_parallel_impl(
 
     let source = Arc::new(File::open(source)?);
     let destination = Arc::new(File::open(destination)?);
-    let block_size = block_size as u64;
-    let block_count = len.div_ceil(block_size);
+    let chunk_size = verification_chunk_size(block_size);
+    let chunk_size_u64 = chunk_size as u64;
+    let chunk_count = len.div_ceil(chunk_size_u64);
     let equal = std::sync::atomic::AtomicBool::new(true);
 
-    (0..block_count)
-        .into_par_iter()
-        .try_for_each(|block_index| {
+    (0..chunk_count).into_par_iter().try_for_each_init(
+        || (vec![0; chunk_size], vec![0; chunk_size]),
+        |(source_block, destination_block), block_index| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
@@ -1251,19 +1408,18 @@ fn files_equal_parallel_impl(
                 return Ok(());
             }
 
-            let offset = block_index.saturating_mul(block_size);
-            let read_len = (len - offset).min(block_size) as usize;
-            let mut source_block = vec![0; read_len];
-            let mut destination_block = vec![0; read_len];
-            read_exact_at(&source, offset, &mut source_block)?;
-            read_exact_at(&destination, offset, &mut destination_block)?;
-            if source_block != destination_block {
+            let offset = block_index.saturating_mul(chunk_size_u64);
+            let read_len = (len - offset).min(chunk_size_u64) as usize;
+            read_exact_at(&source, offset, &mut source_block[..read_len])?;
+            read_exact_at(&destination, offset, &mut destination_block[..read_len])?;
+            if source_block[..read_len] != destination_block[..read_len] {
                 equal.store(false, Ordering::Relaxed);
             } else {
                 let _ = progress_tx.send(read_len as u64);
             }
             Ok(())
-        })?;
+        },
+    )?;
 
     Ok(equal.load(Ordering::Relaxed))
 }
@@ -1285,6 +1441,34 @@ fn read_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<()> 
         read_total += read;
     }
     Ok(())
+}
+
+fn read_at_or_eof(file: &File, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut read_total = 0usize;
+    while read_total < buffer.len() {
+        let read = read_at(
+            file,
+            offset.saturating_add(read_total as u64),
+            &mut buffer[read_total..],
+        )?;
+        if read == 0 {
+            break;
+        }
+        read_total += read;
+    }
+    Ok(read_total)
+}
+
+fn read_exact_or_short(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut read_total = 0usize;
+    while read_total < buffer.len() {
+        let read = file.read(&mut buffer[read_total..])?;
+        if read == 0 {
+            break;
+        }
+        read_total += read;
+    }
+    Ok(read_total)
 }
 
 fn write_all_at(file: &File, offset: u64, buffer: &[u8]) -> io::Result<()> {
@@ -1403,7 +1587,7 @@ fn sync_parent_directory(_: &Path) {}
 mod tests {
     use super::*;
     use crate::explorer::{
-        filesystem::{FileOperationKind, FileOperationProgress},
+        filesystem::{FileOperationKind, FileOperationProgress, set_test_path_volume_key},
         test_support::TempDir,
     };
     use filetime::FileTime;
@@ -1491,6 +1675,7 @@ mod tests {
         fs::write(&source, b"aaaabbbbccccdddd").expect("write source");
         fs::write(&scratch, b"aaaabbbbXXXXdddd").expect("write scratch");
         let mut progress = test_progress(16);
+        let mut progress_events = Vec::new();
 
         verify_and_repair(
             &source,
@@ -1499,12 +1684,122 @@ mod tests {
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
-            &mut |_| {},
+            &mut |progress| progress_events.push(progress),
             CopyOptions::explorer_safe(),
         )
         .expect("verify and repair");
 
         assert_eq!(fs::read(&scratch).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(progress.verified_bytes, 16);
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Verifying && progress.verified_bytes == 16
+        }));
+    }
+
+    #[test]
+    fn sequential_verification_repairs_sparse_corruption() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let scratch_root = temp.path().join("scratch");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&scratch_root).expect("create scratch root");
+        let source = source_root.join("source.bin");
+        let scratch = scratch_root.join("scratch.bin");
+        let data = vec![17; VERIFICATION_CHUNK_SIZE * 2 + 123];
+        let mut corrupt = data.clone();
+        corrupt[VERIFICATION_CHUNK_SIZE + 17..VERIFICATION_CHUNK_SIZE + 21].fill(99);
+        fs::write(&source, &data).expect("write source");
+        fs::write(&scratch, corrupt).expect("write scratch");
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let _scratch_volume = set_test_path_volume_key(&scratch_root, Some("scratch-volume"));
+        let mut progress = test_progress(data.len() as u64);
+
+        verify_and_repair(
+            &source,
+            &scratch,
+            data.len() as u64,
+            1024,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::explorer_safe(),
+        )
+        .expect("verify and repair");
+
+        assert_eq!(fs::read(&scratch).unwrap(), data);
+        assert_eq!(progress.verified_bytes, data.len() as u64);
+    }
+
+    #[test]
+    fn verification_strategy_prefers_sequential_for_different_volumes_and_large_files() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&destination_root).expect("create destination root");
+        let source = source_root.join("source.bin");
+        let destination = destination_root.join("destination.bin");
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let destination_volume =
+            set_test_path_volume_key(&destination_root, Some("destination-volume"));
+
+        assert_eq!(
+            verification_strategy(&source, &destination, 1024),
+            VerificationStrategy::Sequential
+        );
+
+        drop(destination_volume);
+        let _destination_volume =
+            set_test_path_volume_key(&destination_root, Some("source-volume"));
+        assert_eq!(
+            verification_strategy(&source, &destination, 1024),
+            VerificationStrategy::Parallel
+        );
+        assert_eq!(
+            verification_strategy(&source, &destination, PARALLEL_VERIFICATION_MAX_BYTES),
+            VerificationStrategy::Sequential
+        );
+    }
+
+    #[test]
+    fn sequential_identical_verification_can_be_cancelled() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let destination_root = temp.path().join("destination");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&destination_root).expect("create destination root");
+        let source = source_root.join("source.bin");
+        let destination = destination_root.join("source.bin");
+        let data = vec![23; VERIFICATION_CHUNK_SIZE * 2 + 123];
+        fs::write(&source, &data).expect("write source");
+        fs::write(&destination, &data).expect("write destination");
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let _destination_volume =
+            set_test_path_volume_key(&destination_root, Some("destination-volume"));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut progress = test_progress(data.len() as u64);
+        let mut requested_cancel = false;
+
+        let result = copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &cancel,
+            &mut progress,
+            &mut |progress| {
+                if progress.verified_bytes > 0 && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted
+        ));
+        assert!(progress.verified_bytes > 0);
+        assert!(progress.verified_bytes < data.len() as u64);
     }
 
     #[test]
@@ -1550,7 +1845,7 @@ mod tests {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
-        let data = vec![31; 4096 + 123];
+        let data = vec![31; VERIFICATION_CHUNK_SIZE * 2 + 123];
         fs::write(&source, &data).expect("write source");
         fs::write(&destination, &data).expect("write destination");
         let mut progress = test_progress(data.len() as u64);

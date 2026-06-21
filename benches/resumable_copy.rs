@@ -150,6 +150,59 @@ fn copy_benchmarks(criterion: &mut Criterion) {
     }
     files.finish();
 
+    let mut verify = criterion.benchmark_group("resumable_copy/verify");
+    verify.throughput(Throughput::Bytes(LARGE_BYTES as u64));
+    verify.bench_function("identical_destination", |bencher| {
+        bencher.iter_batched(
+            || {
+                let output = fresh_output(&fixture.root, "verify-identical-output");
+                let destination = output.join("large.bin");
+                fs::copy(&fixture.large, &destination).expect("seed identical destination");
+                copy_mtime(&fixture.large, &destination);
+                output
+            },
+            |output| {
+                copy_paths(std::slice::from_ref(&fixture.large), &output);
+                fs::remove_dir_all(output).expect("remove output");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    verify.throughput(Throughput::Bytes(LARGE_BYTES as u64));
+    verify.bench_function("safe_copy_then_verify", |bencher| {
+        bencher.iter_batched(
+            || {
+                set_copy_fast(false);
+                fresh_output(&fixture.root, "verify-safe-output")
+            },
+            |output| {
+                copy_paths(std::slice::from_ref(&fixture.large), &output);
+                fs::remove_dir_all(output).expect("remove output");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    verify.throughput(Throughput::Bytes(8 * 1024 * 1024));
+    verify.bench_function("sparse_mismatch_repair", |bencher| {
+        bencher.iter_batched(
+            || {
+                let output = fresh_output(&fixture.root, "verify-sparse-output");
+                fs::copy(
+                    &fixture.same_size_basis,
+                    output.join("same-size-source.bin"),
+                )
+                .expect("seed sparse mismatch basis");
+                output
+            },
+            |output| {
+                copy_paths(std::slice::from_ref(&fixture.same_size_source), &output);
+                fs::remove_dir_all(output).expect("remove output");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    verify.finish();
+
     let mut update = criterion.benchmark_group("resumable_copy/update");
     update.bench_function("unchanged_quick_skip", |bencher| {
         bencher.iter_batched(
