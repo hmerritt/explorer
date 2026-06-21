@@ -3,6 +3,13 @@
 ## 1
 
 - rsync copy/sync builtin
+- Detect WSL drive type, and show one of the bundled icons:
+    - alpine.svg
+    - debian.svg
+    - generic.svg
+    - kali.svg
+    - opensuse.svg
+    - ubuntu.svg
 - Auto-hide the sidebar when window width gets too small - calc if the sidebar is taking up >40% of the window width - add a Hamburger icon to the utility bar on the left to toggle it
 
 ## 2
