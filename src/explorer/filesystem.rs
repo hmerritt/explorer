@@ -251,6 +251,54 @@ pub(crate) fn wsl_drive_roots() -> Vec<PathBuf> {
     Vec::new()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WslDistroKind {
+    Alpine,
+    Debian,
+    Generic,
+    Kali,
+    OpenSuse,
+    Ubuntu,
+}
+
+pub(crate) fn wsl_distro_kind_from_name(name: &str) -> WslDistroKind {
+    let normalized = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+
+    if normalized.contains("alpine") {
+        WslDistroKind::Alpine
+    } else if normalized.contains("debian") {
+        WslDistroKind::Debian
+    } else if normalized.contains("kali") {
+        WslDistroKind::Kali
+    } else if normalized.contains("opensuse") {
+        WslDistroKind::OpenSuse
+    } else if normalized.contains("ubuntu") {
+        WslDistroKind::Ubuntu
+    } else {
+        WslDistroKind::Generic
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn wsl_distro_kind_for_path(path: &Path) -> Option<WslDistroKind> {
+    if !path_has_no_components_below_prefix_root(path) {
+        return None;
+    }
+
+    windows_wsl_unc_distribution_name(path)
+        .as_deref()
+        .map(wsl_distro_kind_from_name)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn wsl_distro_kind_for_path(_: &Path) -> Option<WslDistroKind> {
+    None
+}
+
 pub(crate) fn drive_display_label(path: &Path) -> String {
     let display = path.display().to_string();
 
@@ -271,7 +319,7 @@ pub(super) fn path_is_filesystem_root(path: &Path) -> bool {
 
 #[cfg(target_os = "windows")]
 pub(super) fn path_is_wsl_unc(path: &Path) -> bool {
-    windows_wsl_unc_prefix(path).is_some()
+    windows_wsl_unc_distribution_name(path).is_some()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -290,21 +338,25 @@ pub(super) fn path_is_wsl_unc_root(_: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_wsl_unc_prefix(path: &Path) -> Option<()> {
+fn windows_wsl_unc_distribution_name(path: &Path) -> Option<String> {
     use std::path::Prefix;
 
     let Component::Prefix(prefix) = path.components().next()? else {
         return None;
     };
 
-    let server = match prefix.kind() {
-        Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => server,
+    let (server, share) = match prefix.kind() {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => (server, share),
         _ => return None,
     };
 
     let server = server.to_string_lossy();
-    (server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$"))
-        .then_some(())
+    if !(server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")) {
+        return None;
+    }
+
+    let share = share.to_string_lossy();
+    (!share.is_empty()).then(|| share.into_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -4773,6 +4825,39 @@ mod tests {
         let roots = wsl_drive_roots_from_distribution_names(["", "  ", "Ubuntu"]);
 
         assert_eq!(roots, vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu\\")]);
+    }
+
+    #[test]
+    fn wsl_distro_kind_matches_partial_distribution_names() {
+        let cases = [
+            ("Alpine", WslDistroKind::Alpine),
+            ("Debian GNU/Linux", WslDistroKind::Debian),
+            ("kali-linux", WslDistroKind::Kali),
+            ("openSUSE-Leap", WslDistroKind::OpenSuse),
+            ("Ubuntu-24.04", WslDistroKind::Ubuntu),
+            ("docker-desktop", WslDistroKind::Generic),
+        ];
+
+        for (name, expected) in cases {
+            assert_eq!(wsl_distro_kind_from_name(name), expected, "{name}");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wsl_distro_kind_for_path_detects_exact_unc_roots() {
+        assert_eq!(
+            wsl_distro_kind_for_path(Path::new(r"\\wsl.localhost\Ubuntu-24.04\")),
+            Some(WslDistroKind::Ubuntu)
+        );
+        assert_eq!(
+            wsl_distro_kind_for_path(Path::new(r"\\wsl$\openSUSE-Leap\")),
+            Some(WslDistroKind::OpenSuse)
+        );
+        assert_eq!(
+            wsl_distro_kind_for_path(Path::new(r"\\wsl.localhost\Ubuntu-24.04\home")),
+            None
+        );
     }
 
     #[test]

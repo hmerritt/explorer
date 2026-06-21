@@ -79,6 +79,10 @@ pub(super) enum ContextMenuIcon {
     NativeFile,
     Folder,
     FolderKind(Option<DirectoryKind>),
+    FolderKindForPath {
+        path: PathBuf,
+        kind: Option<DirectoryKind>,
+    },
     ImagePath(PathBuf),
     ImagePathWithExecutableFallback(PathBuf),
     ImageUrl(String),
@@ -568,7 +572,10 @@ pub(super) fn sidebar_context_menu_items(
     let mut items = vec![
         ContextMenuItem::Action {
             id: "context-menu-sidebar-open".to_owned(),
-            icon: Some(ContextMenuIcon::FolderKind(open_icon_kind)),
+            icon: Some(ContextMenuIcon::FolderKindForPath {
+                path: path.clone(),
+                kind: open_icon_kind,
+            }),
             label: "Open".to_owned(),
             command: ContextMenuCommand::OpenDirectory { path: path.clone() },
             enabled: true,
@@ -1589,7 +1596,10 @@ mod tests {
             items[0],
             ContextMenuItem::Action {
                 id: "context-menu-sidebar-open".to_owned(),
-                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Downloads))),
+                icon: Some(ContextMenuIcon::FolderKindForPath {
+                    path: path.clone(),
+                    kind: Some(DirectoryKind::Downloads),
+                }),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenDirectory { path: path.clone() },
                 enabled: true,
@@ -1630,7 +1640,10 @@ mod tests {
             items[0],
             ContextMenuItem::Action {
                 id: "context-menu-sidebar-open".to_owned(),
-                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::Drive))),
+                icon: Some(ContextMenuIcon::FolderKindForPath {
+                    path: path.clone(),
+                    kind: Some(DirectoryKind::Drive),
+                }),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenDirectory { path: path.clone() },
                 enabled: true,
@@ -1658,7 +1671,10 @@ mod tests {
             items[0],
             ContextMenuItem::Action {
                 id: "context-menu-sidebar-open".to_owned(),
-                icon: Some(ContextMenuIcon::FolderKind(Some(DirectoryKind::DriveWsl))),
+                icon: Some(ContextMenuIcon::FolderKindForPath {
+                    path: path.clone(),
+                    kind: Some(DirectoryKind::DriveWsl),
+                }),
                 label: "Open".to_owned(),
                 command: ContextMenuCommand::OpenDirectory { path: path.clone() },
                 enabled: true,

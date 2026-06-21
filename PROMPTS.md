@@ -3,13 +3,6 @@
 ## 1
 
 - rsync copy/sync builtin
-- Detect WSL drive type, and show one of the bundled icons, in "./assets/icons/wsl":
-    - alpine.svg
-    - debian.svg
-    - generic.svg
-    - kali.svg
-    - opensuse.svg
-    - ubuntu.svg
 
 ## 2
 

@@ -998,6 +998,10 @@ fn tab_icon(path: Option<&Path>) -> AnyElement {
     };
 
     if let Some(kind) = crate::explorer::resolve_directory_kind(path) {
+        if kind == crate::explorer::DirectoryKind::DriveWsl {
+            return crate::explorer::icons::drive_wsl_icon_for_path(path);
+        }
+
         return crate::explorer::icons::directory_kind_icon(kind);
     }
 

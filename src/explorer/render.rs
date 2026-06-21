@@ -2,7 +2,7 @@ use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -64,6 +64,7 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
+    filesystem::wsl_distro_kind_for_path,
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
@@ -72,9 +73,9 @@ use crate::explorer::{
         NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON,
         RENAME_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
-        drive_icon, drive_windows_icon, drive_wsl_icon, executable_icon_sized, file_icon,
-        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font,
+        drive_icon, drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
+        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
+        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
@@ -175,11 +176,13 @@ impl Render for FileColumnHeaderDragPreview {
 struct SidebarItemDrag {
     configured_index: usize,
     label: SharedString,
+    path: PathBuf,
     kind: SidebarItemKind,
 }
 
 struct SidebarItemDragPreview {
     label: SharedString,
+    path: PathBuf,
     kind: SidebarItemKind,
     width: f32,
     font: gpui::Font,
@@ -200,7 +203,7 @@ impl Render for SidebarItemDragPreview {
             .border_1()
             .border_color(rgb(0x8a8a8a))
             .shadow_md()
-            .child(sidebar_item_kind_icon(self.kind))
+            .child(sidebar_item_kind_icon_for_path(self.kind, &self.path))
             .child(
                 div()
                     .min_w(px(0.0))
@@ -1509,7 +1512,7 @@ impl ExplorerView {
                     cx.notify();
                 }),
             )
-            .child(sidebar_item_icon(icon_item))
+            .child(sidebar_item_icon(&icon_item))
             .child(
                 div()
                     .flex_1()
@@ -1540,6 +1543,7 @@ impl ExplorerView {
 
         if let Some(configured_index) = configured_index {
             let drag_label = SharedString::from(item.label.clone());
+            let drag_path = item.path.clone();
             let drag_kind = item.kind;
             row = row
                 .on_mouse_up(
@@ -1562,6 +1566,7 @@ impl ExplorerView {
                     SidebarItemDrag {
                         configured_index,
                         label: drag_label,
+                        path: drag_path,
                         kind: drag_kind,
                     },
                     {
@@ -1575,6 +1580,7 @@ impl ExplorerView {
                             let font = entity.read(cx).font.clone();
                             cx.new(move |_| SidebarItemDragPreview {
                                 label: drag.label.clone(),
+                                path: drag.path.clone(),
                                 kind: drag.kind,
                                 width,
                                 font,
@@ -2720,17 +2726,17 @@ fn entry_row_hover_enabled(is_selected: bool, context_menu_active: bool) -> bool
     !is_selected && !context_menu_active
 }
 
-fn sidebar_item_icon(item: SidebarItem) -> AnyElement {
-    sidebar_item_kind_icon(item.kind)
+fn sidebar_item_icon(item: &SidebarItem) -> AnyElement {
+    sidebar_item_kind_icon_for_path(item.kind, &item.path)
 }
 
-fn sidebar_item_kind_icon(kind: SidebarItemKind) -> AnyElement {
+fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyElement {
     match kind {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
-        SidebarItemKind::DriveWsl => drive_wsl_icon().into_any_element(),
+        SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
     }
 }
 
@@ -3937,6 +3943,14 @@ fn context_menu_icon_element(
         ContextMenuIcon::FolderKind(kind) => kind
             .map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
+        ContextMenuIcon::FolderKindForPath { path, kind } => {
+            if matches!(kind, Some(DirectoryKind::DriveWsl)) {
+                drive_wsl_icon_sized_for_path(&path, CONTEXT_MENU_ICON_SIZE)
+            } else {
+                kind.map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
+                    .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element())
+            }
+        }
         ContextMenuIcon::ImagePath(path) => {
             context_menu_image_path_icon(path, ContextMenuIconImageFallback::None)
         }
@@ -5119,6 +5133,10 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     }
 
     if entry.is_directory_like() {
+        if wsl_distro_kind_for_path(&entry.path).is_some() {
+            return drive_wsl_icon_sized_for_path(&entry.path, FILE_ICON_SLOT_WIDTH);
+        }
+
         folder_icon().into_any_element()
     } else {
         file_icon_for_path(&entry.path).into_any_element()
@@ -5143,6 +5161,10 @@ fn large_entry_icon(
     }
 
     if entry.is_directory_like() {
+        if wsl_distro_kind_for_path(&entry.path).is_some() {
+            return drive_wsl_icon_sized_for_path(&entry.path, LARGE_ICON_SIZE);
+        }
+
         folder_icon_sized(LARGE_ICON_SIZE).into_any_element()
     } else {
         large_file_icon_for_path_sized(&entry.path, LARGE_ICON_SIZE).into_any_element()

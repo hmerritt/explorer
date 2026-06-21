@@ -5,7 +5,10 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use crate::explorer::{directory_kind::DirectoryKind, filesystem::archive_path_is_supported};
+use crate::explorer::{
+    directory_kind::DirectoryKind,
+    filesystem::{WslDistroKind, archive_path_is_supported, wsl_distro_kind_for_path},
+};
 use gpui::{
     AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, StyledImage, div, font, img,
     prelude::*, px,
@@ -135,7 +138,6 @@ png_icon!(
     "macos-applications.png"
 );
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
-png_icon!(DRIVE_WSL_ICON, "devices/drives", "network.png");
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
@@ -166,6 +168,12 @@ svg_icon!(OPEN_WITH_ICON, "utility", "open_with.svg");
 svg_icon!(PASTE_ICON, "utility", "paste.svg");
 svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
+png_icon!(WSL_ALPINE_ICON, "wsl", "alpine.png");
+png_icon!(WSL_DEBIAN_ICON, "wsl", "debian.png");
+png_icon!(WSL_GENERIC_ICON, "wsl", "generic.png");
+png_icon!(WSL_KALI_ICON, "wsl", "kali.png");
+png_icon!(WSL_OPENSUSE_ICON, "wsl", "opensuse.png");
+png_icon!(WSL_UBUNTU_ICON, "wsl", "ubuntu.png");
 const SORT_CHEVRON_UP_ICON_BYTES: &[u8] =
     include_bytes!("../../assets/icons/utility/chevron_up.svg");
 pub(super) static SORT_CHEVRON_UP_ICON: LazyLock<Arc<Image>> =
@@ -405,7 +413,28 @@ pub(super) fn drive_windows_icon() -> AnyElement {
 }
 
 pub(super) fn drive_wsl_icon() -> AnyElement {
-    image_sidebar_icon(DRIVE_WSL_ICON.clone())
+    image_sidebar_icon(wsl_distro_image(WslDistroKind::Generic))
+}
+
+pub(super) fn drive_wsl_icon_for_path(path: &Path) -> AnyElement {
+    let kind = wsl_distro_kind_for_path(path).unwrap_or(WslDistroKind::Generic);
+    image_sidebar_icon(wsl_distro_image(kind))
+}
+
+pub(super) fn drive_wsl_icon_sized_for_path(path: &Path, size: f32) -> AnyElement {
+    let kind = wsl_distro_kind_for_path(path).unwrap_or(WslDistroKind::Generic);
+    image_icon(wsl_distro_image(kind), size, size)
+}
+
+fn wsl_distro_image(kind: WslDistroKind) -> Arc<Image> {
+    match kind {
+        WslDistroKind::Alpine => WSL_ALPINE_ICON.clone(),
+        WslDistroKind::Debian => WSL_DEBIAN_ICON.clone(),
+        WslDistroKind::Generic => WSL_GENERIC_ICON.clone(),
+        WslDistroKind::Kali => WSL_KALI_ICON.clone(),
+        WslDistroKind::OpenSuse => WSL_OPENSUSE_ICON.clone(),
+        WslDistroKind::Ubuntu => WSL_UBUNTU_ICON.clone(),
+    }
 }
 
 pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
@@ -438,7 +467,7 @@ pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyEl
         DirectoryKind::Bin => BIN_SIDEBAR_ICON.clone(),
         DirectoryKind::Drive => DRIVE_ICON.clone(),
         DirectoryKind::DriveWindows => DRIVE_WINDOWS_ICON.clone(),
-        DirectoryKind::DriveWsl => DRIVE_WSL_ICON.clone(),
+        DirectoryKind::DriveWsl => WSL_GENERIC_ICON.clone(),
     };
     image_icon(image, size, size)
 }
@@ -529,6 +558,16 @@ mod tests {
                 .expect("rotated chevron SVG is UTF-8")
                 .contains(r#"transform="rotate(180 12 12)""#)
         );
+    }
+
+    #[test]
+    fn wsl_drive_icons_use_bundled_svg_assets() {
+        assert!(!WSL_ALPINE_ICON_BYTES.is_empty());
+        assert!(!WSL_DEBIAN_ICON_BYTES.is_empty());
+        assert!(!WSL_GENERIC_ICON_BYTES.is_empty());
+        assert!(!WSL_KALI_ICON_BYTES.is_empty());
+        assert!(!WSL_OPENSUSE_ICON_BYTES.is_empty());
+        assert!(!WSL_UBUNTU_ICON_BYTES.is_empty());
     }
 
     #[test]
