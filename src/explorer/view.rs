@@ -1691,10 +1691,10 @@ mod tests {
             sort,
             FileSortSettings {
                 column: FileSortColumn::Name,
-                direction: SortDirection::Ascending,
+                direction: SortDirection::Descending,
             }
         );
-        assert_eq!(names(&view.entries), vec!["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(names(&view.entries), vec!["c.txt", "b.txt", "a.txt"]);
         assert_eq!(view.selected_paths(), vec![PathBuf::from("a.txt")]);
     }
 

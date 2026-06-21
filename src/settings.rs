@@ -353,8 +353,8 @@ pub enum FileSortColumn {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
-    Ascending,
     #[default]
+    Ascending,
     Descending,
 }
 
@@ -1798,7 +1798,7 @@ fn default_file_columns() -> FileColumnSettings {
 fn default_file_sort() -> FileSortSettings {
     FileSortSettings {
         column: FileSortColumn::Name,
-        direction: SortDirection::Descending,
+        direction: SortDirection::Ascending,
     }
 }
 
@@ -2423,7 +2423,7 @@ mod tests {
         assert!(json.contains("\n    \"show_folder_sizes\": false"));
         assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
         assert!(
-            json.contains("\n    \"sort\": {\"column\": \"name\", \"direction\": \"descending\"}")
+            json.contains("\n    \"sort\": {\"column\": \"name\", \"direction\": \"ascending\"}")
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -3139,7 +3139,7 @@ mod tests {
         assert_eq!(object["view"]["native_icons"], true);
         assert_eq!(object["view"]["show_extensions"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");
-        assert_eq!(object["view"]["sort"]["direction"], "descending");
+        assert_eq!(object["view"]["sort"]["direction"], "ascending");
         assert_eq!(object["show_hidden_files"], true);
         assert!(
             normalized.find("\"app\"").unwrap() < normalized.find("\"future_option\"").unwrap()

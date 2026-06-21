@@ -6254,7 +6254,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn default_name_sort_is_descending_and_name_header_toggles(cx: &mut gpui::TestAppContext) {
+    fn default_name_sort_is_ascending_and_name_header_toggles(cx: &mut gpui::TestAppContext) {
         cx.set_global(SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
         ));
@@ -6276,12 +6276,12 @@ mod tests {
         cx.run_until_parked();
 
         cx.read_entity(&view, |view, _| {
-            assert_eq!(entry_names(view), vec!["c.txt", "b.txt", "a.txt"]);
+            assert_eq!(entry_names(view), vec!["a.txt", "b.txt", "c.txt"]);
             assert_eq!(
                 view.header_file_sort(),
                 Some(FileSortSettings {
                     column: FileSortColumn::Name,
-                    direction: SortDirection::Descending,
+                    direction: SortDirection::Ascending,
                 })
             );
         });
@@ -6312,14 +6312,14 @@ mod tests {
         cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
 
         cx.read_entity(&view, |view, _| {
-            assert_eq!(entry_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+            assert_eq!(entry_names(view), vec!["c.txt", "b.txt", "a.txt"]);
             assert_eq!(view.selected_paths(), vec![selected]);
         });
         assert_eq!(
             cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
             FileSortSettings {
                 column: FileSortColumn::Name,
-                direction: SortDirection::Ascending,
+                direction: SortDirection::Descending,
             }
         );
     }
