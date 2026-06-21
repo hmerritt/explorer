@@ -444,6 +444,7 @@ pub fn run() {
         crate::explorer::initialize_native_icon_cache(cx);
         crate::explorer::initialize_image_thumbnail_cache(cx);
         crate::explorer::initialize_folder_size_cache(cx);
+        crate::explorer::initialize_file_checksum_cache(cx);
         cx.bind_keys([
             KeyBinding::new("up", MoveUp, None),
             KeyBinding::new("down", MoveDown, None),

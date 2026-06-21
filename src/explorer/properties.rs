@@ -1,15 +1,16 @@
 use std::fmt::Write as _;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt, fs,
-    io::{BufReader, Read},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[cfg(target_os = "windows")]
@@ -18,10 +19,10 @@ use std::os::windows::process::CommandExt;
 use filetime::{FileTime, set_file_times};
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, FocusHandle,
-    Focusable, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString, StyledImage,
-    Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
+    Focusable, Global, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString,
+    StyledImage, Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
 use jwalk::WalkDirGeneric;
 use sha2::{Digest, Sha256};
@@ -325,6 +326,14 @@ enum PropertyDetailsState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum PropertyChecksumState {
+    NotRequested,
+    Loading,
+    Ready(FileChecksums),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PropertyCodeState {
     NotStarted,
     Loading,
@@ -401,6 +410,8 @@ pub(super) struct PropertiesDialog {
     tree_summary_generation: u64,
     details_state: PropertyDetailsState,
     details_generation: u64,
+    checksum_state: PropertyChecksumState,
+    checksum_generation: u64,
     code_state: PropertyCodeState,
     code_generation: u64,
     details_render_cache_key: Option<PropertyDetailsRenderCacheKey>,
@@ -419,6 +430,8 @@ pub(super) struct PropertiesDialog {
     tree_summary_task: Option<Task<()>>,
     tree_summary_cancel: Option<Arc<AtomicBool>>,
     details_task: Option<Task<()>>,
+    checksum_task: Option<Task<()>>,
+    checksum_cancel: Option<Arc<AtomicBool>>,
     code_task: Option<Task<()>>,
     image_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
@@ -510,6 +523,8 @@ impl PropertiesDialog {
             tree_summary_generation: 0,
             details_state: PropertyDetailsState::NotStarted,
             details_generation: 0,
+            checksum_state: PropertyChecksumState::NotRequested,
+            checksum_generation: 0,
             code_state: PropertyCodeState::NotStarted,
             code_generation: 0,
             details_render_cache_key: None,
@@ -528,6 +543,8 @@ impl PropertiesDialog {
             tree_summary_task: None,
             tree_summary_cancel: None,
             details_task: None,
+            checksum_task: None,
+            checksum_cancel: None,
             code_task: None,
             image_task: None,
             frames_task: None,
@@ -553,6 +570,7 @@ impl PropertiesDialog {
         self.cancel_tree_summary_task();
         self.snapshot_state = PropertySnapshotState::Loading;
         self.reset_details_state();
+        self.reset_checksum_state();
         self.reset_code_state();
         self.reset_image_state();
         self.reset_frames_state();
@@ -610,6 +628,11 @@ impl PropertiesDialog {
         self.set_details_scroll_top(0.0);
     }
 
+    fn reset_checksum_state(&mut self) {
+        self.cancel_checksum_task();
+        self.checksum_state = PropertyChecksumState::NotRequested;
+    }
+
     fn reset_code_state(&mut self) {
         self.code_generation = self.code_generation.wrapping_add(1);
         self.code_state = PropertyCodeState::NotStarted;
@@ -638,6 +661,7 @@ impl PropertiesDialog {
         self.draft = EditablePropertyDraft::from_snapshot(&snapshot);
         self.snapshot_state = PropertySnapshotState::Ready(snapshot);
         self.reset_details_state();
+        self.reset_checksum_state();
         self.reset_code_state();
         self.reset_image_state();
         self.reset_frames_state();
@@ -817,6 +841,104 @@ impl PropertiesDialog {
             });
         });
         self.details_task = Some(task);
+    }
+
+    fn start_checksum_task(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.checksum_state,
+            PropertyChecksumState::Loading | PropertyChecksumState::Ready(_)
+        ) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        let Some(path) =
+            single_file_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
+        else {
+            return;
+        };
+        let cache_key = match file_checksum_cache_key(&path) {
+            Ok(cache_key) => cache_key,
+            Err(error) => {
+                self.checksum_state = PropertyChecksumState::Failed(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(checksums) = cx
+            .try_global::<FileChecksumCache>()
+            .and_then(|cache| cache.get(&cache_key))
+        {
+            self.checksum_state = PropertyChecksumState::Ready(checksums);
+            cx.notify();
+            return;
+        }
+
+        self.cancel_checksum_task();
+        self.checksum_generation = self.checksum_generation.wrapping_add(1);
+        let generation = self.checksum_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.checksum_cancel = Some(cancel.clone());
+        self.checksum_state = PropertyChecksumState::Loading;
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let cancel = cancel.clone();
+                    async move {
+                        let started = Instant::now();
+                        let result = file_checksums_with_cancel(&path, &cancel)
+                            .map(|checksums| (cache_key, checksums));
+                        crate::debug_options::log_property_timing(
+                            started.elapsed(),
+                            format_args!(
+                                "checksums ready path={} ok={}",
+                                path.display(),
+                                result.is_ok()
+                            ),
+                        );
+                        result
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.checksum_generation != generation
+                    || dialog
+                        .checksum_cancel
+                        .as_ref()
+                        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+                {
+                    return;
+                }
+
+                dialog.checksum_task = None;
+                dialog.checksum_cancel = None;
+                match result {
+                    Ok((cache_key, checksums)) => {
+                        if let Some(cache) = cx.try_global::<FileChecksumCache>() {
+                            cache.insert(cache_key, checksums.clone());
+                        }
+                        dialog.checksum_state = PropertyChecksumState::Ready(checksums);
+                    }
+                    Err(error) => {
+                        dialog.checksum_state = PropertyChecksumState::Failed(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.checksum_task = Some(task);
+        cx.notify();
+    }
+
+    fn cancel_checksum_task(&mut self) {
+        self.checksum_generation = self.checksum_generation.wrapping_add(1);
+        if let Some(cancel) = self.checksum_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.checksum_task = None;
     }
 
     fn start_code_task(&mut self, cx: &mut Context<Self>) {
@@ -1142,12 +1264,14 @@ impl PropertiesDialog {
     fn close(&mut self, window: &mut Window, _: &mut Context<Self>) {
         self.completed = true;
         self.cancel_tree_summary_task();
+        self.cancel_checksum_task();
         window.remove_window();
     }
 
     fn release(&mut self, _cx: &mut App) {
         self.completed = true;
         self.cancel_tree_summary_task();
+        self.cancel_checksum_task();
         #[cfg(target_os = "linux")]
         if let Some(handle) = self.default_app_picker.take() {
             let _ = handle.update(_cx, |_, window, _| window.remove_window());
@@ -2138,11 +2262,14 @@ impl PropertiesDialog {
     ) -> AnyElement {
         let loading_details = matches!(self.details_state, PropertyDetailsState::Loading);
         let (groups_empty, detail_children) = {
-            let groups = self.detail_groups_for_render_cached(snapshot);
+            let checksum_state = self.checksum_state.clone();
+            let show_checksum_rows =
+                single_file_path(&snapshot.target, snapshot.item_kind).is_some();
+            let groups = self.detail_groups_for_render_cached(snapshot).to_vec();
             let groups_empty = groups.is_empty();
             let mut detail_children = Vec::new();
             let mut detail_row_index = 0;
-            for group in groups {
+            for group in &groups {
                 detail_children.push(detail_group_header(&group.title));
                 for detail in &group.details {
                     detail_children.push(detail_row(
@@ -2152,6 +2279,14 @@ impl PropertiesDialog {
                         cx,
                     ));
                     detail_row_index += 1;
+                }
+                if show_checksum_rows && group.kind == PropertyDetailGroupKind::File {
+                    push_checksum_detail_rows(
+                        &checksum_state,
+                        &mut detail_children,
+                        &mut detail_row_index,
+                        cx,
+                    );
                 }
             }
             (groups_empty, detail_children)
@@ -3627,7 +3762,7 @@ fn collect_single_file_detail_groups(
     let Some(path) = single_file_path(target, item_kind) else {
         return Vec::new();
     };
-    let mut groups = file_checksum_details(path);
+    let mut groups = Vec::new();
     if path_may_have_media_details(path) {
         groups.extend(media_details(path));
     }
@@ -3651,34 +3786,102 @@ struct FileChecksums {
     sha256: String,
 }
 
-fn file_checksum_details(path: &Path) -> Vec<PropertyDetailGroup> {
-    let Ok(checksums) = file_checksums(path) else {
-        return Vec::new();
-    };
-
-    vec![property_detail_group(
-        PropertyDetailGroupKind::File,
-        vec![
-            PropertyDetail {
-                name: "CRC32".to_owned(),
-                value: checksums.crc32,
-            },
-            PropertyDetail {
-                name: "SHA256".to_owned(),
-                value: checksums.sha256,
-            },
-        ],
-    )]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct FileChecksumCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
 }
 
+#[derive(Clone)]
+struct CachedFileChecksums {
+    checksums: FileChecksums,
+    calculated_at: Instant,
+}
+
+struct FileChecksumCache {
+    entries: RefCell<HashMap<FileChecksumCacheKey, CachedFileChecksums>>,
+}
+
+impl Global for FileChecksumCache {}
+
+impl FileChecksumCache {
+    fn new() -> Self {
+        Self {
+            entries: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, key: &FileChecksumCacheKey) -> Option<FileChecksums> {
+        self.get_at(key, Instant::now())
+    }
+
+    fn get_at(&self, key: &FileChecksumCacheKey, now: Instant) -> Option<FileChecksums> {
+        let cached = self.entries.borrow().get(key).cloned()?;
+        if now.saturating_duration_since(cached.calculated_at) < FILE_CHECKSUM_CACHE_TTL {
+            Some(cached.checksums)
+        } else {
+            self.entries.borrow_mut().remove(key);
+            None
+        }
+    }
+
+    fn insert(&self, key: FileChecksumCacheKey, checksums: FileChecksums) {
+        self.insert_at(key, checksums, Instant::now());
+    }
+
+    fn insert_at(
+        &self,
+        key: FileChecksumCacheKey,
+        checksums: FileChecksums,
+        calculated_at: Instant,
+    ) {
+        self.entries.borrow_mut().insert(
+            key,
+            CachedFileChecksums {
+                checksums,
+                calculated_at,
+            },
+        );
+    }
+}
+
+pub(crate) fn initialize_file_checksum_cache(cx: &mut App) {
+    cx.set_global(FileChecksumCache::new());
+}
+
+const FILE_CHECKSUM_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const FILE_CHECKSUM_BUFFER_SIZE: usize = 1024 * 1024;
+
+fn file_checksum_cache_key(path: &Path) -> io::Result<FileChecksumCacheKey> {
+    let metadata = fs::metadata(path)?;
+    Ok(FileChecksumCacheKey {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+#[cfg(test)]
 fn file_checksums(path: &Path) -> std::io::Result<FileChecksums> {
+    let cancel = AtomicBool::new(false);
+    file_checksums_with_cancel(path, &cancel)
+}
+
+fn file_checksums_with_cancel(path: &Path, cancel: &AtomicBool) -> io::Result<FileChecksums> {
     let file = fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = file;
     let mut crc32 = crc32fast::Hasher::new();
     let mut sha256 = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; FILE_CHECKSUM_BUFFER_SIZE];
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "checksum calculation cancelled",
+            ));
+        }
         let byte_count = reader.read(&mut buffer)?;
         if byte_count == 0 {
             break;
@@ -6494,6 +6697,83 @@ fn detail_row(
     )
 }
 
+fn push_checksum_detail_rows(
+    state: &PropertyChecksumState,
+    children: &mut Vec<AnyElement>,
+    detail_row_index: &mut usize,
+    cx: &mut Context<PropertiesDialog>,
+) {
+    match state {
+        PropertyChecksumState::NotRequested => {
+            children.push(checksum_action_row("Not calculated", Some("Calculate"), cx));
+        }
+        PropertyChecksumState::Loading => {
+            children.push(checksum_action_row("Calculating...", None, cx));
+        }
+        PropertyChecksumState::Ready(checksums) => {
+            children.push(detail_row(*detail_row_index, "CRC32", &checksums.crc32, cx));
+            *detail_row_index += 1;
+            children.push(detail_row(
+                *detail_row_index,
+                "SHA256",
+                &checksums.sha256,
+                cx,
+            ));
+            *detail_row_index += 1;
+        }
+        PropertyChecksumState::Failed(error) => {
+            children.push(checksum_action_row(
+                &format!("Could not calculate checksums: {error}"),
+                Some("Retry"),
+                cx,
+            ));
+        }
+    }
+}
+
+fn checksum_action_row(
+    value: &str,
+    button_label: Option<&'static str>,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    let mut row = div()
+        .id("properties-detail-checksums-row")
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.0))
+        .min_h(px(PROPERTIES_ROW_HEIGHT))
+        .child(
+            div()
+                .w(px(154.0))
+                .flex_shrink_0()
+                .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                .truncate()
+                .child("Checksums"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .child(SharedString::from(value.to_owned())),
+        );
+
+    if let Some(button_label) = button_label {
+        row = row.child(
+            property_button("properties-calculate-checksums", button_label, true, 1.0).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.start_checksum_task(cx);
+                    cx.stop_propagation();
+                }),
+            ),
+        );
+    }
+
+    row.into_any_element()
+}
+
 fn detail_row_id(index: usize) -> (&'static str, usize) {
     ("properties-detail-row", index)
 }
@@ -7042,7 +7322,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn properties_dialog_details_tab_collects_single_file_details(cx: &mut gpui::TestAppContext) {
+    fn properties_dialog_details_tab_does_not_auto_collect_file_checksums(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let temp = TempDir::new();
         let file = temp.path().join("a.txt");
         fs::write(&file, b"abc").unwrap();
@@ -7070,12 +7352,84 @@ mod tests {
 
             assert_eq!(
                 detail_value(groups, PropertyDetailGroupKind::File, "CRC32"),
-                Some("352441c2")
+                None
             );
             assert_eq!(
                 detail_value(groups, PropertyDetailGroupKind::File, "SHA256"),
-                Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                None
             );
+            assert!(matches!(
+                dialog.checksum_state,
+                PropertyChecksumState::NotRequested
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_calculates_file_checksums_on_request(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.start_checksum_task(cx);
+                assert!(matches!(
+                    dialog.checksum_state,
+                    PropertyChecksumState::Loading
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyChecksumState::Ready(checksums) = &dialog.checksum_state else {
+                panic!("checksums should be ready");
+            };
+
+            assert_eq!(checksums.crc32, "352441c2");
+            assert_eq!(
+                checksums.sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn stale_checksum_task_result_is_ignored(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.start_checksum_task(cx);
+                assert!(matches!(
+                    dialog.checksum_state,
+                    PropertyChecksumState::Loading
+                ));
+                dialog.reset_checksum_state();
+                assert!(matches!(
+                    dialog.checksum_state,
+                    PropertyChecksumState::NotRequested
+                ));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            assert!(matches!(
+                dialog.checksum_state,
+                PropertyChecksumState::NotRequested
+            ));
         });
     }
 
@@ -8295,7 +8649,60 @@ mod tests {
     }
 
     #[test]
-    fn single_file_details_include_file_checksums() {
+    fn file_checksum_cache_returns_fresh_values_and_expires_stale_values() {
+        let cache = FileChecksumCache::new();
+        let key = FileChecksumCacheKey {
+            path: PathBuf::from("a.txt"),
+            size: 3,
+            modified: None,
+        };
+        let checksums = FileChecksums {
+            crc32: "crc".to_owned(),
+            sha256: "sha".to_owned(),
+        };
+        let now = Instant::now();
+
+        cache.insert_at(key.clone(), checksums.clone(), now);
+
+        assert_eq!(
+            cache.get_at(&key, now + FILE_CHECKSUM_CACHE_TTL - Duration::from_secs(1)),
+            Some(checksums)
+        );
+        assert_eq!(cache.get_at(&key, now + FILE_CHECKSUM_CACHE_TTL), None);
+    }
+
+    #[test]
+    fn file_checksum_cache_key_changes_when_file_metadata_changes() {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+        let first_time = FileTime::from_unix_time(1, 0);
+        set_file_times(&file, first_time, first_time).unwrap();
+        let first_key = file_checksum_cache_key(&file).unwrap();
+        let cache = FileChecksumCache::new();
+        cache.insert(
+            first_key.clone(),
+            FileChecksums {
+                crc32: "crc".to_owned(),
+                sha256: "sha".to_owned(),
+            },
+        );
+
+        fs::write(&file, b"abcd").unwrap();
+        let size_key = file_checksum_cache_key(&file).unwrap();
+        assert_ne!(first_key, size_key);
+        assert_eq!(cache.get(&size_key), None);
+
+        fs::write(&file, b"abc").unwrap();
+        let second_time = FileTime::from_unix_time(2, 0);
+        set_file_times(&file, second_time, second_time).unwrap();
+        let modified_key = file_checksum_cache_key(&file).unwrap();
+        assert_ne!(first_key, modified_key);
+        assert_eq!(cache.get(&modified_key), None);
+    }
+
+    #[test]
+    fn single_file_details_do_not_collect_file_checksums() {
         let temp = TempDir::new();
         let file = temp.path().join("a.txt");
         fs::write(&file, b"abc").unwrap();
@@ -8307,11 +8714,11 @@ mod tests {
 
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::File, "CRC32"),
-            Some("352441c2")
+            None
         );
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::File, "SHA256"),
-            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            None
         );
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::File, "SHA512"),
@@ -8363,7 +8770,11 @@ mod tests {
             paths: vec![file.clone()],
         })
         .unwrap();
-        let extra_groups = file_checksum_details(&file);
+        let extra_groups = vec![test_property_detail_group(
+            PropertyDetailGroupKind::File,
+            "Custom",
+            "metadata",
+        )];
 
         let groups =
             detail_groups_for_render(&snapshot, &PropertyDetailsState::Ready(extra_groups));
@@ -8380,8 +8791,8 @@ mod tests {
             Some("a.txt")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::File, "CRC32"),
-            Some("352441c2")
+            detail_value(&groups, PropertyDetailGroupKind::File, "Custom"),
+            Some("metadata")
         );
     }
 
@@ -8616,6 +9027,7 @@ mod tests {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        cx.set_global(FileChecksumCache::new());
 
         cx.update(move |cx| {
             let explorer = cx.new(|_| ExplorerView::new(explorer_root));

@@ -75,6 +75,7 @@ pub(crate) use filesystem::{
 };
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 pub(crate) use image_thumbnails::initialize as initialize_image_thumbnail_cache;
+pub(crate) use properties::initialize_file_checksum_cache;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
     pub use super::filesystem::benchmark_support::{
