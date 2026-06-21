@@ -1502,16 +1502,17 @@ mod tests {
     use super::*;
     use crate::explorer::{
         actions::{
-            MoveDown, PasteClipboard, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
+            EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab, PasteClipboard,
+            RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
         },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
-    use crate::settings::{ExplorerSettings, SettingsState};
+    use crate::settings::{ExplorerSettings, SettingsState, SidebarLocation};
     use gpui::{
-        AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, ScrollDelta,
-        ScrollWheelEvent, TestAppContext,
+        AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
     };
     use std::fs;
 
@@ -1614,6 +1615,27 @@ mod tests {
     fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
         let bounds = cx.debug_bounds(selector).expect("element bounds");
         cx.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    fn left_click_position(
+        cx: &mut gpui::VisualTestContext,
+        position: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+        modifiers: Modifiers,
+    ) {
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers,
+            button: MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers,
+            button: MouseButton::Left,
+            click_count,
+        });
     }
 
     fn right_click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
@@ -1826,6 +1848,135 @@ mod tests {
             assert_eq!(view.path, temp.path().join("b"));
         });
         assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn ctrl_enter_folder_open_opens_directory_in_new_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let folder = temp.path().join("a");
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+            view.update(app, |view, _| view.select_single_path(&folder));
+        });
+
+        cx.dispatch_action(EnterSelectedInNewTab);
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, temp.path());
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, folder);
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_right_folder_open_opens_directory_in_new_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let folder = temp.path().join("a");
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+            view.update(app, |view, _| view.select_single_path(&folder));
+        });
+
+        cx.dispatch_action(OpenSelectedInNewTab);
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, temp.path());
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, folder);
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_double_click_folder_opens_directory_in_new_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+        });
+        let position = entry_other_column_position(cx, "explorer-entry-0");
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+
+        left_click_position(cx, position, 1, ctrl);
+        left_click_position(cx, position, 2, ctrl);
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, temp.path());
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, temp.path().join("a"));
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_click_sidebar_item_opens_directory_in_new_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let sidebar_path = temp.path().join("a");
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+            view.update(app, |view, _| {
+                view.sidebar_settings.items = vec![SidebarLocation::Custom {
+                    path: sidebar_path.clone(),
+                    label: Some("a".to_owned()),
+                }];
+                view.sidebar_sections =
+                    crate::explorer::sidebar::sidebar_sections(&view.sidebar_settings);
+            });
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("explorer-sidebar-row-0")
+            .expect("sidebar row bounds");
+
+        cx.simulate_click(
+            row.center(),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, temp.path());
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, sidebar_path);
+        });
     }
 
     #[gpui::test]

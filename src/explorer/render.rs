@@ -80,7 +80,7 @@ use crate::explorer::{
         large_icon_max_tile_height,
     },
     mouse_selection::{local_point, selection_box_bounds, viewport_size},
-    navigation::{EntryAction, HistoryMode},
+    navigation::{DirectoryOpenMode, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
     scrollbar::{
@@ -1395,6 +1395,7 @@ impl ExplorerView {
         let context_menu_active = sidebar_context_menu_is_active(self.context_menu.as_ref(), id);
         let mut row = div()
             .id(("explorer-sidebar-row", id))
+            .debug_selector(move || format!("explorer-sidebar-row-{id}"))
             .flex()
             .flex_row()
             .items_center()
@@ -1412,9 +1413,13 @@ impl ExplorerView {
                 this.hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 this.close_context_menu();
-                this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
+                if event.modifiers().control {
+                    cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(click_path.clone()));
+                } else {
+                    this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
+                }
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -2229,9 +2234,11 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_go_up))
             .on_action(cx.listener(Self::handle_cancel_drag))
             .on_action(cx.listener(Self::handle_open_selected))
+            .on_action(cx.listener(Self::handle_open_selected_in_new_tab))
             .on_action(cx.listener(Self::handle_open_properties))
             .on_action(cx.listener(Self::handle_open_settings))
             .on_action(cx.listener(Self::handle_enter_selected))
+            .on_action(cx.listener(Self::handle_enter_selected_in_new_tab))
             .on_action(cx.listener(Self::handle_refresh))
             .on_action(cx.listener(Self::handle_select_all))
             .on_action(cx.listener(Self::handle_copy_selected))
@@ -2923,23 +2930,26 @@ fn add_entry_primary_click(
             return;
         }
 
+        let directory_open_mode = directory_open_mode_for_entry_click(event, click_count);
         let action = match target {
-            EntryClickTarget::Row => this.handle_entry_click_with_watcher(
+            EntryClickTarget::Row => this.handle_entry_click_with_watcher_and_directory_mode(
                 &entry,
                 click_count,
                 selection_modifiers_for_click(event),
+                directory_open_mode,
                 cx,
             ),
             EntryClickTarget::Name => this.handle_entry_name_click(
                 &entry,
                 click_count,
                 selection_modifiers_for_click(event),
+                directory_open_mode,
                 window,
                 cx,
             ),
         };
-        if let Some(EntryAction::OpenFile(path)) = action {
-            this.open_file_with_default_app(&path, window, cx);
+        if let Some(action) = action {
+            this.perform_entry_action(action, window, cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -5107,6 +5117,26 @@ fn is_alt_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
     }
 }
 
+fn directory_open_mode_for_entry_click(
+    event: &ClickEvent,
+    click_count: usize,
+) -> DirectoryOpenMode {
+    if is_ctrl_entry_double_click(event, click_count) {
+        DirectoryOpenMode::NewTab
+    } else {
+        DirectoryOpenMode::CurrentTab
+    }
+}
+
+fn is_ctrl_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
+    match event {
+        ClickEvent::Mouse(event) => {
+            event.down.button == MouseButton::Left && click_count == 2 && event.up.modifiers.control
+        }
+        ClickEvent::Keyboard(_) => false,
+    }
+}
+
 fn add_item_drag(
     cell: Div,
     id: impl Into<gpui::ElementId>,
@@ -5500,6 +5530,7 @@ mod tests {
         },
         entry::FileEntry,
         git_status::{GitDivergence, GitRepositoryStatus},
+        navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind},
         test_support::{TempDir, test_view_entity_at_path},
@@ -5514,10 +5545,11 @@ mod tests {
         available_filename_text_width, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        copied_directory_address, drop_indicator_target_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
-        git_divergence_label, git_divergence_tooltip, is_alt_entry_double_click,
-        is_normal_entry_click, lines_of_code_tooltip, open_current_folder_context_menu_from_event,
+        copied_directory_address, directory_open_mode_for_entry_click, drop_indicator_target_width,
+        entry_row_hover_enabled, filename_text_width, folder_status_summary, format_address_path,
+        git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
+        is_alt_entry_double_click, is_ctrl_entry_double_click, is_normal_entry_click,
+        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
         sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
@@ -6797,6 +6829,85 @@ mod tests {
             });
 
             assert!(!is_alt_entry_double_click(&event, 2));
+        }
+    }
+
+    #[test]
+    fn ctrl_entry_double_click_detects_left_mouse_double_click() {
+        let event = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent {
+                modifiers: Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                ..MouseUpEvent::default()
+            },
+        });
+
+        assert!(is_ctrl_entry_double_click(&event, 2));
+        assert_eq!(
+            directory_open_mode_for_entry_click(&event, 2),
+            DirectoryOpenMode::NewTab
+        );
+    }
+
+    #[test]
+    fn ctrl_entry_double_click_rejects_plain_or_single_clicks() {
+        let plain = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent::default(),
+        });
+        let ctrl = ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                button: MouseButton::Left,
+                ..MouseDownEvent::default()
+            },
+            up: MouseUpEvent {
+                modifiers: Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                ..MouseUpEvent::default()
+            },
+        });
+
+        assert!(!is_ctrl_entry_double_click(&plain, 2));
+        assert_eq!(
+            directory_open_mode_for_entry_click(&plain, 2),
+            DirectoryOpenMode::CurrentTab
+        );
+        assert!(!is_ctrl_entry_double_click(&ctrl, 1));
+        assert_eq!(
+            directory_open_mode_for_entry_click(&ctrl, 1),
+            DirectoryOpenMode::CurrentTab
+        );
+    }
+
+    #[test]
+    fn ctrl_entry_double_click_rejects_non_left_clicks() {
+        for button in [MouseButton::Middle, MouseButton::Right] {
+            let event = ClickEvent::Mouse(MouseClickEvent {
+                down: MouseDownEvent {
+                    button,
+                    ..MouseDownEvent::default()
+                },
+                up: MouseUpEvent {
+                    modifiers: Modifiers {
+                        control: true,
+                        ..Modifiers::default()
+                    },
+                    ..MouseUpEvent::default()
+                },
+            });
+
+            assert!(!is_ctrl_entry_double_click(&event, 2));
         }
     }
 

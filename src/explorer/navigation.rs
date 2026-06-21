@@ -3,14 +3,14 @@ use std::{
     time::Instant,
 };
 
-use gpui::Context;
+use gpui::{Context, Window};
 
 #[cfg(test)]
 use crate::explorer::filesystem::format_open_error;
 use crate::explorer::{
     entry::FileEntry,
     selection::SelectionModifiers,
-    view::{EntryClickSequence, ExplorerView, ReloadMode},
+    view::{EntryClickSequence, ExplorerView, ExplorerViewEvent, ReloadMode},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +22,13 @@ pub(super) enum HistoryMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum EntryAction {
     OpenFile(PathBuf),
+    OpenDirectoryInNewTab(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DirectoryOpenMode {
+    CurrentTab,
+    NewTab,
 }
 
 impl ExplorerView {
@@ -251,17 +258,24 @@ impl ExplorerView {
         click_count: usize,
         modifiers: SelectionModifiers,
     ) -> Option<EntryAction> {
-        self.handle_entry_click_inner(entry, click_count, modifiers, None)
+        self.handle_entry_click_inner(
+            entry,
+            click_count,
+            modifiers,
+            DirectoryOpenMode::CurrentTab,
+            None,
+        )
     }
 
-    pub(super) fn handle_entry_click_with_watcher(
+    pub(super) fn handle_entry_click_with_watcher_and_directory_mode(
         &mut self,
         entry: &FileEntry,
         click_count: usize,
         modifiers: SelectionModifiers,
+        directory_open_mode: DirectoryOpenMode,
         cx: &mut Context<Self>,
     ) -> Option<EntryAction> {
-        self.handle_entry_click_inner(entry, click_count, modifiers, Some(cx))
+        self.handle_entry_click_inner(entry, click_count, modifiers, directory_open_mode, Some(cx))
     }
 
     fn handle_entry_click_inner(
@@ -269,6 +283,7 @@ impl ExplorerView {
         entry: &FileEntry,
         click_count: usize,
         modifiers: SelectionModifiers,
+        directory_open_mode: DirectoryOpenMode,
         cx: Option<&mut Context<Self>>,
     ) -> Option<EntryAction> {
         self.apply_entry_click_selection(entry, modifiers);
@@ -282,12 +297,11 @@ impl ExplorerView {
         if entry.is_app_bundle() {
             Some(EntryAction::OpenFile(entry.path.clone()))
         } else if entry.is_directory_like() {
-            self.navigate_to_directory_inner(
+            self.activate_directory(
                 entry.navigation_path().to_path_buf(),
-                HistoryMode::Record,
+                directory_open_mode,
                 cx,
-            );
-            None
+            )
         } else {
             Some(EntryAction::OpenFile(entry.path.clone()))
         }
@@ -334,7 +348,15 @@ impl ExplorerView {
 
     #[cfg(test)]
     pub(super) fn activate_focused_entry(&mut self, open_files: bool) -> Option<EntryAction> {
-        self.activate_focused_entry_inner(open_files, None)
+        self.activate_focused_entry_inner(open_files, DirectoryOpenMode::CurrentTab, None)
+    }
+
+    #[cfg(test)]
+    pub(super) fn activate_focused_entry_in_new_tab(
+        &mut self,
+        open_files: bool,
+    ) -> Option<EntryAction> {
+        self.activate_focused_entry_inner(open_files, DirectoryOpenMode::NewTab, None)
     }
 
     pub(super) fn activate_focused_entry_with_watcher(
@@ -342,12 +364,21 @@ impl ExplorerView {
         open_files: bool,
         cx: &mut Context<Self>,
     ) -> Option<EntryAction> {
-        self.activate_focused_entry_inner(open_files, Some(cx))
+        self.activate_focused_entry_inner(open_files, DirectoryOpenMode::CurrentTab, Some(cx))
+    }
+
+    pub(super) fn activate_focused_entry_in_new_tab_with_watcher(
+        &mut self,
+        open_files: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryAction> {
+        self.activate_focused_entry_inner(open_files, DirectoryOpenMode::NewTab, Some(cx))
     }
 
     fn activate_focused_entry_inner(
         &mut self,
         open_files: bool,
+        directory_open_mode: DirectoryOpenMode,
         cx: Option<&mut Context<Self>>,
     ) -> Option<EntryAction> {
         let entry = self.focused_entry()?.clone();
@@ -360,16 +391,44 @@ impl ExplorerView {
                 None
             }
         } else if entry.is_directory_like() {
-            self.navigate_to_directory_inner(
+            self.activate_directory(
                 entry.navigation_path().to_path_buf(),
-                HistoryMode::Record,
+                directory_open_mode,
                 cx,
-            );
-            None
+            )
         } else if open_files {
             Some(EntryAction::OpenFile(entry.path))
         } else {
             None
+        }
+    }
+
+    fn activate_directory(
+        &mut self,
+        path: PathBuf,
+        directory_open_mode: DirectoryOpenMode,
+        cx: Option<&mut Context<Self>>,
+    ) -> Option<EntryAction> {
+        match directory_open_mode {
+            DirectoryOpenMode::CurrentTab => {
+                self.navigate_to_directory_inner(path, HistoryMode::Record, cx);
+                None
+            }
+            DirectoryOpenMode::NewTab => Some(EntryAction::OpenDirectoryInNewTab(path)),
+        }
+    }
+
+    pub(super) fn perform_entry_action(
+        &mut self,
+        action: EntryAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            EntryAction::OpenFile(path) => self.open_file_with_default_app(&path, window, cx),
+            EntryAction::OpenDirectoryInNewTab(path) => {
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
+            }
         }
     }
 
@@ -837,6 +896,44 @@ mod tests {
     }
 
     #[test]
+    fn focused_activation_can_open_directories_in_new_tab() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("folder", true, None, None)];
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry_in_new_tab(true),
+            Some(EntryAction::OpenDirectoryInNewTab(PathBuf::from("folder")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
+        assert!(view.back_stack.is_empty());
+        assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn right_arrow_new_tab_activation_ignores_files() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("file.txt", false, Some(4), None)];
+        view.select_single_index(0);
+
+        assert_eq!(view.activate_focused_entry_in_new_tab(false), None);
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn enter_new_tab_activation_still_opens_files() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test("file.txt", false, Some(4), None)];
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry_in_new_tab(true),
+            Some(EntryAction::OpenFile(PathBuf::from("file.txt")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn focused_activation_opens_app_bundles_on_enter() {
         let mut view = ExplorerView::new(PathBuf::from("root"));
@@ -876,6 +973,26 @@ mod tests {
 
         assert_eq!(view.activate_focused_entry(true), None);
         assert_eq!(view.path, PathBuf::from("target"));
+    }
+
+    #[test]
+    fn directory_shortcut_new_tab_activation_uses_target() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.entries = vec![FileEntry::test_directory_link(
+            "shortcut.lnk",
+            DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("target"),
+                target_kind: ShellShortcutTargetKind::Directory,
+            },
+        )];
+
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry_in_new_tab(true),
+            Some(EntryAction::OpenDirectoryInNewTab(PathBuf::from("target")))
+        );
+        assert_eq!(view.path, PathBuf::from("root"));
     }
 
     #[test]

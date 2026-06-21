@@ -590,6 +590,7 @@ impl ExplorerView {
         entry: &FileEntry,
         click_count: usize,
         modifiers: SelectionModifiers,
+        directory_open_mode: crate::explorer::navigation::DirectoryOpenMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<crate::explorer::navigation::EntryAction> {
@@ -605,7 +606,13 @@ impl ExplorerView {
             return None;
         }
 
-        self.handle_entry_click_with_watcher(entry, click_count, modifiers, cx)
+        self.handle_entry_click_with_watcher_and_directory_mode(
+            entry,
+            click_count,
+            modifiers,
+            directory_open_mode,
+            cx,
+        )
     }
 
     pub(super) fn commit_active_rename_before_interaction(

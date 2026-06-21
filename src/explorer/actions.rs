@@ -3,7 +3,6 @@ use std::path::Path;
 use gpui::{Context, Window, actions};
 
 use crate::explorer::{
-    navigation::EntryAction,
     selection::{SelectionDirection, SelectionEdge},
     view::ExplorerView,
 };
@@ -24,9 +23,11 @@ actions!(
         GoUp,
         CancelDrag,
         OpenSelected,
+        OpenSelectedInNewTab,
         OpenProperties,
         OpenSettings,
         EnterSelected,
+        EnterSelectedInNewTab,
         Refresh,
         SelectAll,
         CopySelected,
@@ -235,10 +236,24 @@ impl ExplorerView {
     pub(super) fn handle_open_selected(
         &mut self,
         _: &OpenSelected,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.activate_focused_entry_with_watcher(false, cx);
+        if let Some(action) = self.activate_focused_entry_with_watcher(false, cx) {
+            self.perform_entry_action(action, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn handle_open_selected_in_new_tab(
+        &mut self,
+        _: &OpenSelectedInNewTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(action) = self.activate_focused_entry_in_new_tab_with_watcher(false, cx) {
+            self.perform_entry_action(action, window, cx);
+        }
         cx.notify();
     }
 
@@ -269,10 +284,20 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(EntryAction::OpenFile(path)) =
-            self.activate_focused_entry_with_watcher(true, cx)
-        {
-            self.open_file_with_default_app(&path, window, cx);
+        if let Some(action) = self.activate_focused_entry_with_watcher(true, cx) {
+            self.perform_entry_action(action, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn handle_enter_selected_in_new_tab(
+        &mut self,
+        _: &EnterSelectedInNewTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(action) = self.activate_focused_entry_in_new_tab_with_watcher(true, cx) {
+            self.perform_entry_action(action, window, cx);
         }
         cx.notify();
     }
