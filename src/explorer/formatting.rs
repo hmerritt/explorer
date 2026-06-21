@@ -35,6 +35,24 @@ pub(super) fn format_size(size: Option<u64>) -> String {
     format!("{} {unit}", format_decimal_with_commas(value, precision))
 }
 
+pub(super) fn format_transfer_rate(bytes_per_second: f64) -> String {
+    let bytes_per_second = if bytes_per_second.is_finite() && bytes_per_second > 0.0 {
+        bytes_per_second
+    } else {
+        0.0
+    };
+
+    let (value, unit) = if bytes_per_second < MB_BYTES as f64 {
+        (bytes_per_second / KB_BYTES as f64, "KB/s")
+    } else if bytes_per_second < GB_BYTES as f64 {
+        (bytes_per_second / MB_BYTES as f64, "MB/s")
+    } else {
+        (bytes_per_second / GB_BYTES as f64, "GB/s")
+    };
+
+    format!("{} {unit}", format_decimal_with_commas(value, 2))
+}
+
 fn format_decimal_with_commas(value: f64, precision: usize) -> String {
     let formatted = format!("{value:.precision$}");
     let Some((integer, fraction)) = formatted.split_once('.') else {
@@ -106,6 +124,33 @@ mod tests {
         assert_eq!(format_size(Some(1024 * MB_BYTES)), "1.00 GB");
         assert_eq!(format_size(Some(1024 * GB_BYTES)), "1.00 TB");
         assert_eq!(format_size(Some(1024 * TB_BYTES)), "1,024.00 TB");
+    }
+
+    #[test]
+    fn transfer_rates_render_kilobytes_with_two_decimal_places() {
+        assert_eq!(format_transfer_rate(0.0), "0.00 KB/s");
+        assert_eq!(format_transfer_rate(512.0), "0.50 KB/s");
+        assert_eq!(format_transfer_rate(1536.0), "1.50 KB/s");
+        assert_eq!(format_transfer_rate((MB_BYTES - 1) as f64), "1,024.00 KB/s");
+    }
+
+    #[test]
+    fn transfer_rates_render_megabytes_with_two_decimal_places() {
+        assert_eq!(format_transfer_rate(MB_BYTES as f64), "1.00 MB/s");
+        assert_eq!(
+            format_transfer_rate((MB_BYTES + 512 * KB_BYTES) as f64),
+            "1.50 MB/s"
+        );
+        assert_eq!(format_transfer_rate((GB_BYTES - 1) as f64), "1,024.00 MB/s");
+    }
+
+    #[test]
+    fn transfer_rates_render_gigabytes_with_two_decimal_places() {
+        assert_eq!(format_transfer_rate(GB_BYTES as f64), "1.00 GB/s");
+        assert_eq!(
+            format_transfer_rate((GB_BYTES + 512 * MB_BYTES) as f64),
+            "1.50 GB/s"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::explorer::{
@@ -18,7 +18,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
-    formatting::{format_size, format_timestamp},
+    formatting::{format_size, format_timestamp, format_transfer_rate},
     icons::{
         DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON, image_icon,
     },
@@ -87,6 +87,7 @@ const PROGRESS_DIALOG_BAR_WIDTH: f32 = 390.0;
 const PROGRESS_DIALOG_STATUS_TOP_MARGIN: f32 = 8.0;
 const PROGRESS_DIALOG_BUTTONS_TOP_MARGIN: f32 = 16.0;
 const PROGRESS_DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const FILE_OPERATION_SPEED_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerDialogKind {
@@ -108,6 +109,7 @@ pub(super) struct ExplorerDialog {
     folder_size_task: Option<Task<()>>,
     folder_size_cancel: Option<Arc<AtomicBool>>,
     file_operation_progress: Option<FileOperationProgress>,
+    file_operation_speed: FileOperationSpeedTracker,
     file_operation_task: Option<Task<()>>,
 }
 
@@ -136,6 +138,19 @@ enum DeleteDialogIconKind {
 enum FileOperationProgressBarMode {
     Determinate,
     Indeterminate,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FileOperationSpeedSample {
+    phase: FileOperationPhase,
+    bytes: u64,
+    captured_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FileOperationSpeedTracker {
+    last_sample: Option<FileOperationSpeedSample>,
+    current_rate: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,8 +298,10 @@ impl ExplorerDialog {
             folder_size_task: None,
             folder_size_cancel: None,
             file_operation_progress,
+            file_operation_speed: FileOperationSpeedTracker::default(),
             file_operation_task: None,
         };
+        dialog.update_file_operation_speed(Instant::now());
         dialog.start_folder_size_task(cx);
         dialog.start_file_operation_progress_task(cx);
         cx.observe_global::<SettingsState>(|this, cx| {
@@ -570,6 +587,12 @@ impl ExplorerDialog {
             })
             .ok()
             .flatten();
+        self.update_file_operation_speed(Instant::now());
+    }
+
+    fn update_file_operation_speed(&mut self, captured_at: Instant) {
+        self.file_operation_speed
+            .record(self.file_operation_progress.as_ref(), captured_at);
     }
 }
 
@@ -834,6 +857,10 @@ impl ExplorerDialog {
             .as_ref()
             .map(file_operation_item_label)
             .unwrap_or_else(|| "Preparing".to_owned());
+        let speed_label = self
+            .file_operation_speed
+            .current_rate()
+            .map(format_transfer_rate);
         let cancellable = progress
             .as_ref()
             .is_none_or(|progress| progress.cancellable);
@@ -858,9 +885,23 @@ impl ExplorerDialog {
             .child(
                 div()
                     .mt(px(PROGRESS_DIALOG_STATUS_TOP_MARGIN))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .min_w(px(0.0))
                     .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
                     .text_color(rgb(0x595959))
-                    .child(SharedString::from(item_label)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(SharedString::from(item_label)),
+                    )
+                    .when_some(speed_label, |this, speed_label| {
+                        this.child(div().flex_shrink_0().child(SharedString::from(speed_label)))
+                    }),
             )
             .when(cancellable, |this| {
                 this.child(
@@ -1365,6 +1406,95 @@ fn file_operation_progress_bar_mode(
         FileOperationProgressBarMode::Indeterminate
     } else {
         FileOperationProgressBarMode::Determinate
+    }
+}
+
+impl FileOperationSpeedTracker {
+    fn record(
+        &mut self,
+        progress: Option<&FileOperationProgress>,
+        captured_at: Instant,
+    ) -> Option<f64> {
+        let Some(progress) = progress else {
+            self.reset();
+            return None;
+        };
+        let Some(bytes) = file_operation_transfer_bytes(progress) else {
+            self.reset();
+            return None;
+        };
+
+        let sample = FileOperationSpeedSample {
+            phase: progress.phase,
+            bytes,
+            captured_at,
+        };
+        let Some(last_sample) = self.last_sample else {
+            self.last_sample = Some(sample);
+            self.current_rate = None;
+            return None;
+        };
+
+        if last_sample.phase != sample.phase || sample.bytes < last_sample.bytes {
+            self.last_sample = Some(sample);
+            self.current_rate = None;
+            return None;
+        }
+
+        if sample.bytes == last_sample.bytes {
+            if sample
+                .captured_at
+                .checked_duration_since(last_sample.captured_at)
+                .is_some_and(|elapsed| elapsed >= FILE_OPERATION_SPEED_STALL_TIMEOUT)
+            {
+                self.current_rate = Some(0.0);
+            }
+            return self.current_rate;
+        }
+
+        let rate = transfer_rate_between_samples(last_sample, sample);
+        self.last_sample = Some(sample);
+        self.current_rate = rate;
+        self.current_rate
+    }
+
+    fn current_rate(&self) -> Option<f64> {
+        self.current_rate
+    }
+
+    fn reset(&mut self) {
+        self.last_sample = None;
+        self.current_rate = None;
+    }
+}
+
+fn transfer_rate_between_samples(
+    previous: FileOperationSpeedSample,
+    current: FileOperationSpeedSample,
+) -> Option<f64> {
+    if previous.phase != current.phase || current.bytes <= previous.bytes {
+        return None;
+    }
+
+    let elapsed = current
+        .captured_at
+        .checked_duration_since(previous.captured_at)?
+        .as_secs_f64();
+    (elapsed > 0.0).then(|| (current.bytes - previous.bytes) as f64 / elapsed)
+}
+
+fn file_operation_transfer_bytes(progress: &FileOperationProgress) -> Option<u64> {
+    match progress.phase {
+        FileOperationPhase::Copying
+        | FileOperationPhase::Extracting
+        | FileOperationPhase::Moving => Some(progress.copied_bytes),
+        FileOperationPhase::Verifying => Some(progress.verified_bytes),
+        FileOperationPhase::Preparing
+        | FileOperationPhase::Indexing
+        | FileOperationPhase::Resuming
+        | FileOperationPhase::Removing
+        | FileOperationPhase::Finished
+        | FileOperationPhase::Cancelled => None,
     }
 }
 
@@ -2191,6 +2321,185 @@ mod tests {
     #[test]
     fn shell_progress_green_uses_copy_progress_green() {
         assert_eq!(SHELL_PROGRESS_GREEN, EXPLORER_COPY_GREEN);
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_needs_two_transfer_samples() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        progress.copied_bytes = 1024;
+
+        assert_eq!(tracker.record(Some(&progress), Instant::now()), None);
+        assert_eq!(tracker.current_rate(), None);
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_computes_current_rate_from_delta() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 3 * 1024;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(2)),
+            Some(1024.0)
+        );
+        assert_eq!(tracker.current_rate(), Some(1024.0));
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_ignores_duplicate_transfer_snapshots() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_millis(1_500)),
+            Some(1024.0)
+        );
+        assert_eq!(tracker.current_rate(), Some(1024.0));
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_duplicate_snapshots_do_not_advance_baseline() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_millis(1_500)),
+            Some(1024.0)
+        );
+
+        progress.copied_bytes = 3072;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(3)),
+            Some(512.0)
+        );
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_reports_zero_after_sustained_stall() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(3)),
+            Some(0.0)
+        );
+        assert_eq!(tracker.current_rate(), Some(0.0));
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_resumes_after_stall() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(3)),
+            Some(0.0)
+        );
+
+        progress.copied_bytes = 3072;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(4)),
+            Some(1024.0 / 3.0)
+        );
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_resets_on_phase_change_and_counter_regression() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.copied_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+        progress.copied_bytes = 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+
+        progress.phase = FileOperationPhase::Verifying;
+        progress.verified_bytes = 512;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(tracker.current_rate(), None);
+
+        progress.phase = FileOperationPhase::Copying;
+        progress.copied_bytes = 4096;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(3)),
+            None
+        );
+        progress.copied_bytes = 1024;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(tracker.current_rate(), None);
+    }
+
+    #[test]
+    fn progress_dialog_speed_tracker_uses_verified_bytes_while_verifying() {
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        let started = Instant::now();
+
+        progress.phase = FileOperationPhase::Verifying;
+        progress.copied_bytes = 10 * 1024;
+        progress.verified_bytes = 1024;
+        assert_eq!(tracker.record(Some(&progress), started), None);
+
+        progress.copied_bytes = 20 * 1024;
+        progress.verified_bytes = 3072;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(2048.0)
+        );
     }
 
     #[test]

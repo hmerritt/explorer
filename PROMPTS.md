@@ -3,7 +3,6 @@
 ## 1
 
 - rsync copy/sync builtin
-- Copy speed and ETA figures in dialog
 
 ## 2
 
