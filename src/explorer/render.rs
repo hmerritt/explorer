@@ -68,9 +68,9 @@ use crate::explorer::{
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
         COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON,
-        FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, LARGE_ICONS_ICON, NEW_ITEM_ICON,
-        NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON,
-        SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
+        FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON, LARGE_ICONS_ICON,
+        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON,
+        RENAME_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
         drive_icon, drive_windows_icon, drive_wsl_icon, executable_icon_sized, file_icon,
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
@@ -219,9 +219,12 @@ const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + (UTILITY_ICON_BUTTON_SIZE * 5.0)
     + UTILITY_SEPARATOR_OUTER_WIDTH
     + (UTILITY_BAR_ITEM_GAP * 8.0);
+const UTILITY_SIDEBAR_TOGGLE_MENU_OFFSET: f32 =
+    UTILITY_ICON_BUTTON_SIZE + UTILITY_SEPARATOR_OUTER_WIDTH + (UTILITY_BAR_ITEM_GAP * 2.0);
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
+const SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION: f32 = 0.40;
 const CONTEXT_MENU_MIN_WIDTH: f32 = 170.0;
 const CONTEXT_MENU_MAX_WIDTH: f32 = 280.0;
 const CONTEXT_MENU_BORDER_WIDTH: f32 = 1.0;
@@ -260,6 +263,30 @@ enum CurrentFolderClickTarget {
     EmptyFolder,
 }
 
+fn sidebar_auto_hide_is_active(sidebar_width: f32, window_width: f32) -> bool {
+    sidebar_width > window_width * SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION
+}
+
+fn effective_sidebar_is_visible(
+    sidebar_width: f32,
+    window_width: f32,
+    sidebar_auto_hide_expanded: bool,
+) -> bool {
+    !sidebar_auto_hide_is_active(sidebar_width, window_width) || sidebar_auto_hide_expanded
+}
+
+fn effective_sidebar_layout_width(
+    sidebar_width: f32,
+    window_width: f32,
+    sidebar_auto_hide_expanded: bool,
+) -> f32 {
+    if effective_sidebar_is_visible(sidebar_width, window_width, sidebar_auto_hide_expanded) {
+        sidebar_width
+    } else {
+        0.0
+    }
+}
+
 impl ExplorerView {
     pub(super) fn entry_row_height(&self) -> f32 {
         if self.view_mode == FileViewMode::LargeIcons {
@@ -274,8 +301,13 @@ impl ExplorerView {
     }
 
     fn list_viewport_width(&self, window: &Window) -> f32 {
-        (f32::from(window.bounds().size.width) - normalized_sidebar_width_f32(self.sidebar_width))
-            .max(0.0)
+        let window_width = f32::from(window.bounds().size.width);
+        let sidebar_width = effective_sidebar_layout_width(
+            normalized_sidebar_width_f32(self.sidebar_width),
+            window_width,
+            self.sidebar_auto_hide_expanded,
+        );
+        (window_width - sidebar_width).max(0.0)
     }
 
     fn name_column_width(&self, window: &Window) -> f32 {
@@ -472,7 +504,12 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn render_utility_bar(&self, cx: &mut Context<Self>) -> Div {
+    fn render_utility_bar(
+        &self,
+        sidebar_auto_hide_active: bool,
+        sidebar_visible: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let has_selection = !self.selection.selected_indices.is_empty();
         let can_rename = self.can_start_selected_rename();
         let can_extract = self.selected_archive_paths().is_some();
@@ -492,6 +529,27 @@ impl ExplorerView {
             .border_color(rgb(0xe9e9e9))
             .px(px(UTILITY_BAR_HORIZONTAL_PADDING))
             .gap(px(UTILITY_BAR_ITEM_GAP))
+            .when(sidebar_auto_hide_active, |this| {
+                this.child(utility_icon_button(
+                    "utility-sidebar-toggle",
+                    HAMBURGER_ICON.clone(),
+                    if sidebar_visible {
+                        "Hide navigation pane"
+                    } else {
+                        "Show navigation pane"
+                    },
+                    true,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.close_context_menu();
+                        this.cancel_pending_click_rename();
+                        this.open_utility_menu = None;
+                        this.sidebar_auto_hide_expanded = !this.sidebar_auto_hide_expanded;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_separator())
+            })
             .child(utility_text_button(
                 "utility-new",
                 Some(utility_new_icon().into_any_element()),
@@ -626,12 +684,13 @@ impl ExplorerView {
             })
     }
 
-    fn render_utility_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_utility_menu_overlay(
+        &self,
+        sidebar_auto_hide_active: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let menu = self.open_utility_menu?;
-        let left = match menu {
-            UtilityMenu::New => UTILITY_NEW_MENU_LEFT,
-            UtilityMenu::View => UTILITY_VIEW_MENU_LEFT,
-        };
+        let left = utility_menu_left(menu, sidebar_auto_hide_active);
 
         let menu = match menu {
             UtilityMenu::New => utility_dropdown()
@@ -2233,6 +2292,17 @@ impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
         let entity = cx.entity();
+        let window_width = f32::from(window.bounds().size.width);
+        let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
+        let sidebar_auto_hide_active = sidebar_auto_hide_is_active(sidebar_width, window_width);
+        if !sidebar_auto_hide_active {
+            self.sidebar_auto_hide_expanded = false;
+        }
+        let sidebar_visible = effective_sidebar_is_visible(
+            sidebar_width,
+            window_width,
+            self.sidebar_auto_hide_expanded,
+        );
 
         div()
             .key_context("Explorer")
@@ -2380,7 +2450,7 @@ impl Render for ExplorerView {
             .text_color(rgb(0x000000))
             .overflow_hidden()
             .child(self.render_navbar(window, cx))
-            .child(self.render_utility_bar(cx))
+            .child(self.render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx))
             .child(
                 div()
                     .flex()
@@ -2388,7 +2458,7 @@ impl Render for ExplorerView {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
-                    .child(self.render_sidebar(cx))
+                    .when(sidebar_visible, |this| this.child(self.render_sidebar(cx)))
                     .child(
                         div()
                             .flex()
@@ -2451,9 +2521,10 @@ impl Render for ExplorerView {
                             .child(self.render_status_bar()),
                     ),
             )
-            .when_some(self.render_utility_menu_overlay(cx), |this, menu| {
-                this.child(menu)
-            })
+            .when_some(
+                self.render_utility_menu_overlay(sidebar_auto_hide_active, cx),
+                |this, menu| this.child(menu),
+            )
             .when_some(
                 self.render_address_suggestions_overlay(window, cx),
                 |this, menu| this.child(menu),
@@ -3267,6 +3338,19 @@ fn utility_text_button_base(
             )
         })
         .into_any_element()
+}
+
+fn utility_menu_left(menu: UtilityMenu, sidebar_toggle_visible: bool) -> f32 {
+    let left = match menu {
+        UtilityMenu::New => UTILITY_NEW_MENU_LEFT,
+        UtilityMenu::View => UTILITY_VIEW_MENU_LEFT,
+    };
+
+    if sidebar_toggle_visible {
+        left + UTILITY_SIDEBAR_TOGGLE_MENU_OFFSET
+    } else {
+        left
+    }
 }
 
 fn utility_new_icon() -> gpui::Img {
@@ -5683,14 +5767,16 @@ mod tests {
         codebase_makeup_segments, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
         context_menu_width_for_natural_width, copied_directory_address,
-        directory_open_mode_for_entry_click, drop_indicator_target_width, entry_row_hover_enabled,
+        directory_open_mode_for_entry_click, drop_indicator_target_width,
+        effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
         git_divergence_label, git_divergence_tooltip, is_alt_entry_double_click,
         is_ctrl_entry_double_click, is_normal_entry_click, lines_of_code_tooltip,
         open_current_folder_context_menu_from_event, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_auto_hide_is_active,
+        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, sort_indicator_direction,
+        text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, SettingsState, SortDirection,
@@ -6121,6 +6207,17 @@ mod tests {
         assert_eq!(sidebar_row_background_color(true, true), 0xcce8ff);
     }
 
+    #[test]
+    fn sidebar_auto_hide_helpers_use_strict_forty_percent_threshold() {
+        assert!(!sidebar_auto_hide_is_active(320.0, 800.0));
+        assert!(sidebar_auto_hide_is_active(320.0, 799.0));
+        assert!(effective_sidebar_is_visible(320.0, 800.0, false));
+        assert!(!effective_sidebar_is_visible(320.0, 799.0, false));
+        assert!(effective_sidebar_is_visible(320.0, 799.0, true));
+        assert_eq!(effective_sidebar_layout_width(320.0, 799.0, false), 0.0);
+        assert_eq!(effective_sidebar_layout_width(320.0, 799.0, true), 320.0);
+    }
+
     #[gpui::test]
     fn sidebar_render_uses_configured_width(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
@@ -6143,6 +6240,164 @@ mod tests {
         );
         assert_eq!(sidebar_width, 312.0);
         assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+    }
+
+    #[gpui::test]
+    fn sidebar_stays_visible_at_exactly_forty_percent(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(600.0)));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+        assert!(cx.debug_bounds("utility-sidebar-toggle").is_none());
+    }
+
+    #[gpui::test]
+    fn sidebar_auto_hides_when_width_exceeds_forty_percent(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        cx.simulate_resize(gpui::size(gpui::px(799.0), gpui::px(600.0)));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-resizer").is_none());
+        assert!(cx.debug_bounds("utility-sidebar-toggle").is_some());
+    }
+
+    #[gpui::test]
+    fn hamburger_toggles_sidebar_in_auto_hide_mode(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        cx.simulate_resize(gpui::size(gpui::px(799.0), gpui::px(600.0)));
+        cx.run_until_parked();
+        let toggle_position = cx
+            .debug_bounds("utility-sidebar-toggle")
+            .expect("sidebar toggle bounds")
+            .center();
+
+        cx.simulate_mouse_down(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+        cx.read_entity(&view, |view, _| assert!(view.sidebar_auto_hide_expanded));
+
+        let toggle_position = cx
+            .debug_bounds("utility-sidebar-toggle")
+            .expect("sidebar toggle bounds after expanding")
+            .center();
+        cx.simulate_mouse_down(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| assert!(!view.sidebar_auto_hide_expanded));
+    }
+
+    #[gpui::test]
+    fn resizing_wide_resets_sidebar_auto_hide_override(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        let window_size = |width: f32| gpui::size(gpui::px(width), gpui::px(600.0));
+
+        cx.simulate_resize(window_size(799.0));
+        cx.run_until_parked();
+        let toggle_position = cx
+            .debug_bounds("utility-sidebar-toggle")
+            .expect("sidebar toggle bounds")
+            .center();
+        cx.simulate_mouse_down(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(toggle_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar").is_some());
+        cx.read_entity(&view, |view, _| assert!(view.sidebar_auto_hide_expanded));
+
+        cx.simulate_resize(window_size(900.0));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar").is_some());
+        cx.read_entity(&view, |view, _| assert!(!view.sidebar_auto_hide_expanded));
+
+        cx.simulate_resize(window_size(799.0));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("utility-sidebar-toggle").is_some());
+        cx.read_entity(&view, |view, _| assert!(!view.sidebar_auto_hide_expanded));
+    }
+
+    #[gpui::test]
+    fn utility_menus_open_when_sidebar_toggle_is_visible(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        cx.simulate_resize(gpui::size(gpui::px(799.0), gpui::px(600.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-sidebar-toggle").is_some());
+
+        let new_position = cx
+            .debug_bounds("utility-new")
+            .expect("new utility button bounds")
+            .center();
+        cx.simulate_mouse_down(new_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(new_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-new-folder").is_some());
+
+        let dismiss_position = gpui::point(gpui::px(650.0), gpui::px(500.0));
+        cx.simulate_mouse_down(dismiss_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(dismiss_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let view_position = cx
+            .debug_bounds("utility-view")
+            .expect("view utility button bounds")
+            .center();
+        cx.simulate_mouse_down(view_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-large-icons").is_some());
     }
 
     #[gpui::test]

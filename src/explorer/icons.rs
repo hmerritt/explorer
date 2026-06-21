@@ -156,6 +156,7 @@ svg_icon!(
     "utility",
     "favorite_pin_remove.svg"
 );
+svg_icon!(HAMBURGER_ICON, "utility", "hamburger.svg");
 svg_icon!(GIT_BRANCH_ICON, "git", "git_branch.svg");
 svg_icon!(GIT_ICON, "git", "git.svg");
 svg_icon!(LARGE_ICONS_ICON, "utility", "large_icons.svg");

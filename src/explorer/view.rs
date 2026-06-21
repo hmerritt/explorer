@@ -75,6 +75,7 @@ pub struct ExplorerView {
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) dragging_sidebar_item: Option<usize>,
     pub(super) sidebar_width: f32,
+    pub(super) sidebar_auto_hide_expanded: bool,
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) file_columns: FileColumnSettings,
     pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
@@ -308,6 +309,7 @@ impl ExplorerView {
             active_drop_indicator: None,
             dragging_sidebar_item: None,
             sidebar_width: settings.sidebar.width as f32,
+            sidebar_auto_hide_expanded: false,
             sidebar_resize_drag: None,
             file_columns: settings.view.file_columns.clone(),
             file_column_resize_drag: None,
@@ -1617,6 +1619,7 @@ mod tests {
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
         );
+        assert!(!view.sidebar_auto_hide_expanded);
         assert_eq!(view.file_sort, crate::settings::FileSortSettings::default());
         assert_eq!(view.open_utility_menu, None);
         assert!(view.directory_watcher.is_none());
