@@ -1657,6 +1657,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn render_drop_indicator_shows_copy_to_overlay_once(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["file.txt"]);
+        let view = active_test_view(&tabs, cx);
+        let source = temp.path().join("file.txt");
+        let mouse_position = gpui::point(gpui::px(96.0), gpui::px(120.0));
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&source);
+                let ix = view
+                    .entries
+                    .iter()
+                    .position(|entry| entry.path == source)
+                    .expect("source entry");
+                let dragged = view
+                    .test_dragged_entries_for_index(ix)
+                    .expect("dragged row");
+                view.active_drop_indicator = view.drop_indicator_for_value(
+                    &dragged,
+                    &DropDestination::CurrentDirectory,
+                    Modifiers::secondary_key(),
+                    mouse_position,
+                );
+                assert!(view.active_drop_indicator.is_some());
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let indicator_bounds = cx
+            .debug_bounds("drop-indicator")
+            .expect("drop indicator bounds");
+        assert!(indicator_bounds.origin.y > mouse_position.y);
+    }
+
+    #[gpui::test]
     fn settings_changes_apply_to_existing_and_future_tabs(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let temp = TempDir::new();

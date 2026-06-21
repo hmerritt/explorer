@@ -1253,6 +1253,7 @@ pub(super) fn copy_paths_to_directory(
     prepare_copy_paths_to_directory(paths, destination).and_then(run_prepared_file_operation)
 }
 
+#[cfg(test)]
 pub(super) fn prepare_copy_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,
@@ -1262,6 +1263,28 @@ pub(super) fn prepare_copy_paths_to_directory(
         destination,
         FileOperationKind::Copy,
         CopyNamePolicy::Original,
+    )
+    .map(prepared_or_conflicts)
+}
+
+#[cfg(test)]
+pub(super) fn copy_paths_to_directory_with_copy_names(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<FileOperationOutcome, String> {
+    prepare_copy_paths_to_directory_with_copy_names(paths, destination)
+        .and_then(run_prepared_file_operation)
+}
+
+pub(super) fn prepare_copy_paths_to_directory_with_copy_names(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
+    prepare_file_operation(
+        paths,
+        destination,
+        FileOperationKind::Copy,
+        CopyNamePolicy::UseCopyNamesInSameDirectory,
     )
     .map(prepared_or_conflicts)
 }
@@ -1279,13 +1302,7 @@ pub(super) fn prepare_copy_paths_to_directory_for_paste(
     paths: &[PathBuf],
     destination: &Path,
 ) -> Result<PreparedFileOperation, String> {
-    prepare_file_operation(
-        paths,
-        destination,
-        FileOperationKind::Copy,
-        CopyNamePolicy::UseCopyNamesInSameDirectory,
-    )
-    .map(prepared_or_conflicts)
+    prepare_copy_paths_to_directory_with_copy_names(paths, destination)
 }
 
 pub(super) fn archive_path_is_supported(path: &Path) -> bool {

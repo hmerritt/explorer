@@ -2460,6 +2460,8 @@ pub(super) fn render_drop_indicator(
         truncated_drop_indicator_target_label(&indicator.target_label, target_width, font, window);
 
     div()
+        .id("drop-indicator")
+        .debug_selector(|| "drop-indicator".to_owned())
         .font(font.clone())
         .absolute()
         .left(px(origin.0))

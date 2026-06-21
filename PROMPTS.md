@@ -3,9 +3,7 @@
 ## 1
 
 - rsync copy/sync builtin
-- Currently resuming a copy takes a lot longer than when copying originally
 - Copy speed and ETA figures in dialog
-- File/folder drag, even in current directory, holding Ctrl will trigger item copy
 
 ## 2
 
