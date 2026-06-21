@@ -96,7 +96,9 @@ use crate::explorer::{
     },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
-use crate::settings::{FileColumnKind, FileViewMode, SettingsState};
+use crate::settings::{
+    FileColumnKind, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
+};
 use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
@@ -1068,6 +1070,7 @@ impl ExplorerView {
         } else {
             0.0
         };
+        let active_sort = self.header_file_sort();
         let mut header_row = div()
             .relative()
             .left(px(-scroll_left))
@@ -1080,10 +1083,12 @@ impl ExplorerView {
                 self.name_column_width(window),
                 self.name_column_is_manual_width(),
                 cx.entity(),
+                active_sort,
             ));
 
         for kind in self.file_columns.order.iter().copied() {
-            header_row = header_row.child(self.render_file_column_header_cell(kind, cx));
+            header_row =
+                header_row.child(self.render_file_column_header_cell(kind, active_sort, cx));
         }
 
         div()
@@ -1110,42 +1115,48 @@ impl ExplorerView {
     fn render_file_column_header_cell(
         &self,
         kind: FileColumnKind,
+        active_sort: Option<FileSortSettings>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity();
         let width = self.file_column_width(kind);
         let label = file_column_label(kind);
-
-        header_cell(label, width)
+        let sort_column = file_column_sort_column(kind);
+        let mut cell = header_cell(label, width, sort_column, active_sort)
             .id(file_column_header_element_id(kind))
-            .on_drag(FileColumnHeaderDrag { kind }, {
-                let label = SharedString::from(label);
-                move |_, _, _, cx| {
-                    cx.new(|_| FileColumnHeaderDragPreview {
-                        label: label.clone(),
-                        width,
-                    })
-                }
-            })
-            .on_drag_move::<FileColumnHeaderDrag>({
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<FileColumnHeaderDrag>, _, cx| {
-                    let left = f32::from(event.bounds.origin.x);
-                    let width = f32::from(event.bounds.size.width);
-                    let cursor_x = f32::from(event.event.position.x);
-                    let before = cursor_x < left + (width / 2.0);
-                    let dragged = event.drag(cx).kind;
+            .debug_selector(move || file_column_header_element_id(kind).to_owned());
+        if let Some(sort_column) = sort_column {
+            cell = add_header_sort_click(cell, sort_column, entity.clone());
+        }
 
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.reorder_file_column(dragged, kind, before) {
-                            crate::settings::reorder_file_column(dragged, kind, before, cx);
-                            cx.notify();
-                        }
-                    });
-                }
-            })
-            .child(file_column_resize_handle(kind, entity))
-            .into_any_element()
+        cell.on_drag(FileColumnHeaderDrag { kind }, {
+            let label = SharedString::from(label);
+            move |_, _, _, cx| {
+                cx.new(|_| FileColumnHeaderDragPreview {
+                    label: label.clone(),
+                    width,
+                })
+            }
+        })
+        .on_drag_move::<FileColumnHeaderDrag>({
+            let entity = entity.clone();
+            move |event: &DragMoveEvent<FileColumnHeaderDrag>, _, cx| {
+                let left = f32::from(event.bounds.origin.x);
+                let width = f32::from(event.bounds.size.width);
+                let cursor_x = f32::from(event.event.position.x);
+                let before = cursor_x < left + (width / 2.0);
+                let dragged = event.drag(cx).kind;
+
+                let _ = entity.update(cx, |this, cx| {
+                    if this.reorder_file_column(dragged, kind, before) {
+                        crate::settings::reorder_file_column(dragged, kind, before, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .child(file_column_resize_handle(kind, entity))
+        .into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4484,8 +4495,13 @@ fn directory_bar_separator() -> Div {
         .child(DIRECTORY_BAR_SEPARATOR)
 }
 
-fn header_cell(label: &'static str, width: f32) -> Div {
-    div()
+fn header_cell(
+    label: &'static str,
+    width: f32,
+    sort_column: Option<FileSortColumn>,
+    active_sort: Option<FileSortSettings>,
+) -> Div {
+    let cell = div()
         .relative()
         .flex()
         .items_start()
@@ -4496,7 +4512,55 @@ fn header_cell(label: &'static str, width: f32) -> Div {
         .pt(px(8.0))
         .border_r_1()
         .border_color(rgb(0xe7e7e7))
-        .child(label)
+        .child(label);
+
+    let cell = if sort_column.is_some() {
+        cell.cursor(CursorStyle::PointingHand)
+    } else {
+        cell
+    };
+
+    if let Some(indicator) = sort_indicator(sort_column, active_sort) {
+        cell.child(div().ml(px(4.0)).text_color(rgb(0x1f1f1f)).child(indicator))
+    } else {
+        cell
+    }
+}
+
+fn add_header_sort_click(
+    cell: gpui::Stateful<Div>,
+    column: FileSortColumn,
+    entity: Entity<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    cell.on_click(move |_: &ClickEvent, _, cx| {
+        let _ = entity.update(cx, |this, cx| {
+            this.close_context_menu();
+            let sort = this.sort_entries_from_header(column);
+            crate::settings::set_file_sort(sort, cx);
+            cx.notify();
+        });
+        cx.stop_propagation();
+    })
+}
+
+fn sort_indicator(
+    sort_column: Option<FileSortColumn>,
+    active_sort: Option<FileSortSettings>,
+) -> Option<&'static str> {
+    let sort_column = sort_column?;
+    let active_sort = active_sort?;
+    (active_sort.column == sort_column).then(|| match active_sort.direction {
+        SortDirection::Ascending => "^",
+        SortDirection::Descending => "v",
+    })
+}
+
+fn file_column_sort_column(kind: FileColumnKind) -> Option<FileSortColumn> {
+    match kind {
+        FileColumnKind::DateModified => Some(FileSortColumn::DateModified),
+        FileColumnKind::Type => None,
+        FileColumnKind::Size => Some(FileSortColumn::Size),
+    }
 }
 
 fn file_column_header_element_id(kind: FileColumnKind) -> &'static str {
@@ -4615,8 +4679,15 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
         .into_any_element()
 }
 
-fn name_header_cell(width: f32, manual_width: bool, entity: Entity<ExplorerView>) -> Div {
+fn name_header_cell(
+    width: f32,
+    manual_width: bool,
+    entity: Entity<ExplorerView>,
+    active_sort: Option<FileSortSettings>,
+) -> gpui::Stateful<Div> {
     let cell = div()
+        .id("explorer-header-name")
+        .debug_selector(|| "explorer-header-name".to_owned())
         .relative()
         .flex()
         .items_start()
@@ -4626,14 +4697,22 @@ fn name_header_cell(width: f32, manual_width: bool, entity: Entity<ExplorerView>
         .pl(px(36.0))
         .pt(px(8.0))
         .border_r_1()
-        .border_color(rgb(0xe7e7e7));
+        .border_color(rgb(0xe7e7e7))
+        .cursor(CursorStyle::PointingHand);
     let cell = if manual_width {
         cell.w(px(width)).flex_shrink_0()
     } else {
         cell.flex_1()
     };
 
-    cell.child("Name")
+    let cell = if let Some(indicator) = sort_indicator(Some(FileSortColumn::Name), active_sort) {
+        cell.child("Name")
+            .child(div().ml(px(4.0)).text_color(rgb(0x1f1f1f)).child(indicator))
+    } else {
+        cell.child("Name")
+    };
+
+    add_header_sort_click(cell, FileSortColumn::Name, entity.clone())
         .child(name_column_resize_handle(width, entity))
 }
 
@@ -5558,7 +5637,16 @@ mod tests {
         sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
         sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
     };
-    use crate::settings::AddressSlash;
+    use crate::settings::{
+        AddressSlash, FileSortColumn, FileSortSettings, SettingsState, SortDirection,
+    };
+
+    fn entry_names(view: &ExplorerView) -> Vec<String> {
+        view.entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
 
     #[test]
     fn nav_button_active_opacity_dims_button() {
@@ -5709,7 +5797,11 @@ mod tests {
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
         });
 
         cx.update(|window, app| {
@@ -5737,7 +5829,11 @@ mod tests {
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
         });
         let expected_value_width = cx.update(|window, _| context_menu_text_width(value, window));
 
@@ -6071,6 +6167,140 @@ mod tests {
                 .file_columns
                 .widths[&crate::settings::FileColumnKind::Type]),
             default_width
+        );
+    }
+
+    #[gpui::test]
+    fn default_name_sort_is_descending_and_name_header_toggles(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"a").unwrap();
+        fs::write(temp.path().join("b.txt"), b"b").unwrap();
+        fs::write(temp.path().join("c.txt"), b"c").unwrap();
+        let selected = temp.path().join("a.txt");
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(entry_names(view), vec!["c.txt", "b.txt", "a.txt"]);
+            assert_eq!(
+                view.header_file_sort(),
+                Some(FileSortSettings {
+                    column: FileSortColumn::Name,
+                    direction: SortDirection::Descending,
+                })
+            );
+        });
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_path(&selected));
+        });
+
+        let position = cx
+            .debug_bounds("explorer-header-name")
+            .expect("name header bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(entry_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+            assert_eq!(view.selected_paths(), vec![selected]);
+        });
+        assert_eq!(
+            cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
+            FileSortSettings {
+                column: FileSortColumn::Name,
+                direction: SortDirection::Ascending,
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_size_header_sorts_size_descending(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        fs::write(temp.path().join("small.txt"), b"1").unwrap();
+        fs::write(temp.path().join("large.txt"), b"12345").unwrap();
+        fs::write(temp.path().join("middle.txt"), b"123").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+        cx.run_until_parked();
+
+        let position = cx
+            .debug_bounds("explorer-header-size")
+            .expect("size header bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                entry_names(view),
+                vec!["large.txt", "middle.txt", "small.txt"]
+            );
+        });
+        assert_eq!(
+            cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
+            FileSortSettings {
+                column: FileSortColumn::Size,
+                direction: SortDirection::Descending,
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_date_header_sorts_date_descending(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let old = temp.path().join("old.txt");
+        let new = temp.path().join("new.txt");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&new, b"new").unwrap();
+        filetime::set_file_mtime(&old, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+        filetime::set_file_mtime(&new, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+        cx.run_until_parked();
+
+        let position = cx
+            .debug_bounds("explorer-header-date-modified")
+            .expect("date header bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(entry_names(view), vec!["new.txt", "old.txt"]);
+        });
+        assert_eq!(
+            cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
+            FileSortSettings {
+                column: FileSortColumn::DateModified,
+                direction: SortDirection::Descending,
+            }
         );
     }
 

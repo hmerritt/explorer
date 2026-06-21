@@ -34,12 +34,14 @@ use crate::explorer::{
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
     scrollbar::{HorizontalScrollbarDrag, ScrollbarDrag},
-    search::SearchState,
+    search::{SearchState, filtered_entries},
     selection::SelectionState,
+    sorting::sort_entries,
     watcher::DirectoryWatcher,
 };
 use crate::settings::{
-    ExplorerSettings, FileColumnKind, FileColumnSettings, FileViewMode, SidebarSettings,
+    ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
+    FileViewMode, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -76,6 +78,8 @@ pub struct ExplorerView {
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) file_columns: FileColumnSettings,
     pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
+    pub(super) file_sort: FileSortSettings,
+    pub(super) recursive_file_sort_override: Option<FileSortSettings>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
@@ -214,7 +218,7 @@ pub(super) enum UtilityMenu {
 impl ExplorerView {
     #[cfg(test)]
     pub fn new(initial_path: PathBuf) -> Self {
-        Self::new_inner(initial_path, None)
+        Self::new_inner_with_settings(initial_path, None, &test_explorer_settings())
     }
 
     pub fn new_watched_with_focus_handle(
@@ -246,12 +250,16 @@ impl ExplorerView {
         initial_path: PathBuf,
         focus_handle: FocusHandle,
     ) -> Self {
-        Self::new_inner(initial_path, Some(focus_handle))
+        Self::new_inner_with_settings(initial_path, Some(focus_handle), &test_explorer_settings())
     }
 
     #[cfg(test)]
-    fn new_inner(initial_path: PathBuf, focus_handle: Option<FocusHandle>) -> Self {
-        Self::new_inner_with_settings(initial_path, focus_handle, &ExplorerSettings::default())
+    pub(super) fn new_with_settings_for_test(
+        initial_path: PathBuf,
+        focus_handle: Option<FocusHandle>,
+        settings: &ExplorerSettings,
+    ) -> Self {
+        Self::new_inner_with_settings(initial_path, focus_handle, settings)
     }
 
     #[cfg(test)]
@@ -303,6 +311,8 @@ impl ExplorerView {
             sidebar_resize_drag: None,
             file_columns: settings.view.file_columns.clone(),
             file_column_resize_drag: None,
+            file_sort: settings.view.sort,
+            recursive_file_sort_override: None,
             pending_permanent_delete: None,
             pending_trash: None,
             pending_file_conflict: None,
@@ -353,12 +363,14 @@ impl ExplorerView {
         let hidden_changed = self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
+        let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
         self.show_hidden_files = settings.view.show_hidden;
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
+        self.file_sort = settings.view.sort;
         #[cfg(target_os = "windows")]
         {
             self.address_slash = settings.view.address_slash;
@@ -414,6 +426,9 @@ impl ExplorerView {
                     self.cancel_folder_size_task();
                     self.clear_folder_sizes();
                 }
+            }
+            if file_sort_changed {
+                self.apply_file_sort_preserving_selection();
             }
             if sidebar_changed || !folder_size_changed {
                 self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
@@ -528,12 +543,15 @@ impl ExplorerView {
     ) {
         self.read_error = None;
         let filter_started = Instant::now();
+        let mut entries = entries;
+        sort_entries(&mut entries, self.file_sort);
+
         if self.search_is_active() {
             self.all_entries = entries;
             self.apply_search_filter_preserving_selection(&selected_paths);
         } else {
-            self.entries = entries.clone();
             self.all_entries = entries;
+            self.entries = self.all_entries.clone();
             if mode.preserve_selection {
                 self.restore_selection_from_paths(&selected_paths);
             } else {
@@ -1011,6 +1029,17 @@ impl ExplorerView {
         if !self.search.recursive_results_active {
             changed |= apply_folder_size_to_entries(&mut self.entries, path, Some(size));
         }
+        if changed
+            && self
+                .active_visible_file_sort()
+                .is_some_and(|sort| sort.column == FileSortColumn::Size)
+        {
+            if self.search.recursive_results_active {
+                self.apply_visible_file_sort_preserving_selection();
+            } else {
+                self.apply_file_sort_preserving_selection();
+            }
+        }
         changed
     }
 
@@ -1018,6 +1047,17 @@ impl ExplorerView {
         let mut changed = clear_folder_sizes_in_entries(&mut self.all_entries);
         if !self.search.recursive_results_active {
             changed |= clear_folder_sizes_in_entries(&mut self.entries);
+        }
+        if changed
+            && self
+                .active_visible_file_sort()
+                .is_some_and(|sort| sort.column == FileSortColumn::Size)
+        {
+            if self.search.recursive_results_active {
+                self.apply_visible_file_sort_preserving_selection();
+            } else {
+                self.apply_file_sort_preserving_selection();
+            }
         }
         changed
     }
@@ -1048,6 +1088,9 @@ impl ExplorerView {
         }
 
         if changed {
+            if self.active_visible_file_sort().is_some() {
+                self.apply_file_sort();
+            }
             self.restore_selection_from_paths(&selected_paths);
         }
 
@@ -1131,6 +1174,70 @@ impl ExplorerView {
 
     pub(super) fn name_column_is_manual_width(&self) -> bool {
         self.file_columns.name_width.is_some()
+    }
+
+    pub(super) fn header_file_sort(&self) -> Option<FileSortSettings> {
+        if self.search.recursive_results_active {
+            self.recursive_file_sort_override
+        } else {
+            Some(self.file_sort)
+        }
+    }
+
+    pub(super) fn sort_entries_from_header(&mut self, column: FileSortColumn) -> FileSortSettings {
+        let direction = match self.header_file_sort() {
+            Some(current) if current.column == column => toggle_sort_direction(current.direction),
+            _ => SortDirection::Descending,
+        };
+        let sort = FileSortSettings { column, direction };
+        self.file_sort = sort;
+
+        if self.search.recursive_results_active {
+            self.recursive_file_sort_override = Some(sort);
+            self.apply_visible_file_sort_preserving_selection();
+        } else {
+            self.apply_file_sort_preserving_selection();
+        }
+
+        sort
+    }
+
+    fn apply_file_sort_preserving_selection(&mut self) {
+        let selected_paths = self.selected_paths();
+        self.apply_file_sort();
+        self.restore_selection_from_paths(&selected_paths);
+    }
+
+    fn apply_visible_file_sort_preserving_selection(&mut self) {
+        let selected_paths = self.selected_paths();
+        if let Some(sort) = self.active_visible_file_sort() {
+            sort_entries(&mut self.entries, sort);
+        }
+        self.restore_selection_from_paths(&selected_paths);
+    }
+
+    fn apply_file_sort(&mut self) {
+        if self.search.recursive_results_active {
+            if let Some(sort) = self.recursive_file_sort_override {
+                sort_entries(&mut self.entries, sort);
+            }
+            return;
+        }
+
+        sort_entries(&mut self.all_entries, self.file_sort);
+        if self.search_is_active() {
+            self.entries = filtered_entries(&self.all_entries, self.search_query());
+        } else {
+            self.entries = self.all_entries.clone();
+        }
+    }
+
+    fn active_visible_file_sort(&self) -> Option<FileSortSettings> {
+        if self.search.recursive_results_active {
+            self.recursive_file_sort_override
+        } else {
+            Some(self.file_sort)
+        }
     }
 
     pub(super) fn begin_name_column_resize(&mut self, pointer_x: f32, start_width: f32) {
@@ -1309,6 +1416,16 @@ pub(super) fn sidebar_width_for_drag(start_width: f32, pointer_delta_x: f32) -> 
     normalized_sidebar_width_f32(start_width + pointer_delta_x)
 }
 
+#[cfg(test)]
+fn test_explorer_settings() -> ExplorerSettings {
+    let mut settings = ExplorerSettings::default();
+    settings.view.sort = FileSortSettings {
+        column: FileSortColumn::Name,
+        direction: SortDirection::Ascending,
+    };
+    settings
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReloadMode {
     pub(super) preserve_selection: bool,
@@ -1397,6 +1514,13 @@ fn directory_is_media_majority(entries: &[FileEntry]) -> bool {
     (media_entries as u128) * 4 > (entries.len() as u128) * 3
 }
 
+fn toggle_sort_direction(direction: SortDirection) -> SortDirection {
+    match direction {
+        SortDirection::Ascending => SortDirection::Descending,
+        SortDirection::Descending => SortDirection::Ascending,
+    }
+}
+
 fn apply_shell_shortcut_resolution_to_entries(
     entries: &mut [FileEntry],
     resolution: &ShellShortcutResolution,
@@ -1433,7 +1557,7 @@ mod tests {
     use super::*;
     use crate::explorer::entry::{DirectoryLinkKind, EntryKind, FileEntry};
     use gpui::AppContext;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn test_pending_shell_shortcut(path: &str, target: &str) -> FileEntry {
         FileEntry {
@@ -1456,6 +1580,10 @@ mod tests {
         FileEntry::test(name, true, None, None)
     }
 
+    fn names(entries: &[FileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
     #[test]
     fn empty_directory_without_error_shows_empty_folder_message() {
         let mut view = ExplorerView::new(PathBuf::from("empty"));
@@ -1467,7 +1595,11 @@ mod tests {
 
     #[test]
     fn view_options_use_settings_defaults() {
-        let view = ExplorerView::new(PathBuf::from("defaults"));
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("defaults"),
+            None,
+            &ExplorerSettings::default(),
+        );
 
         assert!(!view.show_hidden_files);
         assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
@@ -1485,6 +1617,7 @@ mod tests {
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
         );
+        assert_eq!(view.file_sort, crate::settings::FileSortSettings::default());
         assert_eq!(view.open_utility_menu, None);
         assert!(view.directory_watcher.is_none());
     }
@@ -1521,6 +1654,70 @@ mod tests {
         );
 
         assert!(!view.resolve_icons);
+    }
+
+    #[test]
+    fn view_uses_configured_file_sort() {
+        let sort = FileSortSettings {
+            column: FileSortColumn::Size,
+            direction: SortDirection::Ascending,
+        };
+        let view = ExplorerView::new_inner_with_settings(
+            PathBuf::from("configured"),
+            None,
+            &ExplorerSettings {
+                view: crate::settings::ViewSettings {
+                    sort,
+                    ..crate::settings::ViewSettings::default()
+                },
+                ..ExplorerSettings::default()
+            },
+        );
+
+        assert_eq!(view.file_sort, sort);
+    }
+
+    #[test]
+    fn header_sort_toggles_and_preserves_selection() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.file_sort = FileSortSettings::default();
+        view.all_entries = vec![test_file("c.txt"), test_file("a.txt"), test_file("b.txt")];
+        view.entries = view.all_entries.clone();
+        view.select_single_path(Path::new("a.txt"));
+
+        let sort = view.sort_entries_from_header(FileSortColumn::Name);
+
+        assert_eq!(
+            sort,
+            FileSortSettings {
+                column: FileSortColumn::Name,
+                direction: SortDirection::Ascending,
+            }
+        );
+        assert_eq!(names(&view.entries), vec!["a.txt", "b.txt", "c.txt"]);
+        assert_eq!(view.selected_paths(), vec![PathBuf::from("a.txt")]);
+    }
+
+    #[test]
+    fn recursive_results_keep_shallow_order_until_header_sort() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.search.recursive_results_active = true;
+        view.entries = vec![test_file("a.txt"), test_file("c.txt"), test_file("b.txt")];
+
+        assert_eq!(view.header_file_sort(), None);
+        assert_eq!(names(&view.entries), vec!["a.txt", "c.txt", "b.txt"]);
+
+        let sort = view.sort_entries_from_header(FileSortColumn::Name);
+
+        assert_eq!(
+            sort,
+            FileSortSettings {
+                column: FileSortColumn::Name,
+                direction: SortDirection::Descending,
+            }
+        );
+        assert_eq!(view.header_file_sort(), Some(sort));
+        assert_eq!(names(&view.entries), vec!["c.txt", "b.txt", "a.txt"]);
     }
 
     #[test]

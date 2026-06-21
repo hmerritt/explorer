@@ -1,16 +1,51 @@
 use std::{cmp::Ordering, ffi::OsStr};
 
 use crate::explorer::entry::FileEntry;
+use crate::settings::{FileSortColumn, FileSortSettings, SortDirection};
 
-pub(super) fn sort_entries(entries: &mut [FileEntry]) {
-    entries.sort_by(compare_entries);
+pub(super) fn sort_entries(entries: &mut [FileEntry], sort: FileSortSettings) {
+    entries.sort_by(|a, b| compare_entries(a, b, sort));
 }
 
-fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
+fn compare_entries(a: &FileEntry, b: &FileEntry, sort: FileSortSettings) -> Ordering {
     match (a.sorts_as_directory(), b.sorts_as_directory()) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        _ => compare_names(&a.name, &b.name),
+        _ => compare_entries_in_group(a, b, sort),
+    }
+}
+
+fn compare_entries_in_group(a: &FileEntry, b: &FileEntry, sort: FileSortSettings) -> Ordering {
+    match sort.column {
+        FileSortColumn::Name => {
+            compare_with_direction(compare_names(&a.name, &b.name), sort.direction)
+        }
+        FileSortColumn::DateModified => {
+            compare_optional_values(a.modified, b.modified, sort.direction)
+                .then_with(|| compare_names(&a.name, &b.name))
+        }
+        FileSortColumn::Size => compare_optional_values(a.size, b.size, sort.direction)
+            .then_with(|| compare_names(&a.name, &b.name)),
+    }
+}
+
+fn compare_optional_values<T: Ord>(
+    a: Option<T>,
+    b: Option<T>,
+    direction: SortDirection,
+) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => compare_with_direction(a.cmp(&b), direction),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_with_direction(ordering: Ordering, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
     }
 }
 
@@ -83,6 +118,18 @@ mod tests {
     use super::*;
     use crate::explorer::entry::{DirectoryLinkKind, FileEntry, ShellShortcutTargetKind};
     use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn sort(column: FileSortColumn, direction: SortDirection) -> FileSortSettings {
+        FileSortSettings { column, direction }
+    }
+
+    fn names(entries: &[FileEntry]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+    }
 
     #[test]
     fn sorts_directories_before_files() {
@@ -93,13 +140,19 @@ mod tests {
             FileEntry::test("a", true, None, None),
         ];
 
-        sort_entries(&mut entries);
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Ascending),
+        );
 
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["a", "c", "a.txt", "b.txt"]);
+        assert_eq!(names(&entries), vec!["a", "c", "a.txt", "b.txt"]);
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Descending),
+        );
+
+        assert_eq!(names(&entries), vec!["c", "a", "b.txt", "a.txt"]);
     }
 
     #[test]
@@ -110,13 +163,12 @@ mod tests {
             FileEntry::test("a", true, None, None),
         ];
 
-        sort_entries(&mut entries);
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Ascending),
+        );
 
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["a", "linked", "b.txt"]);
+        assert_eq!(names(&entries), vec!["a", "linked", "b.txt"]);
     }
 
     #[test]
@@ -133,13 +185,12 @@ mod tests {
             ),
         ];
 
-        sort_entries(&mut entries);
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Ascending),
+        );
 
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["folder", "a shortcut.lnk", "z.txt"]);
+        assert_eq!(names(&entries), vec!["folder", "a shortcut.lnk", "z.txt"]);
     }
 
     #[test]
@@ -150,13 +201,94 @@ mod tests {
             FileEntry::test("file1.txt", false, Some(1), None),
         ];
 
-        sort_entries(&mut entries);
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Ascending),
+        );
 
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["file1.txt", "file2.txt", "file10.txt"]);
+        assert_eq!(
+            names(&entries),
+            vec!["file1.txt", "file2.txt", "file10.txt"]
+        );
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Descending),
+        );
+
+        assert_eq!(
+            names(&entries),
+            vec!["file10.txt", "file2.txt", "file1.txt"]
+        );
+    }
+
+    #[test]
+    fn sorts_by_date_modified_in_both_directions_with_missing_last() {
+        let oldest = UNIX_EPOCH + Duration::from_secs(10);
+        let newest = UNIX_EPOCH + Duration::from_secs(30);
+        let mut entries = vec![
+            FileEntry::test("missing.txt", false, Some(1), None),
+            FileEntry::test("new.txt", false, Some(1), Some(newest)),
+            FileEntry::test("old.txt", false, Some(1), Some(oldest)),
+        ];
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::DateModified, SortDirection::Ascending),
+        );
+
+        assert_eq!(names(&entries), vec!["old.txt", "new.txt", "missing.txt"]);
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::DateModified, SortDirection::Descending),
+        );
+
+        assert_eq!(names(&entries), vec!["new.txt", "old.txt", "missing.txt"]);
+    }
+
+    #[test]
+    fn sorts_by_size_in_both_directions_with_missing_last() {
+        let mut entries = vec![
+            FileEntry::test("missing.txt", false, None, None),
+            FileEntry::test("large.txt", false, Some(30), None),
+            FileEntry::test("small.txt", false, Some(10), None),
+        ];
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Size, SortDirection::Ascending),
+        );
+
+        assert_eq!(
+            names(&entries),
+            vec!["small.txt", "large.txt", "missing.txt"]
+        );
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Size, SortDirection::Descending),
+        );
+
+        assert_eq!(
+            names(&entries),
+            vec!["large.txt", "small.txt", "missing.txt"]
+        );
+    }
+
+    #[test]
+    fn metadata_sort_ties_fall_back_to_name_ascending() {
+        let mut entries = vec![
+            FileEntry::test("b.txt", false, Some(10), None),
+            FileEntry::test("a.txt", false, Some(10), None),
+        ];
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Size, SortDirection::Descending),
+        );
+
+        assert_eq!(names(&entries), vec!["a.txt", "b.txt"]);
     }
 
     #[test]
@@ -166,15 +298,14 @@ mod tests {
             FileEntry::test("README.md", false, Some(1), None),
         ];
 
-        sort_entries(&mut entries);
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Name, SortDirection::Ascending),
+        );
 
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
         #[cfg(target_os = "windows")]
-        assert_eq!(names, vec!["Readme.md", "README.md"]);
+        assert_eq!(names(&entries), vec!["Readme.md", "README.md"]);
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(names, vec!["README.md", "Readme.md"]);
+        assert_eq!(names(&entries), vec!["README.md", "Readme.md"]);
     }
 }

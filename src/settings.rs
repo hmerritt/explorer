@@ -317,6 +317,11 @@ pub struct ViewSettings {
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
     pub show_hidden: bool,
+    #[serde(
+        default = "default_file_sort",
+        deserialize_with = "deserialize_file_sort_settings"
+    )]
+    pub sort: FileSortSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -333,6 +338,29 @@ pub enum FileColumnKind {
     DateModified,
     Type,
     Size,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSortColumn {
+    #[default]
+    Name,
+    DateModified,
+    Size,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDirection {
+    Ascending,
+    #[default]
+    Descending,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileSortSettings {
+    pub column: FileSortColumn,
+    pub direction: SortDirection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -398,6 +426,7 @@ impl Default for ViewSettings {
             show_extensions: true,
             show_folder_sizes: false,
             show_hidden: false,
+            sort: default_file_sort(),
         }
     }
 }
@@ -405,6 +434,12 @@ impl Default for ViewSettings {
 impl Default for FileColumnSettings {
     fn default() -> Self {
         default_file_columns()
+    }
+}
+
+impl Default for FileSortSettings {
+    fn default() -> Self {
+        default_file_sort()
     }
 }
 
@@ -603,6 +638,10 @@ pub(crate) fn set_show_extensions(value: bool, cx: &mut impl BorrowAppContext) {
 
 pub(crate) fn set_view_mode(mode: FileViewMode, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.view.mode = mode);
+}
+
+pub(crate) fn set_file_sort(sort: FileSortSettings, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| settings.view.sort = sort);
 }
 
 pub(crate) fn set_sidebar_width(value: u32, cx: &mut impl BorrowAppContext) {
@@ -1755,6 +1794,13 @@ fn default_file_columns() -> FileColumnSettings {
     }
 }
 
+fn default_file_sort() -> FileSortSettings {
+    FileSortSettings {
+        column: FileSortColumn::Name,
+        direction: SortDirection::Descending,
+    }
+}
+
 pub(crate) fn default_file_column_order() -> &'static [FileColumnKind] {
     &[
         FileColumnKind::DateModified,
@@ -1813,12 +1859,62 @@ fn file_column_kind_from_str(value: &str) -> Option<FileColumnKind> {
     }
 }
 
+fn file_sort_column_from_str(value: &str) -> Option<FileSortColumn> {
+    match value {
+        "name" => Some(FileSortColumn::Name),
+        "date_modified" => Some(FileSortColumn::DateModified),
+        "size" => Some(FileSortColumn::Size),
+        _ => None,
+    }
+}
+
+fn sort_direction_from_str(value: &str) -> Option<SortDirection> {
+    match value {
+        "ascending" => Some(SortDirection::Ascending),
+        "descending" => Some(SortDirection::Descending),
+        _ => None,
+    }
+}
+
 fn deserialize_file_column_settings<'de, D>(deserializer: D) -> Result<FileColumnSettings, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
     Ok(file_column_settings_from_value(value))
+}
+
+fn deserialize_file_sort_settings<'de, D>(deserializer: D) -> Result<FileSortSettings, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(file_sort_settings_from_value(value))
+}
+
+fn file_sort_settings_from_value(value: Value) -> FileSortSettings {
+    let mut settings = default_file_sort();
+    let Some(object) = value.as_object() else {
+        return settings;
+    };
+
+    if let Some(column) = object
+        .get("column")
+        .and_then(Value::as_str)
+        .and_then(file_sort_column_from_str)
+    {
+        settings.column = column;
+    }
+
+    if let Some(direction) = object
+        .get("direction")
+        .and_then(Value::as_str)
+        .and_then(sort_direction_from_str)
+    {
+        settings.direction = direction;
+    }
+
+    settings
 }
 
 fn file_column_settings_from_value(value: Value) -> FileColumnSettings {
@@ -1979,6 +2075,7 @@ mod tests {
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert!(settings.view.native_icons);
+        assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(
             settings.view.file_columns.order,
             default_file_column_order()
@@ -2036,6 +2133,7 @@ mod tests {
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert_eq!(settings.view.file_columns.name_width, None);
+        assert_eq!(settings.view.sort, default_file_sort());
         assert!(settings.contextmenu.items.is_empty());
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
@@ -2089,6 +2187,28 @@ mod tests {
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
     }
 
+    #[test]
+    fn file_sort_deserializes_known_values_and_defaults_unknowns() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"view":{"sort":{"column":"size","direction":"ascending","future":7}}}"#,
+        )
+        .expect("deserialize file sort");
+
+        assert_eq!(
+            settings.view.sort,
+            FileSortSettings {
+                column: FileSortColumn::Size,
+                direction: SortDirection::Ascending,
+            }
+        );
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{"sort":{"column":"future","direction":"sideways"}}}"#)
+                .expect("deserialize unknown file sort");
+
+        assert_eq!(settings.view.sort, default_file_sort());
+    }
+
     #[gpui::test]
     fn set_sidebar_width_persists_clamped_value(cx: &mut gpui::TestAppContext) {
         let path = unique_temp_dir("sidebar-width").join(SETTINGS_FILE_NAME);
@@ -2109,6 +2229,30 @@ mod tests {
             load_settings_from_path(&path).unwrap().sidebar.width,
             SIDEBAR_MIN_WIDTH
         );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn set_file_sort_persists_global_sort(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("file-sort").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+        let sort = FileSortSettings {
+            column: FileSortColumn::DateModified,
+            direction: SortDirection::Ascending,
+        };
+
+        let stored = cx.update(|cx| {
+            set_file_sort(sort, cx);
+            cx.global::<SettingsState>().value.view.sort
+        });
+
+        assert_eq!(stored, sort);
+        assert_eq!(load_settings_from_path(&path).unwrap().view.sort, sort);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2276,6 +2420,9 @@ mod tests {
         assert!(json.contains("\n    \"native_icons\": true"));
         assert!(json.contains("\n    \"show_folder_sizes\": false"));
         assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
+        assert!(
+            json.contains("\n    \"sort\": {\"column\": \"name\", \"direction\": \"descending\"}")
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2989,6 +3136,8 @@ mod tests {
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
         assert_eq!(object["view"]["show_extensions"], true);
+        assert_eq!(object["view"]["sort"]["column"], "name");
+        assert_eq!(object["view"]["sort"]["direction"], "descending");
         assert_eq!(object["show_hidden_files"], true);
         assert!(
             normalized.find("\"app\"").unwrap() < normalized.find("\"future_option\"").unwrap()
@@ -3049,6 +3198,41 @@ mod tests {
         assert_eq!(document["future_option"]["z"], 1);
         assert_eq!(document["view"]["future_view"], 7);
         assert_eq!(document["view"]["mode"], "large_icons");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn file_sort_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("file-sort-preserve-unknown").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"view":{"future_view":7,"sort":{"column":"name","direction":"descending","future_sort":9}}}"#,
+        )
+        .unwrap();
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        cx.set_global(SettingsState {
+            value: loaded.value,
+            document: loaded.document,
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| {
+            set_file_sort(
+                FileSortSettings {
+                    column: FileSortColumn::Size,
+                    direction: SortDirection::Ascending,
+                },
+                cx,
+            )
+        });
+
+        let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["view"]["future_view"], 7);
+        assert_eq!(document["view"]["sort"]["future_sort"], 9);
+        assert_eq!(document["view"]["sort"]["column"], "size");
+        assert_eq!(document["view"]["sort"]["direction"], "ascending");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     explorer::{entry::FileEntry, view::ExplorerView},
-    settings::{ExplorerSettings, SettingsState},
+    settings::{ExplorerSettings, FileSortColumn, FileSortSettings, SettingsState, SortDirection},
 };
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -32,6 +32,7 @@ pub(super) fn selected_names(view: &ExplorerView) -> Vec<String> {
 
 pub(super) fn test_view_with_entries(names: &[&str]) -> ExplorerView {
     let mut view = ExplorerView::new(PathBuf::from("selection"));
+    view.file_sort = test_file_sort();
     view.entries = names
         .iter()
         .map(|name| FileEntry::test(name, false, Some(1), None))
@@ -58,12 +59,21 @@ pub(super) fn test_view_entity_at_path<'a>(
     cx: &'a mut TestAppContext,
     path: PathBuf,
 ) -> (Entity<ExplorerView>, &'a mut VisualTestContext) {
-    cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+    let mut settings = ExplorerSettings::default();
+    settings.view.sort = test_file_sort();
+    cx.set_global(SettingsState::for_test(settings));
     cx.add_window_view(move |window, cx| {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
         ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
     })
+}
+
+fn test_file_sort() -> FileSortSettings {
+    FileSortSettings {
+        column: FileSortColumn::Name,
+        direction: SortDirection::Ascending,
+    }
 }
 
 pub(super) struct TempDir {

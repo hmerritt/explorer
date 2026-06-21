@@ -42,6 +42,13 @@ const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static COPY_PARALLELISM_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
+fn name_ascending_sort() -> crate::settings::FileSortSettings {
+    crate::settings::FileSortSettings {
+        column: crate::settings::FileSortColumn::Name,
+        direction: crate::settings::SortDirection::Ascending,
+    }
+}
+
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
     let downloads_dir = user_downloads_dir(home_dir.as_deref());
@@ -648,7 +655,7 @@ fn load_entries_with_options(
     );
 
     let sort_started = Instant::now();
-    sort_entries(&mut entries);
+    sort_entries(&mut entries, name_ascending_sort());
     crate::debug_options::log_nav_timing(
         sort_started.elapsed(),
         format_args!("load_entries.sort path={path:?} entries={}", entries.len()),
@@ -772,7 +779,7 @@ fn load_applications_entries(
     );
 
     let sort_started = Instant::now();
-    sort_entries(&mut entries);
+    sort_entries(&mut entries, name_ascending_sort());
     crate::debug_options::log_nav_timing(
         sort_started.elapsed(),
         format_args!(

@@ -41,6 +41,7 @@ use crate::explorer::{
         RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
         RecursiveSearchProgressSnapshot, recursive_search_entries,
     },
+    sorting::sort_entries,
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
         scroll_offset_for_cursor,
@@ -246,13 +247,17 @@ impl ExplorerView {
         selected_paths: &[std::path::PathBuf],
     ) {
         self.search.recursive_results_active = false;
+        self.recursive_file_sort_override = None;
         self.entries = filtered_entries(&self.all_entries, &self.search.content);
+        sort_entries(&mut self.entries, self.file_sort);
         self.restore_selection_from_paths(selected_paths);
     }
 
     fn restore_normal_entries_preserving_selection(&mut self, selected_paths: &[PathBuf]) {
         self.search.recursive_results_active = false;
+        self.recursive_file_sort_override = None;
         self.entries = self.all_entries.clone();
+        sort_entries(&mut self.entries, self.file_sort);
         self.restore_selection_from_paths(selected_paths);
     }
 
@@ -762,6 +767,7 @@ impl ExplorerView {
                 .map(|cache| cache.paths.len())
                 .filter(|count| *count > 0),
         );
+        self.recursive_file_sort_override = None;
         recursive_search_timing!(
             generation,
             cache_clone_started.elapsed(),
@@ -849,6 +855,7 @@ impl ExplorerView {
         self.search.recursive_cancel = None;
         self.search.recursive_task = None;
         self.search.recursive_results_active = true;
+        self.recursive_file_sort_override = None;
         self.search.recursive_cache = Some(RecursiveSearchCache {
             root: output.root,
             show_hidden_files: output.show_hidden_files,
@@ -871,6 +878,7 @@ impl ExplorerView {
         self.search.recursive_status = RecursiveSearchStatus::Idle;
         self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(None);
         self.search.recursive_results_active = false;
+        self.recursive_file_sort_override = None;
     }
 
     fn update_recursive_search_progress(
