@@ -1514,7 +1514,7 @@ mod tests {
         AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, MouseDownEvent,
         MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
     };
-    use std::fs;
+    use std::{fs, io::Write};
 
     #[test]
     fn tab_icon_font_remains_dedicated() {
@@ -1596,6 +1596,17 @@ mod tests {
             ExplorerTabs::new_for_test(path, focus_handle, cx)
         });
         (temp, tabs, cx)
+    }
+
+    fn create_zip_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).expect("create zip archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default();
+        for (name, contents) in entries {
+            writer.start_file(*name, options).expect("start zip file");
+            writer.write_all(contents).expect("write zip file");
+        }
+        writer.finish().expect("finish zip archive");
     }
 
     fn active_test_view(
@@ -2378,6 +2389,35 @@ mod tests {
                 app.read_from_clipboard().and_then(|item| item.text()),
                 Some(expected)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn archive_context_menu_extract_extracts_selected_archive(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = active_test_view(&tabs, cx);
+        let archive = temp.path().join("archive.zip");
+        create_zip_archive(&archive, &[("inside.txt", b"archive contents")]);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.reload_with_entry_metadata_resolution(cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        right_click_entry_other_column(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-extract");
+        cx.run_until_parked();
+
+        assert_eq!(
+            fs::read(temp.path().join("inside.txt")).unwrap(),
+            b"archive contents"
+        );
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["archive.zip"]);
+            assert!(view.context_menu.is_none());
         });
     }
 

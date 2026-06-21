@@ -11,6 +11,7 @@ use gpui::{ClipboardItem, Context, Pixels, Point, Window};
 use crate::explorer::{
     DirectoryKind,
     entry::FileEntry,
+    filesystem::archive_path_is_supported,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
     view::ExplorerView,
@@ -73,6 +74,7 @@ pub(super) enum ContextMenuIcon {
     Rename,
     New,
     Properties,
+    Extract,
     File,
     NativeFile,
     Folder,
@@ -112,6 +114,7 @@ pub(super) enum ContextMenuCommand {
         path: PathBuf,
     },
     Paste,
+    ExtractSelectedArchives,
     DeleteSelected,
     RenameSelected,
     PropertiesSelected,
@@ -376,6 +379,7 @@ impl ExplorerView {
                 self.open_error = None;
             }
             ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
+            ContextMenuCommand::ExtractSelectedArchives => self.extract_selected_archives(cx),
             ContextMenuCommand::DeleteSelected => self.trash_selected_paths(cx),
             ContextMenuCommand::RenameSelected => {
                 self.start_rename_selected(window, cx);
@@ -738,6 +742,16 @@ fn entry_context_menu_items_with_custom(
         });
     }
 
+    if selected_entries_are_supported_archives(selected_entries) {
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-entry-extract".to_owned(),
+            icon: Some(ContextMenuIcon::Extract),
+            label: "Extract".to_owned(),
+            command: ContextMenuCommand::ExtractSelectedArchives,
+            enabled: true,
+        });
+    }
+
     if !items.is_empty() {
         items.push(ContextMenuItem::Separator);
     }
@@ -807,6 +821,13 @@ fn entry_context_menu_items_with_custom(
 
 fn entry_is_file_open_target(entry: &FileEntry) -> bool {
     !entry.is_directory_like() || entry.is_app_bundle()
+}
+
+fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bool {
+    !selected_entries.is_empty()
+        && selected_entries
+            .iter()
+            .all(|entry| entry.is_open_with_target() && archive_path_is_supported(&entry.path))
 }
 
 fn folder_context_menu_items_with_custom(
@@ -1208,6 +1229,51 @@ mod tests {
             }
             ContextMenuItem::Separator | ContextMenuItem::Detail { .. } => false,
         })
+    }
+
+    fn menu_extract_count(items: &[ContextMenuItem]) -> usize {
+        items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ContextMenuItem::Action {
+                        command: ContextMenuCommand::ExtractSelectedArchives,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn entry_menu_for_selected_entries(selected_entries: Vec<FileEntry>) -> Vec<ContextMenuItem> {
+        let targets = selected_entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        let selected_file_count = selected_entries
+            .iter()
+            .filter(|entry| entry_is_file_open_target(entry))
+            .count();
+        let selected_directory_count = selected_entries
+            .iter()
+            .filter(|entry| directory_new_tab_target(entry).is_some())
+            .count();
+        let single_directory_open_target = (selected_entries.len() == 1)
+            .then(|| directory_new_tab_target(&selected_entries[0]))
+            .flatten();
+
+        entry_context_menu_items_with_custom(
+            single_directory_open_target,
+            selected_entries.len(),
+            selected_file_count,
+            selected_directory_count,
+            false,
+            false,
+            &[],
+            &targets,
+            &selected_entries,
+        )
     }
 
     fn custom_menu_for_entries(
@@ -1863,6 +1929,84 @@ mod tests {
             ],
         );
         assert!(!menu_has_label(&multi_items, "Open with"));
+    }
+
+    #[test]
+    fn entry_menu_for_single_archive_shows_extract_before_first_separator() {
+        let archive = FileEntry::test("archive.zip", false, Some(1), None);
+        let items = entry_menu_for_selected_entries(vec![archive]);
+
+        let extract_index = items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    ContextMenuItem::Action {
+                        command: ContextMenuCommand::ExtractSelectedArchives,
+                        ..
+                    }
+                )
+            })
+            .expect("extract action");
+        let first_separator = items
+            .iter()
+            .position(|item| matches!(item, ContextMenuItem::Separator))
+            .expect("first separator");
+
+        assert!(extract_index < first_separator);
+        assert!(matches!(
+            items.get(extract_index),
+            Some(ContextMenuItem::Action {
+                id,
+                icon: Some(ContextMenuIcon::Extract),
+                label,
+                command: ContextMenuCommand::ExtractSelectedArchives,
+                enabled: true,
+            }) if id == "context-menu-entry-extract" && label == "Extract"
+        ));
+    }
+
+    #[test]
+    fn entry_menu_for_multiple_archives_shows_one_extract_action() {
+        let items = entry_menu_for_selected_entries(vec![
+            FileEntry::test("archive.zip", false, Some(1), None),
+            FileEntry::test("package.tar.gz", false, Some(1), None),
+        ]);
+
+        assert_eq!(menu_extract_count(&items), 1);
+        assert!(matches!(
+            items.get(1),
+            Some(ContextMenuItem::Action {
+                id,
+                icon: Some(ContextMenuIcon::Extract),
+                label,
+                command: ContextMenuCommand::ExtractSelectedArchives,
+                enabled: true,
+            }) if id == "context-menu-entry-extract" && label == "Extract"
+        ));
+    }
+
+    #[test]
+    fn entry_menu_omits_extract_for_non_archive_mixed_folder_and_empty_selection() {
+        let archive = FileEntry::test("archive.zip", false, Some(1), None);
+        let text = FileEntry::test("notes.txt", false, Some(1), None);
+        let folder = FileEntry::test("folder.zip", true, None, None);
+
+        assert_eq!(
+            menu_extract_count(&entry_menu_for_selected_entries(vec![
+                archive.clone(),
+                text
+            ])),
+            0
+        );
+        assert_eq!(
+            menu_extract_count(&entry_menu_for_selected_entries(vec![archive, folder])),
+            0
+        );
+        assert_eq!(
+            menu_extract_count(&entry_menu_for_selected_entries(Vec::new())),
+            0
+        );
     }
 
     #[cfg(target_os = "macos")]

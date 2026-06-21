@@ -3824,6 +3824,10 @@ fn context_menu_icon_element(
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
+        ContextMenuIcon::Extract => gpui::img(EXTRACT_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
         ContextMenuIcon::File => file_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
         ContextMenuIcon::NativeFile => native_file_icon
             .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
