@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     ffi::OsStr,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
@@ -16,20 +15,26 @@ use filetime::FileTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::explorer::filesystem::{
     FileOperationPhase, FileOperationProgress, paths_are_on_same_volume, preserve_file_metadata,
     replace_destination_with_temp,
 };
 
-pub(super) const RESUMABLE_COPY_BLOCK_SIZE: usize = 1024 * 1024;
-
 const JOURNAL_VERSION: u32 = 1;
-const LITERAL_FLUSH_SIZE: usize = 64 * 1024;
+pub(super) const RSYNC_MIN_BLOCK_SIZE: usize = 700;
+const RSYNC_MAX_BLOCK_SIZE: usize = 128 * 1024;
+const RSYNC_WRITE_SIZE: usize = 32 * 1024;
+const RSYNC_CHUNK_SIZE: usize = 32 * 1024;
+const RSYNC_MAX_MAP_SIZE: usize = 256 * 1024;
+const RSYNC_IO_BUFFER_SIZE: usize = 32 * 1024;
+const RSYNC_CHECKSUM_SEED: u64 = 0;
+const RSYNC_CHAR_OFFSET: u32 = 0;
+const TRADITIONAL_SIGNATURE_TABLE_SIZE: usize = 1 << 16;
+const LITERAL_FLUSH_SIZE: usize = RSYNC_CHUNK_SIZE;
 const PARALLEL_COPY_CHUNK_SIZE: usize = 4 * 1024 * 1024;
-const PARALLEL_COPY_THRESHOLD: u64 = 8 * 1024 * 1024;
 const PARALLEL_COPY_PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const VERIFICATION_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const PARALLEL_VERIFICATION_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -99,7 +104,15 @@ struct SidecarPaths {
 struct BlockSignature {
     offset: u64,
     len: usize,
-    strong: [u8; 32],
+    weak: u32,
+    strong: u64,
+    chain: isize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SignatureTable {
+    signatures: Vec<BlockSignature>,
+    buckets: Vec<isize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -128,7 +141,7 @@ impl RollingChecksum {
         let mut b = 0u32;
 
         for (index, byte) in bytes.iter().enumerate() {
-            let value = u32::from(*byte);
+            let value = u32::from(*byte) + RSYNC_CHAR_OFFSET;
             a = (a + value) & 0xffff;
             b = (b + ((len - index) as u32 * value)) & 0xffff;
         }
@@ -137,8 +150,8 @@ impl RollingChecksum {
     }
 
     fn roll(&mut self, removed: u8, added: u8) {
-        let removed = u32::from(removed);
-        let added = u32::from(added);
+        let removed = u32::from(removed) + RSYNC_CHAR_OFFSET;
+        let added = u32::from(added) + RSYNC_CHAR_OFFSET;
 
         self.a = (self.a + 0x1_0000 - removed + added) & 0xffff;
         self.b = (self.b + 0x1_0000 - ((self.len as u32 * removed) & 0xffff) + self.a) & 0xffff;
@@ -149,6 +162,112 @@ impl RollingChecksum {
     }
 }
 
+impl SignatureTable {
+    fn new(mut signatures: Vec<BlockSignature>) -> Self {
+        if signatures.is_empty() {
+            return Self::default();
+        }
+
+        let mut table_size = (signatures.len() / 8) * 10 + 11;
+        table_size = table_size.max(TRADITIONAL_SIGNATURE_TABLE_SIZE);
+        let mut buckets = vec![-1; table_size];
+
+        for index in 0..signatures.len() {
+            let bucket = signature_bucket_for_size(signatures[index].weak, table_size);
+            signatures[index].chain = buckets[bucket];
+            buckets[bucket] = index as isize;
+        }
+
+        Self {
+            signatures,
+            buckets,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.signatures.is_empty()
+    }
+
+    fn has_candidate(&self, weak: u32, len: usize) -> bool {
+        let mut index = self.first_candidate_index(weak);
+        while index >= 0 {
+            let signature = &self.signatures[index as usize];
+            if signature.weak == weak && signature.len == len {
+                return true;
+            }
+            index = signature.chain;
+        }
+        false
+    }
+
+    fn match_bytes(&self, bytes: &[u8], weak: u32) -> Option<BlockSignature> {
+        let strong = strong_hash(bytes);
+        let mut index = self.first_candidate_index(weak);
+        while index >= 0 {
+            let signature = &self.signatures[index as usize];
+            if signature.weak == weak && signature.len == bytes.len() && signature.strong == strong
+            {
+                return Some(signature.clone());
+            }
+            index = signature.chain;
+        }
+        None
+    }
+
+    fn first_candidate_index(&self, weak: u32) -> isize {
+        if self.buckets.is_empty() {
+            return -1;
+        }
+
+        self.buckets[signature_bucket_for_size(weak, self.buckets.len())]
+    }
+}
+
+fn signature_bucket_for_size(weak: u32, table_size: usize) -> usize {
+    if table_size == TRADITIONAL_SIGNATURE_TABLE_SIZE {
+        let s1 = weak & 0xffff;
+        let s2 = weak >> 16;
+        ((s1 + s2) & 0xffff) as usize
+    } else {
+        weak as usize % table_size
+    }
+}
+
+fn rsync_block_size(file_len: u64) -> usize {
+    let min = RSYNC_MIN_BLOCK_SIZE as u64;
+    let max = RSYNC_MAX_BLOCK_SIZE as u64;
+    if file_len <= min.saturating_mul(min) {
+        return RSYNC_MIN_BLOCK_SIZE;
+    }
+
+    let mut c = 1u64;
+    let mut len = file_len;
+    loop {
+        len >>= 2;
+        if len == 0 {
+            break;
+        }
+        c = match c.checked_shl(1) {
+            Some(next) => next,
+            None => return RSYNC_MAX_BLOCK_SIZE,
+        };
+        if c >= max {
+            return RSYNC_MAX_BLOCK_SIZE;
+        }
+    }
+
+    let mut block_size = 0u64;
+    while c >= 8 {
+        block_size |= c;
+        if file_len < block_size.saturating_mul(block_size) {
+            block_size &= !c;
+        }
+        c >>= 1;
+    }
+
+    block_size.clamp(min, max) as usize
+}
+
 struct BufferedByteReader {
     file: File,
     buffer: Vec<u8>,
@@ -157,10 +276,11 @@ struct BufferedByteReader {
 }
 
 impl BufferedByteReader {
-    fn new(file: File) -> Self {
+    fn new(file: File, block_size: usize) -> Self {
+        let buffer_size = block_size.clamp(RSYNC_IO_BUFFER_SIZE, RSYNC_MAX_MAP_SIZE);
         Self {
             file,
-            buffer: vec![0; RESUMABLE_COPY_BLOCK_SIZE],
+            buffer: vec![0; buffer_size],
             position: 0,
             filled: 0,
         }
@@ -269,10 +389,11 @@ pub(super) fn copy_with_delta_progress_with_options(
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
 ) -> io::Result<()> {
+    let source_len = fs::metadata(source)?.len();
     copy_with_delta_progress_impl(
         source,
         destination,
-        RESUMABLE_COPY_BLOCK_SIZE,
+        rsync_block_size(source_len),
         cancel,
         progress,
         on_progress,
@@ -375,40 +496,62 @@ fn copy_with_delta_progress_impl(
     }
     write_journal(&sidecars.journal, &identity.journal)?;
 
-    let basis = if journal_matches {
+    let resume_partial = if journal_matches {
         previous_partial_path(&sidecars)?
     } else {
         None
-    }
-    .or_else(|| destination.is_file().then(|| destination.to_path_buf()));
+    };
+    let basis = if resume_partial.is_none() {
+        destination.is_file().then(|| destination.to_path_buf())
+    } else {
+        None
+    };
 
-    let should_verify_after_write = options.durability == CopyDurability::Safe || basis.is_some();
+    let should_verify_after_write =
+        options.durability == CopyDurability::Safe || basis.is_some() || resume_partial.is_some();
     if should_verify_after_write {
         progress.reserve_work_bytes(source_len);
     }
 
-    let stats = match write_delta_scratch(
-        source,
-        basis.as_deref(),
-        &sidecars.next,
-        source_len,
-        block_size,
-        cancel,
-        progress,
-        on_progress,
-        options,
-    ) {
-        Ok(stats) => stats,
-        Err(error) => {
-            preserve_scratch_as_partial(&sidecars);
-            return Err(error);
+    let stats = if let Some(partial) = resume_partial.as_deref() {
+        progress.phase = FileOperationPhase::Copying;
+        progress.current_item = Some(source.to_path_buf());
+        on_progress(progress.clone());
+
+        let valid_prefix = validate_partial_prefix(source, partial, source_len, cancel)?;
+        seed_resume_progress(valid_prefix, progress, on_progress);
+        append_source_remainder_to_partial(
+            source,
+            partial,
+            source_len,
+            valid_prefix,
+            cancel,
+            progress,
+            on_progress,
+            options,
+        )?;
+        DeltaCopyStats {
+            reused_blocks: 0,
+            literal_bytes: source_len.saturating_sub(valid_prefix),
         }
+    } else {
+        write_delta_scratch(
+            source,
+            basis.as_deref(),
+            &sidecars.partial,
+            source_len,
+            block_size,
+            cancel,
+            progress,
+            on_progress,
+            options,
+        )?
     };
 
     if should_verify_after_write || stats.literal_bytes != source_len || stats.reused_blocks != 0 {
         let verify_result = verify_and_repair(
             source,
-            &sidecars.next,
+            &sidecars.partial,
             source_len,
             block_size,
             cancel,
@@ -418,13 +561,12 @@ fn copy_with_delta_progress_impl(
         );
 
         if let Err(error) = verify_result {
-            preserve_scratch_as_partial(&sidecars);
             return Err(error);
         }
     }
 
-    preserve_file_metadata(&metadata, &sidecars.next)?;
-    replace_destination_with_temp(&sidecars.next, destination)?;
+    preserve_file_metadata(&metadata, &sidecars.partial)?;
+    replace_destination_with_temp(&sidecars.partial, destination)?;
     if options.should_sync() {
         sync_parent_directory(destination);
     }
@@ -593,6 +735,7 @@ fn write_journal(path: &Path, journal: &CopyJournal) -> io::Result<()> {
 
 fn previous_partial_path(sidecars: &SidecarPaths) -> io::Result<Option<PathBuf>> {
     if sidecars.partial.is_file() {
+        remove_sidecar_file(&sidecars.next);
         return Ok(Some(sidecars.partial.clone()));
     }
 
@@ -602,6 +745,118 @@ fn previous_partial_path(sidecars: &SidecarPaths) -> io::Result<Option<PathBuf>>
     }
 
     Ok(None)
+}
+
+fn validate_partial_prefix(
+    source: &Path,
+    partial: &Path,
+    source_len: u64,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<u64> {
+    let mut source_file = File::open(source)?;
+    let mut partial_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(partial)?;
+    let partial_len = partial_file.metadata()?.len();
+    let compare_len = partial_len.min(source_len);
+    let mut source_buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
+    let mut partial_buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
+    let mut valid_prefix = 0u64;
+
+    while valid_prefix < compare_len {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_error());
+        }
+
+        let read_len = (compare_len - valid_prefix).min(source_buffer.len() as u64) as usize;
+        source_file.read_exact(&mut source_buffer[..read_len])?;
+        partial_file.read_exact(&mut partial_buffer[..read_len])?;
+
+        if source_buffer[..read_len] != partial_buffer[..read_len] {
+            let matching = source_buffer[..read_len]
+                .iter()
+                .zip(&partial_buffer[..read_len])
+                .take_while(|(source, partial)| source == partial)
+                .count() as u64;
+            valid_prefix = valid_prefix.saturating_add(matching);
+            partial_file.set_len(valid_prefix)?;
+            return Ok(valid_prefix);
+        }
+
+        valid_prefix = valid_prefix.saturating_add(read_len as u64);
+    }
+
+    if partial_len != valid_prefix {
+        partial_file.set_len(valid_prefix)?;
+    }
+    Ok(valid_prefix)
+}
+
+fn seed_resume_progress(
+    bytes: u64,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) {
+    if bytes == 0 {
+        return;
+    }
+
+    progress.add_copied_bytes(bytes);
+    on_progress(progress.clone());
+}
+
+fn append_source_remainder_to_partial(
+    source: &Path,
+    partial: &Path,
+    source_len: u64,
+    start_offset: u64,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
+) -> io::Result<()> {
+    let mut source_file = File::open(source)?;
+    source_file.seek(SeekFrom::Start(start_offset))?;
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(partial)?;
+    output.set_len(start_offset)?;
+    output.seek(SeekFrom::Start(start_offset))?;
+
+    let mut offset = start_offset;
+    let mut buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
+    while offset < source_len {
+        if cancel.load(Ordering::Relaxed) {
+            if options.should_sync() {
+                let _ = output.sync_all();
+            }
+            return Err(cancelled_error());
+        }
+
+        let read_len = (source_len - offset).min(buffer.len() as u64) as usize;
+        let read = source_file.read(&mut buffer[..read_len])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source ended before resumable copy completed",
+            ));
+        }
+
+        output.write_all(&buffer[..read])?;
+        let written = read as u64;
+        offset = offset.saturating_add(written);
+        progress.add_copied_bytes(written);
+        on_progress(progress.clone());
+    }
+
+    output.set_len(source_len)?;
+    if options.should_sync() {
+        output.sync_all()?;
+    }
+    Ok(())
 }
 
 fn write_delta_scratch(
@@ -625,7 +880,7 @@ fn write_delta_scratch(
         on_progress(progress.clone());
         build_basis_signatures(basis, block_size, cancel)?
     } else {
-        HashMap::new()
+        SignatureTable::default()
     };
 
     progress.phase = FileOperationPhase::Copying;
@@ -645,7 +900,6 @@ fn write_delta_scratch(
         &signatures,
         basis_file.as_mut(),
         &mut output,
-        source_len,
         block_size,
         cancel,
         progress,
@@ -670,7 +924,7 @@ fn build_basis_signatures(
     basis: &Path,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
-) -> io::Result<HashMap<u32, Vec<BlockSignature>>> {
+) -> io::Result<SignatureTable> {
     let file = Arc::new(File::open(basis)?);
     let len = file.metadata()?.len();
     let block_size_u64 = block_size as u64;
@@ -687,35 +941,28 @@ fn build_basis_signatures(
             let mut buffer = vec![0; read_len];
             read_exact_at(&file, offset, &mut buffer)?;
             let weak = RollingChecksum::new(&buffer).value();
-            Ok((
+            Ok(BlockSignature {
+                offset,
+                len: read_len,
                 weak,
-                BlockSignature {
-                    offset,
-                    len: read_len,
-                    strong: strong_hash(&buffer),
-                },
-            ))
+                strong: strong_hash(&buffer),
+                chain: -1,
+            })
         })
         .collect::<io::Result<Vec<_>>>()?;
 
-    let mut by_weak = HashMap::with_capacity(signatures.len());
-    for (weak, signature) in signatures {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(cancelled_error());
-        }
-
-        by_weak.entry(weak).or_insert_with(Vec::new).push(signature);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled_error());
     }
 
-    Ok(by_weak)
+    Ok(SignatureTable::new(signatures))
 }
 
 fn scan_source_to_output(
     source: &Path,
-    signatures: &HashMap<u32, Vec<BlockSignature>>,
+    signatures: &SignatureTable,
     mut basis_file: Option<&mut File>,
     output: &mut File,
-    source_len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
@@ -723,18 +970,10 @@ fn scan_source_to_output(
     stats: &mut DeltaCopyStats,
 ) -> io::Result<()> {
     if signatures.is_empty() {
-        return copy_source_literals_buffered(
-            source,
-            output,
-            source_len,
-            cancel,
-            progress,
-            on_progress,
-            stats,
-        );
+        return copy_source_literals_buffered(source, output, cancel, progress, on_progress, stats);
     }
 
-    let mut source = BufferedByteReader::new(File::open(source)?);
+    let mut source = BufferedByteReader::new(File::open(source)?, block_size);
     let mut window = RollingWindow::new(block_size);
     let mut pending_literal = Vec::with_capacity(LITERAL_FLUSH_SIZE);
     fill_window(&mut source, &mut window, block_size)?;
@@ -798,23 +1037,13 @@ fn scan_source_to_output(
 fn copy_source_literals_buffered(
     source: &Path,
     output: &mut File,
-    source_len: u64,
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     stats: &mut DeltaCopyStats,
 ) -> io::Result<()> {
-    if source_len >= PARALLEL_COPY_THRESHOLD {
-        copy_file_contents_parallel_with_progress(source, output, source_len, cancel, |bytes| {
-            stats.literal_bytes = stats.literal_bytes.saturating_add(bytes);
-            progress.add_copied_bytes(bytes);
-            on_progress(progress.clone());
-        })?;
-        return Ok(());
-    }
-
     let mut source = File::open(source)?;
-    let mut buffer = vec![0; RESUMABLE_COPY_BLOCK_SIZE];
+    let mut buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -852,25 +1081,22 @@ fn fill_window(
 
 fn matching_signature(
     window: &RollingWindow,
-    signatures: &HashMap<u32, Vec<BlockSignature>>,
+    signatures: &SignatureTable,
     weak: u32,
 ) -> Option<BlockSignature> {
-    signatures.get(&weak)?;
+    if !signatures.has_candidate(weak, window.len()) {
+        return None;
+    }
     let bytes = window.to_vec();
     matching_signature_bytes(&bytes, signatures, weak)
 }
 
 fn matching_signature_bytes(
     bytes: &[u8],
-    signatures: &HashMap<u32, Vec<BlockSignature>>,
+    signatures: &SignatureTable,
     weak: u32,
 ) -> Option<BlockSignature> {
-    let candidates = signatures.get(&weak)?;
-    let strong = strong_hash(bytes);
-    candidates
-        .iter()
-        .find(|signature| signature.len == bytes.len() && signature.strong == strong)
-        .cloned()
+    signatures.match_bytes(bytes, weak)
 }
 
 fn flush_literal(
@@ -901,7 +1127,7 @@ fn copy_basis_block(
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> io::Result<()> {
     let mut remaining = signature.len;
-    let mut buffer = vec![0; remaining.min(64 * 1024)];
+    let mut buffer = vec![0; remaining.min(RSYNC_WRITE_SIZE)];
     let mut offset = signature.offset;
     while remaining > 0 {
         let read_len = remaining.min(buffer.len());
@@ -1020,9 +1246,10 @@ fn verify_repair_pass_sequential(
         .read(true)
         .write(true)
         .open(scratch)?;
-    let chunk_size = verification_chunk_size(block_size);
-    let mut source_block = vec![0; chunk_size];
-    let mut scratch_block = vec![0; chunk_size];
+    let block_size = verification_chunk_size(block_size);
+    let batch_size = verification_batch_size(block_size);
+    let mut source_block = vec![0; batch_size];
+    let mut scratch_block = vec![0; batch_size];
     let mut repaired = Vec::new();
     let mut offset = 0u64;
 
@@ -1031,15 +1258,26 @@ fn verify_repair_pass_sequential(
             return Err(cancelled_error());
         }
 
-        let len = (source_len - offset).min(chunk_size as u64) as usize;
+        let len = (source_len - offset).min(batch_size as u64) as usize;
         source.read_exact(&mut source_block[..len])?;
         scratch_file.seek(SeekFrom::Start(offset))?;
         let scratch_read = read_exact_or_short(&mut scratch_file, &mut scratch_block[..len])?;
-        let matches = scratch_read == len && source_block[..len] == scratch_block[..scratch_read];
-        if !matches {
-            write_all_at(&scratch_file, offset, &source_block[..len])?;
-            repaired.push((offset, len));
+
+        let mut batch_offset = 0usize;
+        while batch_offset < len {
+            let block_len = (len - batch_offset).min(block_size);
+            let block_range = batch_offset..batch_offset + block_len;
+            let scratch_has_block = scratch_read >= block_range.end;
+            let matches = scratch_has_block
+                && source_block[block_range.clone()] == scratch_block[block_range.clone()];
+            if !matches {
+                let repair_offset = offset.saturating_add(batch_offset as u64);
+                write_all_at(&scratch_file, repair_offset, &source_block[block_range])?;
+                repaired.push((repair_offset, block_len));
+            }
+            batch_offset += block_len;
         }
+
         on_chunk_verified(len as u64);
         offset = offset.saturating_add(len as u64);
     }
@@ -1104,31 +1342,44 @@ fn verify_repair_pass_impl(
             .write(true)
             .open(scratch)?,
     );
-    let chunk_size = verification_chunk_size(block_size);
-    let chunk_size_u64 = chunk_size as u64;
-    let chunk_count = source_len.div_ceil(chunk_size_u64);
+    let block_size = verification_chunk_size(block_size);
+    let batch_size = verification_batch_size(block_size);
+    let batch_size_u64 = batch_size as u64;
+    let batch_count = source_len.div_ceil(batch_size_u64);
     let repaired = Mutex::new(Vec::new());
 
-    (0..chunk_count).into_par_iter().try_for_each_init(
-        || (vec![0; chunk_size], vec![0; chunk_size]),
-        |(source_block, scratch_block), block_index| {
+    (0..batch_count).into_par_iter().try_for_each_init(
+        || (vec![0; batch_size], vec![0; batch_size]),
+        |(source_block, scratch_block), batch_index| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
-            let offset = block_index.saturating_mul(chunk_size_u64);
-            let len = (source_len - offset).min(chunk_size_u64) as usize;
+            let offset = batch_index.saturating_mul(batch_size_u64);
+            let len = (source_len - offset).min(batch_size_u64) as usize;
             read_exact_at(&source, offset, &mut source_block[..len])?;
             let scratch_read = read_at_or_eof(&scratch_file, offset, &mut scratch_block[..len])?;
 
-            let matches =
-                scratch_read == len && source_block[..len] == scratch_block[..scratch_read];
-            if !matches {
-                write_all_at(&scratch_file, offset, &source_block[..len])?;
+            let mut batch_repaired = Vec::new();
+            let mut batch_offset = 0usize;
+            while batch_offset < len {
+                let block_len = (len - batch_offset).min(block_size);
+                let block_range = batch_offset..batch_offset + block_len;
+                let scratch_has_block = scratch_read >= block_range.end;
+                let matches = scratch_has_block
+                    && source_block[block_range.clone()] == scratch_block[block_range.clone()];
+                if !matches {
+                    let repair_offset = offset.saturating_add(batch_offset as u64);
+                    write_all_at(&scratch_file, repair_offset, &source_block[block_range])?;
+                    batch_repaired.push((repair_offset, block_len));
+                }
+                batch_offset += block_len;
+            }
+            if !batch_repaired.is_empty() {
                 repaired
                     .lock()
                     .map_err(|_| io::Error::other("verification state poisoned"))?
-                    .push((offset, len));
+                    .extend(batch_repaired);
             }
             let _ = progress_tx.send(len as u64);
 
@@ -1268,7 +1519,12 @@ fn verification_strategy(source: &Path, destination: &Path, len: u64) -> Verific
 }
 
 fn verification_chunk_size(block_size: usize) -> usize {
-    block_size.max(VERIFICATION_CHUNK_SIZE)
+    block_size.clamp(1, RSYNC_MAX_BLOCK_SIZE)
+}
+
+fn verification_batch_size(block_size: usize) -> usize {
+    let blocks_per_batch = (RSYNC_MAX_MAP_SIZE / block_size).max(1);
+    block_size.saturating_mul(blocks_per_batch)
 }
 
 fn files_equal_with_progress(
@@ -1313,9 +1569,10 @@ fn files_equal_sequential(
 
     let mut source = File::open(source)?;
     let mut destination = File::open(destination)?;
-    let chunk_size = verification_chunk_size(block_size);
-    let mut source_block = vec![0; chunk_size];
-    let mut destination_block = vec![0; chunk_size];
+    let block_size = verification_chunk_size(block_size);
+    let batch_size = verification_batch_size(block_size);
+    let mut source_block = vec![0; batch_size];
+    let mut destination_block = vec![0; batch_size];
     let mut offset = 0u64;
 
     while offset < len {
@@ -1323,7 +1580,7 @@ fn files_equal_sequential(
             return Err(cancelled_error());
         }
 
-        let read_len = (len - offset).min(chunk_size as u64) as usize;
+        let read_len = (len - offset).min(batch_size as u64) as usize;
         source.read_exact(&mut source_block[..read_len])?;
         destination.read_exact(&mut destination_block[..read_len])?;
         if source_block[..read_len] != destination_block[..read_len] {
@@ -1393,14 +1650,15 @@ fn files_equal_parallel_impl(
 
     let source = Arc::new(File::open(source)?);
     let destination = Arc::new(File::open(destination)?);
-    let chunk_size = verification_chunk_size(block_size);
-    let chunk_size_u64 = chunk_size as u64;
-    let chunk_count = len.div_ceil(chunk_size_u64);
+    let block_size = verification_chunk_size(block_size);
+    let batch_size = verification_batch_size(block_size);
+    let batch_size_u64 = batch_size as u64;
+    let batch_count = len.div_ceil(batch_size_u64);
     let equal = std::sync::atomic::AtomicBool::new(true);
 
-    (0..chunk_count).into_par_iter().try_for_each_init(
-        || (vec![0; chunk_size], vec![0; chunk_size]),
-        |(source_block, destination_block), block_index| {
+    (0..batch_count).into_par_iter().try_for_each_init(
+        || (vec![0; batch_size], vec![0; batch_size]),
+        |(source_block, destination_block), batch_index| {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
@@ -1408,8 +1666,8 @@ fn files_equal_parallel_impl(
                 return Ok(());
             }
 
-            let offset = block_index.saturating_mul(chunk_size_u64);
-            let read_len = (len - offset).min(chunk_size_u64) as usize;
+            let offset = batch_index.saturating_mul(batch_size_u64);
+            let read_len = (len - offset).min(batch_size_u64) as usize;
             read_exact_at(&source, offset, &mut source_block[..read_len])?;
             read_exact_at(&destination, offset, &mut destination_block[..read_len])?;
             if source_block[..read_len] != destination_block[..read_len] {
@@ -1518,8 +1776,8 @@ fn write_at(file: &File, offset: u64, buffer: &[u8]) -> io::Result<usize> {
     file.seek_write(buffer, offset)
 }
 
-fn strong_hash(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
+fn strong_hash(bytes: &[u8]) -> u64 {
+    xxh3_64_with_seed(bytes, RSYNC_CHECKSUM_SEED)
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
@@ -1528,12 +1786,6 @@ fn hex_hash(bytes: &[u8]) -> String {
         encoded.push_str(&format!("{byte:02x}"));
     }
     encoded
-}
-
-fn preserve_scratch_as_partial(sidecars: &SidecarPaths) {
-    if sidecars.next.is_file() {
-        let _ = replace_sidecar_file(&sidecars.next, &sidecars.partial);
-    }
 }
 
 fn cleanup_sidecars(sidecars: &SidecarPaths) {
@@ -1618,6 +1870,35 @@ mod tests {
     }
 
     #[test]
+    fn rolling_checksum_matches_rsync_weak_checksum_formula() {
+        assert_eq!(RollingChecksum::new(b"abcd").value(), 0x03d4_018a);
+    }
+
+    #[test]
+    fn strong_hash_uses_seeded_xxh3_64() {
+        assert_eq!(strong_hash(b""), 0x2d06_8005_38d3_94c2);
+        assert_eq!(strong_hash(b"same"), strong_hash(b"same"));
+        assert_ne!(strong_hash(b"same"), strong_hash(b"different"));
+    }
+
+    #[test]
+    fn rsync_block_size_matches_default_heuristic() {
+        assert_eq!(rsync_block_size(0), RSYNC_MIN_BLOCK_SIZE);
+        assert_eq!(
+            rsync_block_size((RSYNC_MIN_BLOCK_SIZE * RSYNC_MIN_BLOCK_SIZE) as u64),
+            RSYNC_MIN_BLOCK_SIZE
+        );
+        assert_eq!(rsync_block_size(500_000), 704);
+        assert_eq!(rsync_block_size(1024 * 1024), 1024);
+        assert_eq!(rsync_block_size(1024 * 1024 * 1024), 32 * 1024);
+        assert_eq!(
+            rsync_block_size((RSYNC_MAX_BLOCK_SIZE as u64).pow(2)),
+            RSYNC_MAX_BLOCK_SIZE
+        );
+        assert_eq!(rsync_block_size(u64::MAX), RSYNC_MAX_BLOCK_SIZE);
+    }
+
+    #[test]
     fn signature_matching_reuses_shifted_basis_blocks() {
         let temp = TempDir::new();
         let basis = temp.path().join("basis.bin");
@@ -1649,10 +1930,9 @@ mod tests {
 
         scan_source_to_output(
             &source,
-            &HashMap::new(),
+            &SignatureTable::default(),
             None,
             &mut output,
-            12,
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
@@ -1705,9 +1985,9 @@ mod tests {
         fs::create_dir_all(&scratch_root).expect("create scratch root");
         let source = source_root.join("source.bin");
         let scratch = scratch_root.join("scratch.bin");
-        let data = vec![17; VERIFICATION_CHUNK_SIZE * 2 + 123];
+        let data = vec![17; RSYNC_MAX_BLOCK_SIZE * 2 + 123];
         let mut corrupt = data.clone();
-        corrupt[VERIFICATION_CHUNK_SIZE + 17..VERIFICATION_CHUNK_SIZE + 21].fill(99);
+        corrupt[RSYNC_MAX_BLOCK_SIZE + 17..RSYNC_MAX_BLOCK_SIZE + 21].fill(99);
         fs::write(&source, &data).expect("write source");
         fs::write(&scratch, corrupt).expect("write scratch");
         let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
@@ -1728,6 +2008,42 @@ mod tests {
 
         assert_eq!(fs::read(&scratch).unwrap(), data);
         assert_eq!(progress.verified_bytes, data.len() as u64);
+    }
+
+    #[test]
+    fn verification_repairs_only_the_selected_rsync_block() {
+        let temp = TempDir::new();
+        let source_root = temp.path().join("source");
+        let scratch_root = temp.path().join("scratch");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::create_dir_all(&scratch_root).expect("create scratch root");
+        let source = source_root.join("source.bin");
+        let scratch = scratch_root.join("scratch.bin");
+        let block_size = RSYNC_MIN_BLOCK_SIZE;
+        let data = (0..block_size * 3)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut corrupt = data.clone();
+        corrupt[block_size + 17] ^= 0xff;
+        fs::write(&source, &data).expect("write source");
+        fs::write(&scratch, corrupt).expect("write scratch");
+        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
+        let _scratch_volume = set_test_path_volume_key(&scratch_root, Some("scratch-volume"));
+        let mut verified = 0;
+
+        let repaired = verify_repair_pass(
+            &source,
+            &scratch,
+            data.len() as u64,
+            block_size,
+            &Arc::new(AtomicBool::new(false)),
+            |bytes| verified += bytes,
+        )
+        .expect("verify repair pass");
+
+        assert_eq!(repaired, vec![(block_size as u64, block_size)]);
+        assert_eq!(verified, data.len() as u64);
+        assert_eq!(fs::read(&scratch).unwrap(), data);
     }
 
     #[test]
@@ -1770,7 +2086,7 @@ mod tests {
         fs::create_dir_all(&destination_root).expect("create destination root");
         let source = source_root.join("source.bin");
         let destination = destination_root.join("source.bin");
-        let data = vec![23; VERIFICATION_CHUNK_SIZE * 2 + 123];
+        let data = vec![23; RSYNC_MAX_BLOCK_SIZE * 2 + 123];
         fs::write(&source, &data).expect("write source");
         fs::write(&destination, &data).expect("write destination");
         let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
@@ -1845,7 +2161,7 @@ mod tests {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
-        let data = vec![31; VERIFICATION_CHUNK_SIZE * 2 + 123];
+        let data = vec![31; RSYNC_MAX_BLOCK_SIZE * 2 + 123];
         fs::write(&source, &data).expect("write source");
         fs::write(&destination, &data).expect("write destination");
         let mut progress = test_progress(data.len() as u64);
@@ -2091,7 +2407,6 @@ mod tests {
             &signatures,
             Some(&mut basis_file),
             &mut output,
-            16,
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
@@ -2138,6 +2453,7 @@ mod tests {
         assert!(!destination.exists());
         let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
         assert!(sidecars.partial.exists());
+        assert!(!sidecars.next.exists());
         assert!(sidecars.journal.exists());
 
         let mut progress = test_progress(data.len() as u64);
@@ -2155,6 +2471,165 @@ mod tests {
         assert!(!sidecars.partial.exists());
         assert!(!sidecars.next.exists());
         assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
+    fn cancelled_resume_appends_to_same_partial_and_later_resumes() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let data = (0..RSYNC_IO_BUFFER_SIZE * 4 + 17)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&source, &data).expect("write source");
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut progress = test_progress(data.len() as u64);
+        let mut requested_cancel = false;
+        let result = copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &cancel,
+            &mut progress,
+            &mut |progress| {
+                if progress.copied_bytes > 0 && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
+        let first_partial_len = fs::metadata(&sidecars.partial)
+            .expect("first partial metadata")
+            .len();
+        assert!(first_partial_len > 0);
+        assert!(!sidecars.next.exists());
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut progress = test_progress(data.len() as u64);
+        let mut requested_cancel = false;
+        let result = copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &cancel,
+            &mut progress,
+            &mut |progress| {
+                if progress.copied_bytes > first_partial_len && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted
+        ));
+
+        let second_partial_len = fs::metadata(&sidecars.partial)
+            .expect("second partial metadata")
+            .len();
+        assert!(
+            second_partial_len > first_partial_len,
+            "partial should grow across resume cancel: {first_partial_len} -> {second_partial_len}"
+        );
+        assert!(!sidecars.next.exists());
+
+        let mut progress = test_progress(data.len() as u64);
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect("final resume");
+
+        assert_eq!(fs::read(&destination).unwrap(), data);
+        assert!(!sidecars.partial.exists());
+        assert!(!sidecars.next.exists());
+        assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
+    fn resumed_copy_progress_is_seeded_from_valid_partial_prefix() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let data = (0..RSYNC_IO_BUFFER_SIZE * 3 + 19)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&source, &data).expect("write source");
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
+        let prefix_len = (RSYNC_IO_BUFFER_SIZE + 7) as u64;
+        fs::write(&sidecars.partial, &data[..prefix_len as usize]).expect("write partial prefix");
+        write_matching_journal_for_test(&source, &destination, 1024);
+
+        let mut progress = test_progress(data.len() as u64);
+        let mut progress_events = Vec::new();
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |progress| progress_events.push(progress),
+        )
+        .expect("resume copy");
+
+        let first_copied = progress_events
+            .iter()
+            .find(|progress| {
+                progress.phase == FileOperationPhase::Copying && progress.copied_bytes > 0
+            })
+            .expect("seeded copy progress");
+        assert_eq!(first_copied.copied_bytes, prefix_len);
+        assert!(first_copied.work_completed_bytes >= prefix_len);
+        assert_eq!(fs::read(&destination).unwrap(), data);
+    }
+
+    #[test]
+    fn legacy_next_sidecar_is_promoted_when_partial_is_missing() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"source").expect("write source");
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
+        fs::write(&sidecars.next, b"legacy next").expect("write legacy next");
+
+        let partial = previous_partial_path(&sidecars)
+            .expect("promote legacy next")
+            .expect("partial path");
+
+        assert_eq!(partial, sidecars.partial);
+        assert_eq!(fs::read(&sidecars.partial).unwrap(), b"legacy next");
+        assert!(!sidecars.next.exists());
+    }
+
+    #[test]
+    fn partial_sidecar_wins_over_legacy_next_sidecar() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"source").expect("write source");
+        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
+        fs::write(&sidecars.partial, b"kept partial").expect("write partial");
+        fs::write(&sidecars.next, b"stale next").expect("write stale next");
+
+        let partial = previous_partial_path(&sidecars)
+            .expect("choose partial")
+            .expect("partial path");
+
+        assert_eq!(partial, sidecars.partial);
+        assert_eq!(fs::read(&sidecars.partial).unwrap(), b"kept partial");
+        assert!(!sidecars.next.exists());
     }
 
     #[test]

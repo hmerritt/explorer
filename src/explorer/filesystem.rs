@@ -1524,6 +1524,7 @@ enum CopyNamePolicy {
     UseCopyNamesInSameDirectory,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyEngine {
     Standard,
@@ -4140,12 +4141,8 @@ fn copy_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
     }
 }
 
-fn copy_engine_for_paths(source: &Path, destination: &Path, conflict: bool) -> CopyEngine {
-    if conflict || paths_are_on_different_known_volumes(source, destination) {
-        CopyEngine::ResumableDelta
-    } else {
-        CopyEngine::Standard
-    }
+fn copy_engine_for_paths(_source: &Path, _destination: &Path, _conflict: bool) -> CopyEngine {
+    CopyEngine::ResumableDelta
 }
 
 pub(super) fn paths_are_on_same_volume(source: &Path, destination: &Path) -> bool {
@@ -4153,10 +4150,6 @@ pub(super) fn paths_are_on_same_volume(source: &Path, destination: &Path) -> boo
         Some(same_volume) => same_volume,
         None => true,
     }
-}
-
-fn paths_are_on_different_known_volumes(source: &Path, destination: &Path) -> bool {
-    matches!(path_volume_relation(source, destination), Some(false))
 }
 
 fn path_volume_relation(source: &Path, destination: &Path) -> Option<bool> {
@@ -5051,7 +5044,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_engine_selection_uses_known_volume_difference_only() {
+    fn copy_engine_selection_defaults_to_delta_for_all_file_copies() {
         let temp = TempDir::new();
         let source_root = temp.path().join("source");
         let destination_root = temp.path().join("destination");
@@ -5073,7 +5066,7 @@ mod tests {
         let destination_volume = set_test_path_volume_key(&destination_root, Some("source-volume"));
         assert_eq!(
             copy_engine_for_paths(&source, &destination, false),
-            CopyEngine::Standard
+            CopyEngine::ResumableDelta
         );
         assert!(paths_are_on_same_volume(&source, &destination));
         assert_eq!(
@@ -5085,7 +5078,7 @@ mod tests {
         let _destination_volume = set_test_path_volume_key(&destination_root, None);
         assert_eq!(
             copy_engine_for_paths(&source, &destination, false),
-            CopyEngine::Standard
+            CopyEngine::ResumableDelta
         );
         assert!(paths_are_on_same_volume(&source, &destination));
         assert_eq!(
@@ -5239,7 +5232,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_chunked_copy_removes_temp_file_and_keeps_source() {
+    fn cancelling_delta_copy_preserves_sidecars_and_keeps_source() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
         let destination = temp.path().join("destination");
@@ -5267,7 +5260,17 @@ mod tests {
         assert_eq!(result, Err(FileOperationError::Cancelled));
         assert!(source.exists());
         assert!(!destination.join("large.bin").exists());
-        assert!(temp_copy_files(&destination).is_empty());
+        let copy_files = temp_copy_files(&destination);
+        assert!(copy_files.iter().any(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(".partial"))
+        }));
+        assert!(copy_files.iter().any(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(".json"))
+        }));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 ## 1
 
 - rsync copy/sync builtin
+- Currently resuming a copy takes a lot longer than when copying originally
 - Copy speed and ETA figures in dialog
 - File/folder drag, even in current directory, holding Ctrl will trigger item copy
 
@@ -12,6 +13,7 @@
 - Improve readme - add screenshots / branding
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)
+- Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 
 ## 3

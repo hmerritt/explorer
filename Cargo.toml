@@ -18,7 +18,6 @@ icon = ["assets/explorer.png"]
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 ar = "0.9.0"
-blake3 = "1.8.5"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
 crc32fast = "1.5.0"
 decompress = "0.6.0"
@@ -48,6 +47,7 @@ unrar = "0.4.4"
 usvg = { version = "0.45.0", default-features = false }
 sevenz-rust2 = "0.21.0"
 kamadak-exif = "0.6.1"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
