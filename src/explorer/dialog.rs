@@ -1372,7 +1372,12 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
         return action.to_owned();
     }
 
-    let copied = format_size(Some(progress.copied_bytes));
+    let completed_bytes = if progress.phase == FileOperationPhase::Verifying {
+        progress.verified_bytes
+    } else {
+        progress.copied_bytes
+    };
+    let copied = format_size(Some(completed_bytes));
     let total = format_size(Some(progress.total_bytes));
     format!(
         "{action} {} of {} items ({copied} of {total})",
@@ -2159,6 +2164,22 @@ mod tests {
         assert_eq!(SHELL_PROGRESS_GREEN, EXPLORER_COPY_GREEN);
     }
 
+    #[test]
+    fn progress_dialog_verifying_status_uses_verified_bytes() {
+        let mut progress = test_progress();
+        progress.phase = FileOperationPhase::Verifying;
+        progress.total_bytes = 12;
+        progress.copied_bytes = 0;
+        progress.verified_bytes = 8;
+        progress.work_total_bytes = 12;
+        progress.work_completed_bytes = 8;
+
+        assert_eq!(
+            file_operation_item_label(&progress),
+            "Verifying 0 of 1 items (8 bytes of 12 bytes)"
+        );
+    }
+
     #[gpui::test]
     fn dialog_focus_actions_move_between_confirmation_buttons(cx: &mut TestAppContext) {
         let pending = PendingPermanentDelete {
@@ -2324,6 +2345,9 @@ mod tests {
             phase: FileOperationPhase::Copying,
             total_bytes: 1,
             copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 1,
+            work_completed_bytes: 0,
             total_files: 1,
             completed_files: 0,
             current_item: None,

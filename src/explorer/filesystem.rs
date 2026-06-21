@@ -21,7 +21,7 @@ use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
         CopyDurability, CopyOptions, copy_file_contents_parallel_with_progress,
-        copy_with_delta_progress_with_options, destination_content_matches_source,
+        copy_with_delta_progress_with_options, destination_content_matches_source_with_progress,
         destination_quick_matches_source,
     },
     sorting::sort_entries,
@@ -1467,6 +1467,9 @@ pub(super) struct FileOperationProgress {
     pub(super) phase: FileOperationPhase,
     pub(super) total_bytes: u64,
     pub(super) copied_bytes: u64,
+    pub(super) verified_bytes: u64,
+    pub(super) work_total_bytes: u64,
+    pub(super) work_completed_bytes: u64,
     pub(super) total_files: usize,
     pub(super) completed_files: usize,
     pub(super) current_item: Option<PathBuf>,
@@ -1475,8 +1478,31 @@ pub(super) struct FileOperationProgress {
 
 impl FileOperationProgress {
     pub(super) fn percent(&self) -> Option<f32> {
-        (self.total_bytes > 0)
-            .then(|| (self.copied_bytes as f32 / self.total_bytes as f32).clamp(0.0, 1.0))
+        (self.work_total_bytes > 0).then(|| {
+            (self.work_completed_bytes as f32 / self.work_total_bytes as f32).clamp(0.0, 1.0)
+        })
+    }
+
+    pub(super) fn reserve_work_bytes(&mut self, bytes: u64) {
+        self.work_total_bytes = self.work_total_bytes.saturating_add(bytes);
+    }
+
+    pub(super) fn add_copied_bytes(&mut self, bytes: u64) {
+        self.copied_bytes = self.copied_bytes.saturating_add(bytes);
+        self.add_completed_work_bytes(bytes);
+    }
+
+    pub(super) fn add_verified_bytes(&mut self, bytes: u64) {
+        self.verified_bytes = self.verified_bytes.saturating_add(bytes);
+        self.add_completed_work_bytes(bytes);
+    }
+
+    pub(super) fn add_completed_work_bytes(&mut self, bytes: u64) {
+        self.work_completed_bytes = self.work_completed_bytes.saturating_add(bytes);
+    }
+
+    pub(super) fn finish_work(&mut self) {
+        self.work_completed_bytes = self.work_completed_bytes.max(self.work_total_bytes);
     }
 }
 
@@ -1529,6 +1555,9 @@ impl FileOperationJob {
             phase: FileOperationPhase::Preparing,
             total_bytes: self.stats.total_bytes,
             copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: self.stats.total_bytes,
+            work_completed_bytes: 0,
             total_files: self.stats.total_files,
             completed_files: 0,
             current_item: None,
@@ -1635,7 +1664,10 @@ enum ParallelFileTaskEvent {
         phase: FileOperationPhase,
         current_item: Option<PathBuf>,
     },
-    Bytes(u64),
+    CopiedBytes(u64),
+    VerifiedBytes(u64),
+    WorkTotalBytes(u64),
+    WorkCompletedBytes(u64),
     Completed,
 }
 
@@ -2310,12 +2342,18 @@ fn run_parallel_file_task(
         phase,
         total_bytes: 0,
         copied_bytes: 0,
+        verified_bytes: 0,
+        work_total_bytes: 0,
+        work_completed_bytes: 0,
         total_files: 0,
         completed_files: 0,
         current_item: Some(source.clone()),
         cancellable: true,
     };
-    let mut last_bytes = 0u64;
+    let mut last_copied_bytes = 0u64;
+    let mut last_verified_bytes = 0u64;
+    let mut last_work_total_bytes = 0u64;
+    let mut last_work_completed_bytes = 0u64;
     let mut last_phase = phase;
     let mut last_item = Some(source.clone());
     let mut publish_worker_progress = |progress: FileOperationProgress| {
@@ -2327,10 +2365,25 @@ fn run_parallel_file_task(
                 current_item: progress.current_item,
             });
         }
-        if progress.copied_bytes > last_bytes {
-            let delta = progress.copied_bytes - last_bytes;
-            last_bytes = progress.copied_bytes;
-            let _ = event_tx.send(ParallelFileTaskEvent::Bytes(delta));
+        if progress.work_total_bytes > last_work_total_bytes {
+            let delta = progress.work_total_bytes - last_work_total_bytes;
+            last_work_total_bytes = progress.work_total_bytes;
+            let _ = event_tx.send(ParallelFileTaskEvent::WorkTotalBytes(delta));
+        }
+        if progress.copied_bytes > last_copied_bytes {
+            let delta = progress.copied_bytes - last_copied_bytes;
+            last_copied_bytes = progress.copied_bytes;
+            let _ = event_tx.send(ParallelFileTaskEvent::CopiedBytes(delta));
+        }
+        if progress.verified_bytes > last_verified_bytes {
+            let delta = progress.verified_bytes - last_verified_bytes;
+            last_verified_bytes = progress.verified_bytes;
+            let _ = event_tx.send(ParallelFileTaskEvent::VerifiedBytes(delta));
+        }
+        if progress.work_completed_bytes > last_work_completed_bytes {
+            let delta = progress.work_completed_bytes - last_work_completed_bytes;
+            last_work_completed_bytes = progress.work_completed_bytes;
+            let _ = event_tx.send(ParallelFileTaskEvent::WorkCompletedBytes(delta));
         }
     };
 
@@ -2402,8 +2455,17 @@ fn drain_parallel_file_task_events(
                 progress.phase = phase;
                 progress.current_item = current_item;
             }
-            ParallelFileTaskEvent::Bytes(bytes) => {
+            ParallelFileTaskEvent::CopiedBytes(bytes) => {
                 progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+            }
+            ParallelFileTaskEvent::VerifiedBytes(bytes) => {
+                progress.verified_bytes = progress.verified_bytes.saturating_add(bytes);
+            }
+            ParallelFileTaskEvent::WorkTotalBytes(bytes) => {
+                progress.work_total_bytes = progress.work_total_bytes.saturating_add(bytes);
+            }
+            ParallelFileTaskEvent::WorkCompletedBytes(bytes) => {
+                progress.add_completed_work_bytes(bytes);
             }
             ParallelFileTaskEvent::Completed => {
                 progress.completed_files = progress.completed_files.saturating_add(1);
@@ -2449,7 +2511,7 @@ fn finish_file_operation_summary(
 
     progress.phase = FileOperationPhase::Finished;
     progress.current_item = None;
-    progress.copied_bytes = progress.copied_bytes.max(progress.total_bytes);
+    progress.finish_work();
     progress.completed_files = progress.completed_files.max(progress.total_files);
     progress.cancellable = false;
     on_progress(progress);
@@ -2718,7 +2780,7 @@ pub(super) fn execute_file_operation_with_progress(
 
     progress.phase = FileOperationPhase::Finished;
     progress.current_item = None;
-    progress.copied_bytes = progress.copied_bytes.max(progress.total_bytes);
+    progress.finish_work();
     progress.completed_files = progress.completed_files.max(progress.total_files);
     progress.cancellable = false;
     on_progress(progress);
@@ -2974,7 +3036,7 @@ fn extract_archive_with_entry_progress(
         while let Ok(index) = rx.recv() {
             let entry = &plan.entries[index];
             progress.current_item = Some(entry.display_path.clone());
-            progress.copied_bytes = progress.copied_bytes.saturating_add(entry.byte_weight);
+            progress.add_copied_bytes(entry.byte_weight);
             progress.completed_files = progress.completed_files.saturating_add(1);
             on_progress(progress.clone());
         }
@@ -3023,9 +3085,7 @@ fn extract_archive_with_entry_progress(
         progress.completed_files = progress
             .completed_files
             .saturating_add(plan.entries.len().max(1));
-        progress.copied_bytes = progress
-            .copied_bytes
-            .saturating_add(archive_entry_byte_total(&plan.entries));
+        progress.add_copied_bytes(archive_entry_byte_total(&plan.entries));
         on_progress(progress.clone());
     }
 
@@ -3149,9 +3209,7 @@ fn extract_7z_archive_from_reader(
                         "ok",
                     );
                 }
-                progress.copied_bytes = progress
-                    .copied_bytes
-                    .saturating_add(planned_entry.byte_weight);
+                progress.add_copied_bytes(planned_entry.byte_weight);
             }
 
             progress.completed_files = progress.completed_files.saturating_add(1);
@@ -3280,9 +3338,7 @@ fn extract_ar_archive_from_reader(
                 "ok",
             );
         }
-        progress.copied_bytes = progress
-            .copied_bytes
-            .saturating_add(planned_entry.byte_weight);
+        progress.add_copied_bytes(planned_entry.byte_weight);
         progress.completed_files = progress.completed_files.saturating_add(1);
         on_progress(progress.clone());
     }
@@ -3418,9 +3474,7 @@ fn extract_rar_archive_to_temp(
             );
             diagnostics.phase("rar_merge", merge_started.elapsed());
         }
-        progress.copied_bytes = progress
-            .copied_bytes
-            .saturating_add(planned_entry.byte_weight);
+        progress.add_copied_bytes(planned_entry.byte_weight);
         progress.completed_files = progress.completed_files.saturating_add(1);
         on_progress(progress.clone());
     }
@@ -3706,7 +3760,7 @@ fn move_source_file_with_progress(
             let file_size = fs::metadata(destination)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            progress.copied_bytes = progress.copied_bytes.saturating_add(file_size);
+            progress.add_copied_bytes(file_size);
             progress.completed_files += 1;
             on_progress(progress.clone());
             Ok(())
@@ -3775,14 +3829,17 @@ fn copy_source_file_standard_with_progress(
     options: CopyOptions,
 ) -> std::io::Result<()> {
     let metadata = fs::metadata(source)?;
+    let verified_before_existing_check = progress.verified_bytes;
     if destination.is_file()
         && destination_quick_matches_source(&metadata, destination).unwrap_or(false)
-        && destination_content_matches_source(
+        && destination_content_matches_source_with_progress(
             source,
             destination,
             metadata.len(),
             COPY_BUFFER_SIZE,
             cancel,
+            progress,
+            on_progress,
         )?
     {
         preserve_file_metadata(&metadata, destination)?;
@@ -3792,6 +3849,16 @@ fn copy_source_file_standard_with_progress(
         }
         return Ok(());
     }
+    let existing_check_verified = progress
+        .verified_bytes
+        .saturating_sub(verified_before_existing_check);
+    if existing_check_verified > 0 {
+        progress.reserve_work_bytes(existing_check_verified);
+    }
+
+    progress.phase = FileOperationPhase::Copying;
+    progress.current_item = Some(source.to_path_buf());
+    on_progress(progress.clone());
 
     let temp_destination = temp_destination_for(destination)?;
     let copy_result = copy_source_file_to_temp(
@@ -3838,7 +3905,7 @@ fn copy_source_file_to_temp(
             source_len,
             cancel,
             |bytes| {
-                progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+                progress.add_copied_bytes(bytes);
                 on_progress(progress.clone());
             },
         )?;
@@ -3864,7 +3931,7 @@ fn copy_source_file_to_temp(
             break;
         }
         destination_file.write_all(&buffer[..read])?;
-        progress.copied_bytes = progress.copied_bytes.saturating_add(read as u64);
+        progress.add_copied_bytes(read as u64);
         on_progress(progress.clone());
     }
 

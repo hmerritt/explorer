@@ -2,6 +2,7 @@
 
 ## 1
 
+- File/folder drag, even in current directory, holding Ctrl will trigger item copy
 - rsync copy/sync builtin
 - Copy speed and ETA figures in dialog
 - Drive total size + used, GB and percentages

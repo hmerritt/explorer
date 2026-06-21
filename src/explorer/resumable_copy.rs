@@ -312,17 +312,20 @@ fn copy_with_delta_progress_impl(
     let source_len = metadata.len();
     let identity = OperationIdentity::new(source, destination, &metadata, block_size)?;
     let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
+    let verified_before_existing_check = progress.verified_bytes;
 
     if destination.is_file() {
         let same_data = match options.sync_mode {
             CopySyncMode::RsyncUpdate => {
                 destination_quick_matches_source(&metadata, destination).unwrap_or(false)
-                    && destination_content_matches_source(
+                    && destination_content_matches_source_with_progress(
                         source,
                         destination,
                         source_len,
                         block_size,
                         cancel,
+                        progress,
+                        on_progress,
                     )?
             }
             CopySyncMode::ExplorerReplace => destination_is_identical_to_source(
@@ -346,6 +349,12 @@ fn copy_with_delta_progress_impl(
             return Ok(());
         }
     }
+    let existing_check_verified = progress
+        .verified_bytes
+        .saturating_sub(verified_before_existing_check);
+    if existing_check_verified > 0 {
+        progress.reserve_work_bytes(existing_check_verified);
+    }
 
     let journal_matches = read_journal(&sidecars.journal)
         .ok()
@@ -365,6 +374,11 @@ fn copy_with_delta_progress_impl(
     }
     .or_else(|| destination.is_file().then(|| destination.to_path_buf()));
 
+    let should_verify_after_write = options.durability == CopyDurability::Safe || basis.is_some();
+    if should_verify_after_write {
+        progress.reserve_work_bytes(source_len);
+    }
+
     let stats = match write_delta_scratch(
         source,
         basis.as_deref(),
@@ -383,11 +397,7 @@ fn copy_with_delta_progress_impl(
         }
     };
 
-    if options.durability == CopyDurability::Safe
-        || basis.is_some()
-        || stats.literal_bytes != source_len
-        || stats.reused_blocks != 0
-    {
+    if should_verify_after_write || stats.literal_bytes != source_len || stats.reused_blocks != 0 {
         let verify_result = verify_and_repair(
             source,
             &sidecars.next,
@@ -490,18 +500,34 @@ pub(super) fn destination_quick_matches_source(
             == FileTime::from_last_modification_time(&destination_metadata))
 }
 
-pub(super) fn destination_content_matches_source(
+pub(super) fn destination_content_matches_source_with_progress(
     source: &Path,
     destination: &Path,
     source_len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> io::Result<bool> {
     if fs::metadata(destination)?.len() != source_len {
         return Ok(false);
     }
 
-    files_equal_parallel(source, destination, source_len, block_size, cancel)
+    progress.phase = FileOperationPhase::Verifying;
+    progress.current_item = Some(source.to_path_buf());
+    on_progress(progress.clone());
+
+    files_equal_parallel_with_progress(
+        source,
+        destination,
+        source_len,
+        block_size,
+        cancel,
+        |bytes| {
+            progress.add_verified_bytes(bytes);
+            on_progress(progress.clone());
+        },
+    )
 }
 
 fn operation_key(
@@ -773,7 +799,7 @@ fn copy_source_literals_buffered(
     if source_len >= PARALLEL_COPY_THRESHOLD {
         copy_file_contents_parallel_with_progress(source, output, source_len, cancel, |bytes| {
             stats.literal_bytes = stats.literal_bytes.saturating_add(bytes);
-            progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
+            progress.add_copied_bytes(bytes);
             on_progress(progress.clone());
         })?;
         return Ok(());
@@ -795,7 +821,7 @@ fn copy_source_literals_buffered(
         output.write_all(&buffer[..read])?;
         let written = read as u64;
         stats.literal_bytes = stats.literal_bytes.saturating_add(written);
-        progress.copied_bytes = progress.copied_bytes.saturating_add(written);
+        progress.add_copied_bytes(written);
         on_progress(progress.clone());
     }
 
@@ -853,7 +879,7 @@ fn flush_literal(
     output.write_all(pending_literal)?;
     let written = pending_literal.len() as u64;
     stats.literal_bytes = stats.literal_bytes.saturating_add(written);
-    progress.copied_bytes = progress.copied_bytes.saturating_add(written);
+    progress.add_copied_bytes(written);
     on_progress(progress.clone());
     pending_literal.clear();
     Ok(())
@@ -877,7 +903,7 @@ fn copy_basis_block(
         offset = offset.saturating_add(read_len as u64);
     }
 
-    progress.copied_bytes = progress.copied_bytes.saturating_add(signature.len as u64);
+    progress.add_copied_bytes(signature.len as u64);
     on_progress(progress.clone());
     Ok(())
 }
@@ -896,7 +922,10 @@ fn verify_and_repair(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    let repaired = verify_repair_pass(source, scratch, source_len, block_size, cancel)?;
+    let repaired = verify_repair_pass(source, scratch, source_len, block_size, cancel, |bytes| {
+        progress.add_verified_bytes(bytes);
+        on_progress(progress.clone());
+    })?;
     if options.should_sync() {
         sync_file(scratch);
     }
@@ -929,7 +958,17 @@ fn destination_is_identical_to_source(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    files_equal_parallel(source, destination, source_len, block_size, cancel)
+    files_equal_parallel_with_progress(
+        source,
+        destination,
+        source_len,
+        block_size,
+        cancel,
+        |bytes| {
+            progress.add_verified_bytes(bytes);
+            on_progress(progress.clone());
+        },
+    )
 }
 
 fn verify_repair_pass(
@@ -938,6 +977,48 @@ fn verify_repair_pass(
     source_len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
+    mut on_block_verified: impl FnMut(u64),
+) -> io::Result<Vec<(u64, usize)>> {
+    let (progress_tx, progress_rx) = mpsc::channel::<u64>();
+    let (result_tx, result_rx) = mpsc::channel::<io::Result<Vec<(u64, usize)>>>();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = verify_repair_pass_impl(
+                source,
+                scratch,
+                source_len,
+                block_size,
+                cancel,
+                progress_tx,
+            );
+            let _ = result_tx.send(result);
+        });
+
+        loop {
+            match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
+                Ok(result) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other("parallel repair worker disconnected"));
+                }
+            }
+        }
+    })
+}
+
+fn verify_repair_pass_impl(
+    source: &Path,
+    scratch: &Path,
+    source_len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    progress_tx: mpsc::Sender<u64>,
 ) -> io::Result<Vec<(u64, usize)>> {
     let source = Arc::new(File::open(source)?);
     let scratch_file = Arc::new(
@@ -974,6 +1055,7 @@ fn verify_repair_pass(
                     .map_err(|_| io::Error::other("verification state poisoned"))?
                     .push((offset, len));
             }
+            let _ = progress_tx.send(len as u64);
 
             Ok(())
         })?;
@@ -1098,12 +1180,56 @@ fn drain_parallel_copy_progress(
     }
 }
 
-fn files_equal_parallel(
+fn files_equal_parallel_with_progress(
     source: &Path,
     destination: &Path,
     len: u64,
     block_size: usize,
     cancel: &Arc<AtomicBool>,
+    mut on_block_verified: impl FnMut(u64),
+) -> io::Result<bool> {
+    let (progress_tx, progress_rx) = mpsc::channel::<u64>();
+    let (result_tx, result_rx) = mpsc::channel::<io::Result<bool>>();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = files_equal_parallel_impl(
+                source,
+                destination,
+                len,
+                block_size,
+                cancel,
+                progress_tx,
+            );
+            let _ = result_tx.send(result);
+        });
+
+        loop {
+            match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
+                Ok(result) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                    return result;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other(
+                        "parallel verification worker disconnected",
+                    ));
+                }
+            }
+        }
+    })
+}
+
+fn files_equal_parallel_impl(
+    source: &Path,
+    destination: &Path,
+    len: u64,
+    block_size: usize,
+    cancel: &Arc<AtomicBool>,
+    progress_tx: mpsc::Sender<u64>,
 ) -> io::Result<bool> {
     if len == 0 {
         return Ok(true);
@@ -1133,6 +1259,8 @@ fn files_equal_parallel(
             read_exact_at(&destination, offset, &mut destination_block)?;
             if source_block != destination_block {
                 equal.store(false, Ordering::Relaxed);
+            } else {
+                let _ = progress_tx.send(read_len as u64);
             }
             Ok(())
         })?;
@@ -1286,6 +1414,9 @@ mod tests {
             phase: FileOperationPhase::Preparing,
             total_bytes,
             copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: total_bytes,
+            work_completed_bytes: 0,
             total_files: 1,
             completed_files: 0,
             current_item: None,
@@ -1388,6 +1519,7 @@ mod tests {
         fs::write(&sidecars.next, b"stale next").expect("write next sidecar");
         write_matching_journal_for_test(&source, &destination, 4);
         let mut progress = test_progress(12);
+        let mut progress_events = Vec::new();
 
         copy_with_delta_progress_for_test(
             &source,
@@ -1395,15 +1527,107 @@ mod tests {
             4,
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
-            &mut |_| {},
+            &mut |progress| progress_events.push(progress),
         )
         .expect("identical no-op");
 
         assert_eq!(fs::read(&destination).unwrap(), b"same content");
         assert_eq!(progress.copied_bytes, 0);
+        assert_eq!(progress.verified_bytes, 12);
+        assert_eq!(progress.percent(), Some(1.0));
+        assert!(progress_events.iter().any(|progress| {
+            progress.phase == FileOperationPhase::Verifying
+                && progress.copied_bytes == 0
+                && progress.verified_bytes > 0
+        }));
         assert!(!sidecars.partial.exists());
         assert!(!sidecars.next.exists());
         assert!(!sidecars.journal.exists());
+    }
+
+    #[test]
+    fn identical_destination_reports_intermediate_verification_progress() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let data = vec![31; 4096 + 123];
+        fs::write(&source, &data).expect("write source");
+        fs::write(&destination, &data).expect("write destination");
+        let mut progress = test_progress(data.len() as u64);
+        let mut progress_events = Vec::new();
+
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            1024,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |progress| progress_events.push(progress),
+        )
+        .expect("identical no-op");
+
+        let verifying_events = progress_events
+            .iter()
+            .filter(|progress| {
+                progress.phase == FileOperationPhase::Verifying && progress.verified_bytes > 0
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            verifying_events.len() >= 2,
+            "expected multiple verification updates, got {verifying_events:?}"
+        );
+        assert!(verifying_events.iter().any(|progress| {
+            progress.verified_bytes > 0 && progress.verified_bytes < data.len() as u64
+        }));
+        assert_eq!(progress.copied_bytes, 0);
+        assert_eq!(progress.verified_bytes, data.len() as u64);
+        assert_eq!(progress.percent(), Some(1.0));
+    }
+
+    #[test]
+    fn copy_then_verify_progress_is_monotonic_and_finishes_after_verification() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"aaaabbbbccccdddd").expect("write source");
+        let mut progress = test_progress(16);
+        let mut progress_events = Vec::new();
+
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |progress| progress_events.push(progress),
+        )
+        .expect("copy then verify");
+
+        let percents = progress_events
+            .iter()
+            .filter_map(FileOperationProgress::percent)
+            .collect::<Vec<_>>();
+        for pair in percents.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "progress regressed from {} to {} in {percents:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let copy_finished = progress_events
+            .iter()
+            .find(|progress| {
+                progress.phase == FileOperationPhase::Copying && progress.copied_bytes == 16
+            })
+            .expect("copy progress event");
+        assert!(
+            copy_finished.percent().expect("copy percent") < 1.0,
+            "copy phase must leave room for verification"
+        );
+        assert_eq!(progress.copied_bytes, 16);
+        assert_eq!(progress.verified_bytes, 16);
+        assert_eq!(progress.percent(), Some(1.0));
     }
 
     #[test]
@@ -1465,6 +1689,7 @@ mod tests {
 
         assert_eq!(fs::read(&destination).unwrap(), b"same content");
         assert_eq!(progress.copied_bytes, 0);
+        assert_eq!(progress.verified_bytes, 12);
         assert_eq!(fs::metadata(&destination).unwrap().len(), metadata.len());
     }
 
