@@ -3,6 +3,7 @@
 ## 1
 
 - rsync copy/sync builtin
+- File view sorting (Name, Date, Size) Ascending and Decending, click column headers
 
 ## 2
 

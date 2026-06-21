@@ -20,9 +20,9 @@ use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, Co
 use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
-        CopyDurability, CopyOptions, copy_file_contents_parallel_with_progress,
-        copy_with_delta_progress_with_options, destination_content_matches_source_with_progress,
-        destination_quick_matches_source,
+        CopyDurability, CopyOptions, cleanup_resumable_copy_progress,
+        copy_file_contents_parallel_with_progress, copy_with_delta_progress_with_options,
+        destination_content_matches_source_with_progress, destination_quick_matches_source,
     },
     sorting::sort_entries,
 };
@@ -1091,6 +1091,7 @@ pub mod benchmark_support {
             job,
             super::ConflictChoice::Replace,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| {},
         )
         .expect("execute archive benchmark extraction");
@@ -1125,6 +1126,7 @@ pub mod benchmark_support {
             prepared.0,
             super::ConflictChoice::Replace,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| {},
         )
         .expect("execute prepared benchmark archive extraction");
@@ -1142,6 +1144,7 @@ pub mod benchmark_support {
             job,
             super::ConflictChoice::Replace,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| callbacks += 1,
         )
         .expect("execute archive progress benchmark");
@@ -1158,6 +1161,7 @@ pub mod benchmark_support {
         super::execute_file_operation_with_progress(
             job,
             super::ConflictChoice::Replace,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| {},
         )
@@ -1178,6 +1182,7 @@ pub mod benchmark_support {
             prepared.0,
             super::ConflictChoice::Replace,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| {},
         )
         .expect("execute prepared copy benchmark");
@@ -1196,6 +1201,7 @@ pub mod benchmark_support {
             job,
             super::ConflictChoice::Replace,
             cancel.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |progress| {
                 if progress.copied_bytes > 0 && !requested_cancel {
                     requested_cancel = true;
@@ -2057,6 +2063,7 @@ fn execute_file_operation(
         job,
         conflict_choice,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
         |_| {},
     )
     .map_err(|error| match error {
@@ -2066,6 +2073,22 @@ fn execute_file_operation(
 }
 
 fn execute_copy_move_operation_with_progress(
+    job: FileOperationJob,
+    conflict_choice: ConflictChoice,
+    cancel: Arc<AtomicBool>,
+    terminate: Arc<AtomicBool>,
+    on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
+    let cleanup_targets = resumable_copy_cleanup_targets(&job, conflict_choice);
+    let result =
+        execute_copy_move_operation_with_progress_impl(job, conflict_choice, cancel, on_progress);
+    if matches!(result, Err(FileOperationError::Cancelled)) && terminate.load(Ordering::Relaxed) {
+        cleanup_resumable_copy_targets(&cleanup_targets);
+    }
+    result
+}
+
+fn execute_copy_move_operation_with_progress_impl(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
@@ -2235,6 +2258,40 @@ fn run_parallel_file_tasks(
             }
         }
     })
+}
+
+fn resumable_copy_cleanup_targets(
+    job: &FileOperationJob,
+    conflict_choice: ConflictChoice,
+) -> Vec<(PathBuf, PathBuf)> {
+    job.steps
+        .iter()
+        .filter_map(|step| match step {
+            FileOperationStep::CopyFile {
+                source,
+                destination,
+                conflict,
+                engine: CopyEngine::ResumableDelta,
+            } if !*conflict || conflict_choice == ConflictChoice::Replace => {
+                Some((source.clone(), destination.clone()))
+            }
+            FileOperationStep::MoveFile {
+                source,
+                destination,
+                conflict,
+                copy_engine: CopyEngine::ResumableDelta,
+            } if !*conflict || conflict_choice == ConflictChoice::Replace => {
+                Some((source.clone(), destination.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn cleanup_resumable_copy_targets(targets: &[(PathBuf, PathBuf)]) {
+    for (source, destination) in targets {
+        cleanup_resumable_copy_progress(source, destination);
+    }
 }
 
 fn run_single_file_task(
@@ -2541,6 +2598,7 @@ pub(super) fn execute_file_operation_with_progress(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
+    terminate: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     if job.kind != FileOperationKind::Extract {
@@ -2548,6 +2606,7 @@ pub(super) fn execute_file_operation_with_progress(
             job,
             conflict_choice,
             cancel,
+            terminate,
             on_progress,
         );
     }
@@ -4546,6 +4605,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
         .expect("extract with progress");
@@ -4586,6 +4646,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             |progress| updates.push(progress),
         )
         .expect("extract with progress");
@@ -4615,6 +4676,7 @@ mod tests {
         execute_file_operation_with_progress(
             conflicts.into_job(),
             ConflictChoice::Skip,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
@@ -5193,6 +5255,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
         .expect("copy with progress");
@@ -5231,6 +5294,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
         .expect("copy with live progress");
@@ -5267,6 +5331,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
             |progress| {
                 if progress.copied_bytes > 0 && !requested_cancel {
                     requested_cancel = true;
@@ -5292,6 +5357,97 @@ mod tests {
     }
 
     #[test]
+    fn terminating_delta_copy_removes_sidecars_and_keeps_source() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&source, vec![11; COPY_BUFFER_SIZE + 128]).expect("create source");
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let mut requested_terminate = false;
+
+        let result = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            cancel.clone(),
+            terminate.clone(),
+            |progress| {
+                if progress.copied_bytes > 0 && !requested_terminate {
+                    requested_terminate = true;
+                    terminate.store(true, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+
+        assert_eq!(result, Err(FileOperationError::Cancelled));
+        assert!(source.exists());
+        assert!(!destination.join("large.bin").exists());
+        assert!(temp_copy_files(&destination).is_empty());
+    }
+
+    #[test]
+    fn terminating_before_resume_starts_removes_existing_sidecars() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&source, vec![13; COPY_BUFFER_SIZE + 128]).expect("create source");
+
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut requested_cancel = false;
+        let result = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
+            |progress| {
+                if progress.copied_bytes > 0 && !requested_cancel {
+                    requested_cancel = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert_eq!(result, Err(FileOperationError::Cancelled));
+        assert!(!temp_copy_files(&destination).is_empty());
+
+        let job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let mut requested_terminate = false;
+        let result = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            cancel.clone(),
+            terminate.clone(),
+            |_| {
+                if !requested_terminate {
+                    requested_terminate = true;
+                    terminate.store(true, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+
+        assert_eq!(result, Err(FileOperationError::Cancelled));
+        assert!(source.exists());
+        assert!(!destination.join("large.bin").exists());
+        assert!(temp_copy_files(&destination).is_empty());
+    }
+
+    #[test]
     fn chunked_copy_preserves_modified_time() {
         let temp = TempDir::new();
         let source = temp.path().join("file.txt");
@@ -5308,6 +5464,7 @@ mod tests {
         execute_file_operation_with_progress(
             job,
             ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             |_| {},
         )
@@ -5449,6 +5606,7 @@ mod tests {
             job,
             ConflictChoice::Replace,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
         .expect("copy files");
@@ -5515,6 +5673,7 @@ mod tests {
         let summary = execute_file_operation_with_progress(
             conflicts.into_job(),
             ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )
@@ -5603,6 +5762,7 @@ mod tests {
         let summary = execute_file_operation_with_progress(
             conflicts.into_job(),
             ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             |progress| progress_events.push(progress),
         )

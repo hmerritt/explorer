@@ -16,12 +16,13 @@ use std::{
 use crate::explorer::{
     constants::EXPLORER_COPY_GREEN,
     entry::FileEntry,
-    filesystem::{FileConflictBatch, FileOperationPhase, FileOperationProgress},
+    filesystem::{FileConflictBatch, FileOperationKind, FileOperationPhase, FileOperationProgress},
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::{format_size, format_timestamp, format_transfer_rate},
     icons::{
         DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON, image_icon,
     },
+    tooltip::{explorer_tooltip, explorer_tooltip_element},
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
@@ -111,6 +112,7 @@ pub(super) struct ExplorerDialog {
     file_operation_progress: Option<FileOperationProgress>,
     file_operation_speed: FileOperationSpeedTracker,
     file_operation_task: Option<Task<()>>,
+    file_operation_terminate_tooltip: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,6 +302,7 @@ impl ExplorerDialog {
             file_operation_progress,
             file_operation_speed: FileOperationSpeedTracker::default(),
             file_operation_task: None,
+            file_operation_terminate_tooltip: false,
         };
         dialog.update_file_operation_speed(Instant::now());
         dialog.start_folder_size_task(cx);
@@ -420,6 +423,17 @@ impl ExplorerDialog {
                     explorer.clear_active_dialog_window();
                 }
             }
+            cx.notify();
+        });
+        window.remove_window();
+    }
+
+    fn terminate_file_operation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.completed = true;
+        self.cancel_folder_size_task();
+        let _ = self.explorer.update(cx, |explorer, cx| {
+            explorer.terminate_active_file_operation();
+            explorer.clear_active_dialog_window();
             cx.notify();
         });
         window.remove_window();
@@ -594,6 +608,13 @@ impl ExplorerDialog {
         self.file_operation_speed
             .record(self.file_operation_progress.as_ref(), captured_at);
     }
+
+    fn set_file_operation_terminate_tooltip(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.file_operation_terminate_tooltip != visible {
+            self.file_operation_terminate_tooltip = visible;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for ExplorerDialog {
@@ -603,6 +624,7 @@ impl Render for ExplorerDialog {
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             .bg(rgb(0xffffff))
             .cursor_default()
             .pt(px(SHELL_DIALOG_TOP_PADDING))
@@ -623,6 +645,17 @@ impl Render for ExplorerDialog {
                     self.render_file_conflict(conflicts, cx)
                 }
                 ExplorerDialogKind::FileOperation(_) => self.render_file_operation(window, cx),
+            })
+            .when(self.file_operation_terminate_tooltip, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right(px(SHELL_DIALOG_HORIZONTAL_PADDING))
+                        .bottom(px(SHELL_DIALOG_BOTTOM_PADDING
+                            + DELETE_DIALOG_BUTTON_HEIGHT
+                            + 6.0))
+                        .child(explorer_tooltip_element("Cancel and delete copied files")),
+                )
             })
     }
 }
@@ -864,6 +897,9 @@ impl ExplorerDialog {
         let cancellable = progress
             .as_ref()
             .is_none_or(|progress| progress.cancellable);
+        let show_terminate = progress.as_ref().is_some_and(|progress| {
+            progress.kind == FileOperationKind::Copy && progress.cancellable
+        });
 
         div()
             .id("file-operation-progress")
@@ -904,27 +940,55 @@ impl ExplorerDialog {
                     }),
             )
             .when(cancellable, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
-                        .child(
-                            dialog_button(
-                                "file-operation-cancel",
-                                "Cancel",
-                                false,
-                                window.scale_factor(),
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, window, cx| {
-                                    this.cancel(window, cx);
-                                    cx.stop_propagation();
-                                },
-                            )),
-                        ),
-                )
+                this.child(self.render_file_operation_buttons(show_terminate, window, cx))
             })
+            .into_any_element()
+    }
+
+    fn render_file_operation_buttons(
+        &self,
+        show_terminate: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut buttons = div()
+            .flex()
+            .justify_end()
+            .gap(px(DELETE_DIALOG_BUTTON_GAP))
+            .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN));
+
+        if show_terminate {
+            buttons = buttons.child(
+                dialog_button(
+                    "file-operation-terminate",
+                    "Terminate",
+                    false,
+                    window.scale_factor(),
+                )
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.set_file_operation_terminate_tooltip(*hovered, cx);
+                }))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.terminate_file_operation(window, cx);
+                    cx.stop_propagation();
+                })),
+            );
+        }
+
+        buttons
+            .child(
+                dialog_button(
+                    "file-operation-cancel",
+                    "Cancel",
+                    false,
+                    window.scale_factor(),
+                )
+                .tooltip(explorer_tooltip("Cancel but progress is saved"))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.cancel(window, cx);
+                    cx.stop_propagation();
+                })),
+            )
             .into_any_element()
     }
 }
@@ -1134,6 +1198,7 @@ fn dialog_button(
 
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .min_w(px(DELETE_DIALOG_BUTTON_MIN_WIDTH))
         .h(px(28.0))
         .relative()
@@ -1818,7 +1883,7 @@ mod tests {
         view::FileOperationState,
     };
     use crate::settings::{ExplorerSettings, SettingsState};
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -2614,6 +2679,7 @@ mod tests {
                 view.active_file_operation = Some(FileOperationState {
                     progress,
                     cancel: cancel.clone(),
+                    terminate: Arc::new(AtomicBool::new(false)),
                     task: None,
                     archive_diagnostics: None,
                 });
@@ -2631,6 +2697,104 @@ mod tests {
     }
 
     #[gpui::test]
+    fn file_operation_dialog_copy_shows_terminate_and_cancel(cx: &mut TestAppContext) {
+        let (_explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("file-operation-terminate").is_some());
+        assert!(cx.debug_bounds("file-operation-cancel").is_some());
+    }
+
+    #[gpui::test]
+    fn file_operation_dialog_non_copy_hides_terminate(cx: &mut TestAppContext) {
+        let mut progress = test_progress_with_kind(FileOperationKind::Move);
+        let (_explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(progress.clone()));
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("file-operation-terminate").is_none());
+        assert!(cx.debug_bounds("file-operation-cancel").is_some());
+
+        progress.kind = FileOperationKind::Extract;
+        progress.cancellable = true;
+        let (_explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(progress));
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("file-operation-terminate").is_none());
+    }
+
+    #[gpui::test]
+    fn clicking_file_operation_cancel_preserves_progress(cx: &mut TestAppContext) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = test_progress();
+        let (explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(progress.clone()));
+
+        cx.update(|_, app| {
+            explorer.update(app, |view, _| {
+                view.active_file_operation = Some(FileOperationState {
+                    progress,
+                    cancel: cancel.clone(),
+                    terminate: terminate.clone(),
+                    task: None,
+                    archive_diagnostics: None,
+                });
+            });
+        });
+        click_selector(cx, "file-operation-cancel");
+
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(!terminate.load(Ordering::Relaxed));
+    }
+
+    #[gpui::test]
+    fn clicking_file_operation_terminate_cancels_and_marks_cleanup(cx: &mut TestAppContext) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = test_progress();
+        let (explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(progress.clone()));
+
+        cx.update(|_, app| {
+            explorer.update(app, |view, _| {
+                view.active_file_operation = Some(FileOperationState {
+                    progress,
+                    cancel: cancel.clone(),
+                    terminate: terminate.clone(),
+                    task: None,
+                    archive_diagnostics: None,
+                });
+            });
+        });
+        click_selector(cx, "file-operation-terminate");
+
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(terminate.load(Ordering::Relaxed));
+    }
+
+    #[gpui::test]
+    fn file_operation_cancel_button_shows_tooltip(cx: &mut TestAppContext) {
+        let (_explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
+
+        hover_selector_until_tooltip(cx, "file-operation-cancel");
+    }
+
+    #[gpui::test]
+    fn file_operation_terminate_button_shows_tooltip(cx: &mut TestAppContext) {
+        let (_explorer, _dialog, cx) =
+            test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
+
+        hover_selector_until_tooltip(cx, "file-operation-terminate");
+    }
+
+    #[gpui::test]
     fn file_operation_dialog_opens_during_explorer_view_update(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (view, cx) = cx.add_window_view(|_, cx| {
@@ -2645,6 +2809,7 @@ mod tests {
                 view.active_file_operation = Some(FileOperationState {
                     progress: test_progress(),
                     cancel: Arc::new(AtomicBool::new(false)),
+                    terminate: Arc::new(AtomicBool::new(false)),
                     task: None,
                     archive_diagnostics: None,
                 });
@@ -2727,6 +2892,53 @@ mod tests {
             current_item: None,
             cancellable: true,
         }
+    }
+
+    fn test_progress_with_kind(kind: FileOperationKind) -> FileOperationProgress {
+        FileOperationProgress {
+            kind,
+            ..test_progress()
+        }
+    }
+
+    fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} bounds"))
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn hover_selector_until_tooltip(cx: &mut VisualTestContext, selector: &'static str) {
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("explorer-tooltip").is_none(),
+            "tooltip should be hidden before hovering {selector}"
+        );
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} bounds"));
+        let positions = [
+            bounds.center(),
+            gpui::point(bounds.left() + px(4.0), bounds.center().y),
+            gpui::point(bounds.right() - px(4.0), bounds.center().y),
+        ];
+        for position in positions {
+            cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+            cx.executor().advance_clock(Duration::from_millis(600));
+            cx.run_until_parked();
+            if cx.debug_bounds("explorer-tooltip").is_some() {
+                return;
+            }
+        }
+
+        assert!(
+            cx.debug_bounds("explorer-tooltip").is_some(),
+            "{selector} should show tooltip after hover delay"
+        );
     }
 
     fn multi_conflict_batch() -> FileConflictBatch {

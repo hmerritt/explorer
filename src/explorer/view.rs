@@ -122,6 +122,7 @@ pub struct ExplorerView {
 pub(super) struct FileOperationState {
     pub(super) progress: FileOperationProgress,
     pub(super) cancel: Arc<AtomicBool>,
+    pub(super) terminate: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
 }

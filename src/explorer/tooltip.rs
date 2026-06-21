@@ -22,27 +22,31 @@ impl ExplorerTooltip {
 
 impl Render for ExplorerTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("explorer-tooltip")
-            .debug_selector(|| "explorer-tooltip".to_owned())
-            .max_w(px(TOOLTIP_MAX_WIDTH))
-            .px(px(7.0))
-            .py(px(4.0))
-            .rounded(px(2.0))
-            .border_1()
-            .border_color(rgb(0x767676))
-            .bg(rgb(0xffffff))
-            .shadow_md()
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(rgb(0x1f1f1f))
-            .child(self.label.clone())
-            .with_animation(
-                "explorer-tooltip-fade",
-                Animation::new(Duration::from_millis(TOOLTIP_FADE_MS)),
-                |this, delta| this.opacity(delta),
-            )
+        explorer_tooltip_element(self.label.clone())
     }
+}
+
+pub(super) fn explorer_tooltip_element(label: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .id("explorer-tooltip")
+        .debug_selector(|| "explorer-tooltip".to_owned())
+        .max_w(px(TOOLTIP_MAX_WIDTH))
+        .px(px(7.0))
+        .py(px(4.0))
+        .rounded(px(2.0))
+        .border_1()
+        .border_color(rgb(0x767676))
+        .bg(rgb(0xffffff))
+        .shadow_md()
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .text_color(rgb(0x1f1f1f))
+        .child(label.into())
+        .with_animation(
+            "explorer-tooltip-fade",
+            Animation::new(Duration::from_millis(TOOLTIP_FADE_MS)),
+            |this, delta| this.opacity(delta),
+        )
 }
 
 pub(super) fn explorer_tooltip(

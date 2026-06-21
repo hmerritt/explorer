@@ -401,6 +401,18 @@ pub(super) fn copy_with_delta_progress_with_options(
     )
 }
 
+pub(super) fn cleanup_resumable_copy_progress(source: &Path, destination: &Path) {
+    let Ok(metadata) = fs::metadata(source) else {
+        return;
+    };
+    let block_size = rsync_block_size(metadata.len());
+    let Ok(identity) = OperationIdentity::new(source, destination, &metadata, block_size) else {
+        return;
+    };
+    let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
+    cleanup_sidecars(&sidecars);
+}
+
 #[cfg(test)]
 pub(super) fn copy_with_delta_progress_for_test(
     source: &Path,

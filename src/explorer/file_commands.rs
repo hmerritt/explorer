@@ -383,6 +383,13 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn terminate_active_file_operation(&mut self) {
+        if let Some(operation) = self.active_file_operation.as_ref() {
+            operation.terminate.store(true, Ordering::Relaxed);
+        }
+        self.cancel_active_file_operation();
+    }
+
     fn start_file_operation(
         &mut self,
         job: FileOperationJob,
@@ -395,11 +402,13 @@ impl ExplorerView {
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
         let progress = job.initial_progress();
         let archive_diagnostics = job.archive_diagnostics();
         self.active_file_operation = Some(FileOperationState {
             progress: progress.clone(),
             cancel: cancel.clone(),
+            terminate: terminate.clone(),
             task: None,
             archive_diagnostics: archive_diagnostics.clone(),
         });
@@ -413,6 +422,7 @@ impl ExplorerView {
         let finished = Arc::new(AtomicBool::new(false));
         let task = cx.spawn({
             let cancel = cancel.clone();
+            let terminate = terminate.clone();
             let finished = finished.clone();
             async move |this, cx| {
                 let operation_task = cx.background_executor().spawn({
@@ -423,6 +433,7 @@ impl ExplorerView {
                             job,
                             conflict_choice,
                             cancel,
+                            terminate,
                             |progress| {
                                 let _ = progress_tx.send(progress);
                             },
@@ -1128,14 +1139,21 @@ mod tests {
                 assert!(view.active_file_operation.is_none());
 
                 let cancel = Arc::new(AtomicBool::new(false));
+                let terminate = Arc::new(AtomicBool::new(false));
                 view.active_file_operation = Some(FileOperationState {
                     progress: test_progress(),
                     cancel: cancel.clone(),
+                    terminate: terminate.clone(),
                     task: None,
                     archive_diagnostics: None,
                 });
                 view.cancel_active_file_operation();
                 assert!(cancel.load(Ordering::Relaxed));
+                assert!(!terminate.load(Ordering::Relaxed));
+
+                view.terminate_active_file_operation();
+                assert!(cancel.load(Ordering::Relaxed));
+                assert!(terminate.load(Ordering::Relaxed));
 
                 view.complete_active_file_operation(Err(FileOperationError::Cancelled), cx);
                 assert!(view.active_file_operation.is_none());
@@ -1144,6 +1162,7 @@ mod tests {
                 view.active_file_operation = Some(FileOperationState {
                     progress: test_progress(),
                     cancel: Arc::new(AtomicBool::new(false)),
+                    terminate: Arc::new(AtomicBool::new(false)),
                     task: None,
                     archive_diagnostics: None,
                 });
