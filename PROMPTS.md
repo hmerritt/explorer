@@ -3,7 +3,7 @@
 ## 1
 
 - rsync copy/sync builtin
-- File view sorting (Name, Date, Size) Ascending and Decending, click column headers
+- Auto-hide the sidebar when window width gets too small - calc if the sidebar is taking up >40% of the window width - add a Hamburger icon to the utility bar on the left to toggle it
 
 ## 2
 
@@ -13,6 +13,7 @@
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
 - Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
+- Special settings value for "date_format" called "relative" and another "relative-timestamp", which shows relative human-readable "ago" times, and "-timestamp" varient includes "at <%H:%M>", e.g. "1 minute ago", "2 hours ago", "yesterday at 15:29", "2 days ago"...
 
 ## 3
 

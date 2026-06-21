@@ -1187,7 +1187,7 @@ impl ExplorerView {
     pub(super) fn sort_entries_from_header(&mut self, column: FileSortColumn) -> FileSortSettings {
         let direction = match self.header_file_sort() {
             Some(current) if current.column == column => toggle_sort_direction(current.direction),
-            _ => SortDirection::Descending,
+            _ => SortDirection::Ascending,
         };
         let sort = FileSortSettings { column, direction };
         self.file_sort = sort;
@@ -1713,11 +1713,11 @@ mod tests {
             sort,
             FileSortSettings {
                 column: FileSortColumn::Name,
-                direction: SortDirection::Descending,
+                direction: SortDirection::Ascending,
             }
         );
         assert_eq!(view.header_file_sort(), Some(sort));
-        assert_eq!(names(&view.entries), vec!["c.txt", "b.txt", "a.txt"]);
+        assert_eq!(names(&view.entries), vec!["a.txt", "b.txt", "c.txt"]);
     }
 
     #[test]

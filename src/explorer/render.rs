@@ -70,10 +70,11 @@ use crate::explorer::{
         COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON,
         FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, LARGE_ICONS_ICON, NEW_ITEM_ICON,
         NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON,
-        directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
-        directory_shortcut_icon_sized, drive_icon, drive_windows_icon, drive_wsl_icon,
-        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
-        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
+        SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
+        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
+        drive_icon, drive_windows_icon, drive_wsl_icon, executable_icon_sized, file_icon,
+        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
+        large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
@@ -119,6 +120,11 @@ const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
 const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
+const FILE_COLUMN_HEADER_HOVER_BG: u32 = 0xd9ebf9;
+const FILE_SORT_CHEVRON_ICON_SIZE: f32 = 11.0;
+const FILE_SORT_CHEVRON_RIGHT_OFFSET: f32 = FILE_COLUMN_RESIZE_HIT_WIDTH + 2.0;
+const FILE_SORT_CHEVRON_RESERVED_WIDTH: f32 =
+    FILE_SORT_CHEVRON_RIGHT_OFFSET + FILE_SORT_CHEVRON_ICON_SIZE + 2.0;
 const CODEBASE_MAKEUP_BAR_WIDTH: f32 = 120.0;
 const CODEBASE_MAKEUP_BAR_HEIGHT: f32 = 8.0;
 const CODEBASE_MAKEUP_BAR_RADIUS: f32 = 6.0;
@@ -4509,10 +4515,11 @@ fn header_cell(
         .w(px(width))
         .flex_shrink_0()
         .pl(px(8.0))
+        .pr(px(FILE_SORT_CHEVRON_RESERVED_WIDTH))
         .pt(px(8.0))
         .border_r_1()
         .border_color(rgb(0xe7e7e7))
-        .child(label);
+        .hover(|style| style.bg(rgb(FILE_COLUMN_HEADER_HOVER_BG)));
 
     let cell = if sort_column.is_some() {
         cell.cursor(CursorStyle::PointingHand)
@@ -4520,10 +4527,13 @@ fn header_cell(
         cell
     };
 
-    if let Some(indicator) = sort_indicator(sort_column, active_sort) {
-        cell.child(div().ml(px(4.0)).text_color(rgb(0x1f1f1f)).child(indicator))
-    } else {
-        cell
+    let cell = cell.child(header_label(label));
+    match (
+        sort_column,
+        sort_indicator_direction(sort_column, active_sort),
+    ) {
+        (Some(column), Some(direction)) => cell.child(sort_indicator_element(column, direction)),
+        _ => cell,
     }
 }
 
@@ -4543,22 +4553,62 @@ fn add_header_sort_click(
     })
 }
 
-fn sort_indicator(
+fn sort_indicator_direction(
     sort_column: Option<FileSortColumn>,
     active_sort: Option<FileSortSettings>,
-) -> Option<&'static str> {
+) -> Option<SortDirection> {
     let sort_column = sort_column?;
     let active_sort = active_sort?;
-    (active_sort.column == sort_column).then(|| match active_sort.direction {
-        SortDirection::Ascending => "^",
-        SortDirection::Descending => "v",
-    })
+    (active_sort.column == sort_column).then_some(active_sort.direction)
+}
+
+fn sort_indicator_element(column: FileSortColumn, direction: SortDirection) -> AnyElement {
+    let icon = match direction {
+        SortDirection::Ascending => SORT_CHEVRON_UP_ICON.clone(),
+        SortDirection::Descending => SORT_CHEVRON_DOWN_ICON.clone(),
+    };
+
+    div()
+        .debug_selector(move || sort_indicator_debug_selector(column).to_owned())
+        .absolute()
+        .top(px(0.0))
+        .right(px(FILE_SORT_CHEVRON_RIGHT_OFFSET))
+        .h_full()
+        .w(px(FILE_SORT_CHEVRON_ICON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(image_icon(
+            icon,
+            FILE_SORT_CHEVRON_ICON_SIZE,
+            FILE_SORT_CHEVRON_ICON_SIZE,
+        ))
+        .into_any_element()
+}
+
+fn header_label(label: &'static str) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w(px(0.0))
+        .child(label)
+        .into_any_element()
+}
+
+fn sort_indicator_debug_selector(column: FileSortColumn) -> &'static str {
+    match column {
+        FileSortColumn::Name => "explorer-header-name-sort-chevron",
+        FileSortColumn::DateModified => "explorer-header-date-modified-sort-chevron",
+        FileSortColumn::Type => "explorer-header-type-sort-chevron",
+        FileSortColumn::Size => "explorer-header-size-sort-chevron",
+    }
 }
 
 fn file_column_sort_column(kind: FileColumnKind) -> Option<FileSortColumn> {
     match kind {
         FileColumnKind::DateModified => Some(FileSortColumn::DateModified),
-        FileColumnKind::Type => None,
+        FileColumnKind::Type => Some(FileSortColumn::Type),
         FileColumnKind::Size => Some(FileSortColumn::Size),
     }
 }
@@ -4695,9 +4745,11 @@ fn name_header_cell(
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(36.0))
+        .pr(px(FILE_SORT_CHEVRON_RESERVED_WIDTH))
         .pt(px(8.0))
         .border_r_1()
         .border_color(rgb(0xe7e7e7))
+        .hover(|style| style.bg(rgb(FILE_COLUMN_HEADER_HOVER_BG)))
         .cursor(CursorStyle::PointingHand);
     let cell = if manual_width {
         cell.w(px(width)).flex_shrink_0()
@@ -4705,11 +4757,13 @@ fn name_header_cell(
         cell.flex_1()
     };
 
-    let cell = if let Some(indicator) = sort_indicator(Some(FileSortColumn::Name), active_sort) {
-        cell.child("Name")
-            .child(div().ml(px(4.0)).text_color(rgb(0x1f1f1f)).child(indicator))
+    let cell = cell.child(header_label("Name"));
+    let cell = if let Some(direction) =
+        sort_indicator_direction(Some(FileSortColumn::Name), active_sort)
+    {
+        cell.child(sort_indicator_element(FileSortColumn::Name, direction))
     } else {
-        cell.child("Name")
+        cell
     };
 
     add_header_sort_click(cell, FileSortColumn::Name, entity.clone())
@@ -5623,19 +5677,20 @@ mod tests {
     use super::{
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
-        DROP_INDICATOR_TARGET_MAX_WIDTH, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
-        RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, codebase_makeup_segments,
-        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
-        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        copied_directory_address, directory_open_mode_for_entry_click, drop_indicator_target_width,
-        entry_row_hover_enabled, filename_text_width, folder_status_summary, format_address_path,
-        git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
-        is_alt_entry_double_click, is_ctrl_entry_double_click, is_normal_entry_click,
-        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, text_cell_width,
+        DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_SORT_CHEVRON_ICON_SIZE,
+        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
+        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
+        codebase_makeup_segments, context_menu_action_width_for_text_width,
+        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
+        context_menu_width_for_natural_width, copied_directory_address,
+        directory_open_mode_for_entry_click, drop_indicator_target_width, entry_row_hover_enabled,
+        filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
+        git_divergence_label, git_divergence_tooltip, is_alt_entry_double_click,
+        is_ctrl_entry_double_click, is_normal_entry_click, lines_of_code_tooltip,
+        open_current_folder_context_menu_from_event, recursive_result_text_width,
+        search_working_detail, selection_modifiers_for_click, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, SettingsState, SortDirection,
@@ -5658,6 +5713,34 @@ mod tests {
     fn cut_item_opacity_dims_rows() {
         assert_eq!(CUT_ITEM_OPACITY, 0.7);
         assert!(CUT_ITEM_OPACITY < 1.0);
+    }
+
+    #[test]
+    fn file_column_header_hover_and_sort_icon_size_match_design() {
+        assert_eq!(FILE_COLUMN_HEADER_HOVER_BG, 0xd9ebf9);
+        assert_eq!(FILE_SORT_CHEVRON_ICON_SIZE, 11.0);
+    }
+
+    #[test]
+    fn sort_indicator_direction_only_matches_active_column() {
+        let sort = Some(FileSortSettings {
+            column: FileSortColumn::Name,
+            direction: SortDirection::Descending,
+        });
+
+        assert_eq!(
+            sort_indicator_direction(Some(FileSortColumn::Name), sort),
+            Some(SortDirection::Descending)
+        );
+        assert_eq!(
+            sort_indicator_direction(Some(FileSortColumn::DateModified), sort),
+            None
+        );
+        assert_eq!(sort_indicator_direction(None, sort), None);
+        assert_eq!(
+            sort_indicator_direction(Some(FileSortColumn::Name), None),
+            None
+        );
     }
 
     #[test]
@@ -6202,6 +6285,21 @@ mod tests {
                 })
             );
         });
+        let header_bounds = cx
+            .debug_bounds("explorer-header-name")
+            .expect("name header bounds");
+        let chevron_bounds = cx
+            .debug_bounds("explorer-header-name-sort-chevron")
+            .expect("name sort chevron bounds");
+        let resizer_bounds = cx
+            .debug_bounds("explorer-header-name-resizer")
+            .expect("name header resizer bounds");
+        assert!(chevron_bounds.right() <= resizer_bounds.left());
+        assert!(chevron_bounds.right() > header_bounds.right() - gpui::px(24.0));
+        assert!(
+            cx.debug_bounds("explorer-header-size-sort-chevron")
+                .is_none()
+        );
         cx.update(|_, app| {
             view.update(app, |view, _| view.select_single_path(&selected));
         });
@@ -6227,7 +6325,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_size_header_sorts_size_descending(cx: &mut gpui::TestAppContext) {
+    fn clicking_size_header_sorts_size_ascending(cx: &mut gpui::TestAppContext) {
         cx.set_global(SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
         ));
@@ -6239,7 +6337,11 @@ mod tests {
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
         });
         cx.run_until_parked();
 
@@ -6253,20 +6355,20 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(
                 entry_names(view),
-                vec!["large.txt", "middle.txt", "small.txt"]
+                vec!["small.txt", "middle.txt", "large.txt"]
             );
         });
         assert_eq!(
             cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
             FileSortSettings {
                 column: FileSortColumn::Size,
-                direction: SortDirection::Descending,
+                direction: SortDirection::Ascending,
             }
         );
     }
 
     #[gpui::test]
-    fn clicking_date_header_sorts_date_descending(cx: &mut gpui::TestAppContext) {
+    fn clicking_date_header_sorts_date_ascending(cx: &mut gpui::TestAppContext) {
         cx.set_global(SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
         ));
@@ -6281,7 +6383,11 @@ mod tests {
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
         });
         cx.run_until_parked();
 
@@ -6293,12 +6399,83 @@ mod tests {
         cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
 
         cx.read_entity(&view, |view, _| {
-            assert_eq!(entry_names(view), vec!["new.txt", "old.txt"]);
+            assert_eq!(entry_names(view), vec!["old.txt", "new.txt"]);
         });
         assert_eq!(
             cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
             FileSortSettings {
                 column: FileSortColumn::DateModified,
+                direction: SortDirection::Ascending,
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_type_header_sorts_type_and_toggles(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.md"), b"a").unwrap();
+        fs::write(temp.path().join("b.txt"), b"b").unwrap();
+        fs::write(temp.path().join("c.exe"), b"c").unwrap();
+        let selected = temp.path().join("c.exe");
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_path(&selected));
+        });
+
+        let position = cx
+            .debug_bounds("explorer-header-type")
+            .expect("type header bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+
+        assert!(
+            cx.debug_bounds("explorer-header-type-sort-chevron")
+                .is_some()
+        );
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(entry_names(view), vec!["c.exe", "a.md", "b.txt"]);
+            assert_eq!(view.selected_paths(), vec![selected.clone()]);
+            assert_eq!(
+                view.header_file_sort(),
+                Some(FileSortSettings {
+                    column: FileSortColumn::Type,
+                    direction: SortDirection::Ascending,
+                })
+            );
+        });
+        assert_eq!(
+            cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
+            FileSortSettings {
+                column: FileSortColumn::Type,
+                direction: SortDirection::Ascending,
+            }
+        );
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(entry_names(view), vec!["b.txt", "a.md", "c.exe"]);
+            assert_eq!(view.selected_paths(), vec![selected]);
+        });
+        assert_eq!(
+            cx.read(|cx| cx.global::<SettingsState>().value.view.sort),
+            FileSortSettings {
+                column: FileSortColumn::Type,
                 direction: SortDirection::Descending,
             }
         );

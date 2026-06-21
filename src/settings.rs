@@ -346,6 +346,7 @@ pub enum FileSortColumn {
     #[default]
     Name,
     DateModified,
+    Type,
     Size,
 }
 
@@ -1863,6 +1864,7 @@ fn file_sort_column_from_str(value: &str) -> Option<FileSortColumn> {
     match value {
         "name" => Some(FileSortColumn::Name),
         "date_modified" => Some(FileSortColumn::DateModified),
+        "type" => Some(FileSortColumn::Type),
         "size" => Some(FileSortColumn::Size),
         _ => None,
     }
@@ -2190,14 +2192,14 @@ mod tests {
     #[test]
     fn file_sort_deserializes_known_values_and_defaults_unknowns() {
         let settings: ExplorerSettings = serde_json::from_str(
-            r#"{"view":{"sort":{"column":"size","direction":"ascending","future":7}}}"#,
+            r#"{"view":{"sort":{"column":"type","direction":"ascending","future":7}}}"#,
         )
         .expect("deserialize file sort");
 
         assert_eq!(
             settings.view.sort,
             FileSortSettings {
-                column: FileSortColumn::Size,
+                column: FileSortColumn::Type,
                 direction: SortDirection::Ascending,
             }
         );
@@ -2242,7 +2244,7 @@ mod tests {
             _watcher: None,
         });
         let sort = FileSortSettings {
-            column: FileSortColumn::DateModified,
+            column: FileSortColumn::Type,
             direction: SortDirection::Ascending,
         };
 

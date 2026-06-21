@@ -24,6 +24,11 @@ fn compare_entries_in_group(a: &FileEntry, b: &FileEntry, sort: FileSortSettings
             compare_optional_values(a.modified, b.modified, sort.direction)
                 .then_with(|| compare_names(&a.name, &b.name))
         }
+        FileSortColumn::Type => compare_with_direction(
+            compare_names(&a.type_label(), &b.type_label()),
+            sort.direction,
+        )
+        .then_with(|| compare_names(&a.name, &b.name)),
         FileSortColumn::Size => compare_optional_values(a.size, b.size, sort.direction)
             .then_with(|| compare_names(&a.name, &b.name)),
     }
@@ -277,6 +282,36 @@ mod tests {
     }
 
     #[test]
+    fn sorts_by_type_in_both_directions() {
+        let mut entries = vec![
+            FileEntry::test("readme.md", false, Some(1), None),
+            FileEntry::test("notes.txt", false, Some(1), None),
+            FileEntry::test("folder", true, None, None),
+            FileEntry::test("app.exe", false, Some(1), None),
+        ];
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Type, SortDirection::Ascending),
+        );
+
+        assert_eq!(
+            names(&entries),
+            vec!["folder", "app.exe", "readme.md", "notes.txt"]
+        );
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Type, SortDirection::Descending),
+        );
+
+        assert_eq!(
+            names(&entries),
+            vec!["folder", "notes.txt", "readme.md", "app.exe"]
+        );
+    }
+
+    #[test]
     fn metadata_sort_ties_fall_back_to_name_ascending() {
         let mut entries = vec![
             FileEntry::test("b.txt", false, Some(10), None),
@@ -286,6 +321,21 @@ mod tests {
         sort_entries(
             &mut entries,
             sort(FileSortColumn::Size, SortDirection::Descending),
+        );
+
+        assert_eq!(names(&entries), vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn type_sort_ties_fall_back_to_name_ascending() {
+        let mut entries = vec![
+            FileEntry::test("b.txt", false, Some(10), None),
+            FileEntry::test("a.txt", false, Some(10), None),
+        ];
+
+        sort_entries(
+            &mut entries,
+            sort(FileSortColumn::Type, SortDirection::Descending),
         );
 
         assert_eq!(names(&entries), vec!["a.txt", "b.txt"]);

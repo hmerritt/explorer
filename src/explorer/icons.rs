@@ -55,6 +55,18 @@ macro_rules! svg_icon {
     };
 }
 
+fn svg_image(bytes: &[u8]) -> Arc<Image> {
+    Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()))
+}
+
+fn rotate_svg_180(bytes: &[u8]) -> Vec<u8> {
+    let source = std::str::from_utf8(bytes).expect("bundled SVG icon is UTF-8");
+    source
+        .replacen("<path", r#"<g transform="rotate(180 12 12)"><path"#, 1)
+        .replacen("</svg>", "</g></svg>", 1)
+        .into_bytes()
+}
+
 macro_rules! png_icon {
     ($name:ident, $sub_dir:expr, $file:expr) => {
         paste::paste! {
@@ -153,6 +165,12 @@ svg_icon!(OPEN_WITH_ICON, "utility", "open_with.svg");
 svg_icon!(PASTE_ICON, "utility", "paste.svg");
 svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
+const SORT_CHEVRON_UP_ICON_BYTES: &[u8] =
+    include_bytes!("../../assets/icons/utility/chevron_up.svg");
+pub(super) static SORT_CHEVRON_UP_ICON: LazyLock<Arc<Image>> =
+    LazyLock::new(|| svg_image(SORT_CHEVRON_UP_ICON_BYTES));
+pub(super) static SORT_CHEVRON_DOWN_ICON: LazyLock<Arc<Image>> =
+    LazyLock::new(|| svg_image(&rotate_svg_180(SORT_CHEVRON_UP_ICON_BYTES)));
 
 impl NavIcon {
     pub(super) fn glyph(self) -> &'static str {
@@ -496,6 +514,20 @@ mod tests {
         assert!(!LARGE_PROGRAM_FILE_ICON_BYTES.is_empty());
         assert!(!LARGE_TEXT_FILE_ICON_BYTES.is_empty());
         assert!(!LARGE_VIDEO_FILE_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn sort_chevron_icons_use_bundled_svg_asset() {
+        assert!(
+            std::str::from_utf8(SORT_CHEVRON_UP_ICON_BYTES)
+                .expect("chevron SVG is UTF-8")
+                .contains("M12 9.5 L6.5 15.5 H17.5 Z")
+        );
+        assert!(
+            std::str::from_utf8(&rotate_svg_180(SORT_CHEVRON_UP_ICON_BYTES))
+                .expect("rotated chevron SVG is UTF-8")
+                .contains(r#"transform="rotate(180 12 12)""#)
+        );
     }
 
     #[test]
