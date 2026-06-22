@@ -19,11 +19,12 @@ use std::os::windows::process::CommandExt;
 use filetime::{FileTime, set_file_times};
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, FocusHandle,
-    Focusable, Global, Image, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent, SharedString,
-    StyledImage, Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    Focusable, Global, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent,
+    SharedString, StyledImage, Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowDecorations, WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
 };
+use image::ImageEncoder;
 use jwalk::WalkDirGeneric;
 use sha2::{Digest, Sha256};
 use thousands::Separable;
@@ -42,12 +43,13 @@ use crate::explorer::{
         SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
         SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
     },
+    context_menu::clamped_context_menu_origin,
     entry::{DirectoryLinkKind, EntryKind, FileEntry},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryCodeInfo, scan_git_repository_code_info},
     icons::{
-        copy_file_dialog_icon_sized, directory_shortcut_icon_sized, file_icon_for_path_sized,
-        folder_icon_sized, image_icon,
+        COPY_ICON, copy_file_dialog_icon_sized, directory_shortcut_icon_sized,
+        file_icon_for_path_sized, folder_icon_sized, image_icon,
     },
     image_preview::{
         PropertyImagePreview, load_property_image_preview, path_may_have_image_preview,
@@ -87,9 +89,18 @@ const PROPERTIES_CODE_LANGUAGE_LOC_WIDTH: f32 = 86.0;
 const PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE: f32 = 10.0;
 const PROPERTIES_FRAME_LIST_GAP: f32 = 16.0;
 const PROPERTIES_FRAME_LABEL_GAP: f32 = 4.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_WIDTH: f32 = 170.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_ROW_HEIGHT: f32 = 30.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_ROW_GAP: f32 = 6.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SIZE: f32 = 14.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 14.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_HORIZONTAL_PADDING: f32 = 18.0;
+const PROPERTIES_IMAGE_CONTEXT_MENU_CHILD_GAP: f32 = 10.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
+const PROPERTIES_CLIPBOARD_IMAGE_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const PROPERTIES_ROW_TYPE_ID: &str = "properties-property-row-type";
 const PROPERTIES_ROW_LOCATION_ID: &str = "properties-property-row-location";
 const PROPERTIES_ROW_SIZE_ID: &str = "properties-property-row-size";
@@ -397,7 +408,40 @@ fn property_frames_state_label(state: &PropertyFramesState) -> &'static str {
 struct PropertyFrameThumbnail {
     label: String,
     image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
     aspect_ratio: f32,
+}
+
+#[derive(Clone)]
+struct PropertyImageCopyPayload {
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct PropertyImageContextMenu {
+    origin: gpui::Point<gpui::Pixels>,
+    payload: PropertyImageCopyPayload,
+}
+
+impl PropertyFrameThumbnail {
+    fn copy_payload(&self) -> PropertyImageCopyPayload {
+        PropertyImageCopyPayload {
+            image: self.image.clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+fn property_image_preview_copy_payload(preview: &PropertyImagePreview) -> PropertyImageCopyPayload {
+    PropertyImageCopyPayload {
+        image: preview.image.clone(),
+        width: preview.width,
+        height: preview.height,
+    }
 }
 
 pub(super) struct PropertiesDialog {
@@ -428,6 +472,7 @@ pub(super) struct PropertiesDialog {
     frames_scroll_handle: ScrollHandle,
     frames_scrollbar_hovered: bool,
     frames_scrollbar_drag: Option<ScrollbarDrag>,
+    image_copy_context_menu: Option<PropertyImageContextMenu>,
     snapshot_task: Option<Task<()>>,
     tree_summary_task: Option<Task<()>>,
     tree_summary_cancel: Option<Arc<AtomicBool>>,
@@ -541,6 +586,7 @@ impl PropertiesDialog {
             frames_scroll_handle: ScrollHandle::new(),
             frames_scrollbar_hovered: false,
             frames_scrollbar_drag: None,
+            image_copy_context_menu: None,
             snapshot_task: None,
             tree_summary_task: None,
             tree_summary_cancel: None,
@@ -645,6 +691,7 @@ impl PropertiesDialog {
         self.image_generation = self.image_generation.wrapping_add(1);
         self.image_state = PropertyImageState::NotStarted;
         self.image_task = None;
+        self.image_copy_context_menu = None;
     }
 
     fn reset_frames_state(&mut self) {
@@ -652,6 +699,7 @@ impl PropertiesDialog {
         self.frames_state = PropertyFramesState::NotStarted;
         self.frames_task = None;
         self.frames_scrollbar_drag = None;
+        self.image_copy_context_menu = None;
         let offset = self.frames_scroll_handle.offset();
         self.frames_scroll_handle
             .set_offset(point(offset.x, px(0.0)));
@@ -1280,6 +1328,34 @@ impl PropertiesDialog {
         }
     }
 
+    fn open_image_copy_context_menu(
+        &mut self,
+        payload: PropertyImageCopyPayload,
+        origin: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_copy_context_menu = Some(PropertyImageContextMenu { origin, payload });
+        cx.notify();
+    }
+
+    fn close_image_copy_context_menu(&mut self) -> bool {
+        self.image_copy_context_menu.take().is_some()
+    }
+
+    fn copy_property_image_payload_to_clipboard(
+        &mut self,
+        payload: PropertyImageCopyPayload,
+        cx: &mut Context<Self>,
+    ) {
+        match clipboard_image_from_property_image_payload(&payload) {
+            Ok(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+            Err(error) => crate::debug_options::log_property_marker(format_args!(
+                "image copy failed width={} height={} error={}",
+                payload.width, payload.height, error
+            )),
+        }
+    }
+
     fn has_changes(&self) -> bool {
         let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
             return false;
@@ -1545,6 +1621,7 @@ impl PropertiesDialog {
             return;
         }
         if self.active_tab != tab {
+            self.image_copy_context_menu = None;
             self.active_tab = tab;
             if tab == PropertyTab::Details {
                 self.start_details_task(cx);
@@ -1610,6 +1687,10 @@ impl Render for PropertiesDialog {
                     .child(self.render_tab_panel_border(window))
                     .child(self.render_body(window, cx))
                     .child(self.render_buttons(window, cx)),
+            )
+            .when_some(
+                self.render_image_copy_context_menu_overlay(window, cx),
+                |this, menu| this.child(menu),
             )
     }
 }
@@ -1882,6 +1963,67 @@ impl Focusable for LinuxDefaultAppPickerDialog {
 }
 
 impl PropertiesDialog {
+    fn render_image_copy_context_menu_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.image_copy_context_menu.as_ref()?;
+        let window_size = (
+            f32::from(window.bounds().size.width),
+            f32::from(window.bounds().size.height),
+        );
+        let menu_width = PROPERTIES_IMAGE_CONTEXT_MENU_WIDTH;
+        let menu_height = property_image_context_menu_height();
+        let (left, top) = clamped_context_menu_origin(
+            (f32::from(menu.origin.x), f32::from(menu.origin.y)),
+            (menu_width, menu_height),
+            window_size,
+        );
+        let payload = menu.payload.clone();
+
+        Some(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                if this.close_image_copy_context_menu() {
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                if this.close_image_copy_context_menu() {
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+                .child(
+                    property_image_context_menu_dropdown()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .child(property_image_context_menu_copy_row(payload, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_tabs(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = div().flex().flex_row().h(px(PROPERTIES_TAB_HEIGHT));
         let snapshot = self.ready_snapshot();
@@ -1931,7 +2073,7 @@ impl PropertiesDialog {
                 PropertyTab::General => self.render_general(&snapshot, window, cx),
                 PropertyTab::Details => self.render_details(&snapshot, cx),
                 PropertyTab::Code => self.render_code(&snapshot, cx),
-                PropertyTab::Image => self.render_image(&snapshot),
+                PropertyTab::Image => self.render_image(&snapshot, cx),
                 PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
         };
@@ -2527,7 +2669,7 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_image(&self, snapshot: &PropertySnapshot) -> AnyElement {
+    fn render_image(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
         if single_file_image_path(&snapshot.target, snapshot.item_kind).is_none() {
             return centered_message("Image preview is not available for this item.");
         }
@@ -2567,7 +2709,7 @@ impl PropertiesDialog {
                 .child(SharedString::from(error.clone()))
                 .into_any_element(),
             PropertyImageState::Ready(preview) => body
-                .child(property_image_preview(preview))
+                .child(property_image_preview(preview, cx))
                 .into_any_element(),
         }
     }
@@ -2597,7 +2739,7 @@ impl PropertiesDialog {
             PropertyFramesState::NotStarted => {}
             PropertyFramesState::Loading(frames) if frames.is_empty() => {}
             PropertyFramesState::Loading(frames) => {
-                body = body.child(frame_thumbnail_list(frames));
+                body = body.child(frame_thumbnail_list(frames, cx));
             }
             PropertyFramesState::Failed(error) => {
                 body = body.child(
@@ -2619,7 +2761,7 @@ impl PropertiesDialog {
                             .child("No video frames are available."),
                     );
                 } else {
-                    body = body.child(frame_thumbnail_list(frames));
+                    body = body.child(frame_thumbnail_list(frames, cx));
                 }
             }
         }
@@ -4268,6 +4410,8 @@ fn prepare_video_frame_thumbnail(frame: VideoFramePng) -> Result<PropertyFrameTh
     Ok(PropertyFrameThumbnail {
         label: frame.label,
         image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        width,
+        height,
         aspect_ratio: width as f32 / height as f32,
     })
 }
@@ -6652,17 +6796,36 @@ fn property_scrollbar_metrics_for_dimensions(
     )
 }
 
-fn property_image_preview(preview: &PropertyImagePreview) -> AnyElement {
-    gpui::img(preview.image.clone())
+fn property_image_preview(
+    preview: &PropertyImagePreview,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    let payload = property_image_preview_copy_payload(preview);
+    div()
         .w(px(preview.width as f32))
         .h(px(preview.height as f32))
         .max_w_full()
         .max_h_full()
-        .object_fit(ObjectFit::Contain)
+        .overflow_hidden()
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_image_copy_context_menu(payload.clone(), event.position, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .child(
+            gpui::img(preview.image.clone())
+                .size_full()
+                .object_fit(ObjectFit::Contain),
+        )
         .into_any_element()
 }
 
-fn frame_thumbnail_list(frames: &[PropertyFrameThumbnail]) -> AnyElement {
+fn frame_thumbnail_list(
+    frames: &[PropertyFrameThumbnail],
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
     let mut list = div()
         .flex()
         .flex_col()
@@ -6670,12 +6833,17 @@ fn frame_thumbnail_list(frames: &[PropertyFrameThumbnail]) -> AnyElement {
         .w_full()
         .min_w(px(0.0));
     for (index, frame) in frames.iter().enumerate() {
-        list = list.child(frame_thumbnail_tile(index, frame));
+        list = list.child(frame_thumbnail_tile(index, frame, cx));
     }
     list.into_any_element()
 }
 
-fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElement {
+fn frame_thumbnail_tile(
+    index: usize,
+    frame: &PropertyFrameThumbnail,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    let payload = frame.copy_payload();
     let mut image = div()
         .w_full()
         .border_1()
@@ -6696,6 +6864,13 @@ fn frame_thumbnail_tile(index: usize, frame: &PropertyFrameThumbnail) -> AnyElem
         .flex()
         .flex_col()
         .gap(px(PROPERTIES_FRAME_LABEL_GAP))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.open_image_copy_context_menu(payload.clone(), event.position, cx);
+                cx.stop_propagation();
+            }),
+        )
         .child(image)
         .child(
             div()
@@ -6717,6 +6892,121 @@ fn frame_thumbnail_label(_index: usize, timestamp: &str) -> String {
 
 fn frame_thumbnail_id(index: usize) -> (&'static str, usize) {
     ("properties-frame-thumbnail", index)
+}
+
+fn property_image_context_menu_height() -> f32 {
+    PROPERTIES_IMAGE_CONTEXT_MENU_ROW_HEIGHT + PROPERTIES_IMAGE_CONTEXT_MENU_ROW_GAP + 8.0
+}
+
+fn property_image_context_menu_dropdown() -> gpui::Stateful<Div> {
+    div()
+        .id("properties-image-copy-context-menu")
+        .debug_selector(|| "properties-image-copy-context-menu".to_owned())
+        .w(px(PROPERTIES_IMAGE_CONTEXT_MENU_WIDTH))
+        .py(px(4.0))
+        .border_1()
+        .border_color(rgb(0xd0d0d0))
+        .rounded(px(6.0))
+        .bg(rgb(0xffffff))
+        .shadow_md()
+        .occlude()
+        .on_any_mouse_down(|_, _, cx| {
+            cx.stop_propagation();
+        })
+}
+
+fn property_image_context_menu_copy_row(
+    payload: PropertyImageCopyPayload,
+    cx: &mut Context<PropertiesDialog>,
+) -> AnyElement {
+    div()
+        .id("properties-image-copy-context-menu-copy")
+        .debug_selector(|| "properties-image-copy-context-menu-copy".to_owned())
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(PROPERTIES_IMAGE_CONTEXT_MENU_ROW_HEIGHT))
+        .px(px(PROPERTIES_IMAGE_CONTEXT_MENU_HORIZONTAL_PADDING / 2.0))
+        .mx(px(PROPERTIES_IMAGE_CONTEXT_MENU_HORIZONTAL_PADDING / 2.0))
+        .gap(px(PROPERTIES_IMAGE_CONTEXT_MENU_CHILD_GAP))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(0xe5f3ff)))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.copy_property_image_payload_to_clipboard(payload.clone(), cx);
+            this.close_image_copy_context_menu();
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SLOT_SIZE))
+                .h(px(PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SLOT_SIZE))
+                .flex_shrink_0()
+                .child(
+                    gpui::img(COPY_ICON.clone())
+                        .w(px(PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SIZE))
+                        .h(px(PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SIZE)),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(PROPERTIES_IMAGE_CONTEXT_MENU_TEXT_SIZE))
+                .text_color(rgb(0x1f1f1f))
+                .child("Copy"),
+        )
+        .into_any_element()
+}
+
+fn clipboard_image_from_property_image_payload(
+    payload: &PropertyImageCopyPayload,
+) -> Result<Image, String> {
+    if payload.width == 0 || payload.height == 0 {
+        return Err("Image has no dimensions.".to_owned());
+    }
+    let bytes = payload
+        .image
+        .as_bytes(0)
+        .ok_or_else(|| "Image render data is not available.".to_owned())?;
+    let expected_len = (payload.width as usize)
+        .checked_mul(payload.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Image dimensions are too large.".to_owned())?;
+    if bytes.len() != expected_len {
+        return Err(format!(
+            "Image render data length {} does not match {}x{} RGBA data.",
+            bytes.len(),
+            payload.width,
+            payload.height
+        ));
+    }
+
+    let mut rgba = bytes.to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let png = encode_property_rgba_png_bytes(&rgba, payload.width, payload.height)
+        .ok_or_else(|| "Failed to encode copied image as PNG.".to_owned())?;
+    Ok(Image::from_bytes(ImageFormat::Png, png))
+}
+
+fn encode_property_rgba_png_bytes(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut bytes,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+    .ok()?;
+    bytes
+        .starts_with(PROPERTIES_CLIPBOARD_IMAGE_PNG_SIGNATURE)
+        .then_some(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -7800,6 +8090,64 @@ mod tests {
         });
     }
 
+    #[test]
+    fn property_image_copy_payload_encodes_render_image_as_png() {
+        let expected = vec![10, 20, 30, 255, 50, 60, 70, 128];
+        let render_image = render_image_from_bgra(2, 1, vec![30, 20, 10, 255, 70, 60, 50, 128]);
+        let payload = PropertyImageCopyPayload {
+            image: render_image,
+            width: 2,
+            height: 1,
+        };
+
+        let clipboard_image = clipboard_image_from_property_image_payload(&payload).unwrap();
+
+        assert_eq!(clipboard_image.format(), ImageFormat::Png);
+        assert_png_image_pixels(&clipboard_image, 2, 1, &expected);
+    }
+
+    #[gpui::test]
+    fn properties_dialog_copies_image_preview_to_clipboard(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("image.png");
+        let expected = vec![10, 20, 30, 255, 50, 60, 70, 128];
+        let image = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(2, 1, expected.clone()).unwrap(),
+        );
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Image;
+                dialog.start_image_task(cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                let payload = match &dialog.image_state {
+                    PropertyImageState::Ready(preview) => {
+                        property_image_preview_copy_payload(preview)
+                    }
+                    _ => panic!("image preview should be ready"),
+                };
+                dialog.copy_property_image_payload_to_clipboard(payload, cx);
+            });
+
+            let item = cx.read_from_clipboard().expect("clipboard item");
+            let clipboard_image = clipboard_item_image(&item).expect("clipboard image");
+            assert_png_image_pixels(&clipboard_image, 2, 1, &expected);
+        });
+    }
+
     #[gpui::test]
     fn properties_dialog_frames_tab_rejects_non_video_target(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
@@ -8722,9 +9070,44 @@ mod tests {
 
         let size = thumbnail.image.size(0);
         assert_eq!(thumbnail.label, "0:00.000");
+        assert_eq!(thumbnail.width, 4);
+        assert_eq!(thumbnail.height, 2);
         assert_eq!(thumbnail.aspect_ratio, 2.0);
         assert_eq!(size.width.0, 4);
         assert_eq!(size.height.0, 2);
+    }
+
+    #[gpui::test]
+    fn properties_dialog_copies_frame_thumbnail_to_clipboard(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("movie.mp4");
+        fs::write(&file, b"not real video").unwrap();
+        let expected = vec![10, 20, 30, 255, 50, 60, 70, 128];
+        let image = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(2, 1, expected.clone()).unwrap(),
+        );
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let thumbnail = prepare_video_frame_thumbnail(VideoFramePng {
+            label: "0:00.000".to_owned(),
+            png: bytes,
+        })
+        .unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.copy_property_image_payload_to_clipboard(thumbnail.copy_payload(), cx);
+            });
+
+            let item = cx.read_from_clipboard().expect("clipboard item");
+            let clipboard_image = clipboard_item_image(&item).expect("clipboard image");
+            assert_png_image_pixels(&clipboard_image, 2, 1, &expected);
+        });
     }
 
     #[test]
@@ -9463,6 +9846,28 @@ mod tests {
             fs::metadata(file).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    fn render_image_from_bgra(width: u32, height: u32, bgra: Vec<u8>) -> Arc<RenderImage> {
+        let image = image::RgbaImage::from_raw(width, height, bgra).expect("render image buffer");
+        Arc::new(RenderImage::new(vec![image::Frame::new(image)]))
+    }
+
+    fn clipboard_item_image(item: &ClipboardItem) -> Option<Image> {
+        item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            gpui::ClipboardEntry::String(_) => None,
+        })
+    }
+
+    fn assert_png_image_pixels(image: &Image, width: u32, height: u32, expected_rgba: &[u8]) {
+        assert_eq!(image.format(), ImageFormat::Png);
+        let decoded = image::load_from_memory_with_format(image.bytes(), image::ImageFormat::Png)
+            .expect("clipboard PNG")
+            .into_rgba8();
+        assert_eq!(decoded.width(), width);
+        assert_eq!(decoded.height(), height);
+        assert_eq!(decoded.as_raw(), expected_rgba);
     }
 
     fn test_properties_dialog(
