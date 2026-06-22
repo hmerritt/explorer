@@ -165,12 +165,12 @@ fn load_image_thumbnail_png_with_cancel_timed_result(
         load_image_thumbnail_rgba_with_cancel_timed(path, size, cancel, timings_enabled, timings)?;
     check_image_cancelled(cancel)?;
     let resize_started = thumbnail_timing_started(timings_enabled);
-    let thumbnail = fit_rgba_image_on_square_canvas(image, size);
+    let thumbnail = resize_rgba_image_to_longest_side(image, size);
     thumbnail_timing_finished(&mut timings.resize_canvas, resize_started);
     let thumbnail = thumbnail?;
     check_image_cancelled(cancel)?;
     let encode_started = thumbnail_timing_started(timings_enabled);
-    let encoded = encode_rgba_png_bytes(thumbnail.as_raw(), size, size);
+    let encoded = encode_rgba_png_bytes(thumbnail.as_raw(), thumbnail.width(), thumbnail.height());
     thumbnail_timing_finished(&mut timings.png_encode, encode_started);
     encoded.ok_or_else(|| "Failed to encode image thumbnail.".to_owned())
 }
@@ -1130,20 +1130,6 @@ fn property_image_preview_from_rgba(
     })
 }
 
-fn fit_rgba_image_on_square_canvas(
-    image: image::RgbaImage,
-    size: u32,
-) -> Result<image::RgbaImage, String> {
-    let resized = resize_rgba_image_to_longest_side(image, size)?;
-    let resized_width = resized.width();
-    let resized_height = resized.height();
-    let mut canvas = image::RgbaImage::from_pixel(size, size, image::Rgba([0, 0, 0, 0]));
-    let x = ((size - resized_width) / 2) as i64;
-    let y = ((size - resized_height) / 2) as i64;
-    image::imageops::overlay(&mut canvas, &resized, x, y);
-    Ok(canvas)
-}
-
 fn resize_rgba_image_to_longest_side(
     image: image::RgbaImage,
     size: u32,
@@ -1381,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn image_thumbnail_png_uses_square_128px_canvas() {
+    fn image_thumbnail_png_preserves_landscape_aspect_ratio() {
         let temp = TempDir::new();
         let path = temp.path().join("image.png");
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
@@ -1395,7 +1381,41 @@ mod tests {
         let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
 
         assert!(thumbnail.starts_with(PNG_SIGNATURE));
-        assert_eq!(decoded.dimensions(), (128, 128));
+        assert_eq!(decoded.dimensions(), (128, 64));
+    }
+
+    #[test]
+    fn image_thumbnail_png_preserves_portrait_aspect_ratio() {
+        let temp = TempDir::new();
+        let path = temp.path().join("portrait.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 4));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let thumbnail = load_image_thumbnail_png(&path, 128).unwrap();
+        let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
+
+        assert_eq!(decoded.dimensions(), (64, 128));
+    }
+
+    #[test]
+    fn image_thumbnail_png_upscales_small_images_to_128px_longest_side() {
+        let temp = TempDir::new();
+        let path = temp.path().join("small.png");
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 4));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let thumbnail = load_image_thumbnail_png(&path, 128).unwrap();
+        let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
+
+        assert_eq!(decoded.dimensions(), (128, 64));
     }
 
     #[test]
@@ -1458,7 +1478,7 @@ mod tests {
             let decoded = image::load_from_memory(&thumbnail.result.unwrap())
                 .unwrap()
                 .into_rgba8();
-            assert_eq!(decoded.dimensions(), (128, 128));
+            assert_eq!(decoded.dimensions(), (128, 96));
         }
     }
 
@@ -1560,7 +1580,7 @@ mod tests {
         let decoded = image::load_from_memory(&thumbnail.result.unwrap())
             .unwrap()
             .into_rgba8();
-        assert_eq!(decoded.dimensions(), (128, 128));
+        assert_eq!(decoded.dimensions(), (128, 64));
     }
 
     #[test]
@@ -1615,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn svg_thumbnail_png_uses_square_128px_canvas() {
+    fn svg_thumbnail_png_preserves_aspect_ratio() {
         let temp = TempDir::new();
         let path = temp.path().join("vector.svg");
         fs::write(
@@ -1627,7 +1647,7 @@ mod tests {
         let thumbnail = load_image_thumbnail_png(&path, 128).unwrap();
         let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
 
-        assert_eq!(decoded.dimensions(), (128, 128));
+        assert_eq!(decoded.dimensions(), (128, 32));
     }
 
     #[test]
@@ -1671,7 +1691,7 @@ mod tests {
         let thumbnail = load_image_thumbnail_png(&path, 128).unwrap();
         let decoded = image::load_from_memory(&thumbnail).unwrap().into_rgba8();
 
-        assert_eq!(decoded.dimensions(), (128, 128));
+        assert_eq!(decoded.dimensions(), (128, 64));
     }
 
     #[test]
@@ -1692,7 +1712,7 @@ mod tests {
 
         let bytes = thumbnail.result.unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().into_rgba8();
-        let pixel = decoded.get_pixel(64, 64);
+        let pixel = decoded.get_pixel(64, 32);
         assert!(
             pixel[1] > pixel[0],
             "expected embedded green thumbnail to be used, got {pixel:?}"

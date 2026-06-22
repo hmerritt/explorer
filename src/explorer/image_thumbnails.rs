@@ -35,7 +35,7 @@ use crate::{
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v4";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v5";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -1610,12 +1610,12 @@ mod tests {
     }
 
     #[test]
-    fn standard_image_thumbnail_key_preserves_existing_namespace() {
+    fn standard_image_thumbnail_key_uses_current_cache_namespace() {
         let entry = FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH));
 
         assert_eq!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
-            "c2396ce4e73cea04"
+            "76d4c10647d2c01d"
         );
     }
 
@@ -1927,7 +1927,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
-        assert_eq!(png_dimensions(&generated), Some((128, 128)));
+        assert_eq!(png_dimensions(&generated), Some((128, 64)));
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             &request.key,
