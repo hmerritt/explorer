@@ -25,10 +25,11 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, Globals, GpuSpecs, Modifiers, Output, Pixels,
-    PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    ResizeEdge, Size, Tiling, WaylandClientStatePtr, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowParams, px, size,
+    AnyWindowHandle, Bounds, Decorations, ExternalPaths, ExternalPathsDragStartResult, Globals,
+    GpuSpecs, Modifiers, Output, Pixels, PlatformDisplay, PlatformInput, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, ResizeEdge, Size, Tiling, WaylandClientStatePtr,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowDecorations, WindowParams, px, size,
 };
 use crate::{
     Capslock,
@@ -883,6 +884,10 @@ impl PlatformWindow for WaylandWindow {
             .borrow()
             .mouse_location
             .unwrap_or_default()
+    }
+
+    fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
+        self.borrow().client.start_external_paths_drag(&self.0, paths)
     }
 
     fn modifiers(&self) -> Modifiers {

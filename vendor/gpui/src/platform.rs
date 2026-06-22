@@ -37,9 +37,10 @@ pub(crate) mod scap_screen_capture;
 
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
-    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Font, FontId, FontMetrics, FontRun,
-    ExternalPaths, ForegroundExecutor, GlyphId, GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput,
-    Point, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
+    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, ExternalPaths,
+    ExternalPathsDragStartResult, Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId,
+    GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput, Point, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
     ShapedRun, SharedString, Size, SvgRenderer, SvgSize, SystemWindowTab, Task, TaskLabel, Window,
     WindowControlArea, hash, point, px, size,
 };
@@ -550,8 +551,8 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
-    fn start_external_paths_drag(&self, _paths: ExternalPaths) -> bool {
-        false
+    fn start_external_paths_drag(&self, _paths: ExternalPaths) -> ExternalPathsDragStartResult {
+        ExternalPathsDragStartResult::Failed
     }
 
     #[cfg(any(test, feature = "test-support"))]

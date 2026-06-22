@@ -255,6 +255,13 @@ impl DraggedEntries {
             file_count,
         })
     }
+
+    pub(super) fn external_paths(&self) -> gpui::ExternalPaths {
+        gpui::ExternalPaths::with_operations(
+            self.paths.clone(),
+            gpui::ExternalPathDragOperations::COPY_MOVE,
+        )
+    }
 }
 
 impl ExplorerView {
@@ -1273,6 +1280,54 @@ mod tests {
         assert_eq!(second_drag.count, first_drag.count);
         assert_eq!(second_drag.folder_count, first_drag.folder_count);
         assert_eq!(second_drag.file_count, first_drag.file_count);
+    }
+
+    #[test]
+    fn selected_row_drag_exports_all_selected_paths_for_native_drag() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+        view.apply_click_selection(
+            2,
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+        let external_paths = dragged.external_paths();
+
+        assert_eq!(
+            external_paths.paths(),
+            &[PathBuf::from("a.txt"), PathBuf::from("c.txt")]
+        );
+        assert!(external_paths.operations().copy());
+        assert!(external_paths.operations().move_());
+    }
+
+    #[test]
+    fn unselected_row_drag_exports_only_that_item_for_native_drag() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt", "c.txt"]);
+        view.select_single_index(0);
+
+        let dragged = view.test_dragged_entry_for_index(2).expect("dragged row");
+        let external_paths = dragged.external_paths();
+
+        assert_eq!(external_paths.paths(), &[PathBuf::from("c.txt")]);
+        assert!(external_paths.operations().copy());
+        assert!(external_paths.operations().move_());
+    }
+
+    #[test]
+    fn large_icon_item_drag_exports_item_path_for_native_drag() {
+        let view = test_view_with_entries(&["a.txt", "b.txt"]);
+
+        let dragged = view.test_dragged_entry_for_index(1).expect("dragged item");
+        let external_paths = dragged.external_paths();
+
+        assert_eq!(external_paths.paths(), &[PathBuf::from("b.txt")]);
+        assert!(external_paths.operations().copy());
+        assert!(external_paths.operations().move_());
     }
 
     #[test]

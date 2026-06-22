@@ -9,11 +9,11 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
-    IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px, rgb,
-    transparent_black, uniform_list,
+    CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, ExternalPathsDragCallback, FocusHandle,
+    Focusable, Image, IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -3122,19 +3122,26 @@ fn add_selected_entry_drag(
         return element;
     };
 
-    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
-    element.on_drag_with_external_paths(drag_payload, external_paths, {
-        let entity = entity.clone();
-        move |dragged: &DraggedEntries, cursor_offset, _, cx| {
-            entity.update(cx, |this, _| {
-                if this.mouse_selection_drag.is_none() {
-                    this.cancel_mouse_selection_drag();
-                }
-            });
-            let font = entity.read(cx).font.clone();
-            cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
-        }
-    })
+    let external_paths = drag_payload.external_paths();
+    let completion_callback =
+        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
+    element.on_drag_with_external_paths_callback(
+        drag_payload,
+        external_paths,
+        completion_callback,
+        {
+            let entity = entity.clone();
+            move |dragged: &DraggedEntries, cursor_offset, _, cx| {
+                entity.update(cx, |this, _| {
+                    if this.mouse_selection_drag.is_none() {
+                        this.cancel_mouse_selection_drag();
+                    }
+                });
+                let font = entity.read(cx).font.clone();
+                cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
+            }
+        },
+    )
 }
 
 fn add_individual_entry_drag(
@@ -3146,10 +3153,13 @@ fn add_individual_entry_drag(
         return element;
     };
 
-    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
-    element.on_drag_with_external_paths(
+    let external_paths = drag_payload.external_paths();
+    let completion_callback =
+        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
+    element.on_drag_with_external_paths_callback(
         drag_payload,
         external_paths,
+        completion_callback,
         move |dragged: &DraggedEntries, cursor_offset, _, cx| {
             entity.update(cx, |this, _| {
                 this.begin_individual_item_drag(dragged);
@@ -3158,6 +3168,17 @@ fn add_individual_entry_drag(
             cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
         },
     )
+}
+
+fn external_paths_drag_completion_callback(
+    entity: Entity<ExplorerView>,
+    paths: Vec<PathBuf>,
+) -> ExternalPathsDragCallback {
+    Box::new(move |result, cx| {
+        entity.update(cx, |this, cx| {
+            this.complete_external_paths_drag(&paths, result, cx);
+        });
+    })
 }
 
 fn add_drop_handlers(
@@ -5406,12 +5427,15 @@ fn add_item_drag(
     drag_payload: DraggedEntries,
     entity: Entity<ExplorerView>,
 ) -> AnyElement {
-    let external_paths = ExternalPaths::new(drag_payload.paths.clone());
+    let external_paths = drag_payload.external_paths();
+    let completion_callback =
+        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
 
     cell.id(id)
-        .on_drag_with_external_paths(
+        .on_drag_with_external_paths_callback(
             drag_payload,
             external_paths,
+            completion_callback,
             move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                 entity.update(cx, |this, _| {
                     this.begin_individual_item_drag(dragged);

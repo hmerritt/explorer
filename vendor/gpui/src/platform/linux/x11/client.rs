@@ -29,7 +29,8 @@ use x11rb::{
     protocol::xkb::ConnectionExt as _,
     protocol::xproto::{
         AtomEnum, ChangeWindowAttributesAux, ClientMessageData, ClientMessageEvent,
-        ConnectionExt as _, EventMask, Visibility,
+        ConnectionExt as _, EventMask, GrabMode, SelectionNotifyEvent, SelectionRequestEvent,
+        Visibility,
     },
     protocol::{Event, randr, render, xinput, xkb, xproto},
     resource_manager::Database,
@@ -60,7 +61,8 @@ use crate::platform::{
     },
 };
 use crate::{
-    AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
+    AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, ExternalPathDragOperations,
+    ExternalPaths, ExternalPathsDragResult, ExternalPathsDragStartResult, FileDropEvent, Keystroke,
     LinuxKeyboardLayout, Modifiers, ModifiersChangedEvent, MouseButton, Pixels, Platform,
     PlatformDisplay, PlatformInput, PlatformKeyboardLayout, Point, RequestFrameOptions,
     ScrollDelta, Size, TouchPhase, WindowParams, X11Window, modifiers_from_xinput_info, point, px,
@@ -148,6 +150,15 @@ pub struct Xdnd {
     position: Point<Pixels>,
 }
 
+pub(crate) struct XdndSource {
+    source_window: xproto::Window,
+    target_window: Option<xproto::Window>,
+    window: X11WindowStatePtr,
+    paths: ExternalPaths,
+    requested_action: u32,
+    accepted_action: Option<u32>,
+}
+
 #[derive(Debug)]
 struct PointerDeviceState {
     horizontal: ScrollAxisState,
@@ -216,6 +227,7 @@ pub struct X11ClientState {
     pub(crate) clipboard: Clipboard,
     pub(crate) clipboard_item: Option<ClipboardItem>,
     pub(crate) xdnd_state: Xdnd,
+    pub(crate) xdnd_source: Option<XdndSource>,
 }
 
 #[derive(Clone)]
@@ -250,6 +262,113 @@ impl X11ClientStatePtr {
         if state.windows.is_empty() {
             state.common.signal.stop();
         }
+    }
+
+    pub(crate) fn start_external_paths_drag(
+        &self,
+        window: &X11WindowStatePtr,
+        paths: ExternalPaths,
+    ) -> ExternalPathsDragStartResult {
+        if paths.is_empty() {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        let Some(client) = self.get_client() else {
+            return ExternalPathsDragStartResult::Failed;
+        };
+        let mut state = client.0.borrow_mut();
+        let requested_action = xdnd_action_for_operations(paths.operations(), &state.atoms);
+        if requested_action == 0 {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        let source_window = window.x_window;
+        let event_mask = EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION | EventMask::POINTER_MOTION;
+        let grab = get_reply(
+            || "Failed to grab X11 pointer for XDND source drag",
+            state.xcb_connection.grab_pointer(
+                false,
+                source_window,
+                event_mask,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                x11rb::CURRENT_TIME,
+            ),
+        )
+        .log_err();
+        if grab.is_none() {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        check_reply(
+            || "Failed to set XdndSelection owner",
+            state.xcb_connection.set_selection_owner(
+                source_window,
+                state.atoms.XdndSelection,
+                x11rb::CURRENT_TIME,
+            ),
+        )
+        .log_err();
+
+        let action_list = xdnd_actions_for_operations(paths.operations(), &state.atoms);
+        if action_list.len() > 1 {
+            check_reply(
+                || "Failed to set XdndActionList",
+                state.xcb_connection.change_property32(
+                    xproto::PropMode::REPLACE,
+                    source_window,
+                    state.atoms.XdndActionList,
+                    state.atoms.XA_ATOM,
+                    &action_list,
+                ),
+            )
+            .log_err();
+        }
+
+        let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+        let pointer = get_reply(
+            || "Failed to query pointer for XDND source drag",
+            state.xcb_connection.query_pointer(root),
+        )
+        .log_err();
+        let target_window = pointer.as_ref().and_then(|pointer| {
+            xdnd_target_window_at_pointer(
+                &state.xcb_connection,
+                &state.atoms,
+                root,
+                source_window,
+                pointer.child,
+            )
+        });
+
+        if let Some(target_window) = target_window {
+            xdnd_send_enter(&state.xcb_connection, &state.atoms, source_window, target_window);
+            if let Some(pointer) = &pointer {
+                xdnd_send_position(
+                    &state.xcb_connection,
+                    &state.atoms,
+                    source_window,
+                    target_window,
+                    pointer.root_x,
+                    pointer.root_y,
+                    x11rb::CURRENT_TIME,
+                    requested_action,
+                );
+            }
+        }
+
+        state.xdnd_source = Some(XdndSource {
+            source_window,
+            target_window,
+            window: window.clone(),
+            paths,
+            requested_action,
+            accepted_action: None,
+        });
+        xcb_flush(&state.xcb_connection);
+        ExternalPathsDragStartResult::Pending
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -514,6 +633,7 @@ impl X11Client {
             clipboard,
             clipboard_item: None,
             xdnd_state: Xdnd::default(),
+            xdnd_source: None,
         }))))
     }
 
@@ -735,6 +855,127 @@ impl X11Client {
             .map(|window_reference| window_reference.window.clone())
     }
 
+    fn update_xdnd_source_position(&self) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(source) = state.xdnd_source.as_ref() else {
+            return false;
+        };
+
+        let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+        let source_window = source.source_window;
+        let requested_action = source.requested_action;
+        let pointer = get_reply(
+            || "Failed to query pointer for XDND source motion",
+            state.xcb_connection.query_pointer(root),
+        )
+        .log_err();
+        let Some(pointer) = pointer else {
+            return true;
+        };
+
+        let target_window = xdnd_target_window_at_pointer(
+            &state.xcb_connection,
+            &state.atoms,
+            root,
+            source_window,
+            pointer.child,
+        );
+        let previous_target = source.target_window;
+
+        if previous_target != target_window {
+            if let Some(previous_target) = previous_target {
+                xdnd_send_leave(
+                    &state.xcb_connection,
+                    &state.atoms,
+                    source_window,
+                    previous_target,
+                );
+            }
+            if let Some(target_window) = target_window {
+                xdnd_send_enter(
+                    &state.xcb_connection,
+                    &state.atoms,
+                    source_window,
+                    target_window,
+                );
+            }
+            if let Some(source) = state.xdnd_source.as_mut() {
+                source.target_window = target_window;
+                source.accepted_action = None;
+            }
+        }
+
+        if let Some(target_window) = target_window {
+            xdnd_send_position(
+                &state.xcb_connection,
+                &state.atoms,
+                source_window,
+                target_window,
+                pointer.root_x,
+                pointer.root_y,
+                x11rb::CURRENT_TIME,
+                requested_action,
+            );
+        }
+
+        xcb_flush(&state.xcb_connection);
+        true
+    }
+
+    fn finish_xdnd_source_drop(&self) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(source) = state.xdnd_source.as_ref() else {
+            return false;
+        };
+
+        if let (Some(target_window), Some(_accepted_action)) =
+            (source.target_window, source.accepted_action)
+        {
+            xdnd_send_drop(
+                &state.xcb_connection,
+                &state.atoms,
+                source.source_window,
+                target_window,
+                x11rb::CURRENT_TIME,
+            );
+            xcb_flush(&state.xcb_connection);
+            return true;
+        }
+
+        let Some(source) = state.xdnd_source.take() else {
+            return true;
+        };
+        if let Some(target_window) = source.target_window {
+            xdnd_send_leave(
+                &state.xcb_connection,
+                &state.atoms,
+                source.source_window,
+                target_window,
+            );
+        }
+        check_reply(
+            || "Failed to clear XdndSelection owner",
+            state.xcb_connection.set_selection_owner(
+                x11rb::NONE,
+                state.atoms.XdndSelection,
+                x11rb::CURRENT_TIME,
+            ),
+        )
+        .log_err();
+        state
+            .xcb_connection
+            .ungrab_pointer(x11rb::CURRENT_TIME)
+            .log_err();
+        xcb_flush(&state.xcb_connection);
+        drop(state);
+        source
+            .window
+            .handle_input(PlatformInput::ExternalPathsDragFinished(
+                ExternalPathsDragResult::Cancelled,
+            ));
+        true
+    }
+
     fn handle_event(&self, event: Event) -> Option<()> {
         match event {
             Event::UnmapNotify(event) => {
@@ -775,6 +1016,37 @@ impl X11Client {
                             lo: arg2,
                             hi: arg3 as i32,
                         })
+                }
+
+                if event.type_ == state.atoms.XdndStatus && state.xdnd_source.is_some() {
+                    if let Some(source) = state.xdnd_source.as_mut() {
+                        source.accepted_action =
+                            ((arg1 & 1) != 0 && arg4 != x11rb::NONE).then_some(arg4);
+                    }
+                    return Some(());
+                } else if event.type_ == state.atoms.XdndFinished
+                    && state.xdnd_source.is_some()
+                {
+                    let result = xdnd_finished_result(arg1 != 0, arg2, &state.atoms);
+                    let Some(source) = state.xdnd_source.take() else {
+                        return Some(());
+                    };
+                    let xcb = state.xcb_connection.clone();
+                    check_reply(
+                        || "Failed to clear XdndSelection owner",
+                        xcb.set_selection_owner(
+                            x11rb::NONE,
+                            state.atoms.XdndSelection,
+                            x11rb::CURRENT_TIME,
+                        ),
+                    )
+                    .log_err();
+                    xcb.ungrab_pointer(x11rb::CURRENT_TIME).log_err();
+                    drop(state);
+                    source
+                        .window
+                        .handle_input(PlatformInput::ExternalPathsDragFinished(result));
+                    return Some(());
                 }
 
                 if event.type_ == state.atoms.XdndEnter {
@@ -846,6 +1118,17 @@ impl X11Client {
                     self.0.borrow_mut().xdnd_state = Xdnd::default();
                 }
             }
+            Event::SelectionRequest(event) => {
+                let state = self.0.borrow();
+                if event.selection == state.atoms.XdndSelection {
+                    xdnd_handle_source_selection_request(
+                        &state.xcb_connection,
+                        &state.atoms,
+                        state.xdnd_source.as_ref(),
+                        event,
+                    );
+                }
+            }
             Event::SelectionNotify(event) => {
                 let window = self.get_window(event.requestor)?;
                 let mut state = self.0.borrow_mut();
@@ -872,7 +1155,7 @@ impl X11Client {
                         .collect();
                     let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                         position: state.xdnd_state.position,
-                        paths: crate::ExternalPaths(paths),
+                        paths: crate::ExternalPaths::new(paths),
                     });
                     drop(state);
                     window.handle_input(input);
@@ -1150,7 +1433,20 @@ impl X11Client {
                     }
                 }
             }
+            Event::ButtonRelease(_) => {
+                if self.finish_xdnd_source_drop() {
+                    return Some(());
+                }
+            }
+            Event::MotionNotify(_) => {
+                if self.update_xdnd_source_position() {
+                    return Some(());
+                }
+            }
             Event::XinputButtonRelease(event) => {
+                if self.finish_xdnd_source_drop() {
+                    return Some(());
+                }
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
@@ -1176,6 +1472,9 @@ impl X11Client {
                 }
             }
             Event::XinputMotion(event) => {
+                if self.update_xdnd_source_position() {
+                    return Some(());
+                }
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
@@ -2038,6 +2337,302 @@ fn xdnd_get_supported_atom(
     0
 }
 
+fn xdnd_actions_for_operations(
+    operations: ExternalPathDragOperations,
+    atoms: &XcbAtoms,
+) -> Vec<u32> {
+    xdnd_actions_for_operations_with_atoms(operations, atoms.XdndActionCopy, atoms.XdndActionMove)
+}
+
+fn xdnd_actions_for_operations_with_atoms(
+    operations: ExternalPathDragOperations,
+    copy_action: u32,
+    move_action: u32,
+) -> Vec<u32> {
+    let mut actions = Vec::with_capacity(2);
+    if operations.copy() {
+        actions.push(copy_action);
+    }
+    if operations.move_() {
+        actions.push(move_action);
+    }
+    actions
+}
+
+fn xdnd_action_for_operations(operations: ExternalPathDragOperations, atoms: &XcbAtoms) -> u32 {
+    xdnd_action_for_operations_with_atoms(operations, atoms.XdndActionCopy, atoms.XdndActionMove)
+}
+
+fn xdnd_action_for_operations_with_atoms(
+    operations: ExternalPathDragOperations,
+    copy_action: u32,
+    move_action: u32,
+) -> u32 {
+    if operations.move_() && !operations.copy() {
+        move_action
+    } else if operations.copy() {
+        copy_action
+    } else {
+        0
+    }
+}
+
+fn xdnd_finished_result(accepted: bool, action: u32, atoms: &XcbAtoms) -> ExternalPathsDragResult {
+    xdnd_finished_result_with_atoms(
+        accepted,
+        action,
+        atoms.XdndActionCopy,
+        atoms.XdndActionMove,
+    )
+}
+
+fn xdnd_finished_result_with_atoms(
+    accepted: bool,
+    action: u32,
+    copy_action: u32,
+    move_action: u32,
+) -> ExternalPathsDragResult {
+    if !accepted {
+        return ExternalPathsDragResult::Cancelled;
+    }
+
+    if action == move_action {
+        ExternalPathsDragResult::move_(false)
+    } else if action == copy_action {
+        ExternalPathsDragResult::copy()
+    } else {
+        ExternalPathsDragResult::Cancelled
+    }
+}
+
+fn xdnd_target_window_at_pointer(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    root: xproto::Window,
+    source_window: xproto::Window,
+    child: xproto::Window,
+) -> Option<xproto::Window> {
+    let mut window = child;
+    if window == x11rb::NONE {
+        return None;
+    }
+
+    loop {
+        let reply = get_reply(
+            || "Failed to query child window for XDND source drag",
+            xcb_connection.query_pointer(window),
+        )
+        .log_with_level(Level::Debug)?;
+        if reply.child == x11rb::NONE {
+            break;
+        }
+        window = reply.child;
+    }
+
+    loop {
+        if window != source_window && xdnd_window_is_aware(xcb_connection, atoms, window) {
+            return Some(window);
+        }
+        if window == root || window == x11rb::NONE {
+            return None;
+        }
+        let tree = get_reply(
+            || "Failed to query parent window for XDND source drag",
+            xcb_connection.query_tree(window),
+        )
+        .log_with_level(Level::Debug)?;
+        window = tree.parent;
+    }
+}
+
+fn xdnd_window_is_aware(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    window: xproto::Window,
+) -> bool {
+    get_reply(
+        || "Failed to get XdndAware property",
+        xcb_connection.get_property(false, window, atoms.XdndAware, atoms.XA_ATOM, 0, 1),
+    )
+    .log_with_level(Level::Debug)
+    .is_some_and(|reply| reply.value_len > 0)
+}
+
+fn xdnd_enter_data(source: xproto::Window, text_uri_list: u32) -> [u32; 5] {
+    [source, 5 << 24, text_uri_list, 0, 0]
+}
+
+fn xdnd_position_data(
+    source: xproto::Window,
+    root_x: i16,
+    root_y: i16,
+    time: xproto::Timestamp,
+    action: u32,
+) -> [u32; 5] {
+    [
+        source,
+        0,
+        ((root_x as u16 as u32) << 16) | (root_y as u16 as u32),
+        time,
+        action,
+    ]
+}
+
+fn xdnd_send_enter(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    source: xproto::Window,
+    target: xproto::Window,
+) {
+    let message = ClientMessageEvent {
+        format: 32,
+        window: target,
+        type_: atoms.XdndEnter,
+        data: ClientMessageData::from(xdnd_enter_data(source, atoms.TextUriList)),
+        sequence: 0,
+        response_type: xproto::CLIENT_MESSAGE_EVENT,
+    };
+    check_reply(
+        || "Failed to send XDnD enter event",
+        xcb_connection.send_event(false, target, EventMask::default(), message),
+    )
+    .log_err();
+}
+
+fn xdnd_send_position(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    source: xproto::Window,
+    target: xproto::Window,
+    root_x: i16,
+    root_y: i16,
+    time: xproto::Timestamp,
+    action: u32,
+) {
+    let message = ClientMessageEvent {
+        format: 32,
+        window: target,
+        type_: atoms.XdndPosition,
+        data: ClientMessageData::from(xdnd_position_data(source, root_x, root_y, time, action)),
+        sequence: 0,
+        response_type: xproto::CLIENT_MESSAGE_EVENT,
+    };
+    check_reply(
+        || "Failed to send XDnD position event",
+        xcb_connection.send_event(false, target, EventMask::default(), message),
+    )
+    .log_err();
+}
+
+fn xdnd_send_leave(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    source: xproto::Window,
+    target: xproto::Window,
+) {
+    let message = ClientMessageEvent {
+        format: 32,
+        window: target,
+        type_: atoms.XdndLeave,
+        data: ClientMessageData::from([source, 0, 0, 0, 0]),
+        sequence: 0,
+        response_type: xproto::CLIENT_MESSAGE_EVENT,
+    };
+    check_reply(
+        || "Failed to send XDnD leave event",
+        xcb_connection.send_event(false, target, EventMask::default(), message),
+    )
+    .log_err();
+}
+
+fn xdnd_send_drop(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    source: xproto::Window,
+    target: xproto::Window,
+    time: xproto::Timestamp,
+) {
+    let message = ClientMessageEvent {
+        format: 32,
+        window: target,
+        type_: atoms.XdndDrop,
+        data: ClientMessageData::from([source, 0, time, 0, 0]),
+        sequence: 0,
+        response_type: xproto::CLIENT_MESSAGE_EVENT,
+    };
+    check_reply(
+        || "Failed to send XDnD drop event",
+        xcb_connection.send_event(false, target, EventMask::default(), message),
+    )
+    .log_err();
+}
+
+fn xdnd_handle_source_selection_request(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    source: Option<&XdndSource>,
+    event: SelectionRequestEvent,
+) {
+    let property = if event.property == x11rb::NONE {
+        event.target
+    } else {
+        event.property
+    };
+    let mut response_property = x11rb::NONE;
+
+    if let Some(source) = source {
+        if event.target == atoms.TextUriList {
+            let uri_list = source.paths.to_uri_list();
+            if check_reply(
+                || "Failed to write XDND text/uri-list selection",
+                xcb_connection.change_property8(
+                    xproto::PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    atoms.TextUriList,
+                    uri_list.as_bytes(),
+                ),
+            )
+            .log_err()
+            .is_some()
+            {
+                response_property = property;
+            }
+        } else if event.target == atoms.TARGETS
+            && check_reply(
+                || "Failed to write XDND TARGETS selection",
+                xcb_connection.change_property32(
+                    xproto::PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    atoms.XA_ATOM,
+                    &[atoms.TextUriList],
+                ),
+            )
+            .log_err()
+            .is_some()
+        {
+            response_property = property;
+        }
+    }
+
+    let notify = SelectionNotifyEvent {
+        response_type: xproto::SELECTION_NOTIFY_EVENT,
+        sequence: 0,
+        time: event.time,
+        requestor: event.requestor,
+        selection: event.selection,
+        target: event.target,
+        property: response_property,
+    };
+    check_reply(
+        || "Failed to send XDND selection notify",
+        xcb_connection.send_event(false, event.requestor, EventMask::default(), notify),
+    )
+    .log_err();
+    xcb_connection.flush().log_err();
+}
+
 fn xdnd_send_finished(
     xcb_connection: &XCBConnection,
     atoms: &XcbAtoms,
@@ -2081,6 +2676,63 @@ fn xdnd_send_status(
     )
     .log_err();
     xcb_connection.flush().log_err();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExternalPathDragOperation, ExternalPathsDragResult};
+
+    #[test]
+    fn x11_xdnd_actions_advertise_copy_and_move() {
+        assert_eq!(
+            xdnd_actions_for_operations_with_atoms(
+                ExternalPathDragOperations::COPY_MOVE,
+                10,
+                20,
+            ),
+            vec![10, 20]
+        );
+        assert_eq!(
+            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::MOVE, 10, 20),
+            20
+        );
+        assert_eq!(
+            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::COPY, 10, 20),
+            10
+        );
+    }
+
+    #[test]
+    fn x11_xdnd_finished_maps_copy_move_and_cancel() {
+        assert_eq!(
+            xdnd_finished_result_with_atoms(true, 10, 10, 20),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Copy,
+                cleanup_source: false,
+            }
+        );
+        assert_eq!(
+            xdnd_finished_result_with_atoms(true, 20, 10, 20),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Move,
+                cleanup_source: false,
+            }
+        );
+        assert_eq!(
+            xdnd_finished_result_with_atoms(false, 20, 10, 20),
+            ExternalPathsDragResult::Cancelled
+        );
+    }
+
+    #[test]
+    fn x11_xdnd_message_data_uses_source_position_and_action() {
+        assert_eq!(xdnd_enter_data(7, 99), [7, 5 << 24, 99, 0, 0]);
+        assert_eq!(
+            xdnd_position_data(7, 12, 34, 56, 78),
+            [7, 0, (12 << 16) | 34, 56, 78]
+        );
+    }
 }
 
 /// Recomputes `pointer_device_states` by querying all pointer devices.

@@ -22,8 +22,8 @@ use crate::{
     KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow,
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
-    ExternalPaths, point, px, size,
+    ExternalPaths, ExternalPathsDragCallback, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -536,6 +536,21 @@ impl Interactivity {
         T: 'static,
         W: 'static + Render,
     {
+        self.on_drag_with_external_paths_callback(value, external_paths, None, constructor);
+    }
+
+    /// Like [`Self::on_drag_with_external_paths`], with a callback for native drag completion.
+    pub fn on_drag_with_external_paths_callback<T, W>(
+        &mut self,
+        value: T,
+        external_paths: Option<ExternalPaths>,
+        external_paths_callback: Option<ExternalPathsDragCallback>,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
         debug_assert!(
             self.drag_listener.is_none(),
             "calling on_drag more than once on the same element is not supported"
@@ -543,6 +558,7 @@ impl Interactivity {
         self.drag_listener = Some((
             Arc::new(value),
             external_paths,
+            external_paths_callback,
             Box::new(move |value, offset, window, cx| {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
@@ -1205,6 +1221,29 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// On drag initiation, advertises `external_paths` to native operating-system
+    /// drop targets and reports native drag completion through `external_paths_callback`.
+    fn on_drag_with_external_paths_callback<T, W>(
+        mut self,
+        value: T,
+        external_paths: ExternalPaths,
+        external_paths_callback: ExternalPathsDragCallback,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
+        self.interactivity().on_drag_with_external_paths_callback(
+            value,
+            Some(external_paths),
+            Some(external_paths_callback),
+            constructor,
+        );
+        self
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// The fluent API equivalent to [`Interactivity::on_hover`]
@@ -1583,7 +1622,12 @@ pub struct Interactivity {
     pub(crate) drop_listeners: Vec<(TypeId, DropListener)>,
     pub(crate) can_drop_predicate: Option<CanDropPredicate>,
     pub(crate) click_listeners: Vec<ClickListener>,
-    pub(crate) drag_listener: Option<(Arc<dyn Any>, Option<ExternalPaths>, DragListener)>,
+    pub(crate) drag_listener: Option<(
+        Arc<dyn Any>,
+        Option<ExternalPaths>,
+        Option<ExternalPathsDragCallback>,
+        DragListener,
+    )>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) window_control: Option<WindowControlArea>,
@@ -2231,7 +2275,12 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
-                            && let Some((drag_value, external_paths, drag_listener)) = drag_listener.take()
+                            && let Some((
+                                drag_value,
+                                external_paths,
+                                external_paths_callback,
+                                drag_listener,
+                            )) = drag_listener.take()
                         {
                             *clicked_state.borrow_mut() = ElementClickedState::default();
                             let cursor_offset = event.position - hitbox.origin;
@@ -2244,6 +2293,7 @@ impl Interactivity {
                                 cursor_offset,
                                 cursor_style: drag_cursor_style,
                                 external_paths,
+                                external_paths_callback,
                             });
                             pending_mouse_down.take();
                             window.refresh();

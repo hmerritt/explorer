@@ -3,10 +3,11 @@ use x11rb::connection::RequestConnection;
 
 use crate::platform::blade::{BladeContext, BladeRenderer, BladeSurfaceConfig};
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, ExternalPaths,
+    ExternalPathsDragStartResult, ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size, Tiling,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowDecorations, WindowKind, WindowParams, X11ClientStatePtr, px, size,
 };
 
@@ -47,6 +48,9 @@ x11rb::atom_manager! {
         XdndFinished,
         XdndTypeList,
         XdndActionCopy,
+        XdndActionMove,
+        XdndActionList,
+        TARGETS,
         TextUriList: b"text/uri-list",
         UTF8_STRING,
         TEXT,
@@ -1245,6 +1249,14 @@ impl PlatformWindow for X11Window {
         .map_or(Point::new(Pixels::ZERO, Pixels::ZERO), |reply| {
             Point::new((reply.root_x as u32).into(), (reply.root_y as u32).into())
         })
+    }
+
+    fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
+        self.0
+            .state
+            .borrow()
+            .client
+            .start_external_paths_drag(&self.0, paths)
     }
 
     fn modifiers(&self) -> Modifiers {

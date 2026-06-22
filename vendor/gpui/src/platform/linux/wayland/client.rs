@@ -1,7 +1,8 @@
 use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
-    os::fd::{AsRawFd, BorrowedFd},
+    io::Write,
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     path::PathBuf,
     rc::{Rc, Weak},
     time::{Duration, Instant},
@@ -73,11 +74,12 @@ use super::{
 use crate::platform::{PlatformWindow, blade::BladeContext};
 use crate::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DOUBLE_CLICK_INTERVAL, DevicePixels, DisplayId,
-    FileDropEvent, ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, LinuxCommon,
-    LinuxKeyboardLayout, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay,
-    PlatformInput, PlatformKeyboardLayout, Point, SCROLL_LINES, ScrollDelta, ScrollWheelEvent,
-    Size, TouchPhase, WindowParams, point, px, size,
+    ExternalPathDragOperations, ExternalPaths, ExternalPathsDragResult,
+    ExternalPathsDragStartResult, FileDropEvent, ForegroundExecutor, KeyDownEvent, KeyUpEvent,
+    Keystroke, LinuxCommon, LinuxKeyboardLayout, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels,
+    PlatformDisplay, PlatformInput, PlatformKeyboardLayout, Point, SCROLL_LINES, ScrollDelta,
+    ScrollWheelEvent, Size, TouchPhase, WindowParams, point, px, size,
 };
 use crate::{
     SharedString,
@@ -243,6 +245,15 @@ pub struct DragState {
     data_offer: Option<wl_data_offer::WlDataOffer>,
     window: Option<WaylandWindowStatePtr>,
     position: Point<Pixels>,
+    source: Option<ExternalPathsSourceDrag>,
+}
+
+pub struct ExternalPathsSourceDrag {
+    data_source: wl_data_source::WlDataSource,
+    window: WaylandWindowStatePtr,
+    paths: ExternalPaths,
+    drop_performed: bool,
+    selected_action: Option<DndAction>,
 }
 
 pub struct ClickState {
@@ -268,6 +279,39 @@ pub(crate) enum PendingActivation {
     Window(ObjectId),
 }
 
+fn wayland_dnd_actions(operations: ExternalPathDragOperations) -> DndAction {
+    let mut actions = DndAction::empty();
+    if operations.copy() {
+        actions |= DndAction::Copy;
+    }
+    if operations.move_() {
+        actions |= DndAction::Move;
+    }
+    actions
+}
+
+fn wayland_drag_result(
+    drop_performed: bool,
+    selected_action: Option<DndAction>,
+) -> ExternalPathsDragResult {
+    if !drop_performed {
+        return ExternalPathsDragResult::Cancelled;
+    }
+
+    match selected_action {
+        Some(action) if action == DndAction::Copy => ExternalPathsDragResult::copy(),
+        Some(action) if action == DndAction::Move => ExternalPathsDragResult::move_(false),
+        _ => ExternalPathsDragResult::Cancelled,
+    }
+}
+
+fn send_external_paths_uri_list(uri_list: String, fd: OwnedFd) {
+    let mut file = std::fs::File::from(fd);
+    if let Err(error) = file.write_all(uri_list.as_bytes()) {
+        log::error!("error writing drag and drop file list: {error:?}");
+    }
+}
+
 /// This struct is required to conform to Rust's orphan rules, so we can dispatch on the state but hand the
 /// window to GPUI.
 #[derive(Clone)]
@@ -282,6 +326,51 @@ impl WaylandClientStatePtr {
 
     pub fn get_serial(&self, kind: SerialKind) -> u32 {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
+    }
+
+    pub(crate) fn start_external_paths_drag(
+        &self,
+        window: &WaylandWindowStatePtr,
+        paths: ExternalPaths,
+    ) -> ExternalPathsDragStartResult {
+        if paths.is_empty() {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        let (Some(data_device_manager), Some(data_device)) = (
+            state.globals.data_device_manager.clone(),
+            state.data_device.clone(),
+        ) else {
+            return ExternalPathsDragStartResult::Failed;
+        };
+        let serial = state.serial_tracker.get(SerialKind::MousePress);
+        if serial == 0 {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        let data_source = data_device_manager.create_data_source(&state.globals.qh, ());
+        data_source.offer(FILE_LIST_MIME_TYPE.to_string());
+        if data_source.version() >= 3 {
+            let actions = wayland_dnd_actions(paths.operations());
+            data_source.set_actions(actions);
+        }
+
+        data_device.start_drag(
+            Some(&data_source),
+            &window.surface(),
+            None::<&wl_surface::WlSurface>,
+            serial,
+        );
+        state.drag.source = Some(ExternalPathsSourceDrag {
+            data_source,
+            window: window.clone(),
+            paths,
+            drop_performed: false,
+            selected_action: None,
+        });
+        ExternalPathsDragStartResult::Pending
     }
 
     pub fn set_pending_activation(&self, window: ObjectId) {
@@ -575,6 +664,7 @@ impl WaylandClient {
                 data_offer: None,
                 window: None,
                 position: Point::default(),
+                source: None,
             },
             click: ClickState {
                 last_click: Instant::now(),
@@ -1950,7 +2040,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
 
                             let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                                 position,
-                                paths: crate::ExternalPaths(paths),
+                                paths: crate::ExternalPaths::new(paths),
                             });
 
                             let client = this.get_client();
@@ -2062,10 +2152,69 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
 
         match event {
             wl_data_source::Event::Send { mime_type, fd } => {
-                state.clipboard.send(mime_type, fd);
+                if state
+                    .drag
+                    .source
+                    .as_ref()
+                    .is_some_and(|drag| drag.data_source.id() == data_source.id())
+                {
+                    if mime_type == FILE_LIST_MIME_TYPE
+                        && let Some(drag) = state.drag.source.as_ref()
+                    {
+                        send_external_paths_uri_list(drag.paths.to_uri_list(), fd);
+                    }
+                } else {
+                    state.clipboard.send(mime_type, fd);
+                }
             }
             wl_data_source::Event::Cancelled => {
+                if state
+                    .drag
+                    .source
+                    .as_ref()
+                    .is_some_and(|drag| drag.data_source.id() == data_source.id())
+                {
+                    let drag = state.drag.source.take();
+                    drop(state);
+                    if let Some(drag) = drag {
+                        drag.window.handle_input(PlatformInput::ExternalPathsDragFinished(
+                            ExternalPathsDragResult::Cancelled,
+                        ));
+                    }
+                }
                 data_source.destroy();
+            }
+            wl_data_source::Event::DndDropPerformed => {
+                if let Some(drag) = state.drag.source.as_mut()
+                    && drag.data_source.id() == data_source.id()
+                {
+                    drag.drop_performed = true;
+                }
+            }
+            wl_data_source::Event::DndFinished => {
+                if state
+                    .drag
+                    .source
+                    .as_ref()
+                    .is_some_and(|drag| drag.data_source.id() == data_source.id())
+                {
+                    let drag = state.drag.source.take();
+                    drop(state);
+                    if let Some(drag) = drag {
+                        let result = wayland_drag_result(drag.drop_performed, drag.selected_action);
+                        drag.window
+                            .handle_input(PlatformInput::ExternalPathsDragFinished(result));
+                    }
+                    data_source.destroy();
+                }
+            }
+            wl_data_source::Event::Action { dnd_action } => {
+                if let Some(drag) = state.drag.source.as_mut()
+                    && drag.data_source.id() == data_source.id()
+                    && let WEnum::Value(action) = dnd_action
+                {
+                    drag.selected_action = Some(action);
+                }
             }
             _ => {}
         }

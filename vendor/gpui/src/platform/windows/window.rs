@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
-    sync::{Arc, Once},
+    sync::{Arc, LazyLock, Once},
     time::{Duration, Instant},
 };
 
@@ -21,7 +21,14 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::{Com::*, LibraryLoader::*, Memory::*, Ole::*, SystemServices::*},
+        System::{
+            Com::*,
+            DataExchange::RegisterClipboardFormatW,
+            LibraryLoader::*,
+            Memory::*,
+            Ole::*,
+            SystemServices::*,
+        },
         UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -854,8 +861,8 @@ impl PlatformWindow for WindowsWindow {
         self.0.hwnd
     }
 
-    fn start_external_paths_drag(&self, paths: ExternalPaths) -> bool {
-        start_windows_external_paths_drag(self.0.hwnd, paths.paths())
+    fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
+        start_windows_external_paths_drag(self.0.hwnd, paths)
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
@@ -865,6 +872,24 @@ impl PlatformWindow for WindowsWindow {
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         // There is no such thing on Windows.
     }
+}
+
+static PREFERRED_DROPEFFECT_FORMAT: LazyLock<u16> =
+    LazyLock::new(|| register_shell_clipboard_format(CFSTR_PREFERREDDROPEFFECT));
+static PERFORMED_DROPEFFECT_FORMAT: LazyLock<u16> =
+    LazyLock::new(|| register_shell_clipboard_format(CFSTR_PERFORMEDDROPEFFECT));
+static LOGICAL_PERFORMED_DROPEFFECT_FORMAT: LazyLock<u16> =
+    LazyLock::new(|| register_shell_clipboard_format(CFSTR_LOGICALPERFORMEDDROPEFFECT));
+
+fn register_shell_clipboard_format(format: PCWSTR) -> u16 {
+    let format = unsafe { RegisterClipboardFormatW(format) };
+    if format == 0 {
+        panic!(
+            "Error when registering shell clipboard format: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    format as u16
 }
 
 #[implement(IDropSource)]
@@ -896,6 +921,9 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
 #[implement(IDataObject)]
 struct WindowsFileDataObject {
     paths: Vec<PathBuf>,
+    preferred_effect: DROPEFFECT,
+    performed_effect: Rc<Cell<DROPEFFECT>>,
+    logical_performed_effect: Rc<Cell<DROPEFFECT>>,
 }
 
 #[allow(non_snake_case)]
@@ -905,7 +933,16 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
             return Err(DV_E_FORMATETC.into());
         }
 
-        let hglobal = allocate_hdrop(self.paths.as_slice())?;
+        let format = unsafe { pformatetcin.as_ref() }
+            .map(|format| format.cfFormat)
+            .ok_or_else(|| windows::core::Error::from(DV_E_FORMATETC))?;
+        let hglobal = if format == CF_HDROP.0 {
+            allocate_hdrop(self.paths.as_slice())?
+        } else if format == *PREFERRED_DROPEFFECT_FORMAT {
+            allocate_dropeffect(self.preferred_effect)?
+        } else {
+            return Err(DV_E_FORMATETC.into());
+        };
         Ok(STGMEDIUM {
             tymed: TYMED_HGLOBAL.0 as u32,
             u: STGMEDIUM_0 { hGlobal: hglobal },
@@ -922,7 +959,7 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
     }
 
     fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::HRESULT {
-        if is_hdrop_format(pformatetc) {
+        if is_hdrop_format(pformatetc) || is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT) {
             S_OK
         } else {
             DV_E_FORMATETC
@@ -939,11 +976,26 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
 
     fn SetData(
         &self,
-        _pformatetc: *const FORMATETC,
-        _pmedium: *const STGMEDIUM,
-        _frelease: BOOL,
+        pformatetc: *const FORMATETC,
+        pmedium: *const STGMEDIUM,
+        frelease: BOOL,
     ) -> windows::core::Result<()> {
-        Err(E_NOTIMPL.into())
+        if is_dropeffect_format(pformatetc, *PERFORMED_DROPEFFECT_FORMAT) {
+            if let Some(effect) = read_dropeffect_from_medium(pmedium) {
+                self.performed_effect.set(effect);
+            }
+        } else if is_dropeffect_format(pformatetc, *LOGICAL_PERFORMED_DROPEFFECT_FORMAT)
+            && let Some(effect) = read_dropeffect_from_medium(pmedium)
+        {
+            self.logical_performed_effect.set(effect);
+        }
+
+        if frelease.as_bool() && !pmedium.is_null() {
+            let mut medium = unsafe { std::ptr::read(pmedium) };
+            unsafe { ReleaseStgMedium(&mut medium) };
+        }
+
+        Ok(())
     }
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
@@ -993,12 +1045,15 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
         }
 
         let mut fetched = 0;
-        if celt > 0 && self.next_index.get() == 0 {
-            unsafe {
-                rgelt.write(hdrop_format_etc());
-            }
-            self.next_index.set(1);
-            fetched = 1;
+        while fetched < celt && self.next_index.get() < 2 {
+            let format = match self.next_index.get() {
+                0 => hdrop_format_etc(),
+                1 => dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT),
+                _ => unreachable!(),
+            };
+            unsafe { rgelt.add(fetched as usize).write(format) };
+            self.next_index.set(self.next_index.get() + 1);
+            fetched += 1;
         }
 
         if !pceltfetched.is_null() {
@@ -1011,9 +1066,9 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     }
 
     fn Skip(&self, celt: u32) -> windows::core::Result<()> {
-        let remaining = 1usize.saturating_sub(self.next_index.get());
+        let remaining = 2usize.saturating_sub(self.next_index.get());
         self.next_index
-            .set((self.next_index.get() + celt as usize).min(1));
+            .set((self.next_index.get() + celt as usize).min(2));
         if celt as usize <= remaining {
             Ok(())
         } else {
@@ -1034,29 +1089,80 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     }
 }
 
-fn start_windows_external_paths_drag(hwnd: HWND, paths: &[PathBuf]) -> bool {
+fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> ExternalPathsDragStartResult {
+    let operations = paths.operations();
+    let preferred_effect = preferred_dropeffect_for_operations(operations);
+    let allowed_effects = allowed_dropeffects_for_operations(operations);
     let paths = paths
+        .paths()
         .iter()
         .filter(|path| path.as_os_str().len() > 0)
         .cloned()
         .collect::<Vec<_>>();
 
     if paths.is_empty() {
-        return false;
+        return ExternalPathsDragStartResult::Failed;
     }
 
+    let performed_effect = Rc::new(Cell::new(DROPEFFECT_NONE));
+    let logical_performed_effect = Rc::new(Cell::new(DROPEFFECT_NONE));
     let result = unsafe {
-        let data_object: IDataObject = WindowsFileDataObject { paths }.into();
+        let data_object: IDataObject = WindowsFileDataObject {
+            paths,
+            preferred_effect,
+            performed_effect: performed_effect.clone(),
+            logical_performed_effect: logical_performed_effect.clone(),
+        }
+        .into();
         let drop_source: IDropSource = WindowsFileDragSource.into();
-        SHDoDragDrop(
-            Some(hwnd),
-            &data_object,
-            &drop_source,
-            DROPEFFECT_COPY | DROPEFFECT_MOVE,
-        )
+        SHDoDragDrop(Some(hwnd), &data_object, &drop_source, allowed_effects)
     };
 
-    result.log_err().is_some()
+    match result.log_err() {
+        Some(effect) => ExternalPathsDragStartResult::Completed(windows_external_drag_result(
+            effect,
+            performed_effect.get(),
+            logical_performed_effect.get(),
+        )),
+        None => ExternalPathsDragStartResult::Failed,
+    }
+}
+
+fn allowed_dropeffects_for_operations(operations: ExternalPathDragOperations) -> DROPEFFECT {
+    let mut effect = DROPEFFECT_NONE;
+    if operations.copy() {
+        effect |= DROPEFFECT_COPY;
+    }
+    if operations.move_() {
+        effect |= DROPEFFECT_MOVE;
+    }
+    effect
+}
+
+fn preferred_dropeffect_for_operations(operations: ExternalPathDragOperations) -> DROPEFFECT {
+    if operations.move_() && !operations.copy() {
+        DROPEFFECT_MOVE
+    } else if operations.copy() {
+        DROPEFFECT_COPY
+    } else {
+        DROPEFFECT_NONE
+    }
+}
+
+fn windows_external_drag_result(
+    drop_effect: DROPEFFECT,
+    performed_effect: DROPEFFECT,
+    logical_performed_effect: DROPEFFECT,
+) -> ExternalPathsDragResult {
+    if drop_effect == DROPEFFECT_MOVE {
+        let cleanup_source = performed_effect == DROPEFFECT_MOVE
+            || (performed_effect == DROPEFFECT_NONE && logical_performed_effect == DROPEFFECT_MOVE);
+        ExternalPathsDragResult::move_(cleanup_source)
+    } else if drop_effect == DROPEFFECT_COPY {
+        ExternalPathsDragResult::copy()
+    } else {
+        ExternalPathsDragResult::Cancelled
+    }
 }
 
 fn is_hdrop_format(format: *const FORMATETC) -> bool {
@@ -1069,9 +1175,29 @@ fn is_hdrop_format(format: *const FORMATETC) -> bool {
         && (format.tymed & TYMED_HGLOBAL.0 as u32) != 0
 }
 
+fn is_dropeffect_format(format: *const FORMATETC, expected_format: u16) -> bool {
+    let Some(format) = (unsafe { format.as_ref() }) else {
+        return false;
+    };
+
+    format.cfFormat == expected_format
+        && format.dwAspect == DVASPECT_CONTENT.0
+        && (format.tymed & TYMED_HGLOBAL.0 as u32) != 0
+}
+
 fn hdrop_format_etc() -> FORMATETC {
     FORMATETC {
         cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+fn dropeffect_format_etc(format: u16) -> FORMATETC {
+    FORMATETC {
+        cfFormat: format,
         ptd: std::ptr::null_mut(),
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
@@ -1111,6 +1237,42 @@ fn build_hdrop_payload(paths: &[PathBuf]) -> Vec<u8> {
     payload.extend_from_slice(header_bytes);
     payload.extend_from_slice(path_bytes);
     payload
+}
+
+fn allocate_dropeffect(effect: DROPEFFECT) -> windows::core::Result<HGLOBAL> {
+    let effect = effect.0.to_ne_bytes();
+    unsafe {
+        let global = GlobalAlloc(GMEM_MOVEABLE, effect.len())?;
+        let handle = GlobalLock(global);
+        if handle.is_null() {
+            return Err(windows::core::Error::from_win32());
+        }
+        std::ptr::copy_nonoverlapping(effect.as_ptr(), handle.cast::<u8>(), effect.len());
+        let _ = GlobalUnlock(global);
+        Ok(global)
+    }
+}
+
+fn read_dropeffect_from_medium(medium: *const STGMEDIUM) -> Option<DROPEFFECT> {
+    let medium = unsafe { medium.as_ref() }?;
+    if (medium.tymed & TYMED_HGLOBAL.0 as u32) == 0 {
+        return None;
+    }
+
+    let global = unsafe { medium.u.hGlobal };
+    let size = unsafe { GlobalSize(global) };
+    if size < mem::size_of::<u32>() {
+        return None;
+    }
+
+    let handle = unsafe { GlobalLock(global) };
+    if handle.is_null() {
+        return None;
+    }
+
+    let effect = unsafe { std::ptr::read_unaligned(handle.cast::<u32>()) };
+    let _ = unsafe { GlobalUnlock(global) };
+    Some(DROPEFFECT(effect))
 }
 
 fn allocate_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
@@ -1187,7 +1349,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                         cursor_position.y as f32,
                         scale_factor,
                     ),
-                    paths: ExternalPaths(paths),
+                    paths: ExternalPaths::new(paths),
                 });
                 self.handle_drag_drop(input);
             } else {
@@ -1276,7 +1438,11 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 
 #[cfg(test)]
 mod external_paths_drag_tests {
-    use super::{build_hdrop_payload, DROPFILES};
+    use super::{
+        build_hdrop_payload, windows_external_drag_result, DROPFILES, DROPEFFECT_COPY,
+        DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    };
+    use crate::{ExternalPathDragOperation, ExternalPathsDragResult};
     use std::{mem, path::PathBuf};
 
     fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
@@ -1315,6 +1481,39 @@ mod external_paths_drag_tests {
             [r"C:\Users\test\one.txt", r"C:\Users\test\two.txt"]
         );
         assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn windows_drag_result_copies_without_source_cleanup() {
+        assert_eq!(
+            windows_external_drag_result(DROPEFFECT_COPY, DROPEFFECT_COPY, DROPEFFECT_NONE),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Copy,
+                cleanup_source: false,
+            }
+        );
+    }
+
+    #[test]
+    fn windows_drag_result_requires_cleanup_for_unoptimized_move() {
+        assert_eq!(
+            windows_external_drag_result(DROPEFFECT_MOVE, DROPEFFECT_MOVE, DROPEFFECT_NONE),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Move,
+                cleanup_source: true,
+            }
+        );
+    }
+
+    #[test]
+    fn windows_drag_result_preserves_optimized_move_sources() {
+        assert_eq!(
+            windows_external_drag_result(DROPEFFECT_MOVE, DROPEFFECT_NONE, DROPEFFECT_NONE),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Move,
+                cleanup_source: false,
+            }
+        );
     }
 }
 

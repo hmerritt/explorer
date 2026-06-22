@@ -1,12 +1,14 @@
 use super::{BoolExt, MacDisplay, NSRange, NSStringExt, ns_string, renderer};
 use crate::{
-    AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPaths, FileDropEvent,
-    ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, Timer, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, dispatch_get_main_queue,
-    dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point, px, size,
+    AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPathDragOperations,
+    ExternalPathDragOperation, ExternalPaths, ExternalPathsDragResult, ExternalPathsDragStartResult,
+    FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, SharedString, Size, SystemWindowTab, Timer, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
+    dispatch_get_main_queue, dispatch_sys::dispatch_async_f, platform::PlatformInputHandler,
+    point, px, size,
 };
 use block::ConcreteBlock;
 use cocoa::{
@@ -253,6 +255,11 @@ unsafe fn build_classes() {
                     dragging_session_source_operation_mask
                         as extern "C" fn(&Object, Sel, id, NSInteger) -> NSDragOperation,
                 );
+                decl.add_method(
+                    sel!(draggingSession:endedAtPoint:operation:),
+                    dragging_session_ended_at_point_operation
+                        as extern "C" fn(&Object, Sel, id, NSPoint, NSDragOperation),
+                );
 
                 decl.add_method(
                     sel!(characterIndexForPoint:),
@@ -419,6 +426,7 @@ struct MacWindowState {
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
+    external_paths_drag_operations: ExternalPathDragOperations,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
     fullscreen_restore_bounds: Bounds<Pixels>,
@@ -726,6 +734,7 @@ impl MacWindow {
                 keystroke_for_do_command: None,
                 do_command_handled: None,
                 external_files_dragged: false,
+                external_paths_drag_operations: ExternalPathDragOperations::COPY,
                 first_mouse: false,
                 fullscreen_restore_bounds: Bounds::default(),
                 move_tab_to_new_window_callback: None,
@@ -1127,9 +1136,9 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().input_handler.take()
     }
 
-    fn start_external_paths_drag(&self, paths: ExternalPaths) -> bool {
+    fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
         let native_view = self.0.lock().native_view.as_ptr();
-        start_macos_external_paths_drag(native_view, paths.paths())
+        start_macos_external_paths_drag(native_view, &paths)
     }
 
     fn prompt(
@@ -2369,12 +2378,53 @@ extern "C" fn character_index_for_point(this: &Object, _: Sel, position: NSPoint
 }
 
 extern "C" fn dragging_session_source_operation_mask(
-    _: &Object,
+    this: &Object,
     _: Sel,
     _: id,
     _: NSInteger,
 ) -> NSDragOperation {
-    NSDragOperationCopy | NSDragOperationMove
+    let window_state = unsafe { get_window_state(this) };
+    macos_drag_operation_mask(window_state.lock().external_paths_drag_operations)
+}
+
+extern "C" fn dragging_session_ended_at_point_operation(
+    this: &Object,
+    _: Sel,
+    _: id,
+    _: NSPoint,
+    operation: NSDragOperation,
+) {
+    let window_state = unsafe { get_window_state(this) };
+    {
+        let mut lock = window_state.lock();
+        lock.external_paths_drag_operations = ExternalPathDragOperations::COPY;
+    }
+    let result = macos_external_drag_result(operation);
+    send_new_event(
+        &window_state,
+        PlatformInput::ExternalPathsDragFinished(result),
+    );
+}
+
+fn macos_drag_operation_mask(operations: ExternalPathDragOperations) -> NSDragOperation {
+    let mut mask = NSDragOperationNone;
+    if operations.copy() {
+        mask |= NSDragOperationCopy;
+    }
+    if operations.move_() {
+        mask |= NSDragOperationMove;
+    }
+    mask
+}
+
+fn macos_external_drag_result(operation: NSDragOperation) -> ExternalPathsDragResult {
+    if operation & NSDragOperationMove != 0 {
+        ExternalPathsDragResult::move_(false)
+    } else if operation & NSDragOperationCopy != 0 {
+        ExternalPathsDragResult::copy()
+    } else {
+        ExternalPathsDragResult::Cancelled
+    }
 }
 
 fn screen_point_to_gpui_point(this: &Object, position: NSPoint) -> Point<Pixels> {
@@ -2445,14 +2495,20 @@ fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths
         };
         paths.push(PathBuf::from(path))
     }
-    Some(ExternalPaths(paths))
+    Some(ExternalPaths::new(paths))
 }
 
-fn start_macos_external_paths_drag(native_view: *mut Object, paths: &[PathBuf]) -> bool {
+fn start_macos_external_paths_drag(
+    native_view: *mut Object,
+    paths: &ExternalPaths,
+) -> ExternalPathsDragStartResult {
     let mut dragging_items = Vec::new();
 
     unsafe {
-        for path in paths {
+        let window_state = get_window_state(native_view);
+        window_state.lock().external_paths_drag_operations = paths.operations();
+
+        for path in paths.paths() {
             let Some(path) = path.to_str().filter(|path| !path.is_empty()) else {
                 continue;
             };
@@ -2479,13 +2535,15 @@ fn start_macos_external_paths_drag(native_view: *mut Object, paths: &[PathBuf]) 
         }
 
         if dragging_items.is_empty() {
-            return false;
+            window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
+            return ExternalPathsDragStartResult::Failed;
         }
 
         let app = NSApplication::sharedApplication(nil);
         let event: id = msg_send![app, currentEvent];
         if event == nil {
-            return false;
+            window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
+            return ExternalPathsDragStartResult::Failed;
         }
 
         let items = NSArray::arrayWithObjects(nil, &dragging_items);
@@ -2495,7 +2553,12 @@ fn start_macos_external_paths_drag(native_view: *mut Object, paths: &[PathBuf]) 
             event: event
             source: native_view
         ];
-        session != nil
+        if session == nil {
+            window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
+            ExternalPathsDragStartResult::Failed
+        } else {
+            ExternalPathsDragStartResult::Pending
+        }
     }
 }
 

@@ -3,7 +3,7 @@ use crate::{
     Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
-use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+use std::{any::Any, fmt::Debug, ops::Deref, path::Path, path::PathBuf};
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
@@ -492,19 +492,150 @@ impl Deref for MouseExitEvent {
     }
 }
 
+/// Native file drag operations that can be advertised to operating-system drop targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExternalPathDragOperations {
+    copy: bool,
+    move_: bool,
+}
+
+impl ExternalPathDragOperations {
+    /// Advertise that native targets may copy the dragged paths.
+    pub const COPY: Self = Self {
+        copy: true,
+        move_: false,
+    };
+    /// Advertise that native targets may move the dragged paths.
+    pub const MOVE: Self = Self {
+        copy: false,
+        move_: true,
+    };
+    /// Advertise that native targets may either copy or move the dragged paths.
+    pub const COPY_MOVE: Self = Self {
+        copy: true,
+        move_: true,
+    };
+
+    /// Returns true when copy is an allowed native drag operation.
+    pub fn copy(self) -> bool {
+        self.copy
+    }
+
+    /// Returns true when move is an allowed native drag operation.
+    pub fn move_(self) -> bool {
+        self.move_
+    }
+}
+
+impl Default for ExternalPathDragOperations {
+    fn default() -> Self {
+        Self::COPY
+    }
+}
+
+/// The operation reported by an operating-system file drag target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalPathDragOperation {
+    /// The target copied the dragged paths.
+    Copy,
+    /// The target moved the dragged paths.
+    Move,
+}
+
+/// The result of a native file drag that was handed off to the operating system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalPathsDragResult {
+    /// The native drag was cancelled or no target accepted it.
+    Cancelled,
+    /// The native drag completed on a target.
+    Completed {
+        /// The native operation reported by the drop target.
+        operation: ExternalPathDragOperation,
+        /// Whether the source app must delete originals to finish a native move.
+        cleanup_source: bool,
+    },
+}
+
+impl ExternalPathsDragResult {
+    /// Construct a completed native copy result.
+    pub fn copy() -> Self {
+        Self::Completed {
+            operation: ExternalPathDragOperation::Copy,
+            cleanup_source: false,
+        }
+    }
+
+    /// Construct a completed native move result.
+    pub fn move_(cleanup_source: bool) -> Self {
+        Self::Completed {
+            operation: ExternalPathDragOperation::Move,
+            cleanup_source,
+        }
+    }
+}
+
+/// The immediate result of asking the platform window to start a native file drag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalPathsDragStartResult {
+    /// The platform accepted the drag and will report completion asynchronously.
+    Pending,
+    /// The platform completed the drag synchronously.
+    Completed(ExternalPathsDragResult),
+    /// The platform could not start the native drag.
+    Failed,
+}
+
 /// A collection of paths from the platform, such as from a file drop.
 #[derive(Debug, Clone, Default)]
-pub struct ExternalPaths(pub(crate) SmallVec<[PathBuf; 2]>);
+pub struct ExternalPaths {
+    paths: SmallVec<[PathBuf; 2]>,
+    operations: ExternalPathDragOperations,
+}
 
 impl ExternalPaths {
     /// Create a collection of platform file paths.
     pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        Self(paths.into_iter().collect())
+        Self {
+            paths: paths
+                .into_iter()
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect(),
+            operations: ExternalPathDragOperations::default(),
+        }
+    }
+
+    /// Create a collection of platform file paths with explicit native drag operations.
+    pub fn with_operations(
+        paths: impl IntoIterator<Item = PathBuf>,
+        operations: ExternalPathDragOperations,
+    ) -> Self {
+        Self {
+            paths: paths
+                .into_iter()
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect(),
+            operations,
+        }
     }
 
     /// Convert this collection of paths into a slice.
     pub fn paths(&self) -> &[PathBuf] {
-        &self.0
+        &self.paths
+    }
+
+    /// Returns the native drag operations advertised for these paths.
+    pub fn operations(&self) -> ExternalPathDragOperations {
+        self.operations
+    }
+
+    /// Returns true when no paths are present.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Encode the paths as a freedesktop-compatible `text/uri-list` payload.
+    pub fn to_uri_list(&self) -> String {
+        uri_list_for_paths(&self.paths)
     }
 }
 
@@ -513,6 +644,21 @@ impl Render for ExternalPaths {
         // the platform will render icons for the dragged files
         Empty
     }
+}
+
+fn uri_list_for_paths(paths: &[PathBuf]) -> String {
+    let mut output = String::new();
+    for path in paths {
+        if let Some(uri) = file_uri_for_path(path) {
+            output.push_str(&uri);
+            output.push_str("\r\n");
+        }
+    }
+    output
+}
+
+fn file_uri_for_path(path: &Path) -> Option<String> {
+    http_client::Url::from_file_path(path).ok().map(|uri| uri.to_string())
 }
 
 /// A file drop event from the platform, generated when files are dragged and dropped onto the window.
@@ -568,6 +714,8 @@ pub enum PlatformInput {
     ScrollWheel(ScrollWheelEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
+    /// A native file drag that originated in this window has completed.
+    ExternalPathsDragFinished(ExternalPathsDragResult),
 }
 
 impl PlatformInput {
@@ -582,6 +730,7 @@ impl PlatformInput {
             PlatformInput::MouseExited(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
+            PlatformInput::ExternalPathsDragFinished(_) => None,
         }
     }
 
@@ -596,6 +745,7 @@ impl PlatformInput {
             PlatformInput::MouseExited(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::FileDrop(_) => None,
+            PlatformInput::ExternalPathsDragFinished(_) => None,
         }
     }
 }
@@ -604,9 +754,11 @@ impl PlatformInput {
 mod test {
 
     use crate::{
-        self as gpui, AppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
-        KeyBinding, Keystroke, ParentElement, Render, TestAppContext, Window, div,
+        self as gpui, AppContext as _, Context, ExternalPathDragOperations, ExternalPaths,
+        FocusHandle, InteractiveElement, IntoElement, KeyBinding, Keystroke, ParentElement, Render,
+        TestAppContext, Window, div,
     };
+    use std::{fs, path::PathBuf};
 
     struct TestView {
         saw_key_down: bool,
@@ -671,5 +823,53 @@ mod test {
                 assert!(test_view.saw_action);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn external_paths_default_to_copy() {
+        let paths = ExternalPaths::new([PathBuf::from("/tmp/a.txt")]);
+
+        assert_eq!(paths.paths(), &[PathBuf::from("/tmp/a.txt")]);
+        assert_eq!(paths.operations(), ExternalPathDragOperations::COPY);
+        assert!(!paths.is_empty());
+    }
+
+    #[test]
+    fn external_paths_accept_copy_move_operations() {
+        let paths = ExternalPaths::with_operations(
+            [PathBuf::from("/tmp/a.txt")],
+            ExternalPathDragOperations::COPY_MOVE,
+        );
+
+        assert!(paths.operations().copy());
+        assert!(paths.operations().move_());
+    }
+
+    #[test]
+    fn external_paths_filter_empty_paths() {
+        let paths = ExternalPaths::with_operations(
+            [PathBuf::new(), PathBuf::from("/tmp/a.txt")],
+            ExternalPathDragOperations::COPY_MOVE,
+        );
+
+        assert_eq!(paths.paths(), &[PathBuf::from("/tmp/a.txt")]);
+    }
+
+    #[test]
+    fn external_paths_uri_list_encodes_files_and_directories() {
+        let directory = std::env::temp_dir().join("gpui uri-list directory");
+        let file = std::env::temp_dir().join("gpui unicode-\u{2603}.txt");
+        fs::create_dir_all(&directory).expect("create uri-list test directory");
+        let paths = ExternalPaths::with_operations(
+            [directory.clone(), file.clone()],
+            ExternalPathDragOperations::COPY_MOVE,
+        );
+
+        let uri_list = paths.to_uri_list();
+
+        assert!(uri_list.contains("gpui%20uri-list%20directory"));
+        assert!(uri_list.contains("gpui%20unicode-%E2%98%83.txt"));
+        assert_eq!(uri_list.lines().count(), 2);
+        assert!(uri_list.ends_with("\r\n"));
     }
 }

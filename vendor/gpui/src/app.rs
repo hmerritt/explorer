@@ -36,8 +36,9 @@ use crate::InspectorElementRegistry;
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Asset,
     AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle, DispatchPhase, DisplayId,
-    EventEmitter, ExternalPaths, FocusHandle, FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext,
-    Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
+    EventEmitter, ExternalPaths, ExternalPathsDragResult, FocusHandle, FocusMap,
+    ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu,
+    MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PromptBuilder,
     PromptButton, PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
     Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
@@ -543,6 +544,7 @@ pub struct App {
     pending_updates: usize,
     pub(crate) actions: Rc<ActionRegistry>,
     pub(crate) active_drag: Option<AnyDrag>,
+    pub(crate) external_paths_drag_callback: Option<ExternalPathsDragCallback>,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
@@ -619,6 +621,7 @@ impl App {
                 flushing_effects: false,
                 pending_updates: 0,
                 active_drag: None,
+                external_paths_drag_callback: None,
                 background_executor: executor,
                 foreground_executor,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
@@ -1949,6 +1952,7 @@ impl App {
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
         if self.active_drag.is_some() {
             self.active_drag = None;
+            self.external_paths_drag_callback = None;
             window.refresh();
             true
         } else {
@@ -1968,6 +1972,12 @@ impl App {
             true
         } else {
             false
+        }
+    }
+
+    pub(crate) fn complete_external_paths_drag(&mut self, result: ExternalPathsDragResult) {
+        if let Some(callback) = self.external_paths_drag_callback.take() {
+            callback(result, self);
         }
     }
 
@@ -2312,7 +2322,13 @@ pub struct AnyDrag {
 
     /// Native file paths to advertise to operating-system drop targets.
     pub external_paths: Option<ExternalPaths>,
+
+    /// Callback to run when a native file drag reports completion.
+    pub external_paths_callback: Option<ExternalPathsDragCallback>,
 }
+
+/// A callback invoked when a native external-path drag completes or is cancelled.
+pub type ExternalPathsDragCallback = Box<dyn FnOnce(ExternalPathsDragResult, &mut App) + 'static>;
 
 /// Contains state associated with a tooltip. You'll only need this struct if you're implementing
 /// tooltip behavior on a custom element. Otherwise, use [Div::tooltip](crate::Interactivity::tooltip).

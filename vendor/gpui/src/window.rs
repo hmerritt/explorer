@@ -5,8 +5,9 @@ use crate::{
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorStyle, Decorations, DevicePixels, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+    ExternalPathsDragResult, ExternalPathsDragStartResult, FileDropEvent, FontId, Global,
+    GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
     MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
@@ -3681,6 +3682,7 @@ impl Window {
                             cursor_offset: position,
                             cursor_style: None,
                             external_paths: None,
+                            external_paths_callback: None,
                         });
                     }
                     PlatformInput::MouseMove(MouseMoveEvent {
@@ -3713,6 +3715,11 @@ impl Window {
                     PlatformInput::FileDrop(FileDropEvent::Exited)
                 }
             },
+            PlatformInput::ExternalPathsDragFinished(result) => {
+                cx.complete_external_paths_drag(result);
+                self.refresh();
+                return DispatchEventResult::default();
+            }
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
@@ -3799,13 +3806,25 @@ impl Window {
             return false;
         };
         let external_paths = drag.external_paths;
+        let external_paths_callback = drag.external_paths_callback;
 
         let arena_clear_needed = self.draw(cx);
         self.present();
         arena_clear_needed.clear();
 
         if let Some(paths) = external_paths {
-            self.platform_window.start_external_paths_drag(paths);
+            cx.external_paths_drag_callback = external_paths_callback;
+            match self.platform_window.start_external_paths_drag(paths) {
+                ExternalPathsDragStartResult::Pending => {}
+                ExternalPathsDragStartResult::Completed(result) => {
+                    cx.complete_external_paths_drag(result);
+                }
+                ExternalPathsDragStartResult::Failed => {
+                    cx.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
+                }
+            }
+        } else if let Some(callback) = external_paths_callback {
+            callback(ExternalPathsDragResult::Cancelled, cx);
         }
         true
     }

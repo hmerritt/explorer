@@ -12,7 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Context, Image, ImageFormat, Window};
+use gpui::{
+    Context, ExternalPathDragOperation, ExternalPathsDragResult, Image, ImageFormat, Window,
+};
 
 use crate::explorer::{
     clipboard::{
@@ -24,7 +26,8 @@ use crate::explorer::{
         FileOperationSummary, PreparedFileOperation, archive_path_is_supported,
         execute_file_operation, execute_file_operation_with_progress,
         prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
-        prepare_move_paths_to_directory, remove_paths_permanently, trash_paths,
+        prepare_move_paths_to_directory, remove_existing_paths_permanently,
+        remove_paths_permanently, trash_paths,
     },
     view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
@@ -308,6 +311,45 @@ impl ExplorerView {
 
     pub(super) fn cancel_pending_permanent_delete(&mut self) {
         self.pending_permanent_delete = None;
+    }
+
+    pub(super) fn complete_external_paths_drag(
+        &mut self,
+        source_paths: &[PathBuf],
+        result: ExternalPathsDragResult,
+        cx: &mut Context<Self>,
+    ) {
+        let ExternalPathsDragResult::Completed {
+            operation,
+            cleanup_source,
+        } = result
+        else {
+            return;
+        };
+
+        if cleanup_source {
+            match remove_existing_paths_permanently(source_paths) {
+                Ok(removed_any) => {
+                    self.remove_cut_paths(source_paths);
+                    self.reload_with_entry_metadata_resolution(cx);
+                    self.clear_selection();
+                    self.open_error = None;
+                    if removed_any || operation == ExternalPathDragOperation::Move {
+                        self.emit_filesystem_changed(cx);
+                    }
+                }
+                Err(error) => {
+                    self.open_error = Some(error);
+                    self.reload_with_entry_metadata_resolution(cx);
+                }
+            }
+        } else {
+            self.refresh_with_entry_metadata_resolution(cx);
+            self.open_error = None;
+            if operation == ExternalPathDragOperation::Move {
+                self.emit_filesystem_changed(cx);
+            }
+        }
     }
 
     pub(super) fn selected_file_clipboard(
@@ -1461,6 +1503,53 @@ mod tests {
         });
 
         assert!(!file.exists());
+    }
+
+    #[gpui::test]
+    fn external_drag_unoptimized_move_cleans_up_existing_sources(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("dragged.txt");
+        let missing = temp.path().join("already-moved.txt");
+        fs::write(&file, b"dragged").expect("create file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.mark_cut_paths(std::slice::from_ref(&file));
+                view.complete_external_paths_drag(
+                    &[file.clone(), missing.clone()],
+                    ExternalPathsDragResult::move_(true),
+                    cx,
+                );
+
+                assert!(view.open_error.is_none());
+                assert!(!view.entry_is_cut(&file));
+            });
+        });
+
+        assert!(!file.exists());
+    }
+
+    #[gpui::test]
+    fn external_drag_optimized_move_does_not_delete_sources(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("dragged.txt");
+        fs::write(&file, b"dragged").expect("create file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.complete_external_paths_drag(
+                    std::slice::from_ref(&file),
+                    ExternalPathsDragResult::move_(false),
+                    cx,
+                );
+
+                assert!(view.open_error.is_none());
+            });
+        });
+
+        assert!(file.exists());
     }
 
     #[gpui::test]

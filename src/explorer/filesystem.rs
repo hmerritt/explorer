@@ -2036,6 +2036,23 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     Ok(())
 }
 
+pub(super) fn remove_existing_paths_permanently(paths: &[PathBuf]) -> Result<bool, String> {
+    let mut removed_any = false;
+
+    for path in paths {
+        match path.try_exists() {
+            Ok(true) => {
+                remove_source(path).map_err(|error| format_path_error("delete", path, error))?;
+                removed_any = true;
+            }
+            Ok(false) => {}
+            Err(error) => return Err(format_path_error("delete", path, error)),
+        }
+    }
+
+    Ok(removed_any)
+}
+
 fn plan_path_operation(
     source: &Path,
     destination: &Path,
@@ -6346,6 +6363,25 @@ mod tests {
 
         assert!(!file.exists());
         assert!(!folder.exists());
+    }
+
+    #[test]
+    fn permanent_delete_existing_paths_ignores_already_missing_paths() {
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        let missing = temp.path().join("missing.txt");
+        fs::write(&file, b"data").expect("create file");
+
+        let removed_any = remove_existing_paths_permanently(&[file.clone(), missing.clone()])
+            .expect("delete existing paths");
+
+        assert!(removed_any);
+        assert!(!file.exists());
+        assert!(!missing.exists());
+        assert!(
+            !remove_existing_paths_permanently(std::slice::from_ref(&missing))
+                .expect("ignore missing path")
+        );
     }
 
     #[test]
