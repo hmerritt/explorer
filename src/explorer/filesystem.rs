@@ -38,8 +38,6 @@ const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
 ];
 const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
 const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
-const DVD_DISC_MIN_BYTES: u64 = 1024 * 1024 * 1024;
-const BLU_RAY_DISC_MIN_BYTES: u64 = 18 * 1024 * 1024 * 1024;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static COPY_PARALLELISM_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
@@ -762,7 +760,8 @@ pub(crate) fn drive_root_is_ejectable(_: &Path) -> bool {
 }
 
 pub(crate) fn drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
-    drive_root_marker_disc_kind(path).or_else(|| platform_drive_root_disc_kind(path))
+    let marker_kind = drive_root_marker_disc_kind(path)?;
+    platform_drive_root_is_physical_optical(path).then_some(marker_kind)
 }
 
 fn drive_root_marker_disc_kind(path: &Path) -> Option<DriveDiscKind> {
@@ -787,50 +786,38 @@ fn drive_root_marker_disc_kind(path: &Path) -> Option<DriveDiscKind> {
     has_dvd_marker.then_some(DriveDiscKind::Dvd)
 }
 
-fn drive_disc_kind_from_total_bytes(total_bytes: u64) -> Option<DriveDiscKind> {
-    if total_bytes >= BLU_RAY_DISC_MIN_BYTES {
-        Some(DriveDiscKind::BluRay)
-    } else if total_bytes >= DVD_DISC_MIN_BYTES {
-        Some(DriveDiscKind::Dvd)
-    } else {
-        None
-    }
-}
-
 #[cfg(target_os = "windows")]
-fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+fn platform_drive_root_is_physical_optical(path: &Path) -> bool {
     if windows_drive_type(path) != Some(5) {
-        return None;
+        return false;
     }
 
-    windows_drive_total_bytes(path).and_then(drive_disc_kind_from_total_bytes)
+    windows_drive_device_descriptor(path).is_some_and(|(device_type, removable_media, bus_type)| {
+        windows_storage_descriptor_is_physical_optical(device_type, removable_media, bus_type)
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+fn platform_drive_root_is_physical_optical(path: &Path) -> bool {
     if path == Path::new("/") {
-        return None;
+        return false;
     }
 
-    let (fs_type, total_bytes) = macos_statfs_disc_info(path)?;
-    if !macos_disc_filesystem_is_optical(&fs_type) {
-        return None;
-    }
-
-    drive_disc_kind_from_total_bytes(total_bytes)
+    macos_diskutil_disc_evidence(path)
+        .and_then(|evidence| macos_diskutil_disc_evidence_is_physical_optical(&evidence))
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
-fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let total_bytes = linux_path_total_bytes(path)?;
-
-    linux_mountinfo_disc_kind_for_path(&mountinfo, path, total_bytes)
+fn platform_drive_root_is_physical_optical(path: &Path) -> bool {
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .is_some_and(|mountinfo| linux_mountinfo_path_is_physical_optical_drive(&mountinfo, path))
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn platform_drive_root_disc_kind(_: &Path) -> Option<DriveDiscKind> {
-    None
+fn platform_drive_root_is_physical_optical(_: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -856,89 +843,170 @@ fn windows_drive_root(path: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_drive_total_bytes(path: &Path) -> Option<u64> {
-    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+struct WindowsHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_device_descriptor(path: &Path) -> Option<(u8, bool, i32)> {
+    use std::{ffi::c_void, mem::size_of};
+    use windows::Win32::{
+        Storage::FileSystem::{
+            CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+        System::{
+            IO::DeviceIoControl,
+            Ioctl::{
+                IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR,
+                STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+            },
+        },
+    };
     use windows::core::PCWSTR;
 
     let root = windows_drive_root(path)?;
-    let encoded = wide_null(&root);
-    let mut total_bytes = 0;
+    let drive = root.trim_end_matches(['\\', '/']);
+    let encoded = wide_null(&format!(r"\\.\{drive}"));
+    let handle = WindowsHandle(unsafe {
+        CreateFileW(
+            PCWSTR(encoded.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        )
+        .ok()?
+    });
+
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        AdditionalParameters: [0],
+    };
+    let mut descriptor = vec![0u8; 1024];
+    let mut bytes_returned = 0;
+
     unsafe {
-        GetDiskFreeSpaceExW(PCWSTR(encoded.as_ptr()), None, Some(&mut total_bytes), None).ok()?;
+        DeviceIoControl(
+            handle.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            Some(&query as *const STORAGE_PROPERTY_QUERY as *const c_void),
+            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            Some(descriptor.as_mut_ptr().cast::<c_void>()),
+            descriptor.len() as u32,
+            Some(&mut bytes_returned),
+            None,
+        )
+        .ok()?;
     }
 
-    Some(total_bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_statfs_disc_info(path: &Path) -> Option<(String, u64)> {
-    use std::{
-        ffi::{CStr, CString},
-        mem::MaybeUninit,
-        os::unix::ffi::OsStrExt,
-    };
-
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut statfs = MaybeUninit::<libc::statfs>::zeroed();
-    if unsafe { libc::statfs(path.as_ptr(), statfs.as_mut_ptr()) } != 0 {
+    if bytes_returned < size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32 {
         return None;
     }
-    let statfs = unsafe { statfs.assume_init() };
-    let fs_type = unsafe { CStr::from_ptr(statfs.f_fstypename.as_ptr()) }
-        .to_string_lossy()
-        .into_owned();
-    let blocks = u64::try_from(statfs.f_blocks).ok()?;
-    let block_size = u64::try_from(statfs.f_bsize).ok()?;
-    let total_bytes = blocks.checked_mul(block_size)?;
+    let descriptor = unsafe {
+        descriptor
+            .as_ptr()
+            .cast::<STORAGE_DEVICE_DESCRIPTOR>()
+            .read_unaligned()
+    };
 
-    Some((fs_type, total_bytes))
+    Some((
+        descriptor.DeviceType,
+        descriptor.RemovableMedia,
+        descriptor.BusType.0,
+    ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_storage_descriptor_is_physical_optical(
+    device_type: u8,
+    removable_media: bool,
+    bus_type: i32,
+) -> bool {
+    const SCSI_DEVICE_TYPE_CD_DVD: u8 = 5;
+    const BUS_TYPE_SCSI: i32 = 1;
+    const BUS_TYPE_ATAPI: i32 = 2;
+    const BUS_TYPE_ATA: i32 = 3;
+    const BUS_TYPE_1394: i32 = 4;
+    const BUS_TYPE_USB: i32 = 7;
+    const BUS_TYPE_SATA: i32 = 11;
+
+    device_type == SCSI_DEVICE_TYPE_CD_DVD
+        && removable_media
+        && matches!(
+            bus_type,
+            BUS_TYPE_SCSI
+                | BUS_TYPE_ATAPI
+                | BUS_TYPE_ATA
+                | BUS_TYPE_1394
+                | BUS_TYPE_USB
+                | BUS_TYPE_SATA
+        )
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_disc_filesystem_is_optical(fs_type: &str) -> bool {
-    fs_type.eq_ignore_ascii_case("udf")
-        || fs_type.eq_ignore_ascii_case("cd9660")
-        || fs_type.eq_ignore_ascii_case("cdfs")
+#[derive(Debug, Default, Eq, PartialEq)]
+struct MacosDiskutilDiscEvidence {
+    optical: Option<bool>,
+    virtual_or_physical: Option<String>,
 }
 
-#[cfg(target_os = "linux")]
-fn linux_path_total_bytes(path: &Path) -> Option<u64> {
-    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+#[cfg(target_os = "macos")]
+fn macos_diskutil_disc_evidence(path: &Path) -> Option<MacosDiskutilDiscEvidence> {
+    use std::process::Command;
 
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut statvfs = MaybeUninit::<libc::statvfs>::zeroed();
-    if unsafe { libc::statvfs(path.as_ptr(), statvfs.as_mut_ptr()) } != 0 {
+    let output = Command::new("/usr/sbin/diskutil")
+        .args(["info", "-plist"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    let statvfs = unsafe { statvfs.assume_init() };
-    let blocks = u64::try_from(statvfs.f_blocks).ok()?;
-    let fragment_size = u64::try_from(statvfs.f_frsize)
-        .ok()
-        .filter(|size| *size > 0);
-    let block_size = fragment_size.or_else(|| u64::try_from(statvfs.f_bsize).ok())?;
 
-    blocks.checked_mul(block_size)
+    let value = plist::Value::from_reader(output.stdout.as_slice()).ok()?;
+    let dictionary = value.as_dictionary()?;
+    Some(MacosDiskutilDiscEvidence {
+        optical: dictionary.get("Optical").and_then(plist::Value::as_boolean),
+        virtual_or_physical: dictionary
+            .get("VirtualOrPhysical")
+            .and_then(plist::Value::as_string)
+            .map(str::to_owned),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_diskutil_disc_evidence_is_physical_optical(
+    evidence: &MacosDiskutilDiscEvidence,
+) -> Option<bool> {
+    Some(
+        evidence.optical?
+            && evidence
+                .virtual_or_physical
+                .as_deref()?
+                .eq_ignore_ascii_case("Physical"),
+    )
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_mountinfo_disc_kind_for_path(
-    mountinfo: &str,
-    path: &Path,
-    total_bytes: u64,
-) -> Option<DriveDiscKind> {
+fn linux_mountinfo_path_is_physical_optical_drive(mountinfo: &str, path: &Path) -> bool {
     let entry = mountinfo
         .lines()
         .filter_map(linux_mountinfo_entry)
-        .find(|entry| entry.mount_point == path)?;
+        .find(|entry| entry.mount_point == path);
 
-    if !linux_mount_point_is_visible_drive(&entry.mount_point)
-        || !linux_disc_filesystem_is_optical(&entry.fs_type)
-        || !linux_disc_source_is_optical_or_iso(&entry.source)
-    {
-        return None;
-    }
-
-    drive_disc_kind_from_total_bytes(total_bytes)
+    entry.is_some_and(|entry| {
+        linux_mount_point_is_visible_drive(&entry.mount_point)
+            && linux_disc_filesystem_is_optical(&entry.fs_type)
+            && linux_disc_source_is_physical_optical(&entry.source)
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -949,14 +1017,11 @@ fn linux_disc_filesystem_is_optical(fs_type: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_disc_source_is_optical_or_iso(source: &str) -> bool {
+fn linux_disc_source_is_physical_optical(source: &str) -> bool {
     source == "/dev/cdrom"
         || source == "/dev/dvd"
         || source
             .strip_prefix("/dev/sr")
-            .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
-        || source
-            .strip_prefix("/dev/loop")
             .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
 }
 
@@ -5338,7 +5403,7 @@ mod tests {
         fs::create_dir(temp.path().join("bdmv")).expect("create blu-ray marker");
 
         assert_eq!(
-            drive_root_disc_kind(temp.path()),
+            drive_root_marker_disc_kind(temp.path()),
             Some(DriveDiscKind::BluRay)
         );
     }
@@ -5348,31 +5413,29 @@ mod tests {
         let temp = TempDir::new();
         fs::create_dir(temp.path().join("audio_ts")).expect("create dvd marker");
 
-        assert_eq!(drive_root_disc_kind(temp.path()), Some(DriveDiscKind::Dvd));
-    }
-
-    #[test]
-    fn drive_disc_kind_uses_capacity_thresholds() {
         assert_eq!(
-            drive_disc_kind_from_total_bytes(BLU_RAY_DISC_MIN_BYTES),
-            Some(DriveDiscKind::BluRay)
-        );
-        assert_eq!(
-            drive_disc_kind_from_total_bytes(BLU_RAY_DISC_MIN_BYTES - 1),
+            drive_root_marker_disc_kind(temp.path()),
             Some(DriveDiscKind::Dvd)
-        );
-        assert_eq!(
-            drive_disc_kind_from_total_bytes(DVD_DISC_MIN_BYTES),
-            Some(DriveDiscKind::Dvd)
-        );
-        assert_eq!(
-            drive_disc_kind_from_total_bytes(DVD_DISC_MIN_BYTES - 1),
-            None
         );
     }
 
     #[test]
-    fn linux_mountinfo_disc_detection_requires_optical_mount_shape() {
+    fn drive_root_disc_marker_returns_none_without_markers() {
+        let temp = TempDir::new();
+
+        assert_eq!(drive_root_marker_disc_kind(temp.path()), None);
+    }
+
+    #[test]
+    fn drive_root_disc_kind_does_not_classify_regular_directories_with_markers() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("BDMV")).expect("create blu-ray marker");
+
+        assert_eq!(drive_root_disc_kind(temp.path()), None);
+    }
+
+    #[test]
+    fn linux_mountinfo_physical_optical_detection_rejects_disk_images() {
         let mountinfo = "\
 36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
 40 25 11:0 / /media/alex/Movie rw,relatime - udf /dev/sr0 ro
@@ -5381,46 +5444,99 @@ mod tests {
 43 25 11:1 / /home/alex/Disc rw,relatime - udf /dev/sr1 ro
 ";
 
+        assert!(linux_mountinfo_path_is_physical_optical_drive(
+            mountinfo,
+            Path::new("/media/alex/Movie"),
+        ));
+        assert!(!linux_mountinfo_path_is_physical_optical_drive(
+            mountinfo,
+            Path::new("/media/alex/Image"),
+        ));
+        assert!(!linux_mountinfo_path_is_physical_optical_drive(
+            mountinfo,
+            Path::new("/media/alex/USB"),
+        ));
+        assert!(!linux_mountinfo_path_is_physical_optical_drive(
+            mountinfo,
+            Path::new("/home/alex/Disc"),
+        ));
+    }
+
+    #[test]
+    fn linux_physical_optical_source_detection_rejects_loop_devices() {
+        assert!(linux_disc_source_is_physical_optical("/dev/sr0"));
+        assert!(linux_disc_source_is_physical_optical("/dev/sr12"));
+        assert!(linux_disc_source_is_physical_optical("/dev/cdrom"));
+        assert!(linux_disc_source_is_physical_optical("/dev/dvd"));
+        assert!(!linux_disc_source_is_physical_optical("/dev/loop0"));
+        assert!(!linux_disc_source_is_physical_optical("/dev/sdb1"));
+    }
+
+    #[test]
+    fn macos_diskutil_evidence_requires_optical_and_physical_metadata() {
         assert_eq!(
-            linux_mountinfo_disc_kind_for_path(
-                mountinfo,
-                Path::new("/media/alex/Movie"),
-                BLU_RAY_DISC_MIN_BYTES,
-            ),
-            Some(DriveDiscKind::BluRay)
+            macos_diskutil_disc_evidence_is_physical_optical(&MacosDiskutilDiscEvidence {
+                optical: Some(true),
+                virtual_or_physical: Some("Physical".to_owned()),
+            }),
+            Some(true)
         );
         assert_eq!(
-            linux_mountinfo_disc_kind_for_path(
-                mountinfo,
-                Path::new("/media/alex/Image"),
-                DVD_DISC_MIN_BYTES,
-            ),
-            Some(DriveDiscKind::Dvd)
+            macos_diskutil_disc_evidence_is_physical_optical(&MacosDiskutilDiscEvidence {
+                optical: Some(true),
+                virtual_or_physical: Some("Virtual".to_owned()),
+            }),
+            Some(false)
         );
         assert_eq!(
-            linux_mountinfo_disc_kind_for_path(
-                mountinfo,
-                Path::new("/media/alex/USB"),
-                DVD_DISC_MIN_BYTES,
-            ),
-            None
+            macos_diskutil_disc_evidence_is_physical_optical(&MacosDiskutilDiscEvidence {
+                optical: Some(false),
+                virtual_or_physical: Some("Physical".to_owned()),
+            }),
+            Some(false)
         );
         assert_eq!(
-            linux_mountinfo_disc_kind_for_path(
-                mountinfo,
-                Path::new("/home/alex/Disc"),
-                DVD_DISC_MIN_BYTES,
-            ),
+            macos_diskutil_disc_evidence_is_physical_optical(&MacosDiskutilDiscEvidence {
+                optical: Some(true),
+                virtual_or_physical: None,
+            }),
             None
         );
     }
 
     #[test]
-    fn macos_disc_filesystem_detection_accepts_optical_names() {
-        assert!(macos_disc_filesystem_is_optical("udf"));
-        assert!(macos_disc_filesystem_is_optical("CD9660"));
-        assert!(macos_disc_filesystem_is_optical("cdfs"));
-        assert!(!macos_disc_filesystem_is_optical("apfs"));
+    fn windows_storage_descriptor_evidence_rejects_virtual_or_unknown_devices() {
+        const SCSI_DEVICE_TYPE_CD_DVD: u8 = 5;
+        const BUS_TYPE_SCSI: i32 = 1;
+        const BUS_TYPE_UNKNOWN: i32 = 0;
+        const BUS_TYPE_VIRTUAL: i32 = 14;
+        const BUS_TYPE_FILE_BACKED_VIRTUAL: i32 = 15;
+
+        assert!(windows_storage_descriptor_is_physical_optical(
+            SCSI_DEVICE_TYPE_CD_DVD,
+            true,
+            BUS_TYPE_SCSI,
+        ));
+        assert!(!windows_storage_descriptor_is_physical_optical(
+            SCSI_DEVICE_TYPE_CD_DVD,
+            true,
+            BUS_TYPE_UNKNOWN,
+        ));
+        assert!(!windows_storage_descriptor_is_physical_optical(
+            SCSI_DEVICE_TYPE_CD_DVD,
+            true,
+            BUS_TYPE_VIRTUAL,
+        ));
+        assert!(!windows_storage_descriptor_is_physical_optical(
+            SCSI_DEVICE_TYPE_CD_DVD,
+            true,
+            BUS_TYPE_FILE_BACKED_VIRTUAL,
+        ));
+        assert!(!windows_storage_descriptor_is_physical_optical(
+            SCSI_DEVICE_TYPE_CD_DVD,
+            false,
+            BUS_TYPE_SCSI,
+        ));
     }
 
     #[test]

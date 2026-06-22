@@ -2,6 +2,7 @@
 
 ## 1
 
+- Settings option not to hide "." items (only items with hidden attribute)
 - Alt + hover over any image file to view a preview of the image in a hovering popup overaly box 250x250. The aim of this is a super-fast preview, so the implementation should aggressively focus on speed over quality, for all file formats.
 
 ## 2
@@ -16,7 +17,6 @@
 
 ## 3
 
-- Settings option not to hide "." items (only hidden attribute items)
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu
