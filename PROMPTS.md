@@ -1,13 +1,7 @@
 ## Todo
 
-- Video Properties > Frames tab, add a contextmenu to each frame with "Copy" to copy the image to clipboard. Also add this copy functionality to Images Properties > Image
-- Windows-only: Remove "Open with" for .exe
-- When in a repo directory (or sub-directory) add a new contextmenu item "Copy <file/folder> relative repo path" to copy the item path, relative to the repo root. Add this below the exiting "Copy <file/folder> path" item, with the same icon
-- Add settings icon: ./assets/icons/utility/settings.svg - place the settings icon button on the lower left of the side-bar. Set opacity 0 by default and fade-in on hover to lower section of side-bar. For now, this icon opens the settings file.
-
 ## 1
 
-- rsync copy/sync builtin
 - Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon:
 
 ## 2

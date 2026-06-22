@@ -34,7 +34,7 @@ use crate::explorer::{
     SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
     SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
     SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
 use crate::settings::{APP_ID, SettingsState, config_dir};
 

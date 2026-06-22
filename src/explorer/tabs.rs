@@ -1553,6 +1553,7 @@ mod tests {
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
     use crate::settings::{ExplorerSettings, SettingsState, SidebarLocation};
+    use git2::Repository;
     use gpui::{
         AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, MouseDownEvent,
         MouseUpEvent, ScrollDelta, ScrollWheelEvent, TestAppContext,
@@ -1593,6 +1594,17 @@ mod tests {
         &'a mut gpui::VisualTestContext,
     ) {
         test_tabs_with_files(cx, &["a.txt", "b.txt"])
+    }
+
+    fn test_tabs_at_path<'a>(
+        cx: &'a mut TestAppContext,
+        path: PathBuf,
+    ) -> (Entity<ExplorerTabs>, &'a mut gpui::VisualTestContext) {
+        cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new_for_test(path, focus_handle, cx)
+        })
     }
 
     fn test_tabs_with_directories<'a>(
@@ -2534,6 +2546,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn file_context_menu_copy_relative_repo_path_copies_selected_file_repo_path(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        Repository::init(temp.path()).expect("init repo");
+        let source_dir = temp.path().join("src");
+        fs::create_dir(&source_dir).expect("create source directory");
+        fs::write(source_dir.join("a.txt"), b"file").expect("write test file");
+        let (tabs, cx) = test_tabs_at_path(cx, source_dir);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_entry_other_column(cx, "explorer-entry-0");
+        click_selector(cx, "context-menu-entry-copy-relative-repo-path");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a.txt"]);
+            assert!(view.context_menu.is_none());
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard().and_then(|item| item.text()),
+                Some("src/a.txt".to_owned())
+            );
+        });
+    }
+
+    #[gpui::test]
     fn archive_context_menu_extract_extracts_selected_archive(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
         let view = active_test_view(&tabs, cx);
@@ -2592,6 +2631,47 @@ mod tests {
             assert_eq!(
                 app.read_from_clipboard().and_then(|item| item.text()),
                 Some(expected)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn current_folder_context_menu_copy_relative_repo_path_copies_current_folder_repo_path(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        Repository::init(temp.path()).expect("init repo");
+        let source_dir = temp.path().join("src");
+        fs::create_dir(&source_dir).expect("create source directory");
+        fs::write(source_dir.join("a.txt"), b"file").expect("write first file");
+        fs::write(source_dir.join("b.txt"), b"file").expect("write second file");
+        let (tabs, cx) = test_tabs_at_path(cx, source_dir);
+        let view = active_test_view(&tabs, cx);
+        let second = cx
+            .debug_bounds("explorer-entry-1")
+            .expect("second entry bounds");
+        let start = gpui::point(
+            second.left() + gpui::px(10.0),
+            second.bottom() + gpui::px(20.0),
+        );
+        let end = gpui::point(
+            second.left() + gpui::px(100.0),
+            second.bottom() + gpui::px(40.0),
+        );
+
+        cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Right, Modifiers::default());
+        click_selector(cx, "context-menu-folder-copy-relative-repo-path");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
+            assert!(view.context_menu.is_none());
+        });
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard().and_then(|item| item.text()),
+                Some("src".to_owned())
             );
         });
     }

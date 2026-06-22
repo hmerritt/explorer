@@ -6,6 +6,7 @@ use std::{
     time::SystemTime,
 };
 
+use git2::Repository;
 use gpui::{ClipboardItem, Context, Pixels, Point, Window};
 
 use crate::explorer::{
@@ -119,6 +120,9 @@ pub(super) enum ContextMenuCommand {
     CopySelected,
     CopyPath {
         path: PathBuf,
+    },
+    CopyRepoRelativePath {
+        relative_path: String,
     },
     Paste,
     ExtractSelectedArchives,
@@ -389,6 +393,11 @@ impl ExplorerView {
             ContextMenuCommand::CopySelected => self.copy_selected_to_clipboard(cx),
             ContextMenuCommand::CopyPath { path } => {
                 cx.write_to_clipboard(ClipboardItem::new_string(self.address_text_for_path(&path)));
+                self.cut_paths.clear();
+                self.open_error = None;
+            }
+            ContextMenuCommand::CopyRepoRelativePath { relative_path } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(relative_path));
                 self.cut_paths.clear();
                 self.open_error = None;
             }
@@ -1061,11 +1070,19 @@ fn entry_context_menu_items_with_custom(
     if selected_count == 1
         && let Some(entry) = selected_entries.first()
     {
+        let is_folder = directory_new_tab_target(entry).is_some();
         items.push(copy_path_context_menu_item(
             "context-menu-entry-copy-path",
             &entry.path,
-            directory_new_tab_target(entry).is_some(),
+            is_folder,
         ));
+        if let Some(item) = copy_repo_relative_path_context_menu_item(
+            "context-menu-entry-copy-relative-repo-path",
+            &entry.path,
+            is_folder,
+        ) {
+            items.push(item);
+        }
     }
     items.extend([
         ContextMenuItem::Separator,
@@ -1198,7 +1215,7 @@ fn folder_context_menu_items_from_times_with_format(
     modified: Option<SystemTime>,
     date_format: &str,
 ) -> Vec<ContextMenuItem> {
-    vec![
+    let mut items = vec![
         ContextMenuItem::Action {
             id: "context-menu-paste".to_owned(),
             icon: Some(ContextMenuIcon::Paste),
@@ -1228,6 +1245,17 @@ fn folder_context_menu_items_from_times_with_format(
             ],
         },
         copy_path_context_menu_item("context-menu-folder-copy-path", path, true),
+    ];
+    if let Some(relative_path) = repo_relative_path_text(path, true).filter(|path| path != ".") {
+        items.push(
+            copy_repo_relative_path_context_menu_item_with_relative_path(
+                "context-menu-folder-copy-relative-repo-path",
+                true,
+                relative_path,
+            ),
+        );
+    }
+    items.extend([
         ContextMenuItem::Separator,
         ContextMenuItem::Detail {
             label: "Created",
@@ -1249,7 +1277,8 @@ fn folder_context_menu_items_from_times_with_format(
             },
             enabled: true,
         },
-    ]
+    ]);
+    items
 }
 
 fn copy_path_context_menu_item(id: &str, path: &Path, is_folder: bool) -> ContextMenuItem {
@@ -1265,6 +1294,54 @@ fn copy_path_context_menu_item(id: &str, path: &Path, is_folder: bool) -> Contex
             path: path.to_path_buf(),
         },
         enabled: true,
+    }
+}
+
+fn copy_repo_relative_path_context_menu_item(
+    id: &str,
+    path: &Path,
+    is_folder: bool,
+) -> Option<ContextMenuItem> {
+    let relative_path = repo_relative_path_text(path, is_folder)?;
+    Some(copy_repo_relative_path_context_menu_item_with_relative_path(id, is_folder, relative_path))
+}
+
+fn copy_repo_relative_path_context_menu_item_with_relative_path(
+    id: &str,
+    is_folder: bool,
+    relative_path: String,
+) -> ContextMenuItem {
+    ContextMenuItem::Action {
+        id: id.to_owned(),
+        icon: Some(ContextMenuIcon::CopyAsPath),
+        label: if is_folder {
+            "Copy folder relative repo path".to_owned()
+        } else {
+            "Copy file relative repo path".to_owned()
+        },
+        command: ContextMenuCommand::CopyRepoRelativePath { relative_path },
+        enabled: true,
+    }
+}
+
+fn repo_relative_path_text(path: &Path, is_folder: bool) -> Option<String> {
+    let discover_start = if is_folder { path } else { path.parent()? };
+    let repo = Repository::discover(discover_start).ok()?;
+    let repo_root = repo.workdir()?;
+    let relative = path.strip_prefix(repo_root).ok()?;
+    Some(format_repo_relative_path(relative))
+}
+
+fn format_repo_relative_path(path: &Path) -> String {
+    let relative = path
+        .iter()
+        .map(|component| component.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if relative.is_empty() {
+        ".".to_owned()
+    } else {
+        relative
     }
 }
 
@@ -1540,6 +1617,18 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("explorer-context-menu-{name}-{nanos}"))
+    }
+
+    fn action_index(items: &[ContextMenuItem], expected_id: &str) -> usize {
+        items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    ContextMenuItem::Action { id, .. } if id == expected_id
+                )
+            })
+            .expect("context menu action")
     }
 
     fn menu_has_label(items: &[ContextMenuItem], expected: &str) -> bool {
@@ -2172,6 +2261,117 @@ mod tests {
                 && label == "Copy file path"
                 && path == Path::new("file-1.txt")
         ));
+    }
+
+    #[test]
+    fn entry_menu_for_file_in_repo_shows_relative_repo_path_after_copy_path() {
+        let repo = unique_temp_dir("file-relative-path-repo");
+        fs::create_dir_all(repo.join("src").join("explorer")).unwrap();
+        Repository::init(&repo).expect("init repo");
+        let path = repo.join("src").join("explorer").join("context_menu.rs");
+        fs::write(&path, b"file").unwrap();
+        let entry = test_context_menu_entry(path.clone(), false);
+        let items = entry_menu_for_selected_entries(vec![entry]);
+        let copy_path_index = action_index(&items, "context-menu-entry-copy-path");
+
+        assert_eq!(
+            items.get(copy_path_index + 1),
+            Some(&ContextMenuItem::Action {
+                id: "context-menu-entry-copy-relative-repo-path".to_owned(),
+                icon: Some(ContextMenuIcon::CopyAsPath),
+                label: "Copy file relative repo path".to_owned(),
+                command: ContextMenuCommand::CopyRepoRelativePath {
+                    relative_path: "src/explorer/context_menu.rs".to_owned()
+                },
+                enabled: true,
+            })
+        );
+    }
+
+    #[test]
+    fn folder_menu_for_folder_in_repo_shows_relative_repo_path_after_copy_path() {
+        let repo = unique_temp_dir("folder-relative-path-repo");
+        let path = repo.join("src").join("explorer");
+        fs::create_dir_all(&path).unwrap();
+        Repository::init(&repo).expect("init repo");
+        let items = folder_context_menu_items_with_custom(
+            &path,
+            false,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &[],
+        );
+        let copy_path_index = action_index(&items, "context-menu-folder-copy-path");
+
+        assert_eq!(
+            items.get(copy_path_index + 1),
+            Some(&ContextMenuItem::Action {
+                id: "context-menu-folder-copy-relative-repo-path".to_owned(),
+                icon: Some(ContextMenuIcon::CopyAsPath),
+                label: "Copy folder relative repo path".to_owned(),
+                command: ContextMenuCommand::CopyRepoRelativePath {
+                    relative_path: "src/explorer".to_owned()
+                },
+                enabled: true,
+            })
+        );
+    }
+
+    #[test]
+    fn context_menus_omit_relative_repo_path_outside_repositories() {
+        let dir = unique_temp_dir("outside-relative-path-repo");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("file.txt");
+        fs::write(&file, b"file").unwrap();
+        let entry_items =
+            entry_menu_for_selected_entries(vec![test_context_menu_entry(file.clone(), false)]);
+        let folder_items = folder_context_menu_items_with_custom(
+            &dir,
+            false,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &[],
+        );
+
+        assert!(!entry_items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::CopyRepoRelativePath { .. },
+                ..
+            }
+        )));
+        assert!(!folder_items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::CopyRepoRelativePath { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn folder_menu_for_repo_root_omits_relative_repo_path() {
+        let repo = unique_temp_dir("root-relative-path-repo");
+        fs::create_dir_all(&repo).unwrap();
+        Repository::init(&repo).expect("init repo");
+        let items = folder_context_menu_items_with_custom(
+            &repo,
+            false,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            &[],
+        );
+        let copy_path_index = action_index(&items, "context-menu-folder-copy-path");
+
+        assert!(matches!(
+            items.get(copy_path_index + 1),
+            Some(ContextMenuItem::Separator)
+        ));
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                id,
+                command: ContextMenuCommand::CopyRepoRelativePath { .. },
+                ..
+            } if id == "context-menu-folder-copy-relative-repo-path"
+        )));
     }
 
     #[test]
