@@ -1,13 +1,17 @@
 use crate::explorer::constants::FILE_ICON_SIZE;
 use crate::explorer::constants::SIDEBAR_ICON_SIZE;
 use std::{
+    io::Cursor,
     path::Path,
     sync::{Arc, LazyLock},
 };
 
 use crate::explorer::{
     directory_kind::DirectoryKind,
-    filesystem::{WslDistroKind, archive_path_is_supported, wsl_distro_kind_for_path},
+    filesystem::{
+        DriveDiscKind, WslDistroKind, archive_path_is_supported, drive_root_disc_kind,
+        wsl_distro_kind_for_path,
+    },
 };
 use gpui::{
     AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, StyledImage, div, font, img,
@@ -84,6 +88,21 @@ macro_rules! png_icon {
     };
 }
 
+fn ico_image_or_fallback(bytes: &[u8], fallback: Arc<Image>) -> Arc<Image> {
+    ico_png_bytes(bytes)
+        .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+        .unwrap_or(fallback)
+}
+
+fn ico_png_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Ico).ok()?;
+    let mut png = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    (!png.is_empty()).then_some(png)
+}
+
 png_icon!(AUDIO_FILE_ICON, "files", "audio.png");
 png_icon!(CONFIGURATION_FILE_ICON, "files", "configuration.png");
 png_icon!(DISC_FILE_ICON, "files", "disc.png");
@@ -140,6 +159,12 @@ png_icon!(
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
+const BLU_RAY_DISC_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/devices/discs/bd.ico");
+const DVD_DISC_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/devices/discs/dvd.ico");
+static BLU_RAY_DISC_ICON: LazyLock<Arc<Image>> =
+    LazyLock::new(|| ico_image_or_fallback(BLU_RAY_DISC_ICON_BYTES, DRIVE_DISC_ICON.clone()));
+static DVD_DISC_ICON: LazyLock<Arc<Image>> =
+    LazyLock::new(|| ico_image_or_fallback(DVD_DISC_ICON_BYTES, DRIVE_DISC_ICON.clone()));
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
 png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
@@ -414,12 +439,25 @@ pub(super) fn drive_icon() -> AnyElement {
     image_sidebar_icon(DRIVE_ICON.clone())
 }
 
-pub(super) fn drive_disc_icon() -> AnyElement {
-    image_sidebar_icon(DRIVE_DISC_ICON.clone())
+pub(super) fn drive_disc_icon_for_path(path: &Path) -> AnyElement {
+    image_sidebar_icon(drive_disc_image_for_path(path))
 }
 
-pub(super) fn drive_disc_icon_sized(size: f32) -> AnyElement {
-    image_icon(DRIVE_DISC_ICON.clone(), size, size)
+pub(super) fn drive_disc_icon_sized_for_path(path: &Path, size: f32) -> AnyElement {
+    image_icon(drive_disc_image_for_path(path), size, size)
+}
+
+fn drive_disc_image_for_path(path: &Path) -> Arc<Image> {
+    drive_root_disc_kind(path)
+        .map(drive_disc_image_for_kind)
+        .unwrap_or_else(|| DRIVE_DISC_ICON.clone())
+}
+
+fn drive_disc_image_for_kind(kind: DriveDiscKind) -> Arc<Image> {
+    match kind {
+        DriveDiscKind::BluRay => BLU_RAY_DISC_ICON.clone(),
+        DriveDiscKind::Dvd => DVD_DISC_ICON.clone(),
+    }
 }
 
 pub(super) fn drive_windows_icon() -> AnyElement {
@@ -531,6 +569,33 @@ mod tests {
         assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!DRIVE_DISC_ICON_BYTES.is_empty());
+        assert!(!BLU_RAY_DISC_ICON_BYTES.is_empty());
+        assert!(!DVD_DISC_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn optical_drive_ico_assets_decode_to_png_images() {
+        let blu_ray_png = ico_png_bytes(BLU_RAY_DISC_ICON_BYTES).expect("decode blu-ray icon");
+        let dvd_png = ico_png_bytes(DVD_DISC_ICON_BYTES).expect("decode dvd icon");
+
+        assert!(!blu_ray_png.is_empty());
+        assert!(!dvd_png.is_empty());
+        assert_eq!(BLU_RAY_DISC_ICON.format, ImageFormat::Png);
+        assert_eq!(DVD_DISC_ICON.format, ImageFormat::Png);
+        assert!(!BLU_RAY_DISC_ICON.bytes.is_empty());
+        assert!(!DVD_DISC_ICON.bytes.is_empty());
+    }
+
+    #[test]
+    fn optical_drive_disc_icons_use_specific_images_with_generic_fallback() {
+        assert_ne!(
+            drive_disc_image_for_kind(DriveDiscKind::BluRay).id(),
+            drive_disc_image_for_kind(DriveDiscKind::Dvd).id()
+        );
+        assert_eq!(
+            drive_disc_image_for_path(Path::new("not-a-drive-root")).id(),
+            DRIVE_DISC_ICON.clone().id()
+        );
     }
 
     #[test]

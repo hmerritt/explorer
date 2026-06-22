@@ -38,8 +38,16 @@ const SIMPLE_ARCHIVE_EXTENSIONS: &[&str] = &[
 ];
 const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
 const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
+const DVD_DISC_MIN_BYTES: u64 = 1024 * 1024 * 1024;
+const BLU_RAY_DISC_MIN_BYTES: u64 = 18 * 1024 * 1024 * 1024;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static COPY_PARALLELISM_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DriveDiscKind {
+    BluRay,
+    Dvd,
+}
 
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
@@ -655,7 +663,8 @@ fn linux_mountinfo_drive_roots(mountinfo: &str) -> Vec<PathBuf> {
     let mut seen = HashSet::from([PathBuf::from("/")]);
     let mut mounted_volumes = mountinfo
         .lines()
-        .filter_map(linux_mountinfo_mount_point)
+        .filter_map(linux_mountinfo_entry)
+        .map(|entry| entry.mount_point)
         .filter(|path| linux_mount_point_is_visible_drive(path))
         .filter(|path| seen.insert(path.clone()))
         .collect::<Vec<_>>();
@@ -666,11 +675,30 @@ fn linux_mountinfo_drive_roots(mountinfo: &str) -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_mountinfo_mount_point(line: &str) -> Option<PathBuf> {
-    line.split_whitespace()
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxMountInfoEntry {
+    mount_point: PathBuf,
+    fs_type: String,
+    source: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_entry(line: &str) -> Option<LinuxMountInfoEntry> {
+    let (mount_fields, filesystem_fields) = line.split_once(" - ")?;
+    let mount_point = mount_fields
+        .split_whitespace()
         .nth(4)
         .map(linux_mountinfo_unescape)
-        .map(PathBuf::from)
+        .map(PathBuf::from)?;
+    let mut filesystem_fields = filesystem_fields.split_whitespace();
+    let fs_type = filesystem_fields.next()?.to_owned();
+    let source = linux_mountinfo_unescape(filesystem_fields.next()?);
+
+    Some(LinuxMountInfoEntry {
+        mount_point,
+        fs_type,
+        source,
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -733,22 +761,203 @@ pub(crate) fn drive_root_is_ejectable(_: &Path) -> bool {
     false
 }
 
+pub(crate) fn drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+    drive_root_marker_disc_kind(path).or_else(|| platform_drive_root_disc_kind(path))
+}
+
+fn drive_root_marker_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+    let entries = fs::read_dir(path).ok()?;
+    let mut has_dvd_marker = false;
+
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.eq_ignore_ascii_case("BDMV") {
+            return Some(DriveDiscKind::BluRay);
+        }
+        if name.eq_ignore_ascii_case("VIDEO_TS") || name.eq_ignore_ascii_case("AUDIO_TS") {
+            has_dvd_marker = true;
+        }
+    }
+
+    has_dvd_marker.then_some(DriveDiscKind::Dvd)
+}
+
+fn drive_disc_kind_from_total_bytes(total_bytes: u64) -> Option<DriveDiscKind> {
+    if total_bytes >= BLU_RAY_DISC_MIN_BYTES {
+        Some(DriveDiscKind::BluRay)
+    } else if total_bytes >= DVD_DISC_MIN_BYTES {
+        Some(DriveDiscKind::Dvd)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+    if windows_drive_type(path) != Some(5) {
+        return None;
+    }
+
+    windows_drive_total_bytes(path).and_then(drive_disc_kind_from_total_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+    if path == Path::new("/") {
+        return None;
+    }
+
+    let (fs_type, total_bytes) = macos_statfs_disc_info(path)?;
+    if !macos_disc_filesystem_is_optical(&fs_type) {
+        return None;
+    }
+
+    drive_disc_kind_from_total_bytes(total_bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_drive_root_disc_kind(path: &Path) -> Option<DriveDiscKind> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let total_bytes = linux_path_total_bytes(path)?;
+
+    linux_mountinfo_disc_kind_for_path(&mountinfo, path, total_bytes)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_drive_root_disc_kind(_: &Path) -> Option<DriveDiscKind> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn windows_drive_type(path: &Path) -> Option<u32> {
     use windows::Win32::Storage::FileSystem::GetDriveTypeW;
     use windows::core::PCWSTR;
 
-    let root = path
-        .components()
+    let root = windows_drive_root(path)?;
+    let encoded = wide_null(&root);
+    Some(unsafe { GetDriveTypeW(PCWSTR(encoded.as_ptr())) })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_root(path: &Path) -> Option<String> {
+    path.components()
         .next()
         .and_then(|component| match component {
             Component::Prefix(prefix) => {
                 Some(format!("{}\\", prefix.as_os_str().to_string_lossy()))
             }
             _ => None,
-        })?;
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_total_bytes(path: &Path) -> Option<u64> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows::core::PCWSTR;
+
+    let root = windows_drive_root(path)?;
     let encoded = wide_null(&root);
-    Some(unsafe { GetDriveTypeW(PCWSTR(encoded.as_ptr())) })
+    let mut total_bytes = 0;
+    unsafe {
+        GetDiskFreeSpaceExW(PCWSTR(encoded.as_ptr()), None, Some(&mut total_bytes), None).ok()?;
+    }
+
+    Some(total_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_statfs_disc_info(path: &Path) -> Option<(String, u64)> {
+    use std::{
+        ffi::{CStr, CString},
+        mem::MaybeUninit,
+        os::unix::ffi::OsStrExt,
+    };
+
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut statfs = MaybeUninit::<libc::statfs>::zeroed();
+    if unsafe { libc::statfs(path.as_ptr(), statfs.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let statfs = unsafe { statfs.assume_init() };
+    let fs_type = unsafe { CStr::from_ptr(statfs.f_fstypename.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    let blocks = u64::try_from(statfs.f_blocks).ok()?;
+    let block_size = u64::try_from(statfs.f_bsize).ok()?;
+    let total_bytes = blocks.checked_mul(block_size)?;
+
+    Some((fs_type, total_bytes))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_disc_filesystem_is_optical(fs_type: &str) -> bool {
+    fs_type.eq_ignore_ascii_case("udf")
+        || fs_type.eq_ignore_ascii_case("cd9660")
+        || fs_type.eq_ignore_ascii_case("cdfs")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_path_total_bytes(path: &Path) -> Option<u64> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut statvfs = MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(path.as_ptr(), statvfs.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let statvfs = unsafe { statvfs.assume_init() };
+    let blocks = u64::try_from(statvfs.f_blocks).ok()?;
+    let fragment_size = u64::try_from(statvfs.f_frsize)
+        .ok()
+        .filter(|size| *size > 0);
+    let block_size = fragment_size.or_else(|| u64::try_from(statvfs.f_bsize).ok())?;
+
+    blocks.checked_mul(block_size)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_disc_kind_for_path(
+    mountinfo: &str,
+    path: &Path,
+    total_bytes: u64,
+) -> Option<DriveDiscKind> {
+    let entry = mountinfo
+        .lines()
+        .filter_map(linux_mountinfo_entry)
+        .find(|entry| entry.mount_point == path)?;
+
+    if !linux_mount_point_is_visible_drive(&entry.mount_point)
+        || !linux_disc_filesystem_is_optical(&entry.fs_type)
+        || !linux_disc_source_is_optical_or_iso(&entry.source)
+    {
+        return None;
+    }
+
+    drive_disc_kind_from_total_bytes(total_bytes)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_disc_filesystem_is_optical(fs_type: &str) -> bool {
+    fs_type.eq_ignore_ascii_case("udf")
+        || fs_type.eq_ignore_ascii_case("iso9660")
+        || fs_type.eq_ignore_ascii_case("cdfs")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_disc_source_is_optical_or_iso(source: &str) -> bool {
+    source == "/dev/cdrom"
+        || source == "/dev/dvd"
+        || source
+            .strip_prefix("/dev/sr")
+            .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
+        || source
+            .strip_prefix("/dev/loop")
+            .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
 }
 
 pub(super) fn load_entries(
@@ -5085,6 +5294,98 @@ mod tests {
             linux_mountinfo_drive_roots_from_path(&mountinfo).expect("parse mountinfo"),
             vec![PathBuf::from("/"), PathBuf::from("/media/alex/USB")]
         );
+    }
+
+    #[test]
+    fn drive_root_disc_marker_prefers_blu_ray_over_dvd() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("VIDEO_TS")).expect("create dvd marker");
+        fs::create_dir(temp.path().join("bdmv")).expect("create blu-ray marker");
+
+        assert_eq!(
+            drive_root_disc_kind(temp.path()),
+            Some(DriveDiscKind::BluRay)
+        );
+    }
+
+    #[test]
+    fn drive_root_disc_marker_detects_dvd_audio_or_video_folders() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("audio_ts")).expect("create dvd marker");
+
+        assert_eq!(drive_root_disc_kind(temp.path()), Some(DriveDiscKind::Dvd));
+    }
+
+    #[test]
+    fn drive_disc_kind_uses_capacity_thresholds() {
+        assert_eq!(
+            drive_disc_kind_from_total_bytes(BLU_RAY_DISC_MIN_BYTES),
+            Some(DriveDiscKind::BluRay)
+        );
+        assert_eq!(
+            drive_disc_kind_from_total_bytes(BLU_RAY_DISC_MIN_BYTES - 1),
+            Some(DriveDiscKind::Dvd)
+        );
+        assert_eq!(
+            drive_disc_kind_from_total_bytes(DVD_DISC_MIN_BYTES),
+            Some(DriveDiscKind::Dvd)
+        );
+        assert_eq!(
+            drive_disc_kind_from_total_bytes(DVD_DISC_MIN_BYTES - 1),
+            None
+        );
+    }
+
+    #[test]
+    fn linux_mountinfo_disc_detection_requires_optical_mount_shape() {
+        let mountinfo = "\
+36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+40 25 11:0 / /media/alex/Movie rw,relatime - udf /dev/sr0 ro
+41 25 7:0 / /media/alex/Image rw,relatime - iso9660 /dev/loop0 ro
+42 25 8:17 / /media/alex/USB rw,relatime - udf /dev/sdb1 rw
+43 25 11:1 / /home/alex/Disc rw,relatime - udf /dev/sr1 ro
+";
+
+        assert_eq!(
+            linux_mountinfo_disc_kind_for_path(
+                mountinfo,
+                Path::new("/media/alex/Movie"),
+                BLU_RAY_DISC_MIN_BYTES,
+            ),
+            Some(DriveDiscKind::BluRay)
+        );
+        assert_eq!(
+            linux_mountinfo_disc_kind_for_path(
+                mountinfo,
+                Path::new("/media/alex/Image"),
+                DVD_DISC_MIN_BYTES,
+            ),
+            Some(DriveDiscKind::Dvd)
+        );
+        assert_eq!(
+            linux_mountinfo_disc_kind_for_path(
+                mountinfo,
+                Path::new("/media/alex/USB"),
+                DVD_DISC_MIN_BYTES,
+            ),
+            None
+        );
+        assert_eq!(
+            linux_mountinfo_disc_kind_for_path(
+                mountinfo,
+                Path::new("/home/alex/Disc"),
+                DVD_DISC_MIN_BYTES,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn macos_disc_filesystem_detection_accepts_optical_names() {
+        assert!(macos_disc_filesystem_is_optical("udf"));
+        assert!(macos_disc_filesystem_is_optical("CD9660"));
+        assert!(macos_disc_filesystem_is_optical("cdfs"));
+        assert!(!macos_disc_filesystem_is_optical("apfs"));
     }
 
     #[test]

@@ -73,8 +73,8 @@ use crate::explorer::{
         LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
         PROPERTIES_ICON, RENAME_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON,
         directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
-        directory_shortcut_icon_sized, drive_disc_icon, drive_disc_icon_sized, drive_icon,
-        drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
+        directory_shortcut_icon_sized, drive_disc_icon_for_path, drive_disc_icon_sized_for_path,
+        drive_icon, drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
@@ -2745,7 +2745,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
     match kind {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
-        SidebarItemKind::Drive if drive_root_is_ejectable(path) => drive_disc_icon(),
+        SidebarItemKind::Drive if drive_root_is_ejectable(path) => drive_disc_icon_for_path(path),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
@@ -3982,7 +3982,7 @@ fn context_menu_icon_element(
             if matches!(kind, Some(DirectoryKind::DriveWsl)) {
                 drive_wsl_icon_sized_for_path(&path, CONTEXT_MENU_ICON_SIZE)
             } else if matches!(kind, Some(DirectoryKind::Drive)) && drive_root_is_ejectable(&path) {
-                drive_disc_icon_sized(CONTEXT_MENU_ICON_SIZE)
+                drive_disc_icon_sized_for_path(&path, CONTEXT_MENU_ICON_SIZE)
             } else {
                 kind.map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
                     .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element())
@@ -5174,7 +5174,20 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     }
 
     if entry.is_directory_like() {
-        if wsl_distro_kind_for_path(&entry.path).is_some() {
+        if let Some(kind) = crate::explorer::resolve_directory_kind(&entry.path) {
+            match kind {
+                DirectoryKind::DriveWsl => {
+                    return drive_wsl_icon_sized_for_path(&entry.path, FILE_ICON_SLOT_WIDTH);
+                }
+                DirectoryKind::Drive if drive_root_is_ejectable(&entry.path) => {
+                    return drive_disc_icon_sized_for_path(&entry.path, FILE_ICON_SLOT_WIDTH);
+                }
+                DirectoryKind::Drive | DirectoryKind::DriveWindows => {
+                    return directory_kind_icon_sized(kind, FILE_ICON_SLOT_WIDTH);
+                }
+                _ => {}
+            }
+        } else if wsl_distro_kind_for_path(&entry.path).is_some() {
             return drive_wsl_icon_sized_for_path(&entry.path, FILE_ICON_SLOT_WIDTH);
         }
 
@@ -5202,7 +5215,20 @@ fn large_entry_icon(
     }
 
     if entry.is_directory_like() {
-        if wsl_distro_kind_for_path(&entry.path).is_some() {
+        if let Some(kind) = crate::explorer::resolve_directory_kind(&entry.path) {
+            match kind {
+                DirectoryKind::DriveWsl => {
+                    return drive_wsl_icon_sized_for_path(&entry.path, LARGE_ICON_SIZE);
+                }
+                DirectoryKind::Drive if drive_root_is_ejectable(&entry.path) => {
+                    return drive_disc_icon_sized_for_path(&entry.path, LARGE_ICON_SIZE);
+                }
+                DirectoryKind::Drive | DirectoryKind::DriveWindows => {
+                    return directory_kind_icon_sized(kind, LARGE_ICON_SIZE);
+                }
+                _ => {}
+            }
+        } else if wsl_distro_kind_for_path(&entry.path).is_some() {
             return drive_wsl_icon_sized_for_path(&entry.path, LARGE_ICON_SIZE);
         }
 

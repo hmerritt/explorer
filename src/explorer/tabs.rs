@@ -1030,6 +1030,11 @@ fn tab_icon(path: Option<&Path>) -> AnyElement {
         if kind == crate::explorer::DirectoryKind::DriveWsl {
             return crate::explorer::icons::drive_wsl_icon_for_path(path);
         }
+        if kind == crate::explorer::DirectoryKind::Drive
+            && crate::explorer::filesystem::drive_root_is_ejectable(path)
+        {
+            return crate::explorer::icons::drive_disc_icon_for_path(path);
+        }
 
         return crate::explorer::icons::directory_kind_icon(kind);
     }
