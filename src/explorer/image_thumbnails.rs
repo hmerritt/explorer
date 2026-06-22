@@ -449,6 +449,28 @@ impl ExplorerView {
         Some(preview)
     }
 
+    pub(super) fn ready_standard_video_thumbnail_for_entry(
+        &self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<CachedThumbnailImage> {
+        let request = image_thumbnail_request_for_entry(entry, &self.path)?;
+        if request.kind != ImageThumbnailKind::Video
+            || request.usage != ImageThumbnailUsage::Standard
+        {
+            return None;
+        }
+
+        cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
+            cache
+                .inner
+                .borrow()
+                .states
+                .get(&request.key)
+                .and_then(ImageThumbnailState::thumbnail)
+        })
+    }
+
     pub(super) fn cancel_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
         let directory = self.path.clone();
         let loader_generation = cx
@@ -1416,6 +1438,10 @@ pub(super) fn entry_may_have_hover_image_preview(entry: &FileEntry) -> bool {
     !entry.is_directory_like() && path_may_have_image_preview(&entry.path)
 }
 
+pub(super) fn entry_may_have_hover_video_preview(entry: &FileEntry) -> bool {
+    !entry.is_directory_like() && path_may_have_video_metadata(&entry.path)
+}
+
 fn hover_image_preview_request_for_entry(
     entry: &FileEntry,
     directory: &Path,
@@ -1506,7 +1532,7 @@ fn thumbnail_file_path(cache_dir: Option<&Path>, key: &str) -> Option<PathBuf> {
     Some(cache_dir?.join(format!("{key}.png")))
 }
 
-fn dimensions_for_preview(width: u32, height: u32, size: u32) -> Option<(u32, u32)> {
+pub(super) fn dimensions_for_preview(width: u32, height: u32, size: u32) -> Option<(u32, u32)> {
     dimensions_for_longest_side(width, height, size)
 }
 

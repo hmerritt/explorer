@@ -116,6 +116,7 @@ impl ExplorerView {
 
         if let Some(cx) = cx.as_deref_mut() {
             self.cancel_image_thumbnail_extraction(cx);
+            self.cancel_video_hover_preview(cx);
         }
         self.path = path;
         self.reset_view_mode_for_navigation();

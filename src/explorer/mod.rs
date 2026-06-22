@@ -41,6 +41,7 @@ mod test_support;
 mod text_input;
 mod tooltip;
 mod video;
+mod video_hover_preview;
 mod view;
 mod watcher;
 #[cfg(target_os = "windows")]

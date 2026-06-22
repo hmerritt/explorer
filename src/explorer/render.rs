@@ -79,7 +79,7 @@ use crate::explorer::{
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
-    image_thumbnails::{HoverImagePreviewLookup, entry_may_have_hover_image_preview},
+    image_thumbnails::HoverImagePreviewLookup,
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
         large_icon_max_tile_height,
@@ -95,6 +95,9 @@ use crate::explorer::{
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
     tooltip::explorer_tooltip,
+    video_hover_preview::{
+        VideoHoverPreviewLookup, entry_may_have_hover_media_preview, hover_preview_is_video,
+    },
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
         ImageHoverPreview, UtilityMenu, normalized_sidebar_width_f32,
@@ -949,30 +952,54 @@ impl ExplorerView {
             || self.mouse_selection_drag.is_some()
             || self.active_drop_indicator.is_some()
         {
+            self.cancel_video_hover_preview(cx);
             return None;
         }
 
         let state = self.image_hover_preview.clone()?;
-        let preview = self.hover_image_preview_for_entry(&state.entry, cx)?;
-        let (width, height, content) = match preview {
-            HoverImagePreviewLookup::Loading {
-                width,
-                height,
-                thumbnail,
-            } => (
-                width,
-                height,
-                image_hover_preview_loading_content(thumbnail),
-            ),
-            HoverImagePreviewLookup::Ready(preview) => (
-                preview.width,
-                preview.height,
-                gpui::img(preview.image)
-                    .size_full()
-                    .object_fit(ObjectFit::Contain)
-                    .into_any_element(),
-            ),
-            HoverImagePreviewLookup::Failed => return None,
+        let (width, height, content) = if hover_preview_is_video(&state.entry) {
+            match self.hover_video_preview_for_entry(&state.entry, cx)? {
+                VideoHoverPreviewLookup::Loading {
+                    width,
+                    height,
+                    thumbnail,
+                } => (
+                    width,
+                    height,
+                    image_hover_preview_loading_content(thumbnail),
+                ),
+                VideoHoverPreviewLookup::Playing(preview) => (
+                    preview.width,
+                    preview.height,
+                    gpui::img(preview.image)
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                ),
+                VideoHoverPreviewLookup::Failed => return None,
+            }
+        } else {
+            self.cancel_video_hover_preview(cx);
+            match self.hover_image_preview_for_entry(&state.entry, cx)? {
+                HoverImagePreviewLookup::Loading {
+                    width,
+                    height,
+                    thumbnail,
+                } => (
+                    width,
+                    height,
+                    image_hover_preview_loading_content(thumbnail),
+                ),
+                HoverImagePreviewLookup::Ready(preview) => (
+                    preview.width,
+                    preview.height,
+                    gpui::img(preview.image)
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                ),
+                HoverImagePreviewLookup::Failed => return None,
+            }
         };
         let viewport_size = window.viewport_size();
         let window_size = (
@@ -999,6 +1026,9 @@ impl ExplorerView {
                 .overflow_hidden()
                 .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                     if this.update_image_hover_preview_alt(event.modifiers.alt) {
+                        if !event.modifiers.alt {
+                            this.cancel_video_hover_preview(cx);
+                        }
                         cx.notify();
                     }
                 }))
@@ -1014,7 +1044,7 @@ impl ExplorerView {
         alt: bool,
     ) -> bool {
         let mut changed = self.update_image_hover_preview_alt(alt);
-        if !entry_may_have_hover_image_preview(entry) {
+        if !entry_may_have_hover_media_preview(entry) {
             return self.clear_image_hover_preview() || changed;
         }
 
@@ -2667,6 +2697,9 @@ impl Render for ExplorerView {
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 let drop_indicator_changed = this.update_drop_indicator_modifiers(event.modifiers);
                 let image_hover_changed = this.update_image_hover_preview_alt(event.modifiers.alt);
+                if !event.modifiers.alt {
+                    this.cancel_video_hover_preview(cx);
+                }
                 if drop_indicator_changed || image_hover_changed {
                     cx.notify();
                 }
@@ -3393,6 +3426,7 @@ fn add_entry_hover_preview(
     element
         .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
             let changed = if event.pressed_button.is_some() {
+                this.cancel_video_hover_preview(cx);
                 this.clear_image_hover_preview()
             } else {
                 this.update_image_hover_preview(&move_entry, event.position, event.modifiers.alt)
@@ -3403,6 +3437,7 @@ fn add_entry_hover_preview(
         }))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if !*hovered && this.clear_image_hover_preview_for_entry(&entry) {
+                this.cancel_video_hover_preview(cx);
                 cx.notify();
             }
         }))
@@ -7611,14 +7646,17 @@ mod tests {
     }
 
     #[test]
-    fn image_hover_preview_origin_uses_two_pixel_bottom_right_offset() {
+    fn image_hover_preview_origin_uses_configured_bottom_right_offset() {
         assert_eq!(
             image_hover_preview_origin(
                 gpui::point(gpui::px(100.0), gpui::px(100.0)),
                 (200.0, 100.0),
                 (800.0, 600.0),
             ),
-            (102.0, 102.0)
+            (
+                100.0 + IMAGE_HOVER_PREVIEW_OFFSET_X,
+                100.0 + IMAGE_HOVER_PREVIEW_OFFSET_Y
+            )
         );
     }
 
@@ -7642,7 +7680,7 @@ mod tests {
                 (200.0, 100.0),
                 (800.0, 260.0),
             ),
-            (252.0, 160.0)
+            (250.0 + IMAGE_HOVER_PREVIEW_OFFSET_X, 160.0)
         );
     }
 

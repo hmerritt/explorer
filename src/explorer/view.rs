@@ -38,6 +38,7 @@ use crate::explorer::{
     search::{SearchState, filtered_entries},
     selection::SelectionState,
     sorting::sort_entries,
+    video_hover_preview::VideoHoverPreviewSession,
     watcher::DirectoryWatcher,
 };
 use crate::settings::{
@@ -93,6 +94,8 @@ pub struct ExplorerView {
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) image_hover_preview: Option<ImageHoverPreview>,
     pub(super) image_hover_preview_alt: bool,
+    pub(super) video_hover_preview: Option<VideoHoverPreviewSession>,
+    pub(super) video_hover_preview_generation: u64,
     pub(super) file_columns: FileColumnSettings,
     pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
     pub(super) file_sort: FileSortSettings,
@@ -348,6 +351,8 @@ impl ExplorerView {
             sidebar_resize_drag: None,
             image_hover_preview: None,
             image_hover_preview_alt: false,
+            video_hover_preview: None,
+            video_hover_preview_generation: 0,
             file_columns: settings.view.file_columns.clone(),
             file_column_resize_drag: None,
             file_sort: settings.view.sort,
@@ -1446,6 +1451,7 @@ impl ExplorerView {
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_image_thumbnail_extraction(cx);
+        self.cancel_video_hover_preview(cx);
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
         self.finish_search_edit();

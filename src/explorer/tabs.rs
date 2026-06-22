@@ -452,6 +452,7 @@ impl ExplorerTabs {
         if let Some(tab) = self.active_tab() {
             let _ = tab.view.update(cx, |view, cx| {
                 view.cancel_image_thumbnail_extraction(cx);
+                view.cancel_video_hover_preview(cx);
             });
         }
     }
