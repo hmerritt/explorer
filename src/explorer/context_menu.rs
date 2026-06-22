@@ -988,7 +988,7 @@ fn entry_context_menu_items_with_custom(
 
         if let Some(entry) = selected_entries
             .first()
-            .filter(|entry| entry.is_open_with_target())
+            .filter(|entry| entry_is_open_with_context_menu_target(entry))
         {
             items.push(crate::explorer::open_with::context_menu_item(&entry.path));
         }
@@ -1101,6 +1101,18 @@ fn entry_context_menu_items_with_custom(
 
 fn entry_is_file_open_target(entry: &FileEntry) -> bool {
     !entry.is_directory_like() || entry.is_app_bundle()
+}
+
+fn entry_is_open_with_context_menu_target(entry: &FileEntry) -> bool {
+    entry.is_open_with_target() && !path_is_windows_open_with_context_menu_excluded(&entry.path)
+}
+
+fn path_is_windows_open_with_context_menu_excluded(path: &Path) -> bool {
+    cfg!(target_os = "windows")
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
 }
 
 fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bool {
@@ -2279,6 +2291,32 @@ mod tests {
             ],
         );
         assert!(!menu_has_label(&multi_items, "Open with"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_entry_menu_omits_open_with_for_exe_case_insensitively() {
+        for name in ["setup.exe", "SETUP.EXE"] {
+            let items =
+                entry_menu_for_selected_entries(vec![FileEntry::test(name, false, Some(1), None)]);
+
+            assert!(menu_has_label(&items, "Open"));
+            assert!(menu_has_label(&items, "Run as administrator"));
+            assert!(!menu_has_label(&items, "Open with"));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_entry_menu_shows_open_with_for_exe_files() {
+        let items = entry_menu_for_selected_entries(vec![FileEntry::test(
+            "setup.exe",
+            false,
+            Some(1),
+            None,
+        )]);
+
+        assert!(menu_has_label(&items, "Open with"));
     }
 
     #[test]
