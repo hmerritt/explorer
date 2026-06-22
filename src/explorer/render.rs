@@ -11,9 +11,9 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
     CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, ExternalPathsDragCallback, FocusHandle,
     Focusable, Image, IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point,
-    Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div,
+    list, prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -79,6 +79,7 @@ use crate::explorer::{
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
+    image_thumbnails::entry_may_have_hover_image_preview,
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
         large_icon_max_tile_height,
@@ -96,7 +97,7 @@ use crate::explorer::{
     tooltip::explorer_tooltip,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
-        UtilityMenu, normalized_sidebar_width_f32,
+        ImageHoverPreview, UtilityMenu, normalized_sidebar_width_f32,
     },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
@@ -137,6 +138,9 @@ const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
+const IMAGE_HOVER_PREVIEW_SIZE: f32 = 250.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 16.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -920,6 +924,102 @@ impl ExplorerView {
         }
 
         Some(overlay.into_any_element())
+    }
+
+    fn render_image_hover_preview_overlay(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.image_hover_preview_alt
+            || self.context_menu.is_some()
+            || self.mouse_selection_drag.is_some()
+            || self.active_drop_indicator.is_some()
+        {
+            return None;
+        }
+
+        let state = self.image_hover_preview.clone()?;
+        let thumbnail = self.image_thumbnail_for_entry(&state.entry, cx)?;
+        let image = self
+            .hover_image_preview_for_entry(&state.entry, cx)
+            .unwrap_or(thumbnail);
+        let window_size = (
+            f32::from(window.bounds().size.width),
+            f32::from(window.bounds().size.height),
+        );
+        let (left, top) = image_hover_preview_origin(state.position, window_size);
+
+        Some(
+            div()
+                .id("image-hover-preview")
+                .debug_selector(|| "image-hover-preview".to_owned())
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(IMAGE_HOVER_PREVIEW_SIZE))
+                .h(px(IMAGE_HOVER_PREVIEW_SIZE))
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0xd8d8d8))
+                .shadow_md()
+                .overflow_hidden()
+                .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                    if this.update_image_hover_preview_alt(event.modifiers.alt) {
+                        cx.notify();
+                    }
+                }))
+                .child(gpui::img(image).size_full().object_fit(ObjectFit::Contain))
+                .into_any_element(),
+        )
+    }
+
+    fn update_image_hover_preview(
+        &mut self,
+        entry: &FileEntry,
+        position: Point<Pixels>,
+        alt: bool,
+    ) -> bool {
+        let mut changed = self.update_image_hover_preview_alt(alt);
+        if !entry_may_have_hover_image_preview(entry) {
+            return self.clear_image_hover_preview() || changed;
+        }
+
+        let next = ImageHoverPreview {
+            entry: entry.clone(),
+            position,
+        };
+        if self.image_hover_preview.as_ref() != Some(&next) {
+            self.image_hover_preview = Some(next);
+            changed = true;
+        }
+        changed
+    }
+
+    fn update_image_hover_preview_alt(&mut self, alt: bool) -> bool {
+        if self.image_hover_preview_alt == alt {
+            return false;
+        }
+
+        self.image_hover_preview_alt = alt;
+        true
+    }
+
+    fn clear_image_hover_preview(&mut self) -> bool {
+        self.image_hover_preview.take().is_some()
+    }
+
+    fn clear_image_hover_preview_for_entry(&mut self, entry: &FileEntry) -> bool {
+        if self
+            .image_hover_preview
+            .as_ref()
+            .is_some_and(|preview| preview.entry.path == entry.path)
+        {
+            self.image_hover_preview = None;
+            return true;
+        }
+
+        false
     }
 
     fn render_address_suggestions_overlay(
@@ -1852,6 +1952,7 @@ impl ExplorerView {
             // .border_color(rgb(0x949494))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+        row = add_entry_hover_preview(row, entry.clone(), cx);
         row = add_entry_primary_click(row, entry.clone(), EntryClickTarget::Row, cx);
         row = add_entry_context_menu(row, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
         row = add_entry_middle_click(row, entry.clone(), cx);
@@ -2027,6 +2128,7 @@ impl ExplorerView {
             )
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+        tile = add_entry_hover_preview(tile, entry.clone(), cx);
         tile = add_entry_primary_click(tile, entry.clone(), EntryClickTarget::Row, cx);
         tile = add_entry_context_menu(tile, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
         tile = add_entry_middle_click(tile, entry.clone(), cx);
@@ -2530,7 +2632,9 @@ impl Render for ExplorerView {
                 }),
             )
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                if this.update_drop_indicator_modifiers(event.modifiers) {
+                let drop_indicator_changed = this.update_drop_indicator_modifiers(event.modifiers);
+                let image_hover_changed = this.update_image_hover_preview_alt(event.modifiers.alt);
+                if drop_indicator_changed || image_hover_changed {
                     cx.notify();
                 }
             }))
@@ -2641,6 +2745,10 @@ impl Render for ExplorerView {
             .when_some(
                 self.render_context_menu_overlay(window, cx),
                 |this, menu| this.child(menu),
+            )
+            .when_some(
+                self.render_image_hover_preview_overlay(window, cx),
+                |this, preview| this.child(preview),
             )
     }
 }
@@ -2906,6 +3014,15 @@ fn local_context_menu_origin(
     window_position - view_origin
 }
 
+fn image_hover_preview_origin(position: Point<Pixels>, window_size: (f32, f32)) -> (f32, f32) {
+    let max_x = (window_size.0 - IMAGE_HOVER_PREVIEW_SIZE).max(0.0);
+    let max_y = (window_size.1 - IMAGE_HOVER_PREVIEW_SIZE).max(0.0);
+    let left = f32::from(position.x) + IMAGE_HOVER_PREVIEW_OFFSET_X;
+    let top = f32::from(position.y) + IMAGE_HOVER_PREVIEW_OFFSET_Y;
+
+    (left.clamp(0.0, max_x), top.clamp(0.0, max_y))
+}
+
 fn context_menu_contains_window_position(
     this: &ExplorerView,
     window_position: Point<Pixels>,
@@ -3161,6 +3278,30 @@ fn add_entry_primary_click(
         cx.stop_propagation();
         cx.notify();
     }))
+}
+
+fn add_entry_hover_preview(
+    element: gpui::Stateful<Div>,
+    entry: FileEntry,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    let move_entry = entry.clone();
+    element
+        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            let changed = if event.pressed_button.is_some() {
+                this.clear_image_hover_preview()
+            } else {
+                this.update_image_hover_preview(&move_entry, event.position, event.modifiers.alt)
+            };
+            if changed {
+                cx.notify();
+            }
+        }))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            if !*hovered && this.clear_image_hover_preview_for_entry(&entry) {
+                cx.notify();
+            }
+        }))
 }
 
 fn add_entry_context_menu(
@@ -5923,14 +6064,15 @@ mod tests {
     use std::{
         collections::BTreeSet,
         fs,
+        io::Cursor,
         path::{Path, PathBuf},
         time::Duration,
     };
 
     use gpui::{
-        AppContext, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
+        AppContext, Bounds, ClickEvent, ClipboardItem, ExternalPaths, Image, ImageFormat,
         KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
-        SharedString,
+        Pixels, Point, SharedString,
     };
 
     use crate::explorer::context_menu::{
@@ -5961,24 +6103,24 @@ mod tests {
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
         DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_SORT_CHEVRON_ICON_SIZE,
-        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
-        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
-        codebase_makeup_segments, context_menu_action_width_for_text_width,
-        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
-        context_menu_width_for_natural_width, copied_directory_address,
-        directory_open_mode_for_entry_click, drop_indicator_target_width,
+        ImageHoverPreview, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
+        RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
+        available_filename_text_width, codebase_makeup_segments,
+        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
+        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
+        copied_directory_address, directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
-        git_divergence_label, git_divergence_tooltip, is_alt_entry_double_click,
-        is_ctrl_entry_double_click, is_normal_entry_click, lines_of_code_tooltip,
-        open_current_folder_context_menu_from_event, recursive_result_text_width,
-        search_working_detail, selection_modifiers_for_click, sidebar_auto_hide_is_active,
-        sidebar_context_menu_is_active, sidebar_context_menu_target, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, sort_indicator_direction,
-        text_cell_width,
+        git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
+        is_alt_entry_double_click, is_ctrl_entry_double_click, is_normal_entry_click,
+        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
+        sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
-        AddressSlash, FileSortColumn, FileSortSettings, SettingsState, SortDirection,
+        AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
     };
 
     fn entry_names(view: &ExplorerView) -> Vec<String> {
@@ -5986,6 +6128,80 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect()
+    }
+
+    fn add_hover_preview_test_view<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        path: PathBuf,
+        mode: FileViewMode,
+    ) -> (gpui::Entity<ExplorerView>, &'a mut gpui::VisualTestContext) {
+        cx.update(|app| {
+            crate::explorer::image_thumbnails::initialize_for_test(app);
+        });
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.view.sort = FileSortSettings {
+            column: FileSortColumn::Name,
+            direction: SortDirection::Ascending,
+        };
+        settings.view.mode = mode;
+        settings.view.mode_media = mode;
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.observe_image_thumbnail_cache(cx);
+            view
+        })
+    }
+
+    fn write_test_png(path: &Path) {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            4,
+            image::Rgba([220, 40, 80, 255]),
+        ));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("encode test png");
+        fs::write(path, bytes).expect("write test png");
+    }
+
+    fn hover_selector(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+        modifiers: Modifiers,
+    ) -> Point<Pixels> {
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} bounds"))
+            .center();
+        cx.simulate_modifiers_change(modifiers);
+        cx.run_until_parked();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, modifiers);
+        position
+    }
+
+    fn run_until_image_hover_preview(cx: &mut gpui::VisualTestContext) -> Bounds<Pixels> {
+        for _ in 0..5 {
+            cx.run_until_parked();
+            if let Some(bounds) = cx.debug_bounds("image-hover-preview") {
+                return bounds;
+            }
+        }
+
+        panic!("image hover preview should be visible");
+    }
+
+    fn alt_modifiers() -> Modifiers {
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        }
     }
 
     #[test]
@@ -7266,6 +7482,114 @@ mod tests {
         assert!(!entry_row_hover_enabled(true, false));
         assert!(!entry_row_hover_enabled(false, true));
         assert!(!entry_row_hover_enabled(true, true));
+    }
+
+    #[test]
+    fn image_hover_preview_origin_clamps_inside_window() {
+        assert_eq!(
+            image_hover_preview_origin(
+                gpui::point(gpui::px(295.0), gpui::px(295.0)),
+                (300.0, 300.0),
+            ),
+            (50.0, 50.0)
+        );
+    }
+
+    #[gpui::test]
+    fn alt_hover_image_entry_shows_preview_in_details(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview(cx);
+
+        assert_eq!(preview.size.width, gpui::px(250.0));
+        assert_eq!(preview.size.height, gpui::px(250.0));
+    }
+
+    #[gpui::test]
+    fn hovering_image_then_pressing_alt_shows_and_releasing_alt_hides_preview(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("image-hover-preview").is_none());
+
+        cx.simulate_modifiers_change(alt_modifiers());
+        assert!(run_until_image_hover_preview(cx).size.width == gpui::px(250.0));
+
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.image_hover_preview_alt);
+        });
+        cx.update(|window, _| {
+            assert!(!window.modifiers().alt);
+        });
+    }
+
+    #[gpui::test]
+    fn alt_hover_non_image_entry_does_not_show_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("notes.txt"), b"notes").expect("write notes");
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        for _ in 0..3 {
+            cx.run_until_parked();
+        }
+
+        assert!(cx.debug_bounds("image-hover-preview").is_none());
+    }
+
+    #[gpui::test]
+    fn alt_hover_image_entry_shows_preview_in_large_icons(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::LargeIcons);
+
+        hover_selector(cx, "explorer-large-icon-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview(cx);
+
+        assert_eq!(preview.size.width, gpui::px(250.0));
+        assert_eq!(preview.size.height, gpui::px(250.0));
+    }
+
+    #[gpui::test]
+    fn image_hover_preview_clamps_inside_window(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.simulate_resize(gpui::size(gpui::px(300.0), gpui::px(300.0)));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                view.image_hover_preview = Some(ImageHoverPreview {
+                    entry,
+                    position: gpui::point(gpui::px(295.0), gpui::px(295.0)),
+                });
+                view.image_hover_preview_alt = true;
+                cx.notify();
+            });
+        });
+        let preview = run_until_image_hover_preview(cx);
+
+        assert_eq!(preview.origin.x, gpui::px(50.0));
+        assert_eq!(preview.origin.y, gpui::px(50.0));
+        assert!(preview.origin.x + preview.size.width <= gpui::px(300.0));
+        assert!(preview.origin.y + preview.size.height <= gpui::px(300.0));
     }
 
     #[test]

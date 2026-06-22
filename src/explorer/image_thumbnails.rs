@@ -36,6 +36,7 @@ use crate::{
 
 const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v4";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
+const HOVER_IMAGE_PREVIEW_SIZE: u32 = 250;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -58,9 +59,17 @@ pub(crate) fn initialize(cx: &mut App) {
     cx.set_global(ImageThumbnailCache::new());
 }
 
+#[cfg(test)]
+pub(super) fn initialize_for_test(cx: &mut App) {
+    cx.set_global(ImageThumbnailCache {
+        inner: RefCell::new(ImageThumbnailCacheInner::new(None)),
+    });
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ImageThumbnailRequest {
     kind: ImageThumbnailKind,
+    usage: ImageThumbnailUsage,
     key: String,
     path: PathBuf,
     directory: PathBuf,
@@ -72,11 +81,26 @@ enum ImageThumbnailKind {
     Video,
 }
 
-impl ImageThumbnailKind {
-    fn cache_namespace(self) -> &'static str {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageThumbnailUsage {
+    Standard,
+    HoverPreview,
+}
+
+impl ImageThumbnailUsage {
+    fn cache_namespace(self, kind: ImageThumbnailKind) -> &'static str {
+        match (self, kind) {
+            (Self::Standard, ImageThumbnailKind::Image) => "image",
+            (Self::Standard, ImageThumbnailKind::Video) => "video",
+            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-250",
+            (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview-250",
+        }
+    }
+
+    fn size(self) -> u32 {
         match self {
-            Self::Image => "image",
-            Self::Video => "video",
+            Self::Standard => IMAGE_THUMBNAIL_SIZE,
+            Self::HoverPreview => HOVER_IMAGE_PREVIEW_SIZE,
         }
     }
 }
@@ -287,6 +311,24 @@ impl ExplorerView {
         thumbnail
     }
 
+    pub(super) fn hover_image_preview_for_entry(
+        &mut self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Image>> {
+        let request = hover_image_preview_request_for_entry(entry, &self.path)?;
+        let (preview, loader_generation) = cx
+            .try_global::<ImageThumbnailCache>()
+            .map(|cache| cache.inner.borrow_mut().thumbnail_for_request(request))
+            .unwrap_or((None, None));
+
+        if let Some(generation) = loader_generation {
+            start_image_thumbnail_loader(cx, generation);
+        }
+
+        preview
+    }
+
     pub(super) fn cancel_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
         let directory = self.path.clone();
         let loader_generation = cx
@@ -425,7 +467,7 @@ fn load_or_create_thumbnail_png_with_timings(
         ImageThumbnailKind::Image => {
             let extracted = load_image_thumbnail_png_with_cancel_timed(
                 &request.path,
-                IMAGE_THUMBNAIL_SIZE,
+                request.usage.size(),
                 cancel,
                 timings_enabled,
             );
@@ -1088,7 +1130,29 @@ fn image_thumbnail_request_for_entry(
 
     Some(ImageThumbnailRequest {
         kind,
+        usage: ImageThumbnailUsage::Standard,
         key: image_thumbnail_key(entry, kind),
+        path: entry.path.clone(),
+        directory: directory.to_path_buf(),
+    })
+}
+
+pub(super) fn entry_may_have_hover_image_preview(entry: &FileEntry) -> bool {
+    !entry.is_directory_like() && path_may_have_image_preview(&entry.path)
+}
+
+fn hover_image_preview_request_for_entry(
+    entry: &FileEntry,
+    directory: &Path,
+) -> Option<ImageThumbnailRequest> {
+    if !entry_may_have_hover_image_preview(entry) {
+        return None;
+    }
+
+    Some(ImageThumbnailRequest {
+        kind: ImageThumbnailKind::Image,
+        usage: ImageThumbnailUsage::HoverPreview,
+        key: hover_image_preview_key(entry),
         path: entry.path.clone(),
         directory: directory.to_path_buf(),
     })
@@ -1105,9 +1169,25 @@ fn image_thumbnail_kind_for_path(path: &Path) -> Option<ImageThumbnailKind> {
 }
 
 fn image_thumbnail_key(entry: &FileEntry, kind: ImageThumbnailKind) -> String {
+    image_thumbnail_key_for_usage(entry, kind, ImageThumbnailUsage::Standard)
+}
+
+fn hover_image_preview_key(entry: &FileEntry) -> String {
+    image_thumbnail_key_for_usage(
+        entry,
+        ImageThumbnailKind::Image,
+        ImageThumbnailUsage::HoverPreview,
+    )
+}
+
+fn image_thumbnail_key_for_usage(
+    entry: &FileEntry,
+    kind: ImageThumbnailKind,
+    usage: ImageThumbnailUsage,
+) -> String {
     let mut hash = StableHash::new();
     hash.write_str(IMAGE_THUMBNAIL_CACHE_VERSION);
-    hash.write_str(kind.cache_namespace());
+    hash.write_str(usage.cache_namespace(kind));
     hash.write_str(&normalized_path_key(&entry.path));
     hash.write_u64(entry.size.unwrap_or(0));
     hash.write_u64(system_time_key(entry.modified));
@@ -1264,6 +1344,7 @@ mod tests {
             let request = image_thumbnail_request_for_entry(&entry, Path::new("folder"))
                 .unwrap_or_else(|| panic!("expected request for {name}"));
             assert_eq!(request.kind, ImageThumbnailKind::Image);
+            assert_eq!(request.usage, ImageThumbnailUsage::Standard);
         }
     }
 
@@ -1274,6 +1355,7 @@ mod tests {
             let request = image_thumbnail_request_for_entry(&entry, Path::new("folder"))
                 .unwrap_or_else(|| panic!("expected request for {name}"));
             assert_eq!(request.kind, ImageThumbnailKind::Video);
+            assert_eq!(request.usage, ImageThumbnailUsage::Standard);
         }
     }
 
@@ -1312,12 +1394,69 @@ mod tests {
     }
 
     #[test]
+    fn standard_image_thumbnail_key_preserves_existing_namespace() {
+        let entry = FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH));
+
+        assert_eq!(
+            image_thumbnail_key(&entry, ImageThumbnailKind::Image),
+            "c2396ce4e73cea04"
+        );
+    }
+
+    #[test]
     fn thumbnail_keys_are_namespaced_by_media_kind() {
         let entry = FileEntry::test("clip.mp4", false, Some(1), Some(UNIX_EPOCH));
 
         assert_ne!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
             image_thumbnail_key(&entry, ImageThumbnailKind::Video)
+        );
+    }
+
+    #[test]
+    fn hover_preview_key_is_distinct_from_standard_image_thumbnail_key() {
+        let entry = FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH));
+        let preview = hover_image_preview_request_for_entry(&entry, Path::new("folder"))
+            .expect("expected hover preview request");
+
+        assert_eq!(preview.kind, ImageThumbnailKind::Image);
+        assert_eq!(preview.usage, ImageThumbnailUsage::HoverPreview);
+        assert_eq!(preview.key, hover_image_preview_key(&entry));
+        assert_ne!(
+            preview.key,
+            image_thumbnail_key(&entry, ImageThumbnailKind::Image)
+        );
+    }
+
+    #[test]
+    fn hover_preview_requests_are_image_only() {
+        assert!(
+            hover_image_preview_request_for_entry(
+                &FileEntry::test("folder", true, None, Some(UNIX_EPOCH)),
+                Path::new("folder")
+            )
+            .is_none()
+        );
+        assert!(
+            hover_image_preview_request_for_entry(
+                &FileEntry::test("notes.txt", false, Some(1), Some(UNIX_EPOCH)),
+                Path::new("folder")
+            )
+            .is_none()
+        );
+        assert!(
+            hover_image_preview_request_for_entry(
+                &FileEntry::test("clip.mp4", false, Some(1), Some(UNIX_EPOCH)),
+                Path::new("folder")
+            )
+            .is_none()
+        );
+        assert!(
+            hover_image_preview_request_for_entry(
+                &FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH)),
+                Path::new("folder")
+            )
+            .is_some()
         );
     }
 
@@ -1569,6 +1708,7 @@ mod tests {
         fs::write(&source, bytes).unwrap();
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
             key: "0123456789abcdef".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -1762,6 +1902,7 @@ mod tests {
     fn request(key: &str, directory: &str) -> ImageThumbnailRequest {
         ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
             key: key.to_owned(),
             path: PathBuf::from(directory).join(format!("{key}.png")),
             directory: PathBuf::from(directory),

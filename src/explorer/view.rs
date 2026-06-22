@@ -84,6 +84,8 @@ pub struct ExplorerView {
     pub(super) sidebar_lower_hovered: bool,
     pub(super) sidebar_lower_hover_generation: usize,
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
+    pub(super) image_hover_preview: Option<ImageHoverPreview>,
+    pub(super) image_hover_preview_alt: bool,
     pub(super) file_columns: FileColumnSettings,
     pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
     pub(super) file_sort: FileSortSettings,
@@ -169,6 +171,12 @@ pub(super) enum FileColumnResizeTarget {
 pub(super) enum FileColumnResizeResult {
     Name(u32),
     Column(FileColumnKind, u32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ImageHoverPreview {
+    pub(super) entry: FileEntry,
+    pub(super) position: Point<Pixels>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -325,6 +333,8 @@ impl ExplorerView {
             sidebar_lower_hovered: false,
             sidebar_lower_hover_generation: 0,
             sidebar_resize_drag: None,
+            image_hover_preview: None,
+            image_hover_preview_alt: false,
             file_columns: settings.view.file_columns.clone(),
             file_column_resize_drag: None,
             file_sort: settings.view.sort,

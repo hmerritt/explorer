@@ -3,7 +3,11 @@
 ## 1
 
 - Settings option not to hide "." items (only items with hidden attribute)
-- Alt + hover over any image file to view a preview of the image in a hovering popup overaly box 250x250. The aim of this is a super-fast preview, so the implementation should aggressively focus on speed over quality, for all file formats.
+- Improve Alt+hover functionality:
+    - Change size from 250x250, to match media aspect ratio, with a max width/height of 400px
+    - The hovering popup is currently rendered too far away from the mouse. I like the bottom-right angle, but make it closer to the mouse
+- Improve Alt+hover functionality:
+    - Render gifs+videos via fast ffmpeg/ffprobe link
 
 ## 2
 
