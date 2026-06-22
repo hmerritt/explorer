@@ -14,7 +14,7 @@ use crate::explorer::{
     filesystem::archive_path_is_supported,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
-    view::{ExplorerView, ReloadMode},
+    view::{ExplorerView, ExplorerViewEvent},
 };
 use crate::settings::{
     ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
@@ -465,17 +465,7 @@ impl ExplorerView {
     ) {
         match result {
             Ok(()) => {
-                self.reload_async_with_options(
-                    ReloadMode {
-                        preserve_selection: true,
-                        rebuild_sidebar: true,
-                    },
-                    Vec::new(),
-                    true,
-                    true,
-                    true,
-                    cx,
-                );
+                cx.emit(ExplorerViewEvent::MountedVolumeEjected(path.to_path_buf()));
             }
             Err(error) => {
                 self.open_error = Some(format!(

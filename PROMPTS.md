@@ -10,7 +10,9 @@
 - rsync copy/sync builtin
 - Windows, run as Administrator
 - admin/elevation prompts
-- Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon: 
+- Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon:
+- Detect BluRay, DVD drives and show specific icons, fallback to current disk: assets\icons\devices\discs
+- .ico files are media files, and should be included in the mode_media view calculation
 
 ## 2
 

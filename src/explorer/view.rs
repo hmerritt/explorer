@@ -174,6 +174,7 @@ pub(super) struct ShellShortcutResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerViewEvent {
     FilesystemChanged,
+    MountedVolumeEjected(PathBuf),
     OpenDirectoryInNewTab(PathBuf),
 }
 

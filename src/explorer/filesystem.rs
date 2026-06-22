@@ -309,6 +309,31 @@ pub(super) fn path_is_filesystem_root(path: &Path) -> bool {
     path.has_root() && path.parent().is_none()
 }
 
+pub(super) fn path_is_same_or_descendant(path: &Path, root: &Path) -> bool {
+    let mut path_components = path.components();
+    for root_component in root.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        if !path_components_match(path_component, root_component) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
+    left == right
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn path_is_wsl_unc(path: &Path) -> bool {
     windows_wsl_unc_distribution_name(path).is_some()
@@ -4592,6 +4617,32 @@ mod tests {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn path_same_or_descendant_uses_component_boundaries() {
+        let root = temp_like_absolute_path("drive");
+        let child = root.join("folder");
+        let sibling_prefix = temp_like_absolute_path("drive-other");
+
+        assert!(path_is_same_or_descendant(&root, &root));
+        assert!(path_is_same_or_descendant(&child, &root));
+        assert!(!path_is_same_or_descendant(&sibling_prefix, &root));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn path_same_or_descendant_is_case_insensitive_on_windows() {
+        assert!(path_is_same_or_descendant(
+            Path::new(r"D:\Folder\Child"),
+            Path::new(r"d:\folder")
+        ));
+    }
+
+    fn temp_like_absolute_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(name);
+        path
     }
 
     #[test]

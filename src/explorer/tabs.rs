@@ -465,6 +465,23 @@ impl ExplorerTabs {
         }
     }
 
+    fn redirect_tabs_after_mounted_volume_ejected(
+        &mut self,
+        ejected_root: &Path,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut redirected = false;
+        for tab in &self.tabs {
+            let _ = tab.view.update(cx, |view, cx| {
+                if view.redirect_after_mounted_volume_ejected_with_watcher(ejected_root, cx) {
+                    redirected = true;
+                    cx.notify();
+                }
+            });
+        }
+        redirected
+    }
+
     fn apply_settings_to_all_tabs(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<SettingsState>().value.clone();
         for tab in &self.tabs {
@@ -1046,6 +1063,11 @@ fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Conte
         ExplorerViewEvent::FilesystemChanged => {
             this.reload_all_tabs(cx);
             cx.notify();
+        }
+        ExplorerViewEvent::MountedVolumeEjected(path) => {
+            if this.redirect_tabs_after_mounted_volume_ejected(path, cx) {
+                cx.notify();
+            }
         }
         ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
             this.add_configured_tab(path.clone(), window, cx);
@@ -1794,6 +1816,103 @@ mod tests {
             assert!(view.show_folder_size);
             assert_eq!(view.date_format, "%d %B %Y");
             assert_eq!(view.font.family, "Inter");
+        });
+    }
+
+    #[gpui::test]
+    fn mounted_volume_ejected_event_redirects_all_affected_tabs(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let temp = TempDir::new();
+        let outside = temp.path().join("outside");
+        let ejected_root = temp.path().join("drive");
+        let affected_one = ejected_root.join("one");
+        let affected_two = ejected_root.clone();
+        let history_one = temp.path().join("history-one");
+        let history_two = temp.path().join("history-two");
+        let ejected_history = ejected_root.join("old");
+        fs::create_dir_all(&outside).expect("create outside tab path");
+        fs::create_dir_all(&affected_one).expect("create affected tab path");
+        fs::create_dir_all(&history_one).expect("create first history path");
+        fs::create_dir_all(&history_two).expect("create second history path");
+        fs::create_dir_all(&ejected_history).expect("create ejected history path");
+
+        let (tabs, cx) = cx.add_window_view({
+            let outside = outside.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerTabs::new_for_test(outside, focus_handle, cx)
+            }
+        });
+        let emitter = active_test_view(&tabs, cx);
+
+        let affected_views = cx.update(|window, app| {
+            let mut affected_views = Vec::new();
+            tabs.update(app, |tabs, cx| {
+                observe_tab_view(&emitter, window, cx);
+
+                let focus_one = cx.focus_handle();
+                let view_one_path = affected_one.clone();
+                let view_one = cx.new(|_| {
+                    ExplorerView::new_with_focus_handle_for_test(view_one_path, focus_one)
+                });
+                view_one.update(cx, |view, _| {
+                    view.back_stack = vec![ejected_history.clone(), history_one.clone()];
+                    view.forward_stack = vec![ejected_root.join("forward-one")];
+                });
+
+                let focus_two = cx.focus_handle();
+                let view_two_path = affected_two.clone();
+                let view_two = cx.new(|_| {
+                    ExplorerView::new_with_focus_handle_for_test(view_two_path, focus_two)
+                });
+                view_two.update(cx, |view, _| {
+                    view.back_stack = vec![history_two.clone()];
+                    view.forward_stack = vec![ejected_root.join("forward-two")];
+                });
+
+                tabs.tabs.push(ExplorerTab {
+                    id: TabId(2),
+                    view: view_one.clone(),
+                });
+                tabs.tabs.push(ExplorerTab {
+                    id: TabId(3),
+                    view: view_two.clone(),
+                });
+                tabs.next_tab_id = 4;
+                affected_views.push(view_one);
+                affected_views.push(view_two);
+            });
+
+            emitter.update(app, |_, cx| {
+                cx.emit(ExplorerViewEvent::MountedVolumeEjected(
+                    ejected_root.clone(),
+                ));
+            });
+            affected_views
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&emitter, |view, _| {
+            assert_eq!(view.path, outside);
+        });
+        cx.read_entity(&affected_views[0], |view, _| {
+            assert_eq!(view.path, history_one);
+            assert!(view.back_stack.is_empty());
+            assert!(
+                view.forward_stack
+                    .iter()
+                    .all(|path| !path.starts_with(&ejected_root))
+            );
+        });
+        cx.read_entity(&affected_views[1], |view, _| {
+            assert_eq!(view.path, history_two);
+            assert!(view.back_stack.is_empty());
+            assert!(
+                view.forward_stack
+                    .iter()
+                    .all(|path| !path.starts_with(&ejected_root))
+            );
         });
     }
 

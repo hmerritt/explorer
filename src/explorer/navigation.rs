@@ -9,6 +9,7 @@ use gpui::{Context, Window};
 use crate::explorer::filesystem::format_open_error;
 use crate::explorer::{
     entry::FileEntry,
+    filesystem::{default_start_path, local_drive_roots, path_is_same_or_descendant},
     selection::SelectionModifiers,
     view::{EntryClickSequence, ExplorerView, ExplorerViewEvent, ReloadMode},
 };
@@ -50,7 +51,17 @@ impl ExplorerView {
         &mut self,
         path: PathBuf,
         history_mode: HistoryMode,
+        cx: Option<&mut Context<Self>>,
+    ) {
+        self.navigate_to_directory_inner_with_options(path, history_mode, cx, false);
+    }
+
+    fn navigate_to_directory_inner_with_options(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
         mut cx: Option<&mut Context<Self>>,
+        rebuild_sidebar: bool,
     ) {
         let _timing_batch = crate::debug_options::NavTimingBatch::start();
         let total_started = Instant::now();
@@ -122,11 +133,25 @@ impl ExplorerView {
 
         let reload_started = Instant::now();
         if let Some(cx) = cx.as_deref_mut() {
-            self.reload_for_navigation_async(
-                select_entry_after_reload.clone().into_iter().collect(),
-                true,
-                cx,
-            );
+            if rebuild_sidebar {
+                self.reload_async_with_options(
+                    ReloadMode {
+                        preserve_selection: false,
+                        rebuild_sidebar: true,
+                    },
+                    select_entry_after_reload.clone().into_iter().collect(),
+                    true,
+                    false,
+                    true,
+                    cx,
+                );
+            } else {
+                self.reload_for_navigation_async(
+                    select_entry_after_reload.clone().into_iter().collect(),
+                    true,
+                    cx,
+                );
+            }
         } else {
             self.reload_for_navigation();
         }
@@ -171,6 +196,67 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    pub(super) fn redirect_after_mounted_volume_ejected_with_watcher(
+        &mut self,
+        ejected_root: &Path,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !path_is_same_or_descendant(&self.path, ejected_root) {
+            return false;
+        }
+
+        let Some(target) = self.mounted_volume_eject_redirect_target(ejected_root) else {
+            return false;
+        };
+
+        self.navigate_to_directory_inner_with_options(
+            target,
+            HistoryMode::Preserve,
+            Some(cx),
+            true,
+        );
+        true
+    }
+
+    fn mounted_volume_eject_redirect_target(&mut self, ejected_root: &Path) -> Option<PathBuf> {
+        self.mounted_volume_eject_redirect_target_from(
+            ejected_root,
+            local_drive_roots(),
+            Some(default_start_path()),
+        )
+    }
+
+    fn mounted_volume_eject_redirect_target_from(
+        &mut self,
+        ejected_root: &Path,
+        drive_roots: impl IntoIterator<Item = PathBuf>,
+        default_start: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let mut target = None;
+        while let Some(candidate) = self.back_stack.pop() {
+            if mounted_volume_redirect_candidate_is_valid(&candidate, ejected_root) {
+                target = Some(candidate);
+                break;
+            }
+        }
+
+        self.back_stack
+            .retain(|path| !path_is_same_or_descendant(path, ejected_root));
+        self.forward_stack
+            .retain(|path| !path_is_same_or_descendant(path, ejected_root));
+
+        target
+            .or_else(|| {
+                drive_roots
+                    .into_iter()
+                    .find(|path| mounted_volume_redirect_candidate_is_valid(path, ejected_root))
+            })
+            .or_else(|| {
+                default_start
+                    .filter(|path| mounted_volume_redirect_candidate_is_valid(path, ejected_root))
+            })
     }
 
     #[cfg(test)]
@@ -463,6 +549,10 @@ pub(super) fn directory_new_tab_target(entry: &FileEntry) -> Option<PathBuf> {
         .then(|| entry.navigation_path().to_path_buf())
 }
 
+fn mounted_volume_redirect_candidate_is_valid(path: &Path, ejected_root: &Path) -> bool {
+    !path_is_same_or_descendant(path, ejected_root) && path.is_dir()
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -512,6 +602,102 @@ mod tests {
         assert!(view.entries.is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn mounted_volume_eject_redirect_uses_most_recent_valid_history_path() {
+        let temp = TempDir::new();
+        let ejected_root = temp.path().join("drive");
+        let current = ejected_root.join("folder");
+        let older = temp.path().join("older");
+        let newest_valid = temp.path().join("newest-valid");
+        fs::create_dir_all(&current).expect("create ejected folder");
+        fs::create_dir_all(&older).expect("create older history");
+        fs::create_dir_all(&newest_valid).expect("create newest history");
+
+        let mut view = ExplorerView::new(current);
+        view.back_stack = vec![older.clone(), newest_valid.clone()];
+
+        let target = view
+            .mounted_volume_eject_redirect_target_from(&ejected_root, Vec::new(), None)
+            .expect("redirect target");
+
+        assert_eq!(target, newest_valid);
+        assert_eq!(view.back_stack, vec![older]);
+    }
+
+    #[test]
+    fn mounted_volume_eject_redirect_skips_missing_and_ejected_history_paths() {
+        let temp = TempDir::new();
+        let ejected_root = temp.path().join("drive");
+        let current = ejected_root.join("folder");
+        let valid = temp.path().join("valid");
+        let missing = temp.path().join("missing");
+        let ejected_history = ejected_root.join("old");
+        let retained_forward = temp.path().join("retained-forward");
+        fs::create_dir_all(&current).expect("create ejected folder");
+        fs::create_dir_all(&valid).expect("create valid history");
+        fs::create_dir_all(&ejected_history).expect("create ejected history");
+        fs::create_dir_all(&retained_forward).expect("create retained forward history");
+
+        let mut view = ExplorerView::new(current);
+        view.back_stack = vec![valid.clone(), ejected_history.clone(), missing];
+        view.forward_stack = vec![ejected_history, retained_forward.clone()];
+
+        let target = view
+            .mounted_volume_eject_redirect_target_from(&ejected_root, Vec::new(), None)
+            .expect("redirect target");
+
+        assert_eq!(target, valid);
+        assert!(view.back_stack.is_empty());
+        assert_eq!(view.forward_stack, vec![retained_forward]);
+    }
+
+    #[test]
+    fn mounted_volume_eject_redirect_falls_back_to_existing_drive_root() {
+        let temp = TempDir::new();
+        let ejected_root = temp.path().join("drive");
+        let current = ejected_root.join("folder");
+        let other_root = temp.path().join("other-root");
+        let default_start = temp.path().join("default-start");
+        fs::create_dir_all(&current).expect("create ejected folder");
+        fs::create_dir_all(&other_root).expect("create other root");
+        fs::create_dir_all(&default_start).expect("create default start");
+
+        let mut view = ExplorerView::new(current);
+
+        let target = view
+            .mounted_volume_eject_redirect_target_from(
+                &ejected_root,
+                vec![ejected_root.clone(), other_root.clone()],
+                Some(default_start),
+            )
+            .expect("redirect target");
+
+        assert_eq!(target, other_root);
+    }
+
+    #[test]
+    fn mounted_volume_eject_redirect_falls_back_to_default_start_path() {
+        let temp = TempDir::new();
+        let ejected_root = temp.path().join("drive");
+        let current = ejected_root.join("folder");
+        let missing_root = temp.path().join("missing-root");
+        let default_start = temp.path().join("default-start");
+        fs::create_dir_all(&current).expect("create ejected folder");
+        fs::create_dir_all(&default_start).expect("create default start");
+
+        let mut view = ExplorerView::new(current);
+
+        let target = view
+            .mounted_volume_eject_redirect_target_from(
+                &ejected_root,
+                vec![ejected_root.clone(), missing_root],
+                Some(default_start.clone()),
+            )
+            .expect("redirect target");
+
+        assert_eq!(target, default_start);
     }
 
     #[test]
