@@ -2,17 +2,18 @@
 
 ## 1
 
-- Copy/move/delete are strong, but missing common Explorer behaviors: Ctrl+Z undo for file operations
-- drag-out interoperability with other apps
+- Detect BluRay, DVD drives and show specific icons, fallback to current disk:
+    - assets\icons\devices\discs\bd.ico
+    - assets\icons\devices\discs\dvd.ico
+- .ico files are media files, and should be included in the mode_media view calculation
 
 ---
 
 - rsync copy/sync builtin
-- Windows, run as Administrator
-- admin/elevation prompts
+- Windows-only, "Run as administrator" in contextmenu, and "Run this program as an administrator" checkbox for executables in Properties, to always run as Administrator. Use icon: assets\icons\utility\run_elevated.svg
 - Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon:
-- Detect BluRay, DVD drives and show specific icons, fallback to current disk: assets\icons\devices\discs
-- .ico files are media files, and should be included in the mode_media view calculation
+- Add settings icon: ./assets/icons/utility/settings.svg
+- When in a repo directory (or sub-directory) add a new contextmenu item "Copy <file/folder> relative repo path" to copy the item path, relative to the repo root. Add this below the exiting "Copy <file/folder> path" item, with the same icon
 
 ## 2
 
