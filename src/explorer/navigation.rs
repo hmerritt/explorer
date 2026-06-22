@@ -118,6 +118,7 @@ impl ExplorerView {
             self.cancel_image_thumbnail_extraction(cx);
         }
         self.path = path;
+        self.reset_view_mode_for_navigation();
         self.reset_search_for_navigation();
         self.clear_selection();
         self.read_error = None;
@@ -560,8 +561,9 @@ mod tests {
     use crate::explorer::{
         entry::{DirectoryLinkKind, EntryKind, FileEntry, ShellShortcutTargetKind},
         test_support::TempDir,
-        view::ExplorerView,
+        view::{ExplorerView, ViewModeSelection},
     };
+    use crate::settings::FileViewMode;
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -1245,6 +1247,26 @@ mod tests {
         assert_eq!(view.path, child);
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn navigating_to_another_directory_resets_manual_view_override() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+        fs::write(child.join("photo.jpg"), b"jpg").unwrap();
+        fs::write(child.join("clip.mp4"), b"mp4").unwrap();
+        fs::write(child.join("scan.png"), b"png").unwrap();
+        fs::write(child.join("poster.webp"), b"webp").unwrap();
+        fs::write(child.join("notes.txt"), b"txt").unwrap();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.view_mode_selection = ViewModeSelection::Manual;
+        view.view_mode = FileViewMode::Details;
+
+        view.navigate_to_directory(child, HistoryMode::Record);
+
+        assert_eq!(view.view_mode, FileViewMode::LargeIcons);
+        assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
     }
 
     #[test]

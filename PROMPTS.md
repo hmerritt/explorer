@@ -1,6 +1,6 @@
 ## Todo
 
-- Change the implementation of view.mode_media. Instead of forcing a directory into a selection (which cannot be overridden), instead it should change the current selection in the View dropdown, so a user can still swap back if they want to. Prevent this changing the settings file each time, just change as a temporary view
+- Refactor image thumbnail generation using: https://crates.io/crates/fast_image_resize. enable "rayon" feature to turn on image processing in rayon thread pool.
 
 ## 1
 

@@ -760,7 +760,7 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            crate::settings::set_view_mode(FileViewMode::LargeIcons, cx);
+                            this.select_view_mode(FileViewMode::LargeIcons, cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -773,7 +773,7 @@ impl ExplorerView {
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
-                            crate::settings::set_view_mode(FileViewMode::Details, cx);
+                            this.select_view_mode(FileViewMode::Details, cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -6198,7 +6198,7 @@ mod tests {
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind},
         test_support::{TempDir, test_view_entity_at_path},
-        view::ExplorerView,
+        view::{ExplorerView, ViewModeSelection},
     };
 
     use super::{
@@ -8127,19 +8127,38 @@ mod tests {
     }
 
     #[gpui::test]
-    fn view_menu_large_icons_updates_global_view_mode(cx: &mut gpui::TestAppContext) {
+    fn view_menu_overrides_automatic_media_view_even_when_setting_already_matches(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.set_global(crate::settings::SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
         ));
         let temp = TempDir::new();
+        std::fs::write(temp.path().join("photo.jpg"), b"jpg").unwrap();
+        std::fs::write(temp.path().join("clip.mp4"), b"mp4").unwrap();
+        std::fs::write(temp.path().join("scan.png"), b"png").unwrap();
+        std::fs::write(temp.path().join("poster.webp"), b"webp").unwrap();
+        std::fs::write(temp.path().join("notes.txt"), b"txt").unwrap();
         let path = temp.path().to_path_buf();
-        let (_, cx) = cx.add_window_view(move |window, cx| {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
             ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
         });
 
         cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, FileViewMode::LargeIcons);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .mode),
+            FileViewMode::Details
+        );
         let view_position = cx
             .debug_bounds("utility-view")
             .expect("view utility button bounds")
@@ -8148,29 +8167,25 @@ mod tests {
         cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
-        let large_icons_position = cx
-            .debug_bounds("utility-large-icons")
-            .expect("large icons menu row bounds")
+        let details_position = cx
+            .debug_bounds("utility-details")
+            .expect("details menu row bounds")
             .center();
-        cx.simulate_mouse_down(
-            large_icons_position,
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_up(
-            large_icons_position,
-            MouseButton::Left,
-            Modifiers::default(),
-        );
+        cx.simulate_mouse_down(details_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(details_position, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, FileViewMode::Details);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Manual);
+        });
         assert_eq!(
             cx.read(|cx| cx
                 .global::<crate::settings::SettingsState>()
                 .value
                 .view
                 .mode),
-            crate::settings::FileViewMode::LargeIcons
+            crate::settings::FileViewMode::Details
         );
     }
 

@@ -47,6 +47,13 @@ use crate::settings::{
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ViewModeSelection {
+    Pending,
+    Automatic,
+    Manual,
+}
+
 pub struct ExplorerView {
     pub(super) path: PathBuf,
     pub(super) entries: Vec<FileEntry>,
@@ -115,6 +122,7 @@ pub struct ExplorerView {
     pub(super) base_view_mode: FileViewMode,
     pub(super) media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
+    pub(super) view_mode_selection: ViewModeSelection,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
@@ -300,7 +308,7 @@ impl ExplorerView {
         focus_handle: Option<FocusHandle>,
         settings: &ExplorerSettings,
     ) -> Self {
-        let mut view = Self {
+        Self {
             path: initial_path,
             entries: Vec::new(),
             all_entries: Vec::new(),
@@ -369,6 +377,7 @@ impl ExplorerView {
             base_view_mode: settings.view.mode,
             media_view_mode: settings.view.mode_media,
             view_mode: settings.view.mode,
+            view_mode_selection: ViewModeSelection::Pending,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
@@ -386,9 +395,7 @@ impl ExplorerView {
             git_status: None,
             git_status_generation: 0,
             git_status_task: None,
-        };
-        view.apply_effective_view_mode();
-        view
+        }
     }
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
@@ -409,8 +416,20 @@ impl ExplorerView {
         {
             self.address_slash = settings.view.address_slash;
         }
+        let base_view_mode_changed = self.base_view_mode != settings.view.mode;
+        let media_view_mode_changed = self.media_view_mode != settings.view.mode_media;
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
+        if base_view_mode_changed {
+            self.view_mode_selection = ViewModeSelection::Manual;
+            self.set_active_view_mode(self.base_view_mode);
+        } else if media_view_mode_changed
+            && self.view_mode_selection == ViewModeSelection::Automatic
+        {
+            self.apply_automatic_view_mode();
+        } else if self.view_mode_selection == ViewModeSelection::Pending {
+            self.set_active_view_mode(self.base_view_mode);
+        }
 
         self.sidebar_settings = settings.sidebar.clone();
         if self.sidebar_resize_drag.is_none() {
@@ -468,7 +487,6 @@ impl ExplorerView {
                 self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
             }
         }
-        self.apply_effective_view_mode();
         cx.notify();
     }
 
@@ -563,8 +581,6 @@ impl ExplorerView {
         self.clear_selection();
         self.set_horizontal_scroll_offset(0.0);
         self.horizontal_scrollbar_drag = None;
-        self.apply_effective_view_mode();
-
         selected_paths
     }
 
@@ -630,7 +646,10 @@ impl ExplorerView {
             self.set_horizontal_scroll_offset(0.0);
             self.horizontal_scrollbar_drag = None;
         }
-        self.apply_effective_view_mode();
+        if self.view_mode_selection == ViewModeSelection::Pending {
+            self.apply_automatic_view_mode();
+            self.view_mode_selection = ViewModeSelection::Automatic;
+        }
     }
 
     pub(super) fn reload_async_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
@@ -1520,12 +1539,28 @@ impl ExplorerView {
 }
 
 impl ExplorerView {
-    fn apply_effective_view_mode(&mut self) -> bool {
+    pub(super) fn select_view_mode(&mut self, view_mode: FileViewMode, cx: &mut Context<Self>) {
+        self.view_mode_selection = ViewModeSelection::Manual;
+        self.base_view_mode = view_mode;
+        self.set_active_view_mode(view_mode);
+        crate::settings::set_view_mode(view_mode, cx);
+    }
+
+    pub(super) fn reset_view_mode_for_navigation(&mut self) {
+        self.view_mode_selection = ViewModeSelection::Pending;
+        self.set_active_view_mode(self.base_view_mode);
+    }
+
+    fn apply_automatic_view_mode(&mut self) -> bool {
         let view_mode = effective_view_mode_for_entries(
             &self.all_entries,
             self.base_view_mode,
             self.media_view_mode,
         );
+        self.set_active_view_mode(view_mode)
+    }
+
+    fn set_active_view_mode(&mut self, view_mode: FileViewMode) -> bool {
         if self.view_mode == view_mode {
             return false;
         }
@@ -1659,6 +1694,7 @@ mod tests {
             crate::settings::FileViewMode::LargeIcons
         );
         assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
+        assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
         assert_eq!(
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
@@ -1910,8 +1946,53 @@ mod tests {
         ];
         view.entries = vec![test_file("notes.txt")];
 
-        assert!(view.apply_effective_view_mode());
+        assert!(view.apply_automatic_view_mode());
         assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+    }
+
+    #[test]
+    fn automatic_view_mode_is_selected_only_once_for_a_directory() {
+        let mut view = ExplorerView::new_unloaded_inner_with_settings(
+            PathBuf::from("media"),
+            None,
+            &ExplorerSettings::default(),
+        );
+        view.all_entries = vec![
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+            test_file("notes.txt"),
+        ];
+
+        view.finish_directory_reload_layout();
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+        assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+
+        view.all_entries = vec![test_file("notes.txt")];
+        view.finish_directory_reload_layout();
+
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+        assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+    }
+
+    #[test]
+    fn manual_view_mode_survives_reload_of_the_same_directory() {
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("photo.jpg"), b"jpg").unwrap();
+        std::fs::write(temp.path().join("clip.mp4"), b"mp4").unwrap();
+        std::fs::write(temp.path().join("scan.png"), b"png").unwrap();
+        std::fs::write(temp.path().join("poster.webp"), b"webp").unwrap();
+        std::fs::write(temp.path().join("notes.txt"), b"txt").unwrap();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+
+        view.view_mode_selection = ViewModeSelection::Manual;
+        view.set_active_view_mode(crate::settings::FileViewMode::Details);
+        view.reload();
+
+        assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
+        assert_eq!(view.view_mode_selection, ViewModeSelection::Manual);
     }
 
     #[test]
@@ -2136,6 +2217,48 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_does_not_replace_manual_view_with_media_mode(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            ExplorerSettings::default(),
+        ));
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("photo.jpg"), b"jpg").unwrap();
+        std::fs::write(temp.path().join("clip.mp4"), b"mp4").unwrap();
+        std::fs::write(temp.path().join("scan.png"), b"png").unwrap();
+        std::fs::write(temp.path().join("poster.webp"), b"webp").unwrap();
+        std::fs::write(temp.path().join("notes.txt"), b"txt").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_view_mode(crate::settings::FileViewMode::LargeIcons, cx);
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            mode: crate::settings::FileViewMode::LargeIcons,
+                            mode_media: crate::settings::FileViewMode::Details,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Manual);
         });
     }
 
