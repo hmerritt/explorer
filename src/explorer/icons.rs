@@ -196,6 +196,7 @@ svg_icon!(PASTE_ICON, "utility", "paste.svg");
 svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 svg_icon!(RUN_ELEVATED_ICON, "utility", "run_elevated.svg");
+svg_icon!(SETTINGS_ICON, "utility", "settings.svg");
 png_icon!(WSL_ALPINE_ICON, "wsl", "alpine.png");
 png_icon!(WSL_DEBIAN_ICON, "wsl", "debian.png");
 png_icon!(WSL_GENERIC_ICON, "wsl", "generic.png");
@@ -602,6 +603,7 @@ mod tests {
     #[test]
     fn utility_icons_use_bundled_svg_assets() {
         assert!(!EJECT_ICON_BYTES.is_empty());
+        assert!(!SETTINGS_ICON_BYTES.is_empty());
     }
 
     #[test]

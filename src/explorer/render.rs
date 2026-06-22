@@ -19,7 +19,7 @@ use gpui::{
 #[cfg(test)]
 use crate::explorer::address_bar::format_address_path;
 use crate::explorer::{
-    DirectoryKind,
+    DirectoryKind, OpenSettings,
     address_bar::{
         ADDRESS_SUGGESTION_ROW_HEIGHT, ADDRESS_SUGGESTIONS_VERTICAL_PADDING, address_text_element,
     },
@@ -71,7 +71,7 @@ use crate::explorer::{
         COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EJECT_ICON,
         EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON,
         LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
-        PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SORT_CHEVRON_DOWN_ICON,
+        PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON, SORT_CHEVRON_DOWN_ICON,
         SORT_CHEVRON_UP_ICON, directory_kind_icon, directory_kind_icon_sized,
         directory_shortcut_icon, directory_shortcut_icon_sized, drive_disc_icon_for_path,
         drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon, drive_wsl_icon_for_path,
@@ -136,6 +136,7 @@ const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
+const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -1316,9 +1317,84 @@ impl ExplorerView {
                     cx.notify();
                 }
             }))
-            .children(children)
+            .child(
+                div()
+                    .id("explorer-sidebar-items")
+                    .debug_selector(|| "explorer-sidebar-items".to_owned())
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .children(children),
+            )
+            .child(self.render_sidebar_lower_section(cx))
             .child(self.render_sidebar_resize_handle(cx))
             .into_any_element()
+    }
+
+    fn render_sidebar_lower_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("explorer-sidebar-lower-section")
+            .debug_selector(|| "explorer-sidebar-lower-section".to_owned())
+            .flex()
+            .flex_col()
+            .items_start()
+            .w_full()
+            .pt(px(8.0))
+            .pb(px(8.0))
+            .flex_shrink_0()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.sidebar_lower_hovered != *hovered {
+                    if *hovered {
+                        this.sidebar_lower_hover_generation =
+                            this.sidebar_lower_hover_generation.wrapping_add(1);
+                    }
+                    this.sidebar_lower_hovered = *hovered;
+                    cx.notify();
+                }
+            }))
+            .child(self.render_sidebar_settings_button(cx))
+            .into_any_element()
+    }
+
+    fn render_sidebar_settings_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button = div()
+            .id("explorer-sidebar-settings")
+            .debug_selector(|| "explorer-sidebar-settings".to_owned())
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(SIDEBAR_ROW_HEIGHT))
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .ml(px(8.0))
+            .rounded(px(4.0))
+            .cursor_default()
+            .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+            .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_context_menu();
+                this.open_utility_menu = None;
+                this.handle_open_settings(&OpenSettings, window, cx);
+                cx.stop_propagation();
+            }))
+            .tooltip(explorer_tooltip("Settings"))
+            .child(gpui::img(SETTINGS_ICON.clone()).w(px(16.0)).h(px(16.0)));
+
+        if self.sidebar_lower_hovered {
+            button
+                .with_animation(
+                    (
+                        "explorer-sidebar-settings-fade",
+                        self.sidebar_lower_hover_generation,
+                    ),
+                    Animation::new(Duration::from_millis(SIDEBAR_SETTINGS_FADE_MS)),
+                    |button, delta| button.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            button.opacity(0.0).into_any_element()
+        }
     }
 
     fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -6361,6 +6437,125 @@ mod tests {
         );
         assert_eq!(sidebar_width, 312.0);
         assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+    }
+
+    #[gpui::test]
+    fn sidebar_settings_button_renders_in_bottom_section(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+
+        let sidebar = cx.debug_bounds("explorer-sidebar").expect("sidebar bounds");
+        let lower = cx
+            .debug_bounds("explorer-sidebar-lower-section")
+            .expect("sidebar lower section bounds");
+        let button = cx
+            .debug_bounds("explorer-sidebar-settings")
+            .expect("settings button bounds");
+
+        let sidebar_bottom = f32::from(sidebar.origin.y) + f32::from(sidebar.size.height);
+        let lower_bottom = f32::from(lower.origin.y) + f32::from(lower.size.height);
+        let button_left = f32::from(button.origin.x) - f32::from(sidebar.origin.x);
+
+        assert!((sidebar_bottom - lower_bottom).abs() <= 1.0);
+        assert!(button_left <= 12.0);
+    }
+
+    #[gpui::test]
+    fn sidebar_settings_button_fade_restarts_on_lower_section_hover(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.sidebar_lower_hovered);
+            assert_eq!(view.sidebar_lower_hover_generation, 0);
+        });
+
+        let lower_position = cx
+            .debug_bounds("explorer-sidebar-lower-section")
+            .expect("sidebar lower section bounds")
+            .center();
+        cx.simulate_mouse_move(
+            lower_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.sidebar_lower_hovered);
+            assert_eq!(view.sidebar_lower_hover_generation, 1);
+        });
+
+        let outside_position = cx
+            .debug_bounds("back")
+            .expect("back button bounds")
+            .center();
+        cx.simulate_mouse_move(
+            outside_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.sidebar_lower_hovered);
+            assert_eq!(view.sidebar_lower_hover_generation, 1);
+        });
+
+        cx.simulate_mouse_move(
+            lower_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.sidebar_lower_hovered);
+            assert_eq!(view.sidebar_lower_hover_generation, 2);
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_settings_button_uses_open_settings_action(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.run_until_parked();
+        let lower_position = cx
+            .debug_bounds("explorer-sidebar-lower-section")
+            .expect("sidebar lower section bounds")
+            .center();
+        cx.simulate_mouse_move(
+            lower_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        let button_position = cx
+            .debug_bounds("explorer-sidebar-settings")
+            .expect("settings button bounds")
+            .center();
+        cx.simulate_mouse_down(button_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(button_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.open_error.as_deref(),
+                Some("Could not open settings.json: settings file path is unavailable")
+            );
+        });
     }
 
     #[gpui::test]
