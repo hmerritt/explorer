@@ -1565,11 +1565,31 @@ pub(super) enum PreparedFileOperation {
     Conflicts(FileConflictBatch),
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FileOperationSummary {
+    pub(super) kind: FileOperationKind,
     pub(super) destination_paths: Vec<PathBuf>,
     pub(super) moved_source_paths: Vec<PathBuf>,
+    pub(super) moved_paths: Vec<FileOperationMove>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
+}
+
+impl Default for FileOperationSummary {
+    fn default() -> Self {
+        Self {
+            kind: FileOperationKind::Copy,
+            destination_paths: Vec::new(),
+            moved_source_paths: Vec::new(),
+            moved_paths: Vec::new(),
+            archive_diagnostics: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileOperationMove {
+    pub(super) source: PathBuf,
+    pub(super) destination: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2251,8 +2271,7 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
     file_conflicts
 }
 
-#[cfg(test)]
-fn execute_file_operation(
+pub(super) fn execute_file_operation(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
 ) -> Result<FileOperationSummary, String> {
@@ -2767,6 +2786,7 @@ fn finish_file_operation_summary(
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     let mut summary = FileOperationSummary::default();
+    summary.kind = job.kind;
     summary.archive_diagnostics = job.archive_diagnostics.clone();
     for root in &job.roots {
         if root.source_is_dir {
@@ -2779,6 +2799,12 @@ fn finish_file_operation_summary(
 
         if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
+            if root.destination.exists() {
+                summary.moved_paths.push(FileOperationMove {
+                    source: root.source.clone(),
+                    destination: root.destination.clone(),
+                });
+            }
         }
     }
 
@@ -3034,6 +3060,7 @@ pub(super) fn execute_file_operation_with_progress(
         )
     });
     let mut summary = FileOperationSummary::default();
+    summary.kind = job.kind;
     summary.archive_diagnostics = operation_diagnostics;
     for root in &job.roots {
         if job.kind == FileOperationKind::Extract {
@@ -3050,6 +3077,12 @@ pub(super) fn execute_file_operation_with_progress(
 
         if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
+            if root.destination.exists() {
+                summary.moved_paths.push(FileOperationMove {
+                    source: root.source.clone(),
+                    destination: root.destination.clone(),
+                });
+            }
         }
     }
 

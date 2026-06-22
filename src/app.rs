@@ -34,7 +34,7 @@ use crate::explorer::{
     SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
     SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
     SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation
 };
 use crate::settings::{APP_ID, SettingsState, config_dir};
 
@@ -616,6 +616,7 @@ pub fn run() {
             KeyBinding::new("ctrl-c", CopySelected, None),
             KeyBinding::new("ctrl-x", CutSelected, None),
             KeyBinding::new("ctrl-v", PasteClipboard, None),
+            KeyBinding::new("ctrl-z", UndoFileOperation, Some("Explorer")),
             KeyBinding::new("delete", TrashSelected, None),
             KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
             KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),

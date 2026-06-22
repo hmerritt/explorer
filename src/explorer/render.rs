@@ -2340,6 +2340,7 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_copy_selected))
             .on_action(cx.listener(Self::handle_cut_selected))
             .on_action(cx.listener(Self::handle_paste_clipboard))
+            .on_action(cx.listener(Self::handle_undo_file_operation))
             .on_action(cx.listener(Self::handle_trash_selected))
             .on_action(cx.listener(Self::handle_permanently_delete_selected))
             .on_action(cx.listener(Self::handle_create_new_folder))

@@ -33,6 +33,7 @@ actions!(
         CopySelected,
         CutSelected,
         PasteClipboard,
+        UndoFileOperation,
         TrashSelected,
         PermanentlyDeleteSelected,
         CreateNewFolder,
@@ -345,6 +346,16 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.paste_clipboard(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_undo_file_operation(
+        &mut self,
+        _: &UndoFileOperation,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.undo_file_operation(cx);
         cx.notify();
     }
 

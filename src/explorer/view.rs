@@ -24,6 +24,7 @@ use crate::explorer::{
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
+    file_commands::FileOperationUndo,
     filesystem::{
         FileConflictBatch, FileOperationProgress, load_entries, path_is_filesystem_root,
         path_is_wsl_unc_root,
@@ -73,6 +74,7 @@ pub struct ExplorerView {
     pub(super) suppress_next_click: bool,
     pub(super) entry_click_sequence: Option<EntryClickSequence>,
     pub(super) cut_paths: BTreeSet<PathBuf>,
+    pub(super) file_operation_undo_stack: Vec<FileOperationUndo>,
     pub(super) active_drop_indicator: Option<DropIndicator>,
     pub(super) dragging_sidebar_item: Option<usize>,
     pub(super) sidebar_width: f32,
@@ -309,6 +311,7 @@ impl ExplorerView {
             suppress_next_click: false,
             entry_click_sequence: None,
             cut_paths: BTreeSet::new(),
+            file_operation_undo_stack: Vec::new(),
             active_drop_indicator: None,
             dragging_sidebar_item: None,
             sidebar_width: settings.sidebar.width as f32,

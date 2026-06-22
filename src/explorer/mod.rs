@@ -61,7 +61,7 @@ pub use actions::{
     SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
     SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
     SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
