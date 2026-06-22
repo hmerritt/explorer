@@ -12,6 +12,7 @@ use crate::explorer::{
     DirectoryKind,
     entry::FileEntry,
     filesystem::archive_path_is_supported,
+    filesystem::format_open_error,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
     view::{ExplorerView, ExplorerViewEvent},
@@ -74,6 +75,7 @@ pub(super) enum ContextMenuIcon {
     Rename,
     New,
     Properties,
+    RunElevated,
     Extract,
     File,
     NativeFile,
@@ -125,6 +127,9 @@ pub(super) enum ContextMenuCommand {
     PropertiesSelected,
     PropertiesForPath {
         path: PathBuf,
+    },
+    RunSelectedElevated {
+        paths: Vec<PathBuf>,
     },
     NewFile,
     NewFolder,
@@ -399,6 +404,9 @@ impl ExplorerView {
             ContextMenuCommand::PropertiesForPath { path } => {
                 self.open_properties_for_paths(vec![path], cx);
             }
+            ContextMenuCommand::RunSelectedElevated { paths } => {
+                self.run_selected_paths_elevated(paths, window, cx);
+            }
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
             ContextMenuCommand::RunCustom {
@@ -416,6 +424,54 @@ impl ExplorerView {
             }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
+            }
+        }
+    }
+
+    fn run_selected_paths_elevated(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() || self.run_elevated_task.is_some() {
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let parent = crate::explorer::windows_shell::parent_hwnd(window);
+            self.open_error = None;
+            let task = cx.spawn(async move |this, cx| {
+                let results = run_elevated_paths_until_not_launched(paths, |path| {
+                    windows_run_elevated_path(path, parent)
+                });
+
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.run_elevated_task = None;
+                    explorer.handle_run_elevated_results(results);
+                    cx.notify();
+                });
+            });
+            self.run_elevated_task = Some(task);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = window;
+            let _ = cx;
+        }
+    }
+
+    fn handle_run_elevated_results(&mut self, results: Vec<(PathBuf, io::Result<bool>)>) {
+        for (path, result) in results {
+            match result {
+                Ok(true) => self.open_error = None,
+                Ok(false) => break,
+                Err(error) => {
+                    self.open_error = Some(format_open_error(&path, &error));
+                    break;
+                }
             }
         }
     }
@@ -558,6 +614,40 @@ fn run_custom_command(
     run_custom_command_with(executable, args, targets, |executable, arguments| {
         Command::new(executable).args(arguments).spawn().map(|_| ())
     })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn run_elevated_paths_until_not_launched(
+    paths: Vec<PathBuf>,
+    mut run_path: impl FnMut(&Path) -> io::Result<bool>,
+) -> Vec<(PathBuf, io::Result<bool>)> {
+    let mut results = Vec::new();
+    for path in paths {
+        let result = run_path(&path);
+        let launched = result.as_ref().is_ok_and(|launched| *launched);
+        results.push((path, result));
+        if !launched {
+            break;
+        }
+    }
+    results
+}
+
+#[cfg(target_os = "windows")]
+fn windows_run_elevated_path(
+    path: &Path,
+    parent: Option<windows::Win32::Foundation::HWND>,
+) -> io::Result<bool> {
+    use std::ffi::OsStr;
+
+    let mut request = crate::explorer::windows_shell::shell_execute_file_request(
+        path,
+        OsStr::new("runas"),
+        None,
+        false,
+        parent,
+    );
+    crate::explorer::windows_shell::execute_shell_request(&mut request)
 }
 
 fn run_custom_command_with(
@@ -891,6 +981,11 @@ fn entry_context_menu_items_with_custom(
             enabled: true,
         });
 
+        #[cfg(target_os = "windows")]
+        if selected_entries_are_run_elevated_targets(selected_entries) {
+            items.push(run_elevated_context_menu_item(targets));
+        }
+
         if let Some(entry) = selected_entries
             .first()
             .filter(|entry| entry.is_open_with_target())
@@ -907,6 +1002,10 @@ fn entry_context_menu_items_with_custom(
             command: ContextMenuCommand::OpenSelectedFiles,
             enabled: true,
         });
+        #[cfg(target_os = "windows")]
+        if selected_entries_are_run_elevated_targets(selected_entries) {
+            items.push(run_elevated_context_menu_item(targets));
+        }
     }
 
     if selected_directory_count > 0 {
@@ -1009,6 +1108,34 @@ fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bo
         && selected_entries
             .iter()
             .all(|entry| entry.is_open_with_target() && archive_path_is_supported(&entry.path))
+}
+
+fn selected_entries_are_run_elevated_targets(selected_entries: &[FileEntry]) -> bool {
+    !selected_entries.is_empty() && selected_entries.iter().all(entry_is_run_elevated_target)
+}
+
+fn entry_is_run_elevated_target(entry: &FileEntry) -> bool {
+    entry.is_open_with_target() && path_is_run_elevated_target(&entry.path)
+}
+
+fn path_is_run_elevated_target(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
+fn run_elevated_context_menu_item(targets: &[PathBuf]) -> ContextMenuItem {
+    ContextMenuItem::Action {
+        id: "context-menu-entry-run-elevated".to_owned(),
+        icon: Some(ContextMenuIcon::RunElevated),
+        label: "Run as administrator".to_owned(),
+        command: ContextMenuCommand::RunSelectedElevated {
+            paths: targets.to_vec(),
+        },
+        enabled: true,
+    }
 }
 
 fn folder_context_menu_items_with_custom(
@@ -1425,6 +1552,13 @@ mod tests {
                 )
             })
             .count()
+    }
+
+    fn attempted_run_elevated_paths(results: &[(PathBuf, io::Result<bool>)]) -> Vec<String> {
+        results
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect()
     }
 
     fn entry_menu_for_selected_entries(selected_entries: Vec<FileEntry>) -> Vec<ContextMenuItem> {
@@ -2225,6 +2359,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_elevated_target_detection_accepts_exe_and_bat_case_insensitively() {
+        assert!(entry_is_run_elevated_target(&FileEntry::test(
+            "setup.exe",
+            false,
+            Some(1),
+            None
+        )));
+        assert!(entry_is_run_elevated_target(&FileEntry::test(
+            "SCRIPT.BAT",
+            false,
+            Some(1),
+            None
+        )));
+        assert!(selected_entries_are_run_elevated_targets(&[
+            FileEntry::test("setup.EXE", false, Some(1), None),
+            FileEntry::test("script.bat", false, Some(1), None),
+        ]));
+    }
+
+    #[test]
+    fn run_elevated_target_detection_rejects_empty_mixed_and_non_files() {
+        assert!(!selected_entries_are_run_elevated_targets(&[]));
+        assert!(!selected_entries_are_run_elevated_targets(&[
+            FileEntry::test("setup.exe", false, Some(1), None),
+            FileEntry::test("note.txt", false, Some(1), None),
+        ]));
+        assert!(!entry_is_run_elevated_target(&FileEntry::test(
+            "folder.bat",
+            true,
+            None,
+            None
+        )));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn entry_menu_shows_run_as_administrator_for_all_elevatable_files() {
+        let items = entry_menu_for_selected_entries(vec![
+            FileEntry::test("setup.exe", false, Some(1), None),
+            FileEntry::test("script.bat", false, Some(1), None),
+        ]);
+
+        assert!(matches!(
+            items.get(1),
+            Some(ContextMenuItem::Action {
+                id,
+                icon: Some(ContextMenuIcon::RunElevated),
+                label,
+                command: ContextMenuCommand::RunSelectedElevated { paths },
+                enabled: true,
+            }) if id == "context-menu-entry-run-elevated"
+                && label == "Run as administrator"
+                && paths == &vec![PathBuf::from("setup.exe"), PathBuf::from("script.bat")]
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn entry_menu_omits_run_as_administrator_for_ineligible_selection() {
+        let items = entry_menu_for_selected_entries(vec![
+            FileEntry::test("setup.exe", false, Some(1), None),
+            FileEntry::test("note.txt", false, Some(1), None),
+        ]);
+
+        assert!(!menu_has_label(&items, "Run as administrator"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_open_with_submenu_always_ends_with_other() {
@@ -2441,6 +2643,36 @@ mod tests {
         });
 
         assert_eq!(opened, vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")]);
+    }
+
+    #[test]
+    fn run_elevated_paths_stop_after_cancel_or_error() {
+        let cancelled = run_elevated_paths_until_not_launched(
+            vec![PathBuf::from("a.exe"), PathBuf::from("b.bat")],
+            |_| Ok(false),
+        );
+        assert_eq!(attempted_run_elevated_paths(&cancelled), vec!["a.exe"]);
+
+        let mut calls = 0;
+        let errored = run_elevated_paths_until_not_launched(
+            vec![
+                PathBuf::from("a.exe"),
+                PathBuf::from("b.bat"),
+                PathBuf::from("c.exe"),
+            ],
+            |_| {
+                calls += 1;
+                if calls == 2 {
+                    Err(io::Error::other("denied"))
+                } else {
+                    Ok(true)
+                }
+            },
+        );
+        assert_eq!(
+            attempted_run_elevated_paths(&errored),
+            vec!["a.exe", "b.bat"]
+        );
     }
 
     #[test]

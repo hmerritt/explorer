@@ -272,7 +272,7 @@ impl ExplorerView {
 
         #[cfg(target_os = "windows")]
         {
-            let parent = windows_parent_hwnd(window);
+            let parent = crate::explorer::windows_shell::parent_hwnd(window);
             let task = cx.spawn(async move |this, cx| {
                 let results = open_paths_until_not_opened(paths, |path| {
                     windows_open_file(path, &intent, parent)
@@ -356,17 +356,6 @@ fn open_paths_until_not_opened(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_parent_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
-
-    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(HWND(handle.hwnd.get() as *mut _)),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "windows")]
 fn windows_open_file(
     path: &Path,
     intent: &OpenFileIntent,
@@ -412,86 +401,24 @@ fn windows_default_app_change_outcome_from_shell_result(
 }
 
 #[cfg(target_os = "windows")]
-const WINDOWS_ERROR_CANCELLED: u32 = 1223;
-#[cfg(target_os = "windows")]
 const WINDOWS_OPEN_WITH_CLASS: &str = "Unknown";
 #[cfg(target_os = "windows")]
 const WINDOWS_OPEN_WITH_VERB: &str = "OpenWithSetDefaultOn";
 
 #[cfg(target_os = "windows")]
-fn windows_null_terminated_wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-
-    value.encode_wide().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(target_os = "windows")]
-fn windows_shell_execute_result(result: windows::core::Result<()>) -> io::Result<bool> {
-    match result {
-        Ok(()) => Ok(true),
-        Err(error)
-            if error.code() == windows::core::HRESULT::from_win32(WINDOWS_ERROR_CANCELLED) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(io::Error::other(error)),
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct WindowsShellExecuteRequest {
-    _verb: Vec<u16>,
-    _class: Vec<u16>,
-    _file: Vec<u16>,
-    execute_info: windows::Win32::UI::Shell::SHELLEXECUTEINFOW,
-}
-
-#[cfg(target_os = "windows")]
-impl WindowsShellExecuteRequest {
-    #[cfg(test)]
-    fn execute_info(&self) -> &windows::Win32::UI::Shell::SHELLEXECUTEINFOW {
-        &self.execute_info
-    }
-
-    fn execute_info_mut(&mut self) -> &mut windows::Win32::UI::Shell::SHELLEXECUTEINFOW {
-        &mut self.execute_info
-    }
-}
-
-#[cfg(target_os = "windows")]
 fn windows_open_with_execute_request(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
-) -> WindowsShellExecuteRequest {
-    use std::{ffi::OsStr, mem::size_of};
-    use windows::{
-        Win32::UI::{
-            Shell::{SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW},
-            WindowsAndMessaging::SW_SHOWNORMAL,
-        },
-        core::PCWSTR,
-    };
+) -> crate::explorer::windows_shell::ShellExecuteRequest {
+    use std::ffi::OsStr;
 
-    let verb = windows_null_terminated_wide(OsStr::new(WINDOWS_OPEN_WITH_VERB));
-    let class = windows_null_terminated_wide(OsStr::new(WINDOWS_OPEN_WITH_CLASS));
-    let file = windows_null_terminated_wide(path.as_os_str());
-    let execute_info = SHELLEXECUTEINFOW {
-        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI,
-        hwnd: parent.unwrap_or_default(),
-        lpVerb: PCWSTR(verb.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        lpClass: PCWSTR(class.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-
-    WindowsShellExecuteRequest {
-        _verb: verb,
-        _class: class,
-        _file: file,
-        execute_info,
-    }
+    crate::explorer::windows_shell::shell_execute_file_request(
+        path,
+        OsStr::new(WINDOWS_OPEN_WITH_VERB),
+        Some(OsStr::new(WINDOWS_OPEN_WITH_CLASS)),
+        true,
+        parent,
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -499,10 +426,8 @@ fn windows_show_open_with_picker(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
 ) -> io::Result<bool> {
-    use windows::Win32::UI::Shell::ShellExecuteExW;
-
     let mut request = windows_open_with_execute_request(path, parent);
-    windows_shell_execute_result(unsafe { ShellExecuteExW(request.execute_info_mut()) })
+    crate::explorer::windows_shell::execute_shell_request(&mut request)
 }
 
 #[cfg(target_os = "windows")]
@@ -529,7 +454,7 @@ fn windows_change_default_application_for_file(
 ) -> io::Result<DefaultAppChangeOutcome> {
     windows_default_app_change_outcome_from_shell_result(windows_show_open_with_picker(
         path,
-        windows_parent_hwnd(window),
+        crate::explorer::windows_shell::parent_hwnd(window),
     ))
 }
 
@@ -1646,15 +1571,17 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_shell_execute_success_maps_to_true() {
-        assert!(windows_shell_execute_result(Ok(())).unwrap());
+        assert!(crate::explorer::windows_shell::shell_execute_result(Ok(())).unwrap());
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_shell_execute_cancelled_maps_to_false() {
-        let result = windows_shell_execute_result(Err(windows::core::Error::from_hresult(
-            windows::core::HRESULT::from_win32(WINDOWS_ERROR_CANCELLED),
-        )))
+        let result = crate::explorer::windows_shell::shell_execute_result(Err(
+            windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+                crate::explorer::windows_shell::WINDOWS_ERROR_CANCELLED,
+            )),
+        ))
         .unwrap();
 
         assert!(!result);
@@ -1663,9 +1590,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_shell_execute_error_propagates() {
-        let error = windows_shell_execute_result(Err(windows::core::Error::from_hresult(
-            windows::core::HRESULT::from_win32(2),
-        )))
+        let error = crate::explorer::windows_shell::shell_execute_result(Err(
+            windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(2)),
+        ))
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
@@ -1706,7 +1633,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_null_terminated_wide_appends_single_nul() {
-        let wide = windows_null_terminated_wide(std::ffi::OsStr::new(WINDOWS_OPEN_WITH_VERB));
+        let wide = crate::explorer::windows_shell::null_terminated_wide(std::ffi::OsStr::new(
+            WINDOWS_OPEN_WITH_VERB,
+        ));
 
         assert_eq!(
             wide,

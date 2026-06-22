@@ -42,6 +42,8 @@ mod tooltip;
 mod video;
 mod view;
 mod watcher;
+#[cfg(target_os = "windows")]
+mod windows_shell;
 
 pub use actions::{
     AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel, AddressCommit,

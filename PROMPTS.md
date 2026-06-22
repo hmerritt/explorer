@@ -1,19 +1,14 @@
 ## Todo
 
+- Video Properties > Frames tab, add a contextmenu to each frame with "Copy" to copy the image to clipboard. Also add this copy functionality to Images Properties > Image
+- Windows-only: Remove "Open with" for .exe
+- When in a repo directory (or sub-directory) add a new contextmenu item "Copy <file/folder> relative repo path" to copy the item path, relative to the repo root. Add this below the exiting "Copy <file/folder> path" item, with the same icon
+- Add settings icon: ./assets/icons/utility/settings.svg - place the settings icon button on the lower left of the side-bar. Set opacity 0 by default and fade-in on hover to lower section of side-bar. For now, this icon opens the settings file.
+
 ## 1
 
-- Detect BluRay, DVD drives and show specific icons, fallback to current disk:
-    - assets\icons\devices\discs\bd.ico
-    - assets\icons\devices\discs\dvd.ico
-- .ico files are media files, and should be included in the mode_media view calculation
-
----
-
 - rsync copy/sync builtin
-- Windows-only, "Run as administrator" in contextmenu, and "Run this program as an administrator" checkbox for executables in Properties, to always run as Administrator. Use icon: assets\icons\utility\run_elevated.svg
 - Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon:
-- Add settings icon: ./assets/icons/utility/settings.svg
-- When in a repo directory (or sub-directory) add a new contextmenu item "Copy <file/folder> relative repo path" to copy the item path, relative to the repo root. Add this below the exiting "Copy <file/folder> path" item, with the same icon
 
 ## 2
 

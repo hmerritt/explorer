@@ -42,7 +42,7 @@ use crate::explorer::{
         SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
         SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
     },
-    entry::{DirectoryLinkKind, EntryKind},
+    entry::{DirectoryLinkKind, EntryKind, FileEntry},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryCodeInfo, scan_git_repository_code_info},
     icons::{
@@ -138,6 +138,7 @@ pub(super) struct PropertySnapshot {
     pub(super) unix_mode: MixedValue<u32>,
     pub(super) permission_summary: MixedValue<String>,
     pub(super) default_app: Option<PropertyDefaultApp>,
+    pub(super) run_as_admin: MixedValue<bool>,
     pub(super) shortcut: Option<ShortcutDetails>,
     pub(super) details: Vec<PropertyDetailGroup>,
 }
@@ -149,6 +150,7 @@ pub(super) struct EditablePropertyDraft {
     pub(super) readonly: Option<bool>,
     pub(super) hidden: Option<bool>,
     pub(super) unix_mode: Option<u32>,
+    pub(super) run_as_admin: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1577,6 +1579,12 @@ impl PropertiesDialog {
         self.draft.hidden = Some(!current);
         cx.notify();
     }
+
+    fn toggle_run_as_admin(&mut self, cx: &mut Context<Self>) {
+        let current = self.draft.run_as_admin.unwrap_or(false);
+        self.draft.run_as_admin = Some(!current);
+        cx.notify();
+    }
 }
 
 impl Render for PropertiesDialog {
@@ -2047,9 +2055,11 @@ impl PropertiesDialog {
             }
         }
 
-        body = body
-            .child(separator())
-            .child(self.render_attributes_row(snapshot, cx));
+        body = body.child(separator());
+        body = body.child(self.render_attributes_row(snapshot, cx));
+        if snapshot_has_run_as_admin_setting(snapshot) {
+            body = body.child(self.render_run_as_admin_row(snapshot, cx));
+        }
         if let Some(error) = self.default_app_error.as_ref() {
             body = body.child(error_message(error));
         }
@@ -2364,6 +2374,36 @@ impl PropertiesDialog {
                     LinearProgressStyle::explorer_copy_green(),
                 ))
             })
+            .into_any_element()
+    }
+
+    fn render_run_as_admin_row(
+        &self,
+        snapshot: &PropertySnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let value = self
+            .draft
+            .run_as_admin
+            .or(mixed_bool_value(&snapshot.run_as_admin));
+        div()
+            .id("properties-run-as-admin-row")
+            .flex()
+            .flex_row()
+            .items_center()
+            .min_h(px(PROPERTIES_ROW_HEIGHT))
+            .cursor_default()
+            .child(div().w(px(PROPERTIES_LABEL_WIDTH)).flex_shrink_0())
+            .child(check_box(value))
+            .child(
+                div()
+                    .ml(px(6.0))
+                    .child("Run this program as an administrator"),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.toggle_run_as_admin(cx);
+                cx.stop_propagation();
+            }))
             .into_any_element()
     }
 
@@ -2921,6 +2961,7 @@ impl Default for EditablePropertyDraft {
             readonly: None,
             hidden: None,
             unix_mode: None,
+            run_as_admin: None,
         }
     }
 }
@@ -2933,6 +2974,7 @@ impl EditablePropertyDraft {
             readonly: mixed_bool_value(&snapshot.attributes.readonly),
             hidden: mixed_bool_value(&snapshot.attributes.hidden),
             unix_mode: mixed_u32_value(&snapshot.unix_mode),
+            run_as_admin: mixed_bool_value(&snapshot.run_as_admin),
         }
     }
 }
@@ -3107,6 +3149,7 @@ fn collect_property_snapshot_with_date_format(
     let unix_mode = mixed_from_iter(items.iter().map(|item| item.unix_mode));
     let permission_summary =
         mixed_from_iter(items.iter().map(|item| item.permission_summary.clone()));
+    let run_as_admin = mixed_from_iter(items.iter().map(|item| item.run_as_admin));
     let size = property_value_sum(items.iter().map(|item| item.size.as_ref()));
     let size_on_disk = property_value_sum(items.iter().map(|item| item.size_on_disk.as_ref()));
     let contains = if items.len() == 1 {
@@ -3143,6 +3186,7 @@ fn collect_property_snapshot_with_date_format(
         unix_mode,
         permission_summary,
         default_app,
+        run_as_admin,
         shortcut,
         details,
     })
@@ -3185,6 +3229,7 @@ struct PropertyItem {
     group: Option<String>,
     unix_mode: Option<u32>,
     permission_summary: Option<String>,
+    run_as_admin: Option<bool>,
     shortcut: Option<ShortcutDetails>,
     details: Vec<PropertyDetailGroup>,
 }
@@ -3267,6 +3312,7 @@ fn collect_property_item(
         .as_ref()
         .map(|metadata| metadata.permissions().readonly());
     let hidden = Some(path_is_hidden(path, metadata.as_ref()));
+    let run_as_admin = property_run_as_admin_value(path, entry.as_ref());
     let shortcut = shortcut_details(path, entry.as_ref());
     let details = metadata_details(
         path,
@@ -3305,6 +3351,7 @@ fn collect_property_item(
         group: group_name(metadata.as_ref()),
         unix_mode: unix_mode(metadata.as_ref()),
         permission_summary: permission_summary(metadata.as_ref()),
+        run_as_admin,
         shortcut,
         details,
     })
@@ -5907,6 +5954,9 @@ fn property_apply_plan(
         unix_mode: (draft.unix_mode != baseline.unix_mode)
             .then_some(draft.unix_mode)
             .flatten(),
+        run_as_admin: (draft.run_as_admin != baseline.run_as_admin)
+            .then_some(draft.run_as_admin)
+            .flatten(),
     }
 }
 
@@ -5916,6 +5966,7 @@ fn property_apply_plan_is_empty(plan: &EditablePropertyDraft) -> bool {
         && plan.readonly.is_none()
         && plan.hidden.is_none()
         && plan.unix_mode.is_none()
+        && plan.run_as_admin.is_none()
 }
 
 pub(super) fn apply_property_draft(
@@ -5972,6 +6023,10 @@ fn apply_property_draft_to_path(
         apply_unix_mode(path, mode)?;
         changed = true;
     }
+    if let Some(run_as_admin) = draft.run_as_admin {
+        apply_run_as_admin(path, run_as_admin)?;
+        changed = true;
+    }
     Ok(changed)
 }
 
@@ -6024,6 +6079,16 @@ fn apply_hidden_attribute(_: &Path, _: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn apply_run_as_admin(path: &Path, enabled: bool) -> Result<(), String> {
+    set_windows_run_as_admin_flag(path, enabled).map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_run_as_admin(_: &Path, _: bool) -> Result<(), String> {
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PropertyIconSource {
     Single(PathBuf),
@@ -6050,6 +6115,269 @@ fn single_file_default_app_path(snapshot: &PropertySnapshot) -> Option<&Path> {
     matches!(snapshot.item_kind, PropertyItemKind::SingleFile)
         .then(|| snapshot.target.paths.first().map(PathBuf::as_path))
         .flatten()
+}
+
+fn single_file_run_as_admin_path(
+    target: &PropertyTarget,
+    item_kind: PropertyItemKind,
+) -> Option<&Path> {
+    matches!(item_kind, PropertyItemKind::SingleFile)
+        .then(|| target.paths.first().map(PathBuf::as_path))
+        .flatten()
+        .filter(|path| path_is_windows_executable(path))
+        .filter(|_| cfg!(target_os = "windows"))
+}
+
+fn property_run_as_admin_value(path: &Path, entry: Option<&FileEntry>) -> Option<bool> {
+    if !cfg!(target_os = "windows")
+        || !entry.is_some_and(|entry| entry.is_open_with_target())
+        || !path_is_windows_executable(path)
+    {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Some(windows_run_as_admin_flag(path).unwrap_or(false));
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn path_is_windows_executable(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+}
+
+const WINDOWS_COMPATIBILITY_RUN_AS_ADMIN_FLAG: &str = "RUNASADMIN";
+const WINDOWS_COMPATIBILITY_DEFAULT_PREFIX: &str = "~";
+
+fn windows_compatibility_value_has_run_as_admin(value: &str) -> bool {
+    value
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case(WINDOWS_COMPATIBILITY_RUN_AS_ADMIN_FLAG))
+}
+
+fn windows_compatibility_value_with_run_as_admin(
+    current: Option<&str>,
+    enabled: bool,
+) -> Option<String> {
+    let mut tokens = current
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if enabled {
+        if tokens.is_empty() {
+            tokens.push(WINDOWS_COMPATIBILITY_DEFAULT_PREFIX.to_owned());
+        }
+        if !tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case(WINDOWS_COMPATIBILITY_RUN_AS_ADMIN_FLAG))
+        {
+            tokens.push(WINDOWS_COMPATIBILITY_RUN_AS_ADMIN_FLAG.to_owned());
+        }
+        return Some(tokens.join(" "));
+    }
+
+    tokens.retain(|token| !token.eq_ignore_ascii_case(WINDOWS_COMPATIBILITY_RUN_AS_ADMIN_FLAG));
+    tokens
+        .iter()
+        .any(|token| token != WINDOWS_COMPATIBILITY_DEFAULT_PREFIX)
+        .then(|| tokens.join(" "))
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_COMPATIBILITY_LAYERS_KEY: &str =
+    r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+
+#[cfg(target_os = "windows")]
+fn windows_run_as_admin_flag(path: &Path) -> std::io::Result<bool> {
+    Ok(windows_compatibility_registry_value(path)?
+        .as_deref()
+        .is_some_and(windows_compatibility_value_has_run_as_admin))
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_run_as_admin_flag(path: &Path, enabled: bool) -> std::io::Result<()> {
+    let current = windows_compatibility_registry_value(path)?;
+    match windows_compatibility_value_with_run_as_admin(current.as_deref(), enabled) {
+        Some(value) => windows_write_compatibility_registry_value(path, &value),
+        None => windows_delete_compatibility_registry_value(path),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_compatibility_registry_value(path: &Path) -> std::io::Result<Option<String>> {
+    use windows::Win32::{
+        Foundation::ERROR_FILE_NOT_FOUND,
+        System::Registry::{HKEY_CURRENT_USER, REG_VALUE_TYPE, RRF_RT_REG_SZ, RegGetValueW},
+    };
+    use windows::core::PCWSTR;
+
+    let key = windows_wide_null_str(WINDOWS_COMPATIBILITY_LAYERS_KEY);
+    let value_name = windows_wide_null_path(path);
+    let mut value_type = REG_VALUE_TYPE(0);
+    let mut byte_len = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            Some(&mut value_type),
+            None,
+            Some(&mut byte_len),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    windows_registry_status(status)?;
+    if byte_len < 2 {
+        return Ok(Some(String::new()));
+    }
+
+    let mut buffer = vec![0u16; byte_len.div_ceil(2) as usize];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value_name.as_ptr()),
+            RRF_RT_REG_SZ,
+            Some(&mut value_type),
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut byte_len),
+        )
+    };
+    windows_registry_status(status)?;
+
+    let mut char_len = (byte_len / 2) as usize;
+    if char_len > 0 && buffer.get(char_len - 1) == Some(&0) {
+        char_len -= 1;
+    }
+    String::from_utf16(&buffer[..char_len])
+        .map(Some)
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_write_compatibility_registry_value(path: &Path, value: &str) -> std::io::Result<()> {
+    use windows::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+            RegCreateKeyExW, RegSetValueExW,
+        },
+    };
+    use windows::core::PCWSTR;
+
+    let key_path = windows_wide_null_str(WINDOWS_COMPATIBILITY_LAYERS_KEY);
+    let value_name = windows_wide_null_path(path);
+    let mut key = HKEY::default();
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_path.as_ptr()),
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut key,
+            None,
+        )
+    };
+    windows_registry_status(status)?;
+
+    let data = windows_utf16_bytes(value);
+    let status =
+        unsafe { RegSetValueExW(key, PCWSTR(value_name.as_ptr()), None, REG_SZ, Some(&data)) };
+    let close_status = unsafe { RegCloseKey(key) };
+    windows_registry_status(status)?;
+    if close_status != ERROR_SUCCESS {
+        windows_registry_status(close_status)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_delete_compatibility_registry_value(path: &Path) -> std::io::Result<()> {
+    use windows::Win32::{
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+        System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+        },
+    };
+    use windows::core::PCWSTR;
+
+    let key_path = windows_wide_null_str(WINDOWS_COMPATIBILITY_LAYERS_KEY);
+    let value_name = windows_wide_null_path(path);
+    let mut key = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_path.as_ptr()),
+            None,
+            KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    windows_registry_status(status)?;
+
+    let status = unsafe { RegDeleteValueW(key, PCWSTR(value_name.as_ptr())) };
+    let close_status = unsafe { RegCloseKey(key) };
+    if status != ERROR_FILE_NOT_FOUND {
+        windows_registry_status(status)?;
+    }
+    if close_status != ERROR_SUCCESS {
+        windows_registry_status(close_status)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_status(status: windows::Win32::Foundation::WIN32_ERROR) -> std::io::Result<()> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(status.0 as i32))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wide_null_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wide_null_str(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_utf16_bytes(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 fn default_app_change_error(
@@ -6301,6 +6629,10 @@ fn snapshot_has_image_tab(snapshot: &PropertySnapshot) -> bool {
 
 fn snapshot_has_frames_tab(snapshot: &PropertySnapshot) -> bool {
     single_file_video_path(&snapshot.target, snapshot.item_kind).is_some()
+}
+
+fn snapshot_has_run_as_admin_setting(snapshot: &PropertySnapshot) -> bool {
+    single_file_run_as_admin_path(&snapshot.target, snapshot.item_kind).is_some()
 }
 
 fn property_scrollbar_metrics_for_dimensions(
@@ -7733,6 +8065,84 @@ mod tests {
     }
 
     #[test]
+    fn properties_tabs_do_not_include_compatibility_for_windows_exe() {
+        let temp = TempDir::new();
+        let exe = temp.path().join("setup.EXE");
+        let bat = temp.path().join("script.bat");
+        let text = temp.path().join("note.txt");
+        fs::write(&exe, b"not really executable").unwrap();
+        fs::write(&bat, b"echo ok").unwrap();
+        fs::write(&text, b"text").unwrap();
+
+        let exe_snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![exe.clone()],
+        })
+        .unwrap();
+        let bat_snapshot = collect_property_snapshot(PropertyTarget { paths: vec![bat] }).unwrap();
+        let mixed_snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![exe, text],
+        })
+        .unwrap();
+
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&exe_snapshot)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&bat_snapshot)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&mixed_snapshot)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+    }
+
+    #[test]
+    fn run_as_admin_setting_is_available_only_for_single_windows_exe() {
+        let temp = TempDir::new();
+        let exe = temp.path().join("setup.EXE");
+        let bat = temp.path().join("script.bat");
+        let text = temp.path().join("note.txt");
+        let folder = temp.path().join("folder");
+        fs::write(&exe, b"not really executable").unwrap();
+        fs::write(&bat, b"echo ok").unwrap();
+        fs::write(&text, b"text").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let exe_snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![exe.clone()],
+        })
+        .unwrap();
+        let bat_snapshot = collect_property_snapshot(PropertyTarget { paths: vec![bat] }).unwrap();
+        let folder_snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+        let mixed_snapshot = collect_property_snapshot(PropertyTarget {
+            paths: vec![exe, text],
+        })
+        .unwrap();
+
+        assert_eq!(
+            snapshot_has_run_as_admin_setting(&exe_snapshot),
+            cfg!(target_os = "windows")
+        );
+        assert!(!snapshot_has_run_as_admin_setting(&bat_snapshot));
+        assert!(!snapshot_has_run_as_admin_setting(&folder_snapshot));
+        assert!(!snapshot_has_run_as_admin_setting(&mixed_snapshot));
+    }
+
+    #[test]
     fn non_standard_detail_group_renders_as_misc() {
         assert_eq!(PropertyDetailGroupKind::NonStandard.title(), "non-standard");
     }
@@ -8934,6 +9344,45 @@ mod tests {
     }
 
     #[test]
+    fn apply_plan_includes_changed_run_as_admin_flag() {
+        let temp = TempDir::new();
+        let file = temp.path().join("setup.exe");
+        fs::write(&file, b"a").unwrap();
+        let mut snapshot = collect_property_snapshot(PropertyTarget { paths: vec![file] }).unwrap();
+        snapshot.run_as_admin = MixedValue::Single(false);
+        let mut draft = EditablePropertyDraft::from_snapshot(&snapshot);
+        draft.run_as_admin = Some(true);
+
+        let plan = property_apply_plan(&snapshot, &draft);
+
+        assert_eq!(plan.run_as_admin, Some(true));
+        assert!(!property_apply_plan_is_empty(&plan));
+    }
+
+    #[test]
+    fn run_as_admin_compatibility_value_preserves_other_flags() {
+        assert_eq!(
+            windows_compatibility_value_with_run_as_admin(None, true),
+            Some("~ RUNASADMIN".to_owned())
+        );
+        assert_eq!(
+            windows_compatibility_value_with_run_as_admin(Some("~ WINXPSP3"), true),
+            Some("~ WINXPSP3 RUNASADMIN".to_owned())
+        );
+        assert_eq!(
+            windows_compatibility_value_with_run_as_admin(Some("~ WINXPSP3 RUNASADMIN"), false),
+            Some("~ WINXPSP3".to_owned())
+        );
+        assert_eq!(
+            windows_compatibility_value_with_run_as_admin(Some("~ RUNASADMIN"), false),
+            None
+        );
+        assert!(windows_compatibility_value_has_run_as_admin(
+            "~ winxpsp3 runasadmin"
+        ));
+    }
+
+    #[test]
     fn apply_timestamp_changes_modified_time() {
         let temp = TempDir::new();
         let file = temp.path().join("a.txt");
@@ -9110,6 +9559,7 @@ mod tests {
             unix_mode: MixedValue::None,
             permission_summary: MixedValue::None,
             default_app: None,
+            run_as_admin: MixedValue::None,
             shortcut: None,
             details: vec![test_property_detail_group(
                 PropertyDetailGroupKind::File,
