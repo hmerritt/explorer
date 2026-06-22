@@ -412,6 +412,13 @@ impl Default for RcloneSettings {
     }
 }
 
+impl RcloneSettings {
+    #[allow(dead_code)]
+    pub(crate) fn resolved_conf_path(&self) -> Option<PathBuf> {
+        self.conf_path.as_deref().and_then(expand_configured_path)
+    }
+}
+
 impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
@@ -2125,6 +2132,8 @@ mod tests {
         );
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, StartLocation::Downloads);
+        assert!(settings.rclone.enabled);
+        assert_eq!(settings.rclone.conf_path, None);
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
@@ -2171,9 +2180,25 @@ mod tests {
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.view.sort, default_file_sort());
         assert!(settings.contextmenu.items.is_empty());
+        assert!(settings.rclone.enabled);
+        assert_eq!(settings.rclone.conf_path, None);
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
+    }
+
+    #[test]
+    fn rclone_settings_deserialize_enabled_and_conf_path() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"rclone":{"enabled":false,"conf_path":"~/rclone.conf"}}"#)
+                .expect("deserialize rclone settings");
+
+        assert!(!settings.rclone.enabled);
+        assert_eq!(
+            settings.rclone.conf_path.as_deref(),
+            Some(Path::new("~/rclone.conf"))
+        );
+        assert!(validate_settings(&settings).is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -2442,6 +2467,7 @@ mod tests {
         assert!(json.starts_with("{\n  \"app\": {"));
         assert!(json.contains("\n    \"start\": {\"kind\": \"downloads\"}"));
         assert!(json.contains("\n  \"contextmenu\": [],"));
+        assert!(json.contains("\n  \"rclone\": {\"conf_path\": null, \"enabled\": true},"));
         assert!(json.contains("\n    \"hide\": [],"));
         assert!(json.contains(
             "\n    \"items\": [{\"kind\": \"home\"}, {\"kind\": \"desktop\"}, {\"kind\": \"documents\"}, {\"kind\": \"downloads\"}],"
@@ -3175,13 +3201,31 @@ mod tests {
         assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");
         assert_eq!(object["view"]["sort"]["direction"], "ascending");
+        assert_eq!(object["rclone"]["conf_path"], Value::Null);
+        assert_eq!(object["rclone"]["enabled"], true);
         assert_eq!(object["show_hidden_files"], true);
         assert!(
             normalized.find("\"app\"").unwrap() < normalized.find("\"future_option\"").unwrap()
         );
         assert!(normalized.find("\"a\"").unwrap() < normalized.find("\"z\"").unwrap());
+        assert!(normalized.find("\"rclone\"").unwrap() < normalized.find("\"sidebar\"").unwrap());
         assert!(normalized.find("\"sidebar\"").unwrap() < normalized.find("\"tabs\"").unwrap());
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rclone_sync_preserves_unknown_fields() {
+        let mut document: Value =
+            serde_json::from_str(r#"{"rclone":{"enabled":false,"future_rclone":{"z":1,"a":2}}}"#)
+                .unwrap();
+        let settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
+
+        sync_settings_document(&mut document, &settings);
+
+        assert_eq!(document["rclone"]["enabled"], false);
+        assert_eq!(document["rclone"]["conf_path"], Value::Null);
+        assert_eq!(document["rclone"]["future_rclone"]["a"], 2);
+        assert_eq!(document["rclone"]["future_rclone"]["z"], 1);
     }
 
     #[gpui::test]
@@ -3339,6 +3383,14 @@ mod tests {
         )
         .unwrap();
         assert!(load_settings_from_path(&relative).is_err());
+
+        let relative_rclone = dir.join("relative-rclone.json");
+        fs::write(
+            &relative_rclone,
+            r#"{"rclone":{"conf_path":"rclone.conf"}}"#,
+        )
+        .unwrap();
+        assert!(load_settings_from_path(&relative_rclone).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 

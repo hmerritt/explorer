@@ -111,7 +111,7 @@ impl ExplorerView {
     }
 
     fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
-        match create_new_item_in_directory(&self.path, kind) {
+        match create_new_item_in_directory(&self.path, kind, &self.rclone_settings) {
             Ok(path) => {
                 self.open_error = None;
                 self.reload_with_entry_metadata_resolution(cx);
@@ -191,6 +191,7 @@ impl ExplorerView {
                 &clipboard.paths,
                 &self.path,
                 operation,
+                &self.rclone_settings,
             ) {
                 Ok(destinations) => {
                     if clipboard.operation == FileClipboardOperation::Cut {
@@ -472,7 +473,7 @@ impl ExplorerView {
             return true;
         }
 
-        match crate::explorer::rclone::delete_transfer_paths(paths) {
+        match crate::explorer::rclone::delete_transfer_paths(paths, &self.rclone_settings) {
             Ok(()) => {
                 self.remove_cut_paths(paths);
                 self.reload_with_entry_metadata_resolution(cx);
@@ -1107,10 +1108,14 @@ fn trash_undo_path_key(path: &Path) -> String {
     }
 }
 
-fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<PathBuf, String> {
+fn create_new_item_in_directory(
+    parent: &Path,
+    kind: NewItemKind,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> Result<PathBuf, String> {
     #[cfg(feature = "rclone")]
     if crate::explorer::rclone::is_transfer_path(parent) {
-        return create_new_transfer_item_in_directory(parent, kind);
+        return create_new_transfer_item_in_directory(parent, kind, _rclone_settings);
     }
 
     let mut index = 1usize;
@@ -1144,6 +1149,7 @@ fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<Path
 fn create_new_transfer_item_in_directory(
     parent: &Path,
     kind: NewItemKind,
+    rclone_settings: &crate::settings::RcloneSettings,
 ) -> Result<PathBuf, String> {
     if kind != NewItemKind::Folder {
         return Err(
@@ -1156,12 +1162,12 @@ fn create_new_transfer_item_in_directory(
     loop {
         let name = new_item_name(kind.base_name(), index);
         let path = parent.join(&name);
-        if crate::explorer::rclone::transfer_path_exists(&path)? {
+        if crate::explorer::rclone::transfer_path_exists(&path, rclone_settings)? {
             index = next_new_item_index(index, &name)?;
             continue;
         }
 
-        match crate::explorer::rclone::create_transfer_folder(&path) {
+        match crate::explorer::rclone::create_transfer_folder(&path, rclone_settings) {
             Ok(()) => return Ok(path),
             Err(error) if error.to_ascii_lowercase().contains("already exist") => {
                 index = next_new_item_index(index, &name)?;
@@ -1359,7 +1365,12 @@ mod tests {
     fn new_folder_uses_base_name_in_empty_directory() {
         let temp = TempDir::new();
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New folder");
         assert!(path.is_dir());
@@ -1369,7 +1380,12 @@ mod tests {
     fn new_file_uses_base_name_in_empty_directory() {
         let temp = TempDir::new();
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::File,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New file");
         assert!(path.is_file());
@@ -1381,7 +1397,12 @@ mod tests {
         let temp = TempDir::new();
         fs::create_dir(temp.path().join("New folder")).expect("create base folder");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New folder (2)");
         assert!(path.is_dir());
@@ -1392,7 +1413,12 @@ mod tests {
         let temp = TempDir::new();
         fs::write(temp.path().join("New file"), b"existing").expect("create base file");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::File,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New file (2)");
         assert!(path.is_file());
@@ -1404,7 +1430,12 @@ mod tests {
         fs::create_dir(temp.path().join("New folder")).expect("create base folder");
         fs::create_dir(temp.path().join("New folder (2)")).expect("create second folder");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New folder (3)");
         assert!(path.is_dir());
@@ -1416,7 +1447,12 @@ mod tests {
         fs::write(temp.path().join("New file"), b"base").expect("create base file");
         fs::write(temp.path().join("New file (2)"), b"second").expect("create second file");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::File,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New file (3)");
         assert!(path.is_file());
@@ -1428,7 +1464,12 @@ mod tests {
         fs::create_dir(temp.path().join("New folder")).expect("create base folder");
         fs::create_dir(temp.path().join("New folder (3)")).expect("create third folder");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New folder (2)");
         assert!(path.is_dir());
@@ -1440,7 +1481,12 @@ mod tests {
         fs::write(temp.path().join("New file"), b"base").expect("create base file");
         fs::write(temp.path().join("New file (3)"), b"third").expect("create third file");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::File,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New file (2)");
         assert!(path.is_file());
@@ -1544,7 +1590,12 @@ mod tests {
         let temp = TempDir::new();
         fs::write(temp.path().join("New folder"), b"file").expect("create conflicting file");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New folder (2)");
         assert!(path.is_dir());
@@ -1555,7 +1606,12 @@ mod tests {
         let temp = TempDir::new();
         fs::create_dir(temp.path().join("New file")).expect("create conflicting folder");
 
-        let path = create_new_item_in_directory(temp.path(), NewItemKind::File).unwrap();
+        let path = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::File,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "New file (2)");
         assert!(path.is_file());
@@ -1564,7 +1620,12 @@ mod tests {
     #[test]
     fn created_new_item_can_be_reloaded_and_selected() {
         let temp = TempDir::new();
-        let created = create_new_item_in_directory(temp.path(), NewItemKind::Folder).unwrap();
+        let created = create_new_item_in_directory(
+            temp.path(),
+            NewItemKind::Folder,
+            &crate::settings::RcloneSettings::default(),
+        )
+        .unwrap();
         let mut view = ExplorerView::new(temp.path().to_path_buf());
 
         view.select_single_path(&created);

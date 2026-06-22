@@ -783,7 +783,7 @@ impl ExplorerView {
         let original_path = rename.original_path.clone();
         let target_path = original_path.with_file_name(&target_name);
 
-        match rename_path(&original_path, &target_path) {
+        match rename_path(&original_path, &target_path, &self.rclone_settings) {
             Ok(()) => {
                 self.rename_focus_out = None;
                 self.active_rename = None;
@@ -1260,7 +1260,11 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
+fn rename_path(
+    original_path: &Path,
+    target_path: &Path,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> io::Result<()> {
     #[cfg(feature = "rclone")]
     if crate::explorer::rclone::is_transfer_path(original_path)
         || crate::explorer::rclone::is_transfer_path(target_path)
@@ -1268,7 +1272,11 @@ fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
         if crate::explorer::rclone::is_transfer_path(original_path)
             && crate::explorer::rclone::is_transfer_path(target_path)
         {
-            return crate::explorer::rclone::rename_transfer_path(original_path, target_path);
+            return crate::explorer::rclone::rename_transfer_path(
+                original_path,
+                target_path,
+                _rclone_settings,
+            );
         }
         return Err(io::Error::other(
             "rename must stay within the rclone transfer browser",

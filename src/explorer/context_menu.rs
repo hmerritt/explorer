@@ -520,10 +520,11 @@ impl ExplorerView {
 
         self.open_error = None;
         let task_path = path.clone();
+        let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { eject_mounted_volume_path(&task_path) })
+                .spawn(async move { eject_mounted_volume_path(&task_path, &rclone_settings) })
                 .await;
 
             let _ = this.update(cx, |explorer, cx| {
@@ -824,10 +825,14 @@ struct PlatformCommand {
     args: Vec<OsString>,
 }
 
-fn eject_mounted_volume_path(path: &Path) -> io::Result<()> {
+fn eject_mounted_volume_path(
+    path: &Path,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> io::Result<()> {
     #[cfg(feature = "rclone")]
     if crate::explorer::rclone::is_managed_mount_root(path) {
-        return crate::explorer::rclone::disconnect_mounted_remote(path).map_err(io::Error::other);
+        return crate::explorer::rclone::disconnect_mounted_remote(path, _rclone_settings)
+            .map_err(io::Error::other);
     }
 
     let Some(command) = mounted_volume_eject_command(path) else {

@@ -212,29 +212,38 @@ impl ExplorerView {
             return;
         }
 
-        let Some(remote) = crate::explorer::rclone::remote_for_virtual_path(&path) else {
-            self.open_error = Some(format!(
-                "Could not find rclone remote for {}",
-                path.display()
-            ));
-            return;
-        };
+        let remote =
+            match crate::explorer::rclone::remote_for_virtual_path(&path, &self.rclone_settings) {
+                Ok(Some(remote)) => remote,
+                Ok(None) => {
+                    self.open_error = Some(format!(
+                        "Could not find rclone remote for {}",
+                        path.display()
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    self.open_error = Some(error);
+                    return;
+                }
+            };
         let parsed = crate::explorer::rclone::parse_virtual_path(&path);
+        let settings = self.rclone_settings.clone();
         self.open_error = Some(format!("Connecting to {}...", remote.display_name));
         let task = cx.spawn(async move |this, cx| {
             let connection = cx
                 .background_executor()
-                .spawn(async move { crate::explorer::rclone::connect_remote(remote) })
+                .spawn(async move { crate::explorer::rclone::connect_remote(remote, &settings) })
                 .await;
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.rclone_connect_task = None;
                 let target = match connection {
-                    crate::explorer::rclone::RcloneConnection::Mounted(mounted) => parsed
+                    Ok(crate::explorer::rclone::RcloneConnection::Mounted(mounted)) => parsed
                         .as_ref()
                         .map(|path| mounted.mount_root.join(&path.relative_path))
                         .unwrap_or(mounted.mount_root),
-                    crate::explorer::rclone::RcloneConnection::TransferMode(transfer) => parsed
+                    Ok(crate::explorer::rclone::RcloneConnection::TransferMode(transfer)) => parsed
                         .as_ref()
                         .map(|path| {
                             crate::explorer::rclone::virtual_root_for_remote(&path.remote_name)
@@ -243,6 +252,11 @@ impl ExplorerView {
                         .unwrap_or_else(|| {
                             crate::explorer::rclone::virtual_root_for_remote(&transfer.remote.name)
                         }),
+                    Err(error) => {
+                        explorer.open_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
                 };
                 explorer.navigate_to_directory_inner_with_options(
                     target,

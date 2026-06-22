@@ -26,8 +26,8 @@ use crate::explorer::{
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries_with_rclone_settings,
-        path_is_filesystem_root, path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress,
+        load_entries_with_rclone_settings, path_is_filesystem_root, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
@@ -508,10 +508,8 @@ impl ExplorerView {
                 self.apply_file_sort_preserving_selection();
             }
             if sidebar_changed || rclone_changed || !folder_size_changed {
-                self.sidebar_sections = sidebar_sections(
-                    &self.sidebar_settings,
-                    &self.rclone_settings,
-                );
+                self.sidebar_sections =
+                    sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
             }
         }
         cx.notify();
@@ -541,7 +539,7 @@ impl ExplorerView {
         match load_entries_with_rclone_settings(
             &self.path,
             self.entry_visibility(),
-            rclone_settings_for_load(self),
+            &self.rclone_settings,
         ) {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
@@ -600,8 +598,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections =
-                sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -772,15 +769,15 @@ impl ExplorerView {
 
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move {
-                        load_entries_with_rclone_settings(&path, visibility, &rclone_settings)
-                    }
-                })
-                .await;
+            let result =
+                cx.background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move {
+                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings)
+                        }
+                    })
+                    .await;
             crate::debug_options::log_nav_timing(
                 load_started.elapsed(),
                 format_args!(

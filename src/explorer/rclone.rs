@@ -20,7 +20,7 @@ use crate::{
         filesystem::EntryVisibility,
         view::ExplorerView,
     },
-    settings::config_dir,
+    settings::{RcloneSettings, config_dir},
 };
 
 const RCLONE_VIRTUAL_ROOT: &str = "rclone";
@@ -125,6 +125,58 @@ impl RcloneClient for LibrcloneClient {
     }
 }
 
+pub(super) fn disabled_error() -> String {
+    "rclone is disabled in Explorer settings.".to_owned()
+}
+
+fn ensure_enabled(settings: &RcloneSettings) -> Result<(), String> {
+    settings.enabled.then_some(()).ok_or_else(disabled_error)
+}
+
+fn prepare_librclone(settings: &RcloneSettings) -> Result<(), String> {
+    ensure_enabled(settings)?;
+    apply_librclone_config(settings)
+}
+
+fn apply_librclone_config(settings: &RcloneSettings) -> Result<(), String> {
+    let default_config_path = default_librclone_config_path()?;
+    let path = match settings.resolved_conf_path() {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => default_config_path,
+    };
+    LibrcloneClient
+        .rpc("config/setpath", json!({ "path": path }))
+        .map(drop)
+}
+
+fn default_librclone_config_path() -> Result<String, String> {
+    static DEFAULT_CONFIG_PATH: OnceLock<Result<String, String>> = OnceLock::new();
+    DEFAULT_CONFIG_PATH
+        .get_or_init(|| {
+            let response = LibrcloneClient.rpc("config/paths", json!({}))?;
+            response
+                .get("config")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "rclone config/paths response did not contain config".to_owned())
+        })
+        .clone()
+}
+
+#[cfg(test)]
+fn apply_rclone_config_with_client(
+    client: &impl RcloneClient,
+    settings: &RcloneSettings,
+) -> Result<(), String> {
+    ensure_enabled(settings)?;
+    if let Some(path) = settings.resolved_conf_path() {
+        client
+            .rpc("config/setpath", json!({ "path": path.to_string_lossy() }))
+            .map(drop)?;
+    }
+    Ok(())
+}
+
 fn initialize_librclone() -> Result<(), String> {
     static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
     INITIALIZED
@@ -175,7 +227,10 @@ impl RcloneRemoteState {
     }
 }
 
-pub(super) fn discover_remotes() -> Vec<RcloneRemote> {
+pub(super) fn discover_remotes(settings: &RcloneSettings) -> Vec<RcloneRemote> {
+    if prepare_librclone(settings).is_err() {
+        return Vec::new();
+    }
     discover_remotes_with_client(&LibrcloneClient).unwrap_or_default()
 }
 
@@ -207,6 +262,15 @@ pub(super) fn discover_remotes_with_client(
     Ok(remotes)
 }
 
+#[cfg(test)]
+fn discover_remotes_with_client_and_settings(
+    client: &impl RcloneClient,
+    settings: &RcloneSettings,
+) -> Result<Vec<RcloneRemote>, String> {
+    apply_rclone_config_with_client(client, settings)?;
+    discover_remotes_with_client(client)
+}
+
 fn provider_type_from_config_dump(dump: &Value, remote_name: &str) -> Option<String> {
     dump.get(remote_name)
         .or_else(|| dump.get(format!("{remote_name}:")))
@@ -216,20 +280,32 @@ fn provider_type_from_config_dump(dump: &Value, remote_name: &str) -> Option<Str
         .map(str::to_owned)
 }
 
-pub(super) fn connect_remote(remote: RcloneRemote) -> RcloneConnection {
-    connect_remote_with_client(&LibrcloneClient, remote).unwrap_or_else(|remote| {
-        RcloneConnection::TransferMode(TransferRemote {
-            remote: remote.identity(),
-        })
-    })
+pub(super) fn connect_remote(
+    remote: RcloneRemote,
+    settings: &RcloneSettings,
+) -> Result<RcloneConnection, String> {
+    prepare_librclone(settings)?;
+    Ok(
+        connect_remote_with_client(&LibrcloneClient, remote).unwrap_or_else(|remote| {
+            RcloneConnection::TransferMode(TransferRemote {
+                remote: remote.identity(),
+            })
+        }),
+    )
 }
 
-pub(super) fn remote_for_virtual_path(path: &Path) -> Option<RcloneRemote> {
-    let parsed = parse_virtual_path(path)?;
-    discover_remotes()
+pub(super) fn remote_for_virtual_path(
+    path: &Path,
+    settings: &RcloneSettings,
+) -> Result<Option<RcloneRemote>, String> {
+    ensure_enabled(settings)?;
+    let Some(parsed) = parse_virtual_path(path) else {
+        return Ok(None);
+    };
+    Ok(discover_remotes(settings)
         .into_iter()
         .find(|remote| remote.name == parsed.remote_name)
-        .or_else(|| Some(RcloneRemote::new(parsed.remote_name, None)))
+        .or_else(|| Some(RcloneRemote::new(parsed.remote_name, None))))
 }
 
 pub(super) fn connect_remote_with_client(
@@ -282,7 +358,11 @@ pub(super) fn connect_remote_with_client(
     }))
 }
 
-pub(super) fn disconnect_mounted_remote(mount_root: &Path) -> Result<(), String> {
+pub(super) fn disconnect_mounted_remote(
+    mount_root: &Path,
+    settings: &RcloneSettings,
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
     disconnect_mounted_remote_with_client(&LibrcloneClient, mount_root)
 }
 
@@ -349,7 +429,9 @@ fn preferred_mount_type(mount_types: &[String]) -> &str {
 pub(super) fn load_transfer_entries(
     path: &Path,
     visibility: EntryVisibility,
+    settings: &RcloneSettings,
 ) -> io::Result<Vec<FileEntry>> {
+    prepare_librclone(settings).map_err(io::Error::other)?;
     load_transfer_entries_with_client(&LibrcloneClient, path, visibility)
 }
 
@@ -469,7 +551,9 @@ pub(super) fn normal_open_block_message(path: &Path) -> Option<String> {
 pub(super) fn download_transfer_files_to_temp(
     paths: &[PathBuf],
     read_only: bool,
+    settings: &RcloneSettings,
 ) -> io::Result<Vec<PathBuf>> {
+    prepare_librclone(settings).map_err(io::Error::other)?;
     let client = LibrcloneClient;
     download_transfer_files_to_temp_with_client(&client, paths, read_only)
 }
@@ -516,7 +600,8 @@ pub(super) fn download_transfer_files_to_temp_with_client(
     Ok(downloaded)
 }
 
-pub(super) fn transfer_path_exists(path: &Path) -> Result<bool, String> {
+pub(super) fn transfer_path_exists(path: &Path, settings: &RcloneSettings) -> Result<bool, String> {
+    prepare_librclone(settings)?;
     transfer_path_exists_with_client(&LibrcloneClient, path)
 }
 
@@ -552,7 +637,8 @@ fn transfer_path_metadata_with_client(
     }))
 }
 
-pub(super) fn create_transfer_folder(path: &Path) -> Result<(), String> {
+pub(super) fn create_transfer_folder(path: &Path, settings: &RcloneSettings) -> Result<(), String> {
+    prepare_librclone(settings)?;
     create_transfer_folder_with_client(&LibrcloneClient, path)
 }
 
@@ -572,7 +658,12 @@ pub(super) fn create_transfer_folder_with_client(
     Ok(())
 }
 
-pub(super) fn rename_transfer_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
+pub(super) fn rename_transfer_path(
+    original_path: &Path,
+    target_path: &Path,
+    settings: &RcloneSettings,
+) -> io::Result<()> {
+    prepare_librclone(settings).map_err(io::Error::other)?;
     rename_transfer_path_with_client(&LibrcloneClient, original_path, target_path)
         .map_err(io::Error::other)
 }
@@ -615,7 +706,11 @@ pub(super) fn rename_transfer_path_with_client(
     Ok(())
 }
 
-pub(super) fn delete_transfer_paths(paths: &[PathBuf]) -> Result<(), String> {
+pub(super) fn delete_transfer_paths(
+    paths: &[PathBuf],
+    settings: &RcloneSettings,
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
     delete_transfer_paths_with_client(&LibrcloneClient, paths)
 }
 
@@ -655,7 +750,9 @@ pub(super) fn copy_or_move_paths_to_transfer_destination(
     paths: &[PathBuf],
     destination: &Path,
     operation: RcloneTransferOperation,
+    settings: &RcloneSettings,
 ) -> Result<Vec<PathBuf>, String> {
+    prepare_librclone(settings)?;
     copy_or_move_paths_to_transfer_destination_with_client(
         &LibrcloneClient,
         paths,
@@ -761,11 +858,12 @@ impl ExplorerView {
         }
 
         self.open_error = None;
+        let settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let copies = download_transfer_files_to_temp(&paths, read_only)?;
+                    let copies = download_transfer_files_to_temp(&paths, read_only, &settings)?;
                     for copy in &copies {
                         open::that_detached(copy)?;
                     }
@@ -1195,6 +1293,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["config/listremotes", "config/dump"]
         );
+    }
+
+    #[test]
+    fn configured_conf_path_is_set_before_discovery() {
+        let conf_path = std::env::temp_dir().join("explorer-rclone-test.conf");
+        let settings = RcloneSettings {
+            conf_path: Some(conf_path.clone()),
+            ..RcloneSettings::default()
+        };
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({})),
+            Ok(json!({ "remotes": ["gdrive:"] })),
+            Ok(json!({ "gdrive": { "type": "drive" } })),
+        ]);
+
+        let remotes = discover_remotes_with_client_and_settings(&client, &settings)
+            .expect("discover remotes");
+
+        assert_eq!(remotes.len(), 1);
+        let calls = client.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["config/setpath", "config/listremotes", "config/dump"]
+        );
+        assert_eq!(calls[0].1["path"], conf_path.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn disabled_settings_stop_configured_discovery_before_rpc() {
+        let settings = RcloneSettings {
+            enabled: false,
+            ..RcloneSettings::default()
+        };
+        let client = FakeRcloneClient::default();
+
+        let error = discover_remotes_with_client_and_settings(&client, &settings)
+            .expect_err("disabled rclone should stop discovery");
+
+        assert_eq!(error, disabled_error());
+        assert!(client.calls().is_empty());
     }
 
     #[test]

@@ -1,9 +1,6 @@
 ## Todo
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
-- Add "rclone" top-level object into settings with:
-    - enabled
-    - conf_path
 
 ## 1
 

@@ -44,7 +44,7 @@ pub(super) fn sidebar_sections(
 
 fn sidebar_sections_from_roots(
     settings: &SidebarSettings,
-    rclone_settings: &RcloneSettings,
+    _rclone_settings: &RcloneSettings,
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
@@ -60,7 +60,7 @@ fn sidebar_sections_from_roots(
             wsl_drive_items_from_roots(wsl_roots)
         },
         #[cfg(feature = "rclone")]
-        rclone_remotes: rclone_remote_items(rclone_settings),
+        rclone_remotes: rclone_remote_items(_rclone_settings),
     }
 }
 
@@ -560,5 +560,24 @@ mod tests {
 
         assert_eq!(sections.drives.len(), 1);
         assert!(sections.wsl_drives.is_empty());
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn sidebar_sections_hide_rclone_remotes_when_disabled() {
+        let sections = sidebar_sections_from_roots(
+            &SidebarSettings {
+                items: Vec::new(),
+                ..SidebarSettings::default()
+            },
+            &RcloneSettings {
+                enabled: false,
+                ..RcloneSettings::default()
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(sections.rclone_remotes.is_empty());
     }
 }
