@@ -99,8 +99,8 @@ impl ImageThumbnailUsage {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image",
             (Self::Standard, ImageThumbnailKind::Video) => "video",
-            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-400",
-            (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview-400",
+            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-v2",
+            (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview",
         }
     }
 

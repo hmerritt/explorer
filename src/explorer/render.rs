@@ -138,9 +138,9 @@ const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
-const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 400.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 8.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 10.0;
+const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 500.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 2.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -974,9 +974,10 @@ impl ExplorerView {
             ),
             HoverImagePreviewLookup::Failed => return None,
         };
+        let viewport_size = window.viewport_size();
         let window_size = (
-            f32::from(window.bounds().size.width),
-            f32::from(window.bounds().size.height),
+            f32::from(viewport_size.width),
+            f32::from(viewport_size.height),
         );
         let preview_size = image_hover_preview_render_size(width, height, window_size);
         let (left, top) = image_hover_preview_origin(state.position, preview_size, window_size);
@@ -7608,19 +7609,19 @@ mod tests {
     }
 
     #[test]
-    fn image_hover_preview_origin_uses_close_bottom_right_offset() {
+    fn image_hover_preview_origin_uses_two_pixel_bottom_right_offset() {
         assert_eq!(
             image_hover_preview_origin(
                 gpui::point(gpui::px(100.0), gpui::px(100.0)),
                 (200.0, 100.0),
                 (800.0, 600.0),
             ),
-            (108.0, 110.0)
+            (102.0, 102.0)
         );
     }
 
     #[test]
-    fn image_hover_preview_origin_clamps_inside_window() {
+    fn image_hover_preview_origin_clamps_inside_viewport() {
         assert_eq!(
             image_hover_preview_origin(
                 gpui::point(gpui::px(295.0), gpui::px(295.0)),
@@ -7628,6 +7629,18 @@ mod tests {
                 (300.0, 300.0),
             ),
             (100.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn image_hover_preview_origin_uses_drawable_height_for_vertical_clamping() {
+        assert_eq!(
+            image_hover_preview_origin(
+                gpui::point(gpui::px(250.0), gpui::px(280.0)),
+                (200.0, 100.0),
+                (800.0, 260.0),
+            ),
+            (252.0, 160.0)
         );
     }
 

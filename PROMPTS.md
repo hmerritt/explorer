@@ -4,6 +4,7 @@
 
 ## 1
 
+- Add UPX compression to release pipeline
 - Copy undo can delete pre-existing data. Undo records top-level destinations, then recursively deletes them. Copying into an existing folder or replacing a file destroys original destination content on Ctrl+Z. See [file_commands.rs (line 620)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:620), [file_commands.rs (line 693)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:693), and [filesystem.rs (line 2355)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/filesystem.rs:2355).
 - Implement SIMD PNG decoder specifially for PNG decode paths. This was done previously without success (it was 20% slower than without it), I beleive it was only slower due to the implementation. Make sure to read the docs and apply this library properly to get the benifit
 

@@ -276,8 +276,13 @@ fn load_hover_image_preview_rgba_with_cancel_timed_result(
     }
 
     check_image_cancelled(cancel)?;
-    let image =
-        load_source_thumbnail_rgba_with_cancel_timed(path, size, cancel, timings_enabled, timings)?;
+    let image = load_source_hover_preview_rgba_with_cancel_timed(
+        path,
+        size,
+        cancel,
+        timings_enabled,
+        timings,
+    )?;
     check_image_cancelled(cancel)?;
     let resize_started = thumbnail_timing_started(timings_enabled);
     let preview = resize_rgba_to_longest_side(image, size);
@@ -285,6 +290,33 @@ fn load_hover_image_preview_rgba_with_cancel_timed_result(
     let preview = preview?;
     check_image_cancelled(cancel)?;
     Ok(preview)
+}
+
+fn load_source_hover_preview_rgba_with_cancel_timed(
+    path: &Path,
+    svg_longest_side: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
+) -> Result<image::RgbaImage, String> {
+    check_image_cancelled(cancel)?;
+    if path_is_svg(path) {
+        return load_svg_rgba_with_cancel_timed(
+            path,
+            svg_longest_side,
+            cancel,
+            timings_enabled,
+            timings,
+        );
+    }
+
+    load_raster_thumbnail_rgba_with_cancel_timed(
+        path,
+        svg_longest_side,
+        cancel,
+        timings_enabled,
+        timings,
+    )
 }
 
 fn load_source_thumbnail_rgba_with_cancel_timed(
@@ -1801,6 +1833,31 @@ mod tests {
         assert!(
             pixel[1] > pixel[0],
             "expected embedded green thumbnail to be used, got {pixel:?}"
+        );
+    }
+
+    #[test]
+    fn jpeg_hover_preview_uses_primary_image_instead_of_embedded_thumbnail() {
+        let temp = TempDir::new();
+        let path = temp.path().join("photo.jpg");
+        let primary = jpeg_bytes(16, 16, [220, 20, 20]);
+        let embedded = jpeg_bytes(2, 1, [20, 220, 20]);
+        fs::write(&path, jpeg_with_embedded_thumbnail(&primary, &embedded)).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let preview = load_hover_image_preview_png_with_cancel_timed(&path, 400, &cancel, true);
+
+        assert!(preview.result.is_ok());
+        assert!(preview.timings.embedded_thumbnail_scan.is_none());
+        assert!(preview.timings.embedded_thumbnail_decode.is_none());
+        assert!(preview.timings.raster_decode.is_some());
+
+        let bytes = preview.result.unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().into_rgba8();
+        let pixel = decoded.get_pixel(200, 200);
+        assert!(
+            pixel[0] > pixel[1],
+            "expected primary red image to be used, got {pixel:?}"
         );
     }
 
