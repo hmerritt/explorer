@@ -1756,7 +1756,7 @@ pub(super) fn copy_paths_to_directory(
     prepare_copy_paths_to_directory(paths, destination).and_then(run_prepared_file_operation)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmarks"))]
 pub(super) fn prepare_copy_paths_to_directory(
     paths: &[PathBuf],
     destination: &Path,

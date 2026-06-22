@@ -10,10 +10,10 @@ use std::{
     time::Duration,
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use explorer::benchmark_support::load_image_thumbnail_for_benchmark;
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use explorer::benchmark_support::{load_image_thumbnail_for_benchmark, resize_rgba_for_benchmark};
 
-const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v2";
+const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v3";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
 const LARGE_HEIGHT: u32 = 1200;
@@ -127,6 +127,17 @@ fn gradient_rgba(width: u32, height: u32, seed: u8) -> image::RgbaImage {
     })
 }
 
+fn transparent_gradient_rgba(width: u32, height: u32) -> image::RgbaImage {
+    image::RgbaImage::from_fn(width, height, |x, y| {
+        image::Rgba([
+            (x % 256) as u8,
+            (y % 256) as u8,
+            ((x / 3 + y / 5) % 256) as u8,
+            ((x + y) % 256) as u8,
+        ])
+    })
+}
+
 fn gradient_rgb(width: u32, height: u32, seed: u8) -> image::RgbImage {
     image::RgbImage::from_fn(width, height, |x, y| {
         image::Rgb([
@@ -172,6 +183,36 @@ fn load_batch(paths: &[PathBuf], parallelism: usize) -> usize {
 
 fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
     let fixture = Fixture::get();
+    let opaque_rgba = gradient_rgba(LARGE_WIDTH, LARGE_HEIGHT, 0);
+    let transparent_rgba = transparent_gradient_rgba(LARGE_WIDTH, LARGE_HEIGHT);
+    let mut resize = criterion.benchmark_group("image_thumbnails/rgba_resize");
+    resize.sample_size(20);
+    resize.measurement_time(Duration::from_secs(5));
+    resize.throughput(Throughput::Elements(
+        u64::from(LARGE_WIDTH) * u64::from(LARGE_HEIGHT),
+    ));
+    for (source_name, source) in [("opaque", &opaque_rgba), ("transparent", &transparent_rgba)] {
+        for longest_side in [THUMBNAIL_SIZE, 400] {
+            resize.bench_with_input(
+                BenchmarkId::new(source_name, longest_side),
+                &longest_side,
+                |bencher, longest_side| {
+                    bencher.iter_batched(
+                        || source.clone(),
+                        |image| {
+                            let resized =
+                                resize_rgba_for_benchmark(image, black_box(*longest_side))
+                                    .expect("resize benchmark image");
+                            black_box(resized.len())
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        }
+    }
+    resize.finish();
+
     let mut single = criterion.benchmark_group("image_thumbnails/single_file");
     single.sample_size(10);
     single.measurement_time(Duration::from_secs(5));

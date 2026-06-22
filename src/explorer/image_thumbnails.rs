@@ -35,7 +35,7 @@ use crate::{
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v5";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v6";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -1554,6 +1554,11 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn thumbnail_cache_version_invalidates_pre_bilinear_images() {
+        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v6");
+    }
+
+    #[test]
     fn thumbnail_requests_include_supported_image_extensions() {
         for name in ["image.png", "photo.jpg", "poster.webp", "vector.svg"] {
             let entry = FileEntry::test(name, false, Some(1), Some(UNIX_EPOCH));
@@ -1615,7 +1620,7 @@ mod tests {
 
         assert_eq!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
-            "76d4c10647d2c01d"
+            "f5147175a0e76dd2"
         );
     }
 

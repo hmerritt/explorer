@@ -19,6 +19,7 @@ mod formatting;
 mod git_status;
 mod icons;
 mod image_preview;
+mod image_resize;
 mod image_thumbnails;
 mod large_icons;
 mod mouse_selection;

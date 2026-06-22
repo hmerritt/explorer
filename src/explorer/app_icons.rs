@@ -13,13 +13,13 @@ use gpui::{App, BorrowAppContext, Context, Global, Image};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    explorer::{entry::FileEntry, view::ExplorerView},
+    explorer::{entry::FileEntry, image_resize::resize_rgba, view::ExplorerView},
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
 const NATIVE_ICON_LOAD_INTERVAL: Duration = Duration::from_millis(16);
 const URL_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v4";
+const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v5";
 const URL_ICON_CACHE_VERSION: &str = "url-icons-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "mappings.json";
 const DISK_ICON_DIR_NAME: &str = "icons";
@@ -1932,12 +1932,7 @@ fn normalized_rgba_icon_png(
         .min(content_pixels as f32 / bounds.height as f32);
     let resized_width = ((bounds.width as f32 * scale).round() as u32).max(1);
     let resized_height = ((bounds.height as f32 * scale).round() as u32).max(1);
-    let resized = image::imageops::resize(
-        &cropped,
-        resized_width,
-        resized_height,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = resize_rgba(cropped, resized_width, resized_height).ok()?;
 
     let source_pixels = size.source_pixels();
     let mut canvas =
@@ -2314,7 +2309,7 @@ mod tests {
 
     #[test]
     fn native_icon_cache_version_invalidates_old_low_resolution_icons() {
-        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v4");
+        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v5");
     }
 
     #[test]
