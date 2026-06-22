@@ -1883,6 +1883,7 @@ pub(super) enum PreparedFileOperation {
 pub(super) struct FileOperationSummary {
     pub(super) kind: FileOperationKind,
     pub(super) destination_paths: Vec<PathBuf>,
+    pub(super) copy_undo: FileOperationCopyUndo,
     pub(super) moved_source_paths: Vec<PathBuf>,
     pub(super) moved_paths: Vec<FileOperationMove>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
@@ -1893,11 +1894,39 @@ impl Default for FileOperationSummary {
         Self {
             kind: FileOperationKind::Copy,
             destination_paths: Vec::new(),
+            copy_undo: FileOperationCopyUndo::default(),
             moved_source_paths: Vec::new(),
             moved_paths: Vec::new(),
             archive_diagnostics: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FileOperationCopyUndo {
+    pub(super) created_files: Vec<PathBuf>,
+    pub(super) created_directories: Vec<PathBuf>,
+    pub(super) replaced_files: Vec<FileOperationReplacedFile>,
+}
+
+impl FileOperationCopyUndo {
+    pub(super) fn is_empty(&self) -> bool {
+        self.created_files.is_empty()
+            && self.created_directories.is_empty()
+            && self.replaced_files.is_empty()
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.created_files.extend(other.created_files);
+        self.created_directories.extend(other.created_directories);
+        self.replaced_files.extend(other.replaced_files);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FileOperationReplacedFile {
+    pub(super) destination: PathBuf,
+    pub(super) backup: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2209,9 +2238,66 @@ enum ParallelFileTask {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ParallelFileTaskResult {
     destination: PathBuf,
+    copy_undo: FileOperationCopyUndo,
+    backup_guard: CopyUndoBackupGuard,
+}
+
+impl ParallelFileTaskResult {
+    fn new(destination: PathBuf) -> Self {
+        Self {
+            destination,
+            copy_undo: FileOperationCopyUndo::default(),
+            backup_guard: CopyUndoBackupGuard::default(),
+        }
+    }
+
+    fn with_copy_undo(
+        destination: PathBuf,
+        copy_undo: FileOperationCopyUndo,
+        backup_guard: CopyUndoBackupGuard,
+    ) -> Self {
+        Self {
+            destination,
+            copy_undo,
+            backup_guard,
+        }
+    }
+
+    fn into_copy_undo(mut self) -> FileOperationCopyUndo {
+        self.backup_guard.disarm();
+        std::mem::take(&mut self.copy_undo)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CopyUndoBackupGuard {
+    backups: Vec<PathBuf>,
+    armed: bool,
+}
+
+impl CopyUndoBackupGuard {
+    fn track(&mut self, backup: &Path) {
+        self.backups.push(backup.to_path_buf());
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.backups.clear();
+        self.armed = false;
+    }
+}
+
+impl Drop for CopyUndoBackupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            for backup in &self.backups {
+                cleanup_copy_undo_backup_path(backup);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2643,6 +2729,7 @@ fn execute_copy_move_operation_with_progress_impl(
 ) -> Result<FileOperationSummary, FileOperationError> {
     let copy_options = copy_options_for_operation();
     let mut operated_destinations = HashSet::new();
+    let mut copy_undo = FileOperationCopyUndo::default();
     let mut progress = job.initial_progress();
     on_progress(progress.clone());
 
@@ -2657,12 +2744,21 @@ fn execute_copy_move_operation_with_progress_impl(
     if !create_directories.is_empty() {
         progress.phase = FileOperationPhase::Preparing;
         on_progress(progress.clone());
-        create_directories.par_iter().try_for_each(|path| {
+        for path in &create_directories {
             if cancel.load(Ordering::Relaxed) {
                 return Err(FileOperationError::Cancelled);
             }
-            fs::create_dir_all(path).map_err(|error| operation_error("create", path, error))
-        })?;
+            match fs::create_dir(path) {
+                Ok(()) => {
+                    if job.kind == FileOperationKind::Copy {
+                        copy_undo.created_directories.push(path.clone());
+                    }
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+                Err(error) => return Err(operation_error("create", path, error)),
+            }
+        }
     }
 
     let file_tasks = job
@@ -2715,7 +2811,10 @@ fn execute_copy_move_operation_with_progress_impl(
         &mut on_progress,
     )?;
     for result in task_results {
-        operated_destinations.insert(result.destination);
+        operated_destinations.insert(result.destination.clone());
+        if job.kind == FileOperationKind::Copy {
+            copy_undo.extend(result.into_copy_undo());
+        }
     }
 
     for step in &job.steps {
@@ -2734,7 +2833,7 @@ fn execute_copy_move_operation_with_progress_impl(
         }
     }
 
-    finish_file_operation_summary(job, operated_destinations, progress, on_progress)
+    finish_file_operation_summary(job, operated_destinations, copy_undo, progress, on_progress)
 }
 
 fn run_parallel_file_tasks(
@@ -2862,7 +2961,7 @@ fn run_single_file_task(
             progress.phase = FileOperationPhase::Copying;
             progress.current_item = Some(source.clone());
             on_progress(progress.clone());
-            copy_source_file_with_progress(
+            let (copy_undo, backup_guard) = copy_source_file_with_progress_and_undo(
                 source,
                 destination,
                 &cancel,
@@ -2872,9 +2971,11 @@ fn run_single_file_task(
                 copy_options,
             )
             .map_err(|error| operation_error("copy", source, error))?;
-            Ok(ParallelFileTaskResult {
-                destination: destination.clone(),
-            })
+            Ok(ParallelFileTaskResult::with_copy_undo(
+                destination.clone(),
+                copy_undo,
+                backup_guard,
+            ))
         }
         ParallelFileTask::Move {
             source,
@@ -2916,9 +3017,7 @@ fn run_single_file_task(
                 )
                 .map_err(|error| operation_error("move", source, error))?;
             }
-            Ok(ParallelFileTaskResult {
-                destination: destination.clone(),
-            })
+            Ok(ParallelFileTaskResult::new(destination.clone()))
         }
     }
 }
@@ -3010,21 +3109,28 @@ fn run_parallel_file_task(
         }
     };
 
+    let mut task_copy_undo = FileOperationCopyUndo::default();
+    let mut task_backup_guard = CopyUndoBackupGuard::default();
+
     match task {
         ParallelFileTask::Copy {
             source,
             destination,
             engine,
-        } => copy_source_file_with_progress(
-            source,
-            destination,
-            &cancel,
-            &mut task_progress,
-            &mut publish_worker_progress,
-            *engine,
-            copy_options,
-        )
-        .map_err(|error| operation_error("copy", source, error))?,
+        } => {
+            let (copy_undo, backup_guard) = copy_source_file_with_progress_and_undo(
+                source,
+                destination,
+                &cancel,
+                &mut task_progress,
+                &mut publish_worker_progress,
+                *engine,
+                copy_options,
+            )
+            .map_err(|error| operation_error("copy", source, error))?;
+            task_copy_undo = copy_undo;
+            task_backup_guard = backup_guard;
+        }
         ParallelFileTask::Move {
             source,
             destination,
@@ -3059,9 +3165,11 @@ fn run_parallel_file_task(
     }
 
     let _ = event_tx.send(ParallelFileTaskEvent::Completed);
-    Ok(ParallelFileTaskResult {
-        destination: destination.clone(),
-    })
+    Ok(ParallelFileTaskResult::with_copy_undo(
+        destination.clone(),
+        task_copy_undo,
+        task_backup_guard,
+    ))
 }
 
 fn drain_parallel_file_task_events(
@@ -3113,11 +3221,13 @@ fn file_operation_parallelism(task_count: usize) -> usize {
 fn finish_file_operation_summary(
     job: FileOperationJob,
     operated_destinations: HashSet<PathBuf>,
+    copy_undo: FileOperationCopyUndo,
     mut progress: FileOperationProgress,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     let mut summary = FileOperationSummary::default();
     summary.kind = job.kind;
+    summary.copy_undo = copy_undo;
     summary.archive_diagnostics = job.archive_diagnostics.clone();
     for root in &job.roots {
         if root.source_is_dir {
@@ -4459,6 +4569,42 @@ fn copy_source_file_with_progress(
     Ok(())
 }
 
+fn copy_source_file_with_progress_and_undo(
+    source: &Path,
+    destination: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    engine: CopyEngine,
+    options: CopyOptions,
+) -> std::io::Result<(FileOperationCopyUndo, CopyUndoBackupGuard)> {
+    let destination_existed = destination.try_exists()?;
+    let mut copy_undo = FileOperationCopyUndo::default();
+    let mut backup_guard = CopyUndoBackupGuard::default();
+
+    if destination_existed {
+        let replaced = backup_file_for_copy_undo(destination)?;
+        backup_guard.track(&replaced.backup);
+        copy_undo.replaced_files.push(replaced);
+    }
+
+    copy_source_file_with_progress(
+        source,
+        destination,
+        cancel,
+        progress,
+        on_progress,
+        engine,
+        options,
+    )?;
+
+    if !destination_existed {
+        copy_undo.created_files.push(destination.to_path_buf());
+    }
+
+    Ok((copy_undo, backup_guard))
+}
+
 fn copy_source_file_standard_with_progress(
     source: &Path,
     destination: &Path,
@@ -4578,6 +4724,83 @@ fn copy_source_file_to_temp(
         destination_file.sync_all()?;
     }
     Ok(())
+}
+
+fn backup_file_for_copy_undo(destination: &Path) -> std::io::Result<FileOperationReplacedFile> {
+    let metadata = fs::metadata(destination)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} already exists and is not a file.",
+            path_display_name(destination)
+        )));
+    }
+
+    let backup = copy_undo_backup_path()?;
+    let result =
+        fs::copy(destination, &backup).and_then(|_| preserve_file_metadata(&metadata, &backup));
+    if let Err(error) = result {
+        cleanup_copy_undo_backup_path(&backup);
+        return Err(error);
+    }
+
+    Ok(FileOperationReplacedFile {
+        destination: destination.to_path_buf(),
+        backup,
+    })
+}
+
+fn copy_undo_backup_path() -> std::io::Result<PathBuf> {
+    let process_id = std::process::id();
+    loop {
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!(".explorer-copy-undo-{process_id}-{counter}"));
+        match fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory.join("backup")),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub(super) fn restore_replaced_file_from_copy_undo(
+    replaced: &FileOperationReplacedFile,
+) -> Result<(), String> {
+    let metadata = fs::metadata(&replaced.backup)
+        .map_err(|error| format_path_error("restore", &replaced.destination, error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Could not restore {}: undo backup is not a file.",
+            path_display_name(&replaced.destination)
+        ));
+    }
+
+    let temp_destination = temp_destination_for(&replaced.destination)
+        .map_err(|error| format_path_error("restore", &replaced.destination, error))?;
+    let result = fs::copy(&replaced.backup, &temp_destination)
+        .and_then(|_| preserve_file_metadata(&metadata, &temp_destination))
+        .and_then(|_| replace_destination_with_temp(&temp_destination, &replaced.destination));
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp_destination);
+        return Err(format_path_error("restore", &replaced.destination, error));
+    }
+
+    sync_parent_directory_best_effort(&replaced.destination);
+    Ok(())
+}
+
+pub(super) fn cleanup_copy_undo_backups(copy_undo: &FileOperationCopyUndo) {
+    for replaced in &copy_undo.replaced_files {
+        cleanup_copy_undo_backup_path(&replaced.backup);
+    }
+}
+
+fn cleanup_copy_undo_backup_path(backup: &Path) {
+    let _ = fs::remove_file(backup);
+    if let Some(parent) = backup.parent() {
+        let _ = fs::remove_dir(parent);
+    }
 }
 
 pub(super) fn preserve_file_metadata(
@@ -6063,6 +6286,17 @@ mod tests {
             .collect()
     }
 
+    fn assert_replaced_backup(
+        copy_undo: &FileOperationCopyUndo,
+        destination: &Path,
+        expected_contents: &[u8],
+    ) {
+        assert_eq!(copy_undo.replaced_files.len(), 1);
+        let replaced = &copy_undo.replaced_files[0];
+        assert_eq!(replaced.destination, destination);
+        assert_eq!(fs::read(&replaced.backup).unwrap(), expected_contents);
+    }
+
     #[test]
     fn prepared_operation_counts_nested_file_totals() {
         let temp = TempDir::new();
@@ -6499,6 +6733,14 @@ mod tests {
             summary.destination_paths,
             vec![destination.join("file.txt")]
         );
+        assert!(summary.copy_undo.created_files.is_empty());
+        assert!(summary.copy_undo.created_directories.is_empty());
+        assert_replaced_backup(
+            &summary.copy_undo,
+            &destination.join("file.txt"),
+            b"existing",
+        );
+        cleanup_copy_undo_backups(&summary.copy_undo);
     }
 
     #[test]
@@ -6532,11 +6774,17 @@ mod tests {
             summary.destination_paths,
             vec![destination.join("file.txt")]
         );
+        assert_replaced_backup(
+            &summary.copy_undo,
+            &destination.join("file.txt"),
+            b"aaaaXXXXccccdddd",
+        );
         assert!(
             progress_events
                 .iter()
                 .any(|progress| progress.phase == FileOperationPhase::Verifying)
         );
+        cleanup_copy_undo_backups(&summary.copy_undo);
     }
 
     #[test]
@@ -6558,6 +6806,7 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"source");
         assert_eq!(fs::read(destination.join("file.txt")).unwrap(), b"existing");
         assert!(summary.destination_paths.is_empty());
+        assert!(summary.copy_undo.is_empty());
     }
 
     #[test]
@@ -6675,10 +6924,13 @@ mod tests {
         ));
         assert_eq!(conflicts.len(), 2);
 
-        resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflicts");
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflicts");
 
         assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"new a");
         assert_eq!(fs::read(destination.join("b.txt")).unwrap(), b"new b");
+        assert_eq!(summary.copy_undo.replaced_files.len(), 2);
+        cleanup_copy_undo_backups(&summary.copy_undo);
     }
 
     #[test]
@@ -6837,6 +7089,15 @@ mod tests {
             b"data"
         );
         assert_eq!(summary.destination_paths, vec![destination.join("folder")]);
+        assert_eq!(
+            summary.copy_undo.created_files,
+            vec![destination.join("folder").join("nested").join("file.txt")]
+        );
+        assert_eq!(
+            summary.copy_undo.created_directories,
+            vec![destination.join("folder").join("nested")]
+        );
+        assert!(summary.copy_undo.replaced_files.is_empty());
     }
 
     #[test]
@@ -6857,12 +7118,19 @@ mod tests {
         ));
         assert_eq!(conflicts.len(), 1);
 
-        resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace nested");
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace nested");
 
         assert_eq!(
             fs::read(destination_folder.join("nested").join("file.txt")).unwrap(),
             b"new"
         );
+        assert_replaced_backup(
+            &summary.copy_undo,
+            &destination_folder.join("nested").join("file.txt"),
+            b"old",
+        );
+        cleanup_copy_undo_backups(&summary.copy_undo);
     }
 
     #[test]

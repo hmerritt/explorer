@@ -22,19 +22,22 @@ use crate::explorer::{
         image_clipboard_from_item,
     },
     filesystem::{
-        ConflictChoice, FileOperationError, FileOperationJob, FileOperationKind, FileOperationMove,
-        FileOperationSummary, PreparedFileOperation, archive_path_is_supported,
+        ConflictChoice, FileOperationCopyUndo, FileOperationError, FileOperationJob,
+        FileOperationKind, FileOperationMove, FileOperationReplacedFile, FileOperationSummary,
+        PreparedFileOperation, archive_path_is_supported, cleanup_copy_undo_backups,
         execute_file_operation, execute_file_operation_with_progress,
         mountable_image_path_is_supported, prepare_copy_paths_to_directory_for_paste,
         prepare_extract_archives_to_directory, prepare_move_paths_to_directory,
-        remove_existing_paths_permanently, remove_paths_permanently, trash_paths,
+        remove_existing_paths_permanently, remove_paths_permanently,
+        restore_replaced_file_from_copy_undo, trash_paths,
     },
     view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
 
 #[cfg(test)]
 use crate::explorer::filesystem::{
-    FileOperationOutcome, copy_paths_to_directory, move_paths_to_directory,
+    FileConflictBatch, FileOperationOutcome, copy_paths_to_directory, move_paths_to_directory,
+    resolve_file_conflicts,
 };
 
 const FILE_OPERATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -42,7 +45,7 @@ const FILE_OPERATION_UNDO_LIMIT: usize = 32;
 
 #[derive(Clone, Debug)]
 pub(super) enum FileOperationUndo {
-    Copy { paths: Vec<PathBuf> },
+    Copy { undo: FileOperationCopyUndo },
     Move { paths: Vec<FileOperationMove> },
     Trash(TrashUndo),
 }
@@ -620,9 +623,9 @@ impl ExplorerView {
     fn record_file_operation_undo(&mut self, summary: &FileOperationSummary) {
         match summary.kind {
             FileOperationKind::Copy => {
-                if !summary.destination_paths.is_empty() {
+                if !summary.copy_undo.is_empty() {
                     self.push_file_operation_undo(Some(FileOperationUndo::Copy {
-                        paths: summary.destination_paths.clone(),
+                        undo: summary.copy_undo.clone(),
                     }));
                 }
             }
@@ -643,7 +646,8 @@ impl ExplorerView {
         };
 
         if self.file_operation_undo_stack.len() == FILE_OPERATION_UNDO_LIMIT {
-            self.file_operation_undo_stack.remove(0);
+            let expired = self.file_operation_undo_stack.remove(0);
+            cleanup_file_operation_undo(expired);
         }
         self.file_operation_undo_stack.push(undo);
     }
@@ -655,7 +659,9 @@ impl ExplorerView {
 
         match self.apply_file_operation_undo(undo) {
             Ok(selection) => {
-                self.file_operation_undo_stack.pop();
+                if let Some(applied) = self.file_operation_undo_stack.pop() {
+                    cleanup_file_operation_undo(applied);
+                }
                 self.open_error = None;
                 self.reload_with_entry_metadata_resolution(cx);
                 match selection {
@@ -676,8 +682,8 @@ impl ExplorerView {
         undo: FileOperationUndo,
     ) -> Result<UndoSelection, String> {
         match undo {
-            FileOperationUndo::Copy { paths } => {
-                undo_copied_paths(&paths)?;
+            FileOperationUndo::Copy { undo } => {
+                undo_copied_paths(&undo)?;
                 Ok(UndoSelection::Clear)
             }
             FileOperationUndo::Move { paths } => {
@@ -690,31 +696,121 @@ impl ExplorerView {
     }
 }
 
-fn undo_copied_paths(paths: &[PathBuf]) -> Result<(), String> {
-    for path in paths.iter().rev() {
-        remove_copied_path_for_undo(path)?;
+impl Drop for ExplorerView {
+    fn drop(&mut self) {
+        for undo in self.file_operation_undo_stack.drain(..) {
+            cleanup_file_operation_undo(undo);
+        }
+    }
+}
+
+fn cleanup_file_operation_undo(undo: FileOperationUndo) {
+    if let FileOperationUndo::Copy { undo } = undo {
+        cleanup_copy_undo_backups(&undo);
+    }
+}
+
+fn undo_copied_paths(undo: &FileOperationCopyUndo) -> Result<(), String> {
+    preflight_copy_undo(undo)?;
+
+    for path in undo.created_files.iter().rev() {
+        remove_created_file_for_undo(path)?;
+    }
+    for replaced in &undo.replaced_files {
+        restore_replaced_file_from_copy_undo(replaced)?;
+    }
+    for path in undo.created_directories.iter().rev() {
+        remove_created_directory_for_undo(path)?;
+    }
+    cleanup_copy_undo_backups(undo);
+    Ok(())
+}
+
+fn preflight_copy_undo(undo: &FileOperationCopyUndo) -> Result<(), String> {
+    for path in &undo.created_files {
+        preflight_created_file_for_undo(path)?;
+    }
+    for replaced in &undo.replaced_files {
+        preflight_replaced_file_for_undo(replaced)?;
     }
     Ok(())
 }
 
-fn remove_copied_path_for_undo(path: &Path) -> Result<(), String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
+fn preflight_created_file_for_undo(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Err(format!(
+            "Could not undo copy of {} because it is now a folder.",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Could not undo copy of {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn preflight_replaced_file_for_undo(replaced: &FileOperationReplacedFile) -> Result<(), String> {
+    match fs::metadata(&replaced.backup) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
             return Err(format!(
-                "Could not undo copy of {}: {error}",
-                path.display()
+                "Could not undo copy of {} because its undo backup is not a file.",
+                replaced.destination.display()
             ));
         }
-    };
+        Err(error) => {
+            return Err(format!(
+                "Could not undo copy of {} because its undo backup is unavailable: {error}",
+                replaced.destination.display()
+            ));
+        }
+    }
 
-    let result = if metadata.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
-    result.map_err(|error| format!("Could not undo copy of {}: {error}", path.display()))
+    match fs::symlink_metadata(&replaced.destination) {
+        Ok(metadata) if metadata.is_dir() => Err(format!(
+            "Could not undo copy of {} because it is now a folder.",
+            replaced.destination.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Could not undo copy of {}: {error}",
+            replaced.destination.display()
+        )),
+    }
+}
+
+fn remove_created_file_for_undo(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Could not undo copy of {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn remove_created_directory_for_undo(path: &Path) -> Result<(), String> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::DirectoryNotEmpty
+                    | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "Could not undo copy of {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn undo_moved_paths(paths: &[FileOperationMove]) -> Result<Vec<PathBuf>, String> {
@@ -1127,6 +1223,13 @@ mod tests {
     };
     use gpui::{Image, ImageFormat, TestAppContext};
     use std::{fs, io::Cursor};
+
+    fn file_conflicts(result: Result<FileOperationOutcome, String>) -> FileConflictBatch {
+        match result.expect("file operation") {
+            FileOperationOutcome::Conflicts(conflicts) => conflicts,
+            FileOperationOutcome::Finished(_) => panic!("expected file conflicts"),
+        }
+    }
 
     #[test]
     fn new_folder_uses_base_name_in_empty_directory() {
@@ -1704,6 +1807,123 @@ mod tests {
     }
 
     #[test]
+    fn undo_copy_replace_restores_existing_file() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        let replaced = destination.join("file.txt");
+        fs::write(&source, b"source").expect("create source file");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&replaced, b"existing").expect("create existing file");
+
+        let conflicts = file_conflicts(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace conflict");
+        let mut view = ExplorerView::new(destination.clone());
+        view.handle_file_command_result(Ok(FileOperationOutcome::Finished(summary)));
+
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&replaced).unwrap(), b"source");
+        assert_eq!(view.file_operation_undo_stack.len(), 1);
+
+        let undo = view.file_operation_undo_stack.last().cloned().unwrap();
+        let selection = view.apply_file_operation_undo(undo).expect("undo copy");
+
+        assert!(matches!(selection, UndoSelection::Clear));
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&replaced).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn undo_copy_folder_merge_preserves_destination_only_files() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        let destination_folder = destination.join("folder");
+        fs::create_dir_all(source.join("nested")).expect("create source nested");
+        fs::write(source.join("nested").join("file.txt"), b"source").expect("create source file");
+        fs::create_dir_all(&destination_folder).expect("create destination folder");
+        fs::write(destination_folder.join("extra.txt"), b"extra").expect("create destination file");
+
+        let mut view = ExplorerView::new(destination.clone());
+        let result = copy_paths_to_directory(std::slice::from_ref(&source), &view.path);
+        view.handle_file_command_result(result);
+
+        assert_eq!(
+            fs::read(destination_folder.join("nested").join("file.txt")).unwrap(),
+            b"source"
+        );
+        assert_eq!(view.file_operation_undo_stack.len(), 1);
+
+        let undo = view.file_operation_undo_stack.last().cloned().unwrap();
+        view.apply_file_operation_undo(undo).expect("undo copy");
+
+        assert!(destination_folder.exists());
+        assert_eq!(
+            fs::read(destination_folder.join("extra.txt")).unwrap(),
+            b"extra"
+        );
+        assert!(!destination_folder.join("nested").exists());
+    }
+
+    #[test]
+    fn undo_copy_folder_merge_restores_nested_replacement() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        let destination_folder = destination.join("folder");
+        let replaced = destination_folder.join("nested").join("file.txt");
+        fs::create_dir_all(source.join("nested")).expect("create source nested");
+        fs::write(source.join("nested").join("file.txt"), b"new").expect("create source file");
+        fs::create_dir_all(replaced.parent().unwrap()).expect("create destination nested");
+        fs::write(&replaced, b"old").expect("create destination file");
+
+        let conflicts = file_conflicts(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Replace).expect("replace nested");
+        let mut view = ExplorerView::new(destination.clone());
+        view.handle_file_command_result(Ok(FileOperationOutcome::Finished(summary)));
+
+        assert_eq!(fs::read(&replaced).unwrap(), b"new");
+
+        let undo = view.file_operation_undo_stack.last().cloned().unwrap();
+        view.apply_file_operation_undo(undo).expect("undo copy");
+
+        assert!(destination_folder.exists());
+        assert_eq!(fs::read(&replaced).unwrap(), b"old");
+    }
+
+    #[test]
+    fn skipped_copy_conflict_records_no_undo() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        let existing = destination.join("file.txt");
+        fs::write(&source, b"source").expect("create source file");
+        fs::create_dir(&destination).expect("create destination");
+        fs::write(&existing, b"existing").expect("create existing file");
+
+        let conflicts = file_conflicts(copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let summary =
+            resolve_file_conflicts(conflicts, ConflictChoice::Skip).expect("skip conflict");
+        let mut view = ExplorerView::new(destination.clone());
+        view.handle_file_command_result(Ok(FileOperationOutcome::Finished(summary)));
+
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&existing).unwrap(), b"existing");
+        assert!(view.file_operation_undo_stack.is_empty());
+    }
+
+    #[test]
     fn undo_move_restores_source_destination_pairs() {
         let temp = TempDir::new();
         let source_dir = temp.path().join("source");
@@ -1768,6 +1988,7 @@ mod tests {
         view.finish_file_operation(FileOperationSummary {
             kind: FileOperationKind::Extract,
             destination_paths: vec![extracted],
+            copy_undo: FileOperationCopyUndo::default(),
             moved_source_paths: Vec::new(),
             moved_paths: Vec::new(),
             archive_diagnostics: None,
