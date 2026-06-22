@@ -781,6 +781,19 @@ impl ExplorerView {
                 ))
                 .child(utility_menu_separator())
                 .child(utility_checkbox_row(
+                    "utility-dot-items",
+                    self.show_dotfiles,
+                    "Dot items",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            crate::settings::set_show_dotfiles(!this.show_dotfiles, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+                .child(utility_checkbox_row(
                     "utility-hidden-files",
                     self.show_hidden_files,
                     "Hidden items",
@@ -8209,6 +8222,51 @@ mod tests {
                 .value
                 .view
                 .show_folder_sizes
+        }));
+    }
+
+    #[gpui::test]
+    fn view_menu_dot_items_precedes_hidden_items_and_updates_setting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.run_until_parked();
+        let view_position = cx
+            .debug_bounds("utility-view")
+            .expect("view utility button bounds")
+            .center();
+        cx.simulate_mouse_down(view_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let dot_bounds = cx
+            .debug_bounds("utility-dot-items")
+            .expect("dot items menu row bounds");
+        let hidden_bounds = cx
+            .debug_bounds("utility-hidden-files")
+            .expect("hidden items menu row bounds");
+        assert!(dot_bounds.origin.y < hidden_bounds.origin.y);
+
+        let dot_position = dot_bounds.center();
+        cx.simulate_mouse_down(dot_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(dot_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(!cx.read(|cx| {
+            cx.global::<crate::settings::SettingsState>()
+                .value
+                .view
+                .show_dotfiles
         }));
     }
 

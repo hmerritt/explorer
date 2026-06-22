@@ -753,13 +753,13 @@ impl ExplorerView {
         let generation = self.search.recursive_generation;
         let root = self.path.clone();
         let query = self.search.content.clone();
-        let show_hidden_files = self.show_hidden_files;
+        let visibility = self.entry_visibility();
         let cache_clone_started = Instant::now();
         let cached_search = self
             .search
             .recursive_cache
             .as_ref()
-            .filter(|cache| cache.root == root && cache.show_hidden_files == show_hidden_files)
+            .filter(|cache| cache.root == root && cache.visibility == visibility)
             .cloned();
         self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(
             cached_search
@@ -806,7 +806,7 @@ impl ExplorerView {
                             generation,
                             root,
                             query,
-                            show_hidden_files,
+                            visibility,
                             cached_search,
                             cancel,
                             progress,
@@ -844,7 +844,7 @@ impl ExplorerView {
             || self.search.recursive_generation != output.generation
             || self.path != output.root
             || self.search.content != output.query
-            || self.show_hidden_files != output.show_hidden_files
+            || self.entry_visibility() != output.visibility
         {
             return;
         }
@@ -858,7 +858,7 @@ impl ExplorerView {
         self.recursive_file_sort_override = None;
         self.search.recursive_cache = Some(RecursiveSearchCache {
             root: output.root,
-            show_hidden_files: output.show_hidden_files,
+            visibility: output.visibility,
             paths: output.scanned_paths,
         });
         self.entries = output.entries;
@@ -1245,7 +1245,7 @@ mod tests {
             generation: 1,
             root: view.path.clone(),
             query: "stale".to_owned(),
-            show_hidden_files: view.show_hidden_files,
+            visibility: view.entry_visibility(),
             scanned_paths: Arc::new(Vec::new()),
             entries: vec![FileEntry::test("stale.txt", false, Some(1), None)],
         });

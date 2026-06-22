@@ -316,6 +316,8 @@ pub struct ViewSettings {
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
+    #[serde(default = "default_show_dotfiles")]
+    pub show_dotfiles: bool,
     pub show_hidden: bool,
     #[serde(
         default = "default_file_sort",
@@ -426,6 +428,7 @@ impl Default for ViewSettings {
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
+            show_dotfiles: true,
             show_hidden: false,
             sort: default_file_sort(),
         }
@@ -627,6 +630,10 @@ pub(crate) fn initialize(cx: &mut App) {
 
 pub(crate) fn set_show_hidden(value: bool, cx: &mut impl BorrowAppContext) {
     update_settings(cx, |settings| settings.view.show_hidden = value);
+}
+
+pub(crate) fn set_show_dotfiles(value: bool, cx: &mut impl BorrowAppContext) {
+    update_settings(cx, |settings| settings.view.show_dotfiles = value);
 }
 
 pub(crate) fn set_show_folder_sizes(value: bool, cx: &mut impl BorrowAppContext) {
@@ -1779,6 +1786,10 @@ fn default_font() -> String {
     DEFAULT_FONT.to_owned()
 }
 
+fn default_show_dotfiles() -> bool {
+    true
+}
+
 fn default_media_view_mode() -> FileViewMode {
     FileViewMode::LargeIcons
 }
@@ -2066,6 +2077,7 @@ mod tests {
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
         assert!(settings.contextmenu.items.is_empty());
+        assert!(settings.view.show_dotfiles);
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
@@ -2123,6 +2135,7 @@ mod tests {
             serde_json::from_str(r#"{"view":{"show_hidden":true},"future_option":42}"#)
                 .expect("deserialize partial settings");
         assert!(settings.view.show_hidden);
+        assert!(settings.view.show_dotfiles);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
         #[cfg(target_os = "windows")]
@@ -3138,6 +3151,7 @@ mod tests {
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
         assert_eq!(object["view"]["show_extensions"], true);
+        assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");
         assert_eq!(object["view"]["sort"]["direction"], "ascending");
         assert_eq!(object["show_hidden_files"], true);
@@ -3173,6 +3187,32 @@ mod tests {
         assert_eq!(document["future_option"]["z"], 1);
         assert_eq!(document["view"]["future_view"], 7);
         assert_eq!(document["view"]["show_hidden"], true);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn dotfile_setting_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("dotfiles-preserve-unknown").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"future_option":42,"view":{"future_view":7,"show_dotfiles":true}}"#,
+        )
+        .unwrap();
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        cx.set_global(SettingsState {
+            value: loaded.value,
+            document: loaded.document,
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        cx.update(|cx| set_show_dotfiles(false, cx));
+
+        let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["future_option"], 42);
+        assert_eq!(document["view"]["future_view"], 7);
+        assert_eq!(document["view"]["show_dotfiles"], false);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

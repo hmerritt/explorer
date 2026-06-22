@@ -26,8 +26,8 @@ use crate::explorer::{
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     file_commands::FileOperationUndo,
     filesystem::{
-        FileConflictBatch, FileOperationProgress, load_entries, path_is_filesystem_root,
-        path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries,
+        path_is_filesystem_root, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
@@ -107,6 +107,7 @@ pub struct ExplorerView {
     pub(super) next_pending_click_rename_id: u64,
     pub(super) date_format: String,
     pub(super) font: Font,
+    pub(super) show_dotfiles: bool,
     pub(super) show_hidden_files: bool,
     pub(super) show_file_name_extensions: bool,
     pub(super) show_folder_size: bool,
@@ -233,6 +234,10 @@ pub(super) enum UtilityMenu {
 }
 
 impl ExplorerView {
+    pub(super) fn entry_visibility(&self) -> EntryVisibility {
+        EntryVisibility::new(self.show_dotfiles, self.show_hidden_files)
+    }
+
     #[cfg(test)]
     pub fn new(initial_path: PathBuf) -> Self {
         Self::new_inner_with_settings(initial_path, None, &test_explorer_settings())
@@ -356,6 +361,7 @@ impl ExplorerView {
             next_pending_click_rename_id: 0,
             date_format: settings.view.date_format.clone(),
             font: crate::settings::app_font(settings),
+            show_dotfiles: settings.view.show_dotfiles,
             show_hidden_files: settings.view.show_hidden,
             show_file_name_extensions: settings.view.show_extensions,
             show_folder_size: settings.view.show_folder_sizes,
@@ -386,12 +392,14 @@ impl ExplorerView {
     }
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
-        let hidden_changed = self.show_hidden_files != settings.view.show_hidden;
+        let visibility_changed = self.show_dotfiles != settings.view.show_dotfiles
+            || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
         let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
+        self.show_dotfiles = settings.view.show_dotfiles;
         self.show_hidden_files = settings.view.show_hidden;
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
@@ -431,7 +439,7 @@ impl ExplorerView {
             self.file_columns = settings.view.file_columns.clone();
         }
 
-        if hidden_changed {
+        if visibility_changed {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
@@ -485,7 +493,7 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(mode);
 
         let load_started = Instant::now();
-        match load_entries(&self.path, self.show_hidden_files) {
+        match load_entries(&self.path, self.entry_visibility()) {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
                     load_started.elapsed(),
@@ -704,7 +712,7 @@ impl ExplorerView {
             restart_watcher,
         };
         let path = state.path.clone();
-        let show_hidden_files = self.show_hidden_files;
+        let visibility = self.entry_visibility();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -716,7 +724,7 @@ impl ExplorerView {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { load_entries(&path, show_hidden_files) }
+                    async move { load_entries(&path, visibility) }
                 })
                 .await;
             crate::debug_options::log_nav_timing(
@@ -1638,6 +1646,7 @@ mod tests {
             &ExplorerSettings::default(),
         );
 
+        assert!(view.show_dotfiles);
         assert!(!view.show_hidden_files);
         assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
         assert_eq!(view.font.family, ".SystemUIFont");

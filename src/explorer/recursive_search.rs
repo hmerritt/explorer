@@ -25,7 +25,7 @@ use jwalk::{WalkDirGeneric, rayon::prelude::*};
 
 use crate::explorer::{
     entry::FileEntry,
-    filesystem::{should_hide_entry, should_hide_entry_with_metadata},
+    filesystem::{EntryVisibility, should_hide_entry, should_hide_entry_with_metadata},
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 5120;
@@ -71,7 +71,7 @@ impl RecursiveSearchPath {
 #[derive(Clone)]
 pub(super) struct RecursiveSearchCache {
     pub(super) root: PathBuf,
-    pub(super) show_hidden_files: bool,
+    pub(super) visibility: EntryVisibility,
     pub(super) paths: Arc<Vec<RecursiveSearchPath>>,
 }
 
@@ -80,7 +80,7 @@ pub(super) struct RecursiveSearchOutput {
     pub(super) generation: u64,
     pub(super) root: PathBuf,
     pub(super) query: String,
-    pub(super) show_hidden_files: bool,
+    pub(super) visibility: EntryVisibility,
     pub(super) scanned_paths: Arc<Vec<RecursiveSearchPath>>,
     pub(super) entries: Vec<FileEntry>,
 }
@@ -89,11 +89,12 @@ pub(super) fn recursive_search_entries(
     generation: u64,
     root: PathBuf,
     query: String,
-    show_hidden_files: bool,
+    visibility: impl Into<EntryVisibility>,
     cached_search: Option<RecursiveSearchCache>,
     cancel: Arc<AtomicBool>,
     progress: Arc<RecursiveSearchProgress>,
 ) -> RecursiveSearchOutput {
+    let visibility = visibility.into();
     let total_started = Instant::now();
     let cache_hit = cached_search.is_some();
 
@@ -110,7 +111,7 @@ pub(super) fn recursive_search_entries(
             progress.scanning.store(true, Ordering::Relaxed);
             let paths = scan_recursive_paths_with_progress(
                 &root,
-                show_hidden_files,
+                visibility,
                 cancel.clone(),
                 Some(&progress.scanned_paths),
             );
@@ -142,8 +143,7 @@ pub(super) fn recursive_search_entries(
 
     let result_path_count = result_paths.len();
     let materialize_started = Instant::now();
-    let entries =
-        materialize_recursive_entries(&scanned_paths, &result_paths, show_hidden_files, &cancel);
+    let entries = materialize_recursive_entries(&scanned_paths, &result_paths, visibility, &cancel);
     recursive_search_timing!(
         generation,
         materialize_started.elapsed(),
@@ -163,7 +163,7 @@ pub(super) fn recursive_search_entries(
         generation,
         root,
         query,
-        show_hidden_files,
+        visibility,
         scanned_paths,
         entries,
     }
@@ -172,15 +172,15 @@ pub(super) fn recursive_search_entries(
 #[cfg(any(test, feature = "benchmarks"))]
 pub(super) fn scan_recursive_paths(
     root: &Path,
-    show_hidden_files: bool,
+    visibility: impl Into<EntryVisibility>,
     cancel: Arc<AtomicBool>,
 ) -> Arc<Vec<RecursiveSearchPath>> {
-    scan_recursive_paths_with_progress(root, show_hidden_files, cancel, None)
+    scan_recursive_paths_with_progress(root, visibility.into(), cancel, None)
 }
 
 fn scan_recursive_paths_with_progress(
     root: &Path,
-    show_hidden_files: bool,
+    visibility: EntryVisibility,
     cancel: Arc<AtomicBool>,
     progress: Option<&AtomicUsize>,
 ) -> Arc<Vec<RecursiveSearchPath>> {
@@ -191,7 +191,7 @@ fn scan_recursive_paths_with_progress(
     let process_cancel = cancel.clone();
     let walker = WalkDirGeneric::<((), String)>::new(root)
         .sort(false)
-        .skip_hidden(!show_hidden_files)
+        .skip_hidden(false)
         .follow_links(false)
         .min_depth(1)
         .process_read_dir(move |_, _, _, children| {
@@ -208,7 +208,7 @@ fn scan_recursive_paths_with_progress(
 
                 if entry.file_type().is_dir() {
                     let path = entry.path();
-                    if should_hide_entry(entry.file_name(), &path, show_hidden_files) {
+                    if should_hide_entry(entry.file_name(), &path, visibility) {
                         entry.read_children_path = None;
                     }
                 }
@@ -222,6 +222,10 @@ fn scan_recursive_paths_with_progress(
         }
 
         if let Ok(entry) = entry_result {
+            let path = entry.path();
+            if should_hide_entry(entry.file_name(), &path, visibility) {
+                continue;
+            }
             let depth = entry.depth();
             paths.push(RecursiveSearchPath {
                 parent_path: entry.parent_path,
@@ -278,9 +282,10 @@ fn filter_recursive_paths(
 fn materialize_recursive_entries(
     paths: &[RecursiveSearchPath],
     result_indices: &[usize],
-    show_hidden_files: bool,
+    visibility: impl Into<EntryVisibility>,
     cancel: &AtomicBool,
 ) -> Vec<FileEntry> {
+    let visibility = visibility.into();
     if result_indices.is_empty() || cancel.load(Ordering::Relaxed) {
         return Vec::new();
     }
@@ -288,14 +293,12 @@ fn materialize_recursive_entries(
     let materialized = if result_indices.len() < PARALLEL_MATERIALIZATION_THRESHOLD {
         result_indices
             .iter()
-            .filter_map(|&index| {
-                materialize_recursive_entry(&paths[index], show_hidden_files, cancel)
-            })
+            .filter_map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
             .collect()
     } else {
         result_indices
             .par_iter()
-            .map(|&index| materialize_recursive_entry(&paths[index], show_hidden_files, cancel))
+            .map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
             .collect::<Vec<_>>()
             .into_iter()
             .flatten()
@@ -311,7 +314,7 @@ fn materialize_recursive_entries(
 
 fn materialize_recursive_entry(
     recursive_path: &RecursiveSearchPath,
-    show_hidden_files: bool,
+    visibility: EntryVisibility,
     cancel: &AtomicBool,
 ) -> Option<FileEntry> {
     if cancel.load(Ordering::Relaxed) {
@@ -320,12 +323,8 @@ fn materialize_recursive_entry(
 
     let path = recursive_path.path();
     let link_metadata = fs::symlink_metadata(&path).ok()?;
-    if should_hide_entry_with_metadata(
-        &recursive_path.file_name,
-        &path,
-        show_hidden_files,
-        &link_metadata,
-    ) || cancel.load(Ordering::Relaxed)
+    if should_hide_entry_with_metadata(&recursive_path.file_name, &path, visibility, &link_metadata)
+        || cancel.load(Ordering::Relaxed)
     {
         return None;
     }
@@ -340,7 +339,7 @@ pub mod benchmark_support {
 
     pub struct ScannedPaths {
         root: PathBuf,
-        show_hidden_files: bool,
+        visibility: EntryVisibility,
         paths: Arc<Vec<RecursiveSearchPath>>,
     }
 
@@ -391,10 +390,11 @@ pub mod benchmark_support {
     }
 
     pub fn scan(root: &Path, show_hidden_files: bool) -> ScannedPaths {
+        let visibility = EntryVisibility::from(show_hidden_files);
         ScannedPaths {
             root: root.to_path_buf(),
-            show_hidden_files,
-            paths: scan_recursive_paths(root, show_hidden_files, Arc::new(AtomicBool::new(false))),
+            visibility,
+            paths: scan_recursive_paths(root, visibility, Arc::new(AtomicBool::new(false))),
         }
     }
 
@@ -410,7 +410,7 @@ pub mod benchmark_support {
         MaterializedEntries(materialize_recursive_entries(
             &paths.paths,
             &filtered.0,
-            paths.show_hidden_files,
+            paths.visibility,
             &AtomicBool::new(false),
         ))
     }
@@ -419,7 +419,7 @@ pub mod benchmark_support {
         materialize_recursive_entries(
             &paths.paths,
             &filtered.0,
-            paths.show_hidden_files,
+            paths.visibility,
             &AtomicBool::new(true),
         )
         .len()
@@ -430,10 +430,10 @@ pub mod benchmark_support {
             0,
             paths.root.clone(),
             query.to_owned(),
-            paths.show_hidden_files,
+            paths.visibility,
             Some(RecursiveSearchCache {
                 root: paths.root.clone(),
-                show_hidden_files: paths.show_hidden_files,
+                visibility: paths.visibility,
                 paths: paths.paths.clone(),
             }),
             Arc::new(AtomicBool::new(false)),
@@ -446,7 +446,7 @@ pub mod benchmark_support {
             0,
             root.to_path_buf(),
             query.to_owned(),
-            show_hidden_files,
+            EntryVisibility::from(show_hidden_files),
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(RecursiveSearchProgress::default()),
@@ -529,7 +529,7 @@ mod tests {
 
         let paths = scan_recursive_paths_with_progress(
             temp.path(),
-            true,
+            true.into(),
             Arc::new(AtomicBool::new(false)),
             Some(&progress),
         );
@@ -618,7 +618,26 @@ mod tests {
 
         assert_eq!(
             path_names(&paths),
-            vec![".DS_Store", ".hidden-dir", "nested.txt", "visible.txt"]
+            vec![".hidden-dir", "nested.txt", "visible.txt"]
+        );
+    }
+
+    #[test]
+    fn recursive_scan_shows_dot_items_without_enabling_hidden_attributes() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join(".dot-dir")).expect("create dot directory");
+        fs::write(temp.path().join(".dot-file"), b"dot").expect("create dot file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let paths = scan_recursive_paths(
+            temp.path(),
+            EntryVisibility::new(true, false),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(
+            path_names(&paths),
+            vec![".dot-dir", ".dot-file", "visible.txt"]
         );
     }
 
@@ -757,7 +776,7 @@ mod tests {
         let progress = Arc::new(RecursiveSearchProgress::default());
         let cache = RecursiveSearchCache {
             root: temp.path().to_path_buf(),
-            show_hidden_files: true,
+            visibility: true.into(),
             paths: paths.clone(),
         };
 
@@ -789,7 +808,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let cached_search = RecursiveSearchCache {
             root: temp.path().to_path_buf(),
-            show_hidden_files: true,
+            visibility: true.into(),
             paths: recursive_paths(vec![existing.clone(), missing]),
         };
 

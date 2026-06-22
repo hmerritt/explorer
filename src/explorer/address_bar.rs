@@ -541,7 +541,7 @@ impl ExplorerView {
             Some(focus_handle.clone()),
         );
         address.suggestions =
-            folder_suggestions_for_input(&address.content, &self.path, self.show_hidden_files);
+            folder_suggestions_for_input(&address.content, &self.path, self.entry_visibility());
 
         focus_handle.focus(window);
         let subscription = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
@@ -820,10 +820,10 @@ impl ExplorerView {
 
     fn refresh_address_suggestions(&mut self) {
         let current_path = self.path.clone();
-        let show_hidden_files = self.show_hidden_files;
+        let visibility = self.entry_visibility();
         if let Some(address) = self.active_address_bar.as_mut() {
             address.suggestions =
-                folder_suggestions_for_input(&address.content, &current_path, show_hidden_files);
+                folder_suggestions_for_input(&address.content, &current_path, visibility);
             if address
                 .highlighted_suggestion
                 .is_some_and(|index| index >= address.suggestions.len())
@@ -934,8 +934,9 @@ fn explorer_visible_address_path(path: PathBuf) -> PathBuf {
 pub(super) fn folder_suggestions_for_input(
     input: &str,
     current_path: &Path,
-    show_hidden_files: bool,
+    visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
 ) -> Vec<AddressBarSuggestion> {
+    let visibility = visibility.into();
     let cleaned = cleaned_address_input(input);
     let (parent, prefix) = suggestion_parent_and_prefix(&cleaned, current_path);
     if !parent.is_dir() {
@@ -950,7 +951,7 @@ pub(super) fn folder_suggestions_for_input(
     let mut suggestions = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
-            if should_hide_directory_entry(&entry, show_hidden_files) {
+            if should_hide_directory_entry(&entry, visibility) {
                 return None;
             }
 
@@ -1430,6 +1431,39 @@ mod tests {
 
         assert_eq!(hidden_off_labels, vec!["visible"]);
         assert_eq!(hidden_on_labels, vec![".hidden", "visible"]);
+    }
+
+    #[test]
+    fn folder_suggestions_follow_dot_items_setting_independently() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join(".dot-folder")).expect("create dot folder");
+        fs::create_dir(temp.path().join("visible")).expect("create visible folder");
+
+        let dot_off = folder_suggestions_for_input(
+            "",
+            temp.path(),
+            crate::explorer::filesystem::EntryVisibility::new(false, true),
+        );
+        let dot_on = folder_suggestions_for_input(
+            "",
+            temp.path(),
+            crate::explorer::filesystem::EntryVisibility::new(true, false),
+        );
+
+        assert_eq!(
+            dot_off
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible"]
+        );
+        assert_eq!(
+            dot_on
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![".dot-folder", "visible"]
+        );
     }
 
     #[test]

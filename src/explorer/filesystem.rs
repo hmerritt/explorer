@@ -1025,16 +1025,37 @@ fn linux_disc_source_is_physical_optical(source: &str) -> bool {
             .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct EntryVisibility {
+    pub(super) show_dotfiles: bool,
+    pub(super) show_hidden_attributes: bool,
+}
+
+impl EntryVisibility {
+    pub(super) fn new(show_dotfiles: bool, show_hidden_attributes: bool) -> Self {
+        Self {
+            show_dotfiles,
+            show_hidden_attributes,
+        }
+    }
+}
+
+impl From<bool> for EntryVisibility {
+    fn from(show_hidden: bool) -> Self {
+        Self::new(show_hidden, show_hidden)
+    }
+}
+
 pub(super) fn load_entries(
     path: &Path,
-    show_hidden_files: bool,
+    visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
-    load_entries_with_options(path, EntryLoadOptions::for_path(path, show_hidden_files))
+    load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility.into()))
 }
 
 #[derive(Clone, Copy)]
 struct EntryLoadOptions {
-    hide_hidden_entries: bool,
+    visibility: EntryVisibility,
     applications_view: bool,
 }
 
@@ -1062,9 +1083,9 @@ impl EntryLoadTimingStats {
 }
 
 impl EntryLoadOptions {
-    fn for_path(path: &Path, show_hidden_files: bool) -> Self {
+    fn for_path(path: &Path, visibility: EntryVisibility) -> Self {
         Self {
-            hide_hidden_entries: !show_hidden_files,
+            visibility,
             applications_view: should_use_applications_view(path),
         }
     }
@@ -1136,9 +1157,10 @@ fn load_entries_with_options(
     crate::debug_options::log_nav_timing(
         total_started.elapsed(),
         format_args!(
-            "load_entries.total path={path:?} entries={} show_hidden={}",
+            "load_entries.total path={path:?} entries={} show_dotfiles={} show_hidden={}",
             entries.len().separate_with_commas(),
-            !options.hide_hidden_entries
+            options.visibility.show_dotfiles,
+            options.visibility.show_hidden_attributes
         ),
     );
     Ok(entries)
@@ -1254,9 +1276,10 @@ fn load_applications_entries(
     crate::debug_options::log_nav_timing(
         total_started.elapsed(),
         format_args!(
-            "load_entries.total path={path:?} applications_view=true entries={} show_hidden={}",
+            "load_entries.total path={path:?} applications_view=true entries={} show_dotfiles={} show_hidden={}",
             entries.len().separate_with_commas(),
-            !options.hide_hidden_entries
+            options.visibility.show_dotfiles,
+            options.visibility.show_hidden_attributes
         ),
     );
     Ok(entries)
@@ -1355,15 +1378,15 @@ fn visible_directory_entry_candidate(
         return DirectoryEntryCandidate::Hidden;
     }
 
-    if !options.hide_hidden_entries {
+    if !options.visibility.show_dotfiles && name.to_string_lossy().starts_with('.') {
+        return DirectoryEntryCandidate::Hidden;
+    }
+
+    if options.visibility.show_hidden_attributes {
         return DirectoryEntryCandidate::Visible {
             path,
             link_metadata: None,
         };
-    }
-
-    if name.to_string_lossy().starts_with('.') {
-        return DirectoryEntryCandidate::Hidden;
     }
 
     let Ok(link_metadata) = fs::symlink_metadata(&path) else {
@@ -1402,22 +1425,37 @@ fn should_use_applications_view(_: &Path) -> bool {
     false
 }
 
-pub(super) fn should_hide_directory_entry(entry: &fs::DirEntry, show_hidden_files: bool) -> bool {
-    should_hide_entry(&entry.file_name(), &entry.path(), show_hidden_files)
+pub(super) fn should_hide_directory_entry(
+    entry: &fs::DirEntry,
+    visibility: impl Into<EntryVisibility>,
+) -> bool {
+    should_hide_entry(&entry.file_name(), &entry.path(), visibility)
 }
 
-pub(super) fn should_hide_entry(name: &OsStr, path: &Path, show_hidden_files: bool) -> bool {
-    is_always_hidden_entry(name, path) || (!show_hidden_files && is_hidden_entry(name, path))
+pub(super) fn should_hide_entry(
+    name: &OsStr,
+    path: &Path,
+    visibility: impl Into<EntryVisibility>,
+) -> bool {
+    let visibility = visibility.into();
+    is_always_hidden_entry(name, path)
+        || (!visibility.show_dotfiles && name.to_string_lossy().starts_with('.'))
+        || (!visibility.show_hidden_attributes
+            && (has_macos_hidden_flag(path) || has_windows_hidden_attribute(path)))
 }
 
 pub(super) fn should_hide_entry_with_metadata(
     name: &OsStr,
     path: &Path,
-    show_hidden_files: bool,
+    visibility: impl Into<EntryVisibility>,
     metadata: &fs::Metadata,
 ) -> bool {
+    let visibility = visibility.into();
     is_always_hidden_entry(name, path)
-        || (!show_hidden_files && is_hidden_entry_with_metadata(name, path, metadata))
+        || (!visibility.show_dotfiles && name.to_string_lossy().starts_with('.'))
+        || (!visibility.show_hidden_attributes
+            && (has_macos_hidden_flag_with_metadata(path, metadata)
+                || has_windows_hidden_attribute_with_metadata(path, metadata)))
 }
 
 fn is_always_hidden_entry(name: &OsStr, path: &Path) -> bool {
@@ -1474,18 +1512,6 @@ fn path_is_direct_child_of_windows_drive_root(path: &Path) -> bool {
     }
 
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
-}
-
-fn is_hidden_entry(name: &OsStr, path: &Path) -> bool {
-    name.to_string_lossy().starts_with('.')
-        || has_macos_hidden_flag(path)
-        || has_windows_hidden_attribute(path)
-}
-
-fn is_hidden_entry_with_metadata(name: &OsStr, path: &Path, metadata: &fs::Metadata) -> bool {
-    name.to_string_lossy().starts_with('.')
-        || has_macos_hidden_flag_with_metadata(path, metadata)
-        || has_windows_hidden_attribute_with_metadata(path, metadata)
 }
 
 #[cfg(target_os = "macos")]
@@ -5692,7 +5718,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: true,
+                visibility: EntryVisibility::new(false, false),
                 applications_view: false,
             },
         )
@@ -5710,7 +5736,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: false,
+                visibility: EntryVisibility::new(true, true),
                 applications_view: false,
             },
         )
@@ -5764,6 +5790,56 @@ mod tests {
     }
 
     #[test]
+    fn dot_and_hidden_attribute_visibility_are_independent() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join(".dot"), b"dot").expect("create dot file");
+        fs::write(temp.path().join("visible.txt"), b"visible").expect("create visible file");
+
+        let neither = load_entries(temp.path(), EntryVisibility::new(false, false))
+            .expect("load entries with both disabled");
+        let dots = load_entries(temp.path(), EntryVisibility::new(true, false))
+            .expect("load entries with dots enabled");
+        let hidden = load_entries(temp.path(), EntryVisibility::new(false, true))
+            .expect("load entries with hidden attributes enabled");
+        let both = load_entries(temp.path(), EntryVisibility::new(true, true))
+            .expect("load entries with both enabled");
+
+        assert_eq!(sorted_entry_names(&neither), vec!["visible.txt"]);
+        assert_eq!(sorted_entry_names(&dots), vec![".dot", "visible.txt"]);
+        assert_eq!(sorted_entry_names(&hidden), vec!["visible.txt"]);
+        assert_eq!(sorted_entry_names(&both), vec![".dot", "visible.txt"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dotfile_with_hidden_attribute_requires_both_visibility_options() {
+        let temp = TempDir::new();
+        let hidden_dot = temp.path().join(".hidden-dot");
+        fs::write(&hidden_dot, b"hidden").expect("create hidden dot file");
+        set_windows_file_attributes(&hidden_dot, FILE_ATTRIBUTE_HIDDEN);
+
+        for visibility in [
+            EntryVisibility::new(false, false),
+            EntryVisibility::new(true, false),
+            EntryVisibility::new(false, true),
+        ] {
+            assert!(
+                load_entries(temp.path(), visibility)
+                    .expect("load entries")
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            sorted_entry_names(
+                &load_entries(temp.path(), EntryVisibility::new(true, true)).expect("load entries")
+            ),
+            vec![".hidden-dot"]
+        );
+
+        set_windows_file_attributes(&hidden_dot, FILE_ATTRIBUTE_NORMAL);
+    }
+
+    #[test]
     fn metadata_entry_filter_omits_macos_metadata_names_even_when_hidden_filter_is_disabled() {
         let temp = TempDir::new();
         fs::write(temp.path().join(".DS_Store"), b"metadata").expect("create ds store file");
@@ -5775,7 +5851,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: false,
+                visibility: EntryVisibility::new(true, true),
                 applications_view: false,
             },
         )
@@ -5801,7 +5877,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: true,
+                visibility: EntryVisibility::new(false, false),
                 applications_view: true,
             },
         )
@@ -5826,7 +5902,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: true,
+                visibility: EntryVisibility::new(false, false),
                 applications_view: true,
             },
         )
@@ -5846,7 +5922,7 @@ mod tests {
         let entries = load_entries_with_options(
             temp.path(),
             EntryLoadOptions {
-                hide_hidden_entries: false,
+                visibility: EntryVisibility::new(true, true),
                 applications_view: false,
             },
         )
