@@ -10,7 +10,7 @@
 - rsync copy/sync builtin
 - Windows, run as Administrator
 - admin/elevation prompts
-- Mount ISO (and other mountable files) as drive
+- Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon: 
 
 ## 2
 

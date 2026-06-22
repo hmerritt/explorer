@@ -138,6 +138,7 @@ png_icon!(
     "macos-applications.png"
 );
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
+png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
@@ -152,6 +153,7 @@ svg_icon!(COPY_AS_PATH_ICON, "utility", "copy_as_path.svg");
 svg_icon!(CUT_ICON, "utility", "cut.svg");
 svg_icon!(DELETE_ICON, "utility", "delete.svg");
 svg_icon!(DETAILS_ICON, "utility", "details.svg");
+svg_icon!(EJECT_ICON, "utility", "eject.svg");
 svg_icon!(EXTRACT_ICON, "utility", "extract.svg");
 svg_icon!(
     FAVORITE_PIN_REMOVE_ICON,
@@ -408,6 +410,14 @@ pub(super) fn drive_icon() -> AnyElement {
     image_sidebar_icon(DRIVE_ICON.clone())
 }
 
+pub(super) fn drive_disc_icon() -> AnyElement {
+    image_sidebar_icon(DRIVE_DISC_ICON.clone())
+}
+
+pub(super) fn drive_disc_icon_sized(size: f32) -> AnyElement {
+    image_icon(DRIVE_DISC_ICON.clone(), size, size)
+}
+
 pub(super) fn drive_windows_icon() -> AnyElement {
     image_sidebar_icon(DRIVE_WINDOWS_ICON.clone())
 }
@@ -516,6 +526,12 @@ mod tests {
     fn sidebar_image_icons_use_bundled_png_assets() {
         assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
+        assert!(!DRIVE_DISC_ICON_BYTES.is_empty());
+    }
+
+    #[test]
+    fn utility_icons_use_bundled_svg_assets() {
+        assert!(!EJECT_ICON_BYTES.is_empty());
     }
 
     #[test]

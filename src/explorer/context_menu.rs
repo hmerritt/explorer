@@ -741,6 +741,7 @@ fn mounted_volume_eject_command(path: &Path) -> Option<PlatformCommand> {
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
+    let path_literal = powershell_single_quoted_literal(&path.display().to_string());
     PlatformCommand {
         executable: OsString::from("powershell.exe"),
         args: vec![
@@ -749,15 +750,19 @@ fn windows_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
             OsString::from("-ExecutionPolicy"),
             OsString::from("Bypass"),
             OsString::from("-Command"),
-            OsString::from(
-                "$drive = [System.IO.Path]::GetPathRoot($args[0]).TrimEnd('\\'); \
+            OsString::from(format!(
+                "$drive = [System.IO.Path]::GetPathRoot({path_literal}).TrimEnd('\\'); \
                  $item = (New-Object -ComObject Shell.Application).Namespace(17).ParseName($drive); \
-                 if ($null -eq $item) { throw \"Drive not found: $drive\" }; \
+                 if ($null -eq $item) {{ throw \"Drive not found: $drive\" }}; \
                  $item.InvokeVerb('Eject')",
-            ),
-            path.as_os_str().to_os_string(),
+            )),
         ],
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn powershell_single_quoted_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -3277,9 +3282,18 @@ mod tests {
         let windows_command = windows_mounted_volume_eject_command(&windows_path);
         assert_eq!(windows_command.executable, OsString::from("powershell.exe"));
         assert!(windows_command.args.iter().any(|arg| arg == "-NoProfile"));
+        assert_eq!(windows_command.args.len(), 6);
+        let script = windows_command.args.last().unwrap().to_string_lossy();
+        assert!(script.contains("[System.IO.Path]::GetPathRoot('E:\\')"));
+        assert!(script.contains("$item.InvokeVerb('Eject')"));
+    }
+
+    #[test]
+    fn powershell_single_quoted_literal_escapes_apostrophes() {
+        assert_eq!(powershell_single_quoted_literal(r"E:\"), r"'E:\'");
         assert_eq!(
-            windows_command.args.last().cloned(),
-            Some(windows_path.as_os_str().to_os_string())
+            powershell_single_quoted_literal(r"C:\Bob's Drive"),
+            r"'C:\Bob''s Drive'"
         );
     }
 

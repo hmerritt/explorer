@@ -68,12 +68,13 @@ use crate::explorer::{
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
-        COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EXTRACT_ICON,
-        FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON, LARGE_ICONS_ICON,
-        NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON,
-        RENAME_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
-        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
-        drive_icon, drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
+        COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EJECT_ICON,
+        EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON,
+        LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
+        PROPERTIES_ICON, RENAME_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON,
+        directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
+        directory_shortcut_icon_sized, drive_disc_icon, drive_disc_icon_sized, drive_icon,
+        drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
     },
@@ -238,7 +239,6 @@ const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 14.0;
 const CONTEXT_MENU_ICON_SIZE: f32 = 14.0;
 const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
 const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
-const CONTEXT_MENU_EJECT_ICON: &str = "\u{E759}";
 const CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
 const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 0.0;
 const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 18.0;
@@ -2744,6 +2744,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
     match kind {
         SidebarItemKind::Directory(kind) => directory_kind_icon(kind),
         SidebarItemKind::CustomDirectory => folder_icon().into_any_element(),
+        SidebarItemKind::Drive if drive_root_is_ejectable(path) => drive_disc_icon(),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
@@ -3958,6 +3959,8 @@ fn context_menu_icon_element(
         ContextMenuIcon::FolderKindForPath { path, kind } => {
             if matches!(kind, Some(DirectoryKind::DriveWsl)) {
                 drive_wsl_icon_sized_for_path(&path, CONTEXT_MENU_ICON_SIZE)
+            } else if matches!(kind, Some(DirectoryKind::Drive)) && drive_root_is_ejectable(&path) {
+                drive_disc_icon_sized(CONTEXT_MENU_ICON_SIZE)
             } else {
                 kind.map(|kind| directory_kind_icon_sized(kind, CONTEXT_MENU_ICON_SIZE))
                     .unwrap_or_else(|| folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element())
@@ -3997,26 +4000,15 @@ fn context_menu_icon_element(
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
-        ContextMenuIcon::Eject => context_menu_glyph_icon(CONTEXT_MENU_EJECT_ICON),
+        ContextMenuIcon::Eject => gpui::img(EJECT_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
         ContextMenuIcon::Unpin => gpui::img(FAVORITE_PIN_REMOVE_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
     })
-}
-
-fn context_menu_glyph_icon(icon: &'static str) -> AnyElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(CONTEXT_MENU_ICON_SIZE))
-        .h(px(CONTEXT_MENU_ICON_SIZE))
-        .font(nav_icon_font())
-        .text_size(px(13.0))
-        .text_color(rgb(0x1f1f1f))
-        .child(icon)
-        .into_any_element()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6235,6 +6227,27 @@ mod tests {
                 Some(DirectoryKind::DriveWsl),
                 false
             )
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sidebar_context_menu_target_marks_visible_mounted_drives_ejectable() {
+        let path = if cfg!(target_os = "macos") {
+            PathBuf::from("/Volumes/Backup")
+        } else {
+            PathBuf::from("/media/alex/Backup")
+        };
+        let drive = SidebarItem {
+            label: "Backup".to_owned(),
+            path: path.clone(),
+            kind: SidebarItemKind::Drive,
+            configured_index: None,
+        };
+
+        assert_eq!(
+            sidebar_context_menu_target(&drive),
+            (path, None, Some(DirectoryKind::Drive), true)
         );
     }
 
