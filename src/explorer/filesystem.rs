@@ -1723,6 +1723,20 @@ pub(super) fn archive_path_is_supported(path: &Path) -> bool {
         .is_some_and(archive_name_has_supported_extension)
 }
 
+pub(super) fn mountable_image_path_is_supported(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(mountable_image_extension_is_supported)
+}
+
+pub(super) fn mountable_image_extension_is_supported(extension: &str) -> bool {
+    extension.eq_ignore_ascii_case("iso")
+        || extension.eq_ignore_ascii_case("img")
+        || (cfg!(target_os = "macos") && extension.eq_ignore_ascii_case("dmg"))
+        || (cfg!(target_os = "windows")
+            && (extension.eq_ignore_ascii_case("vhd") || extension.eq_ignore_ascii_case("vhdx")))
+}
+
 pub(super) fn prepare_extract_archives_to_directory(
     archives: &[PathBuf],
     destination: &Path,
@@ -4866,6 +4880,27 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort_unstable();
         names
+    }
+
+    #[test]
+    fn mountable_image_extensions_match_platform_support() {
+        assert!(mountable_image_extension_is_supported("iso"));
+        assert!(mountable_image_extension_is_supported("ISO"));
+        assert!(mountable_image_extension_is_supported("img"));
+        assert!(mountable_image_extension_is_supported("IMG"));
+        assert_eq!(
+            mountable_image_extension_is_supported("dmg"),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            mountable_image_extension_is_supported("vhd"),
+            cfg!(target_os = "windows")
+        );
+        assert_eq!(
+            mountable_image_extension_is_supported("vhdx"),
+            cfg!(target_os = "windows")
+        );
+        assert!(!mountable_image_extension_is_supported("zip"));
     }
 
     #[cfg(target_os = "macos")]

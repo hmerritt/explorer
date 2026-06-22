@@ -2,7 +2,7 @@
 
 ## 1
 
-- Mount ISO (and other mountable files) as drive. Add icon to the utility bar, on the left (same position as Extract). Use icon:
+- Alt + hover over any image file to view a preview of the image in a hovering popup overaly box 250x250. The aim of this is a super-fast preview, so the implementation should aggressively focus on speed over quality, for all file formats.
 
 ## 2
 

@@ -1,7 +1,6 @@
 use crate::explorer::constants::FILE_ICON_SIZE;
 use crate::explorer::constants::SIDEBAR_ICON_SIZE;
 use std::{
-    io::Cursor,
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -88,21 +87,6 @@ macro_rules! png_icon {
     };
 }
 
-fn ico_image_or_fallback(bytes: &[u8], fallback: Arc<Image>) -> Arc<Image> {
-    ico_png_bytes(bytes)
-        .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
-        .unwrap_or(fallback)
-}
-
-fn ico_png_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
-    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Ico).ok()?;
-    let mut png = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-        .ok()?;
-    (!png.is_empty()).then_some(png)
-}
-
 png_icon!(AUDIO_FILE_ICON, "files", "audio.png");
 png_icon!(CONFIGURATION_FILE_ICON, "files", "configuration.png");
 png_icon!(DISC_FILE_ICON, "files", "disc.png");
@@ -158,13 +142,10 @@ png_icon!(
 );
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
+png_icon!(MOUNT_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
-const BLU_RAY_DISC_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/devices/discs/bd.ico");
-const DVD_DISC_ICON_BYTES: &[u8] = include_bytes!("../../assets/icons/devices/discs/dvd.ico");
-static BLU_RAY_DISC_ICON: LazyLock<Arc<Image>> =
-    LazyLock::new(|| ico_image_or_fallback(BLU_RAY_DISC_ICON_BYTES, DRIVE_DISC_ICON.clone()));
-static DVD_DISC_ICON: LazyLock<Arc<Image>> =
-    LazyLock::new(|| ico_image_or_fallback(DVD_DISC_ICON_BYTES, DRIVE_DISC_ICON.clone()));
+png_icon!(BLU_RAY_DISC_ICON, "devices/discs", "bd.png");
+png_icon!(DVD_DISC_ICON, "devices/discs", "dvd.png");
 png_icon!(BIN_SIDEBAR_ICON, "sidebar", "bin.png");
 png_icon!(DESKTOP_SIDEBAR_ICON, "sidebar", "desktop.png");
 png_icon!(DOCUMENTS_SIDEBAR_ICON, "sidebar", "documents.png");
@@ -576,12 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn optical_drive_ico_assets_decode_to_png_images() {
-        let blu_ray_png = ico_png_bytes(BLU_RAY_DISC_ICON_BYTES).expect("decode blu-ray icon");
-        let dvd_png = ico_png_bytes(DVD_DISC_ICON_BYTES).expect("decode dvd icon");
-
-        assert!(!blu_ray_png.is_empty());
-        assert!(!dvd_png.is_empty());
+    fn optical_drive_png_assets_load_as_png_images() {
         assert_eq!(BLU_RAY_DISC_ICON.format, ImageFormat::Png);
         assert_eq!(DVD_DISC_ICON.format, ImageFormat::Png);
         assert!(!BLU_RAY_DISC_ICON.bytes.is_empty());

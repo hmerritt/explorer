@@ -70,13 +70,13 @@ use crate::explorer::{
     icons::{
         COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EJECT_ICON,
         EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON,
-        LARGE_ICONS_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON, PASTE_ICON,
-        PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON, SORT_CHEVRON_DOWN_ICON,
-        SORT_CHEVRON_UP_ICON, directory_kind_icon, directory_kind_icon_sized,
-        directory_shortcut_icon, directory_shortcut_icon_sized, drive_disc_icon_for_path,
-        drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon, drive_wsl_icon_for_path,
-        drive_wsl_icon_sized_for_path, executable_icon_sized, file_icon, file_icon_for_path,
-        file_icon_sized, folder_icon, folder_icon_sized, image_icon,
+        LARGE_ICONS_ICON, MOUNT_DISC_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON,
+        PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON,
+        SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
+        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
+        drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
+        drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, executable_icon_sized, file_icon,
+        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
     large_icons::{
@@ -519,6 +519,7 @@ impl ExplorerView {
         let has_selection = !self.selection.selected_indices.is_empty();
         let can_rename = self.can_start_selected_rename();
         let can_extract = self.selected_archive_paths().is_some();
+        let can_mount = self.selected_mountable_image_path().is_some();
         let clipboard = cx.read_from_clipboard();
         let can_paste = clipboard_item_can_paste(clipboard.as_ref());
 
@@ -682,6 +683,27 @@ impl ExplorerView {
                         this.open_utility_menu = None;
                         if this.commit_active_rename_before_interaction(window, cx) {
                             this.extract_selected_archives(cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+            })
+            .when(can_mount, |this| {
+                this.child(utility_separator()).child(utility_action_button(
+                    "utility-mount",
+                    Some(
+                        gpui::img(MOUNT_DISC_ICON.clone())
+                            .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .into_any_element(),
+                    ),
+                    "Mount",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close_context_menu();
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.mount_selected_image(cx);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -4051,6 +4073,10 @@ fn context_menu_icon_element(
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
+        ContextMenuIcon::Mount => gpui::img(MOUNT_DISC_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
         ContextMenuIcon::File => file_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
         ContextMenuIcon::NativeFile => native_file_icon
             .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
@@ -6714,6 +6740,37 @@ mod tests {
         cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("utility-large-icons").is_some());
+    }
+
+    #[gpui::test]
+    fn utility_mount_is_visible_only_for_single_mountable_image(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let image = temp.path().join("installer.iso");
+        let text = temp.path().join("notes.txt");
+        fs::write(&image, b"not a real image").expect("create image");
+        fs::write(&text, b"text").expect("create text");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-mount").is_none());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&image);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-mount").is_some());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&text);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-mount").is_none());
     }
 
     #[gpui::test]

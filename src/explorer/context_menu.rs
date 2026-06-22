@@ -14,6 +14,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::archive_path_is_supported,
     filesystem::format_open_error,
+    filesystem::mountable_image_path_is_supported,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
     view::{ExplorerView, ExplorerViewEvent},
@@ -78,6 +79,7 @@ pub(super) enum ContextMenuIcon {
     Properties,
     RunElevated,
     Extract,
+    Mount,
     File,
     NativeFile,
     Folder,
@@ -126,6 +128,7 @@ pub(super) enum ContextMenuCommand {
     },
     Paste,
     ExtractSelectedArchives,
+    MountSelectedImage,
     DeleteSelected,
     RenameSelected,
     PropertiesSelected,
@@ -403,6 +406,7 @@ impl ExplorerView {
             }
             ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
             ContextMenuCommand::ExtractSelectedArchives => self.extract_selected_archives(cx),
+            ContextMenuCommand::MountSelectedImage => self.mount_selected_image(cx),
             ContextMenuCommand::DeleteSelected => self.trash_selected_paths(cx),
             ContextMenuCommand::RenameSelected => {
                 self.start_rename_selected(window, cx);
@@ -535,6 +539,51 @@ impl ExplorerView {
             Err(error) => {
                 self.open_error = Some(format!(
                     "Could not eject {}: {error}",
+                    mounted_volume_error_name(path)
+                ));
+            }
+        }
+    }
+
+    pub(super) fn mount_selected_image(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_mountable_image_path() else {
+            return;
+        };
+        if self.image_mount_task.is_some() {
+            return;
+        }
+
+        self.open_error = None;
+        let task_path = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { mount_image_path(&task_path) })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.image_mount_task = None;
+                explorer.handle_image_mount_result(&path, result, cx);
+                cx.notify();
+            });
+        });
+        self.image_mount_task = Some(task);
+    }
+
+    fn handle_image_mount_result(
+        &mut self,
+        path: &Path,
+        result: io::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.open_error = None;
+                self.refresh_with_entry_metadata_resolution(cx);
+            }
+            Err(error) => {
+                self.open_error = Some(format!(
+                    "Could not mount {}: {error}",
                     mounted_volume_error_name(path)
                 ));
             }
@@ -773,6 +822,26 @@ fn eject_mounted_volume_path(path: &Path) -> io::Result<()> {
     run_platform_command(&command)
 }
 
+fn mount_image_path(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_mount_image_path(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return run_platform_command(&macos_mount_image_command(path));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return linux_mount_image_path(path);
+    }
+
+    #[allow(unreachable_code)]
+    Err(io::Error::other("mount is not supported on this platform"))
+}
+
 fn run_platform_command(command: &PlatformCommand) -> io::Result<()> {
     let output = Command::new(&command.executable)
         .args(&command.args)
@@ -828,6 +897,73 @@ fn mounted_volume_eject_command(path: &Path) -> Option<PlatformCommand> {
     None
 }
 
+#[cfg(target_os = "windows")]
+fn windows_mount_image_path(path: &Path) -> io::Result<()> {
+    if windows_mount_image_uses_shell(path) {
+        run_platform_command(&windows_shell_mount_image_command(path))
+    } else {
+        run_platform_command(&windows_mount_disk_image_command(path))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_mount_image_uses_shell(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("img"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_mount_disk_image_command(path: &Path) -> PlatformCommand {
+    let path_literal = powershell_single_quoted_literal(&path.display().to_string());
+    PlatformCommand {
+        executable: OsString::from("powershell.exe"),
+        args: vec![
+            OsString::from("-NoProfile"),
+            OsString::from("-NonInteractive"),
+            OsString::from("-ExecutionPolicy"),
+            OsString::from("Bypass"),
+            OsString::from("-Command"),
+            OsString::from(format!(
+                "Mount-DiskImage -ImagePath {path_literal} -ErrorAction Stop",
+            )),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_shell_mount_image_command(path: &Path) -> PlatformCommand {
+    let parent_literal = powershell_single_quoted_literal(
+        &path
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_else(|| ".".to_owned()),
+    );
+    let file_name_literal = powershell_single_quoted_literal(
+        &path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string()),
+    );
+    PlatformCommand {
+        executable: OsString::from("powershell.exe"),
+        args: vec![
+            OsString::from("-NoProfile"),
+            OsString::from("-NonInteractive"),
+            OsString::from("-ExecutionPolicy"),
+            OsString::from("Bypass"),
+            OsString::from("-Command"),
+            OsString::from(format!(
+                "$folder = (New-Object -ComObject Shell.Application).Namespace({parent_literal}); \
+                 if ($null -eq $folder) {{ throw \"Folder not found\" }}; \
+                 $item = $folder.ParseName({file_name_literal}); \
+                 if ($null -eq $item) {{ throw \"Image not found\" }}; \
+                 $item.InvokeVerb('Mount')",
+            )),
+        ],
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn windows_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
     let path_literal = powershell_single_quoted_literal(&path.display().to_string());
@@ -862,6 +998,14 @@ fn macos_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_mount_image_command(path: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("/usr/bin/hdiutil"),
+        args: vec![OsString::from("attach"), path.as_os_str().to_os_string()],
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
     PlatformCommand {
@@ -872,6 +1016,90 @@ fn linux_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
             path.as_os_str().to_os_string(),
         ],
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_image_path(path: &Path) -> io::Result<()> {
+    let loop_output = run_platform_command_output(&linux_loop_setup_command(path))?;
+    let loop_device = linux_loop_device_from_loop_setup_output(&loop_output).ok_or_else(|| {
+        io::Error::other("udisksctl did not report a loop device for the mounted image")
+    })?;
+
+    match run_platform_command(&linux_mount_loop_device_command(&loop_device)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = run_platform_command(&linux_loop_delete_command(&loop_device));
+            Err(error)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_loop_setup_command(path: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("udisksctl"),
+        args: vec![
+            OsString::from("loop-setup"),
+            OsString::from("--read-only"),
+            OsString::from("--file"),
+            path.as_os_str().to_os_string(),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mount_loop_device_command(loop_device: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("udisksctl"),
+        args: vec![
+            OsString::from("mount"),
+            OsString::from("--block-device"),
+            loop_device.as_os_str().to_os_string(),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_loop_delete_command(loop_device: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("udisksctl"),
+        args: vec![
+            OsString::from("loop-delete"),
+            OsString::from("--block-device"),
+            loop_device.as_os_str().to_os_string(),
+        ],
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_platform_command_output(command: &PlatformCommand) -> io::Result<std::process::Output> {
+    let output = Command::new(&command.executable)
+        .args(&command.args)
+        .output()?;
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    Err(io::Error::other(platform_command_error_message(&output)))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_loop_device_from_loop_setup_output(output: &std::process::Output) -> Option<PathBuf> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    linux_loop_device_from_loop_setup_stdout(&stdout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_loop_device_from_loop_setup_stdout(stdout: &str) -> Option<PathBuf> {
+    stdout
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|character: char| {
+                character == '.' || character == ',' || character == ';'
+            })
+        })
+        .find(|word| word.starts_with("/dev/loop"))
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -989,6 +1217,16 @@ fn entry_context_menu_items_with_custom(
             command,
             enabled: true,
         });
+
+        if selected_entries_are_supported_mountable_images(selected_entries) {
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-mount".to_owned(),
+                icon: Some(ContextMenuIcon::Mount),
+                label: "Mount".to_owned(),
+                command: ContextMenuCommand::MountSelectedImage,
+                enabled: true,
+            });
+        }
 
         #[cfg(target_os = "windows")]
         if selected_entries_are_run_elevated_targets(selected_entries) {
@@ -1137,6 +1375,13 @@ fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bo
         && selected_entries
             .iter()
             .all(|entry| entry.is_open_with_target() && archive_path_is_supported(&entry.path))
+}
+
+fn selected_entries_are_supported_mountable_images(selected_entries: &[FileEntry]) -> bool {
+    let [entry] = selected_entries else {
+        return false;
+    };
+    entry.is_open_with_target() && mountable_image_path_is_supported(&entry.path)
 }
 
 fn selected_entries_are_run_elevated_targets(selected_entries: &[FileEntry]) -> bool {
@@ -1648,6 +1893,21 @@ mod tests {
                     item,
                     ContextMenuItem::Action {
                         command: ContextMenuCommand::ExtractSelectedArchives,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    fn menu_mount_count(items: &[ContextMenuItem]) -> usize {
+        items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ContextMenuItem::Action {
+                        command: ContextMenuCommand::MountSelectedImage,
                         ..
                     }
                 )
@@ -2552,6 +2812,56 @@ mod tests {
                 enabled: true,
             }) if id == "context-menu-entry-extract" && label == "Extract"
         ));
+    }
+
+    #[test]
+    fn entry_menu_for_single_mountable_image_shows_mount_below_open() {
+        let image = FileEntry::test("installer.iso", false, Some(1), None);
+        let items = entry_menu_for_selected_entries(vec![image]);
+
+        let open_index = action_index(&items, "context-menu-entry-open");
+        let mount_index = action_index(&items, "context-menu-entry-mount");
+        let first_separator = items
+            .iter()
+            .position(|item| matches!(item, ContextMenuItem::Separator))
+            .expect("first separator");
+
+        assert_eq!(mount_index, open_index + 1);
+        assert!(mount_index < first_separator);
+        assert!(matches!(
+            items.get(mount_index),
+            Some(ContextMenuItem::Action {
+                id,
+                icon: Some(ContextMenuIcon::Mount),
+                label,
+                command: ContextMenuCommand::MountSelectedImage,
+                enabled: true,
+            }) if id == "context-menu-entry-mount" && label == "Mount"
+        ));
+    }
+
+    #[test]
+    fn entry_menu_omits_mount_for_unsupported_multi_selection_and_folders() {
+        let image = FileEntry::test("installer.iso", false, Some(1), None);
+        let other_image = FileEntry::test("rescue.img", false, Some(1), None);
+        let text = FileEntry::test("notes.txt", false, Some(1), None);
+        let folder = FileEntry::test("folder.iso", true, None, None);
+
+        assert_eq!(
+            menu_mount_count(&entry_menu_for_selected_entries(vec![
+                image.clone(),
+                other_image
+            ])),
+            0
+        );
+        assert_eq!(
+            menu_mount_count(&entry_menu_for_selected_entries(vec![text])),
+            0
+        );
+        assert_eq!(
+            menu_mount_count(&entry_menu_for_selected_entries(vec![folder])),
+            0
+        );
     }
 
     #[test]
@@ -3746,6 +4056,73 @@ mod tests {
         let script = windows_command.args.last().unwrap().to_string_lossy();
         assert!(script.contains("[System.IO.Path]::GetPathRoot('E:\\')"));
         assert!(script.contains("$item.InvokeVerb('Eject')"));
+    }
+
+    #[test]
+    fn mount_image_commands_use_platform_tools() {
+        let image = PathBuf::from("/images/Installer.iso");
+
+        assert_eq!(
+            macos_mount_image_command(&image),
+            PlatformCommand {
+                executable: OsString::from("/usr/bin/hdiutil"),
+                args: vec![OsString::from("attach"), image.as_os_str().to_os_string()],
+            }
+        );
+        assert_eq!(
+            linux_loop_setup_command(&image),
+            PlatformCommand {
+                executable: OsString::from("udisksctl"),
+                args: vec![
+                    OsString::from("loop-setup"),
+                    OsString::from("--read-only"),
+                    OsString::from("--file"),
+                    image.as_os_str().to_os_string(),
+                ],
+            }
+        );
+
+        let loop_device = PathBuf::from("/dev/loop7");
+        assert_eq!(
+            linux_mount_loop_device_command(&loop_device),
+            PlatformCommand {
+                executable: OsString::from("udisksctl"),
+                args: vec![
+                    OsString::from("mount"),
+                    OsString::from("--block-device"),
+                    loop_device.as_os_str().to_os_string(),
+                ],
+            }
+        );
+        assert_eq!(
+            linux_loop_delete_command(&loop_device),
+            PlatformCommand {
+                executable: OsString::from("udisksctl"),
+                args: vec![
+                    OsString::from("loop-delete"),
+                    OsString::from("--block-device"),
+                    loop_device.as_os_str().to_os_string(),
+                ],
+            }
+        );
+        assert_eq!(
+            linux_loop_device_from_loop_setup_stdout("Mapped file image.iso as /dev/loop7.\n"),
+            Some(loop_device)
+        );
+
+        let windows_command = windows_mount_disk_image_command(&PathBuf::from("/images/Win's.iso"));
+        assert_eq!(windows_command.executable, OsString::from("powershell.exe"));
+        assert!(windows_command.args.iter().any(|arg| arg == "-NoProfile"));
+        let script = windows_command.args.last().unwrap().to_string_lossy();
+        assert!(script.contains("Mount-DiskImage -ImagePath '/images/Win''s.iso'"));
+
+        let shell_image = PathBuf::from("/images/Disk.img");
+        assert!(windows_mount_image_uses_shell(&shell_image));
+        let shell_command = windows_shell_mount_image_command(&shell_image);
+        let script = shell_command.args.last().unwrap().to_string_lossy();
+        assert!(script.contains("Namespace('/images')"));
+        assert!(script.contains("ParseName('Disk.img')"));
+        assert!(script.contains("$item.InvokeVerb('Mount')"));
     }
 
     #[test]

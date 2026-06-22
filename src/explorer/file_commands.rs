@@ -25,9 +25,9 @@ use crate::explorer::{
         ConflictChoice, FileOperationError, FileOperationJob, FileOperationKind, FileOperationMove,
         FileOperationSummary, PreparedFileOperation, archive_path_is_supported,
         execute_file_operation, execute_file_operation_with_progress,
-        prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
-        prepare_move_paths_to_directory, remove_existing_paths_permanently,
-        remove_paths_permanently, trash_paths,
+        mountable_image_path_is_supported, prepare_copy_paths_to_directory_for_paste,
+        prepare_extract_archives_to_directory, prepare_move_paths_to_directory,
+        remove_existing_paths_permanently, remove_paths_permanently, trash_paths,
     },
     view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
@@ -371,6 +371,18 @@ impl ExplorerView {
         }
 
         Some(paths)
+    }
+
+    pub(super) fn selected_mountable_image_path(&self) -> Option<PathBuf> {
+        let paths = self.selected_paths();
+        let [path] = paths.as_slice() else {
+            return None;
+        };
+        if !path.is_file() || !mountable_image_path_is_supported(path) {
+            return None;
+        }
+
+        Some(path.clone())
     }
 
     pub(super) fn mark_cut_paths(&mut self, paths: &[PathBuf]) {
@@ -1422,6 +1434,43 @@ mod tests {
         );
 
         assert_eq!(view.selected_archive_paths(), None);
+    }
+
+    #[test]
+    fn selected_mountable_image_path_requires_one_supported_file() {
+        let temp = TempDir::new();
+        let image = temp.path().join("installer.iso");
+        let other_image = temp.path().join("rescue.IMG");
+        let text = temp.path().join("notes.txt");
+        let folder = temp.path().join("folder.iso");
+        fs::write(&image, b"not a real image").expect("create image path");
+        fs::write(&other_image, b"not a real image").expect("create image path");
+        fs::write(&text, b"text").expect("create text");
+        fs::create_dir(&folder).expect("create folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&image);
+
+        assert_eq!(view.selected_mountable_image_path(), Some(image.clone()));
+
+        view.apply_click_selection(
+            view.entries
+                .iter()
+                .position(|entry| entry.path == other_image)
+                .expect("other image index"),
+            SelectionModifiers {
+                toggle: true,
+                extend: false,
+            },
+        );
+
+        assert_eq!(view.selected_mountable_image_path(), None);
+
+        view.select_single_path(&text);
+        assert_eq!(view.selected_mountable_image_path(), None);
+
+        view.select_single_path(&folder);
+        assert_eq!(view.selected_mountable_image_path(), None);
     }
 
     #[test]
