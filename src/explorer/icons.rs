@@ -338,8 +338,12 @@ pub(super) fn file_icon_for_path_sized(path: &Path, size: f32) -> Div {
     sized_file_icon(FileIconKind::for_path(path), size)
 }
 
-pub(super) fn file_path_is_image_or_video(path: &Path) -> bool {
+pub(super) fn file_path_counts_for_media_view(path: &Path) -> bool {
     FileIconKind::for_path(path).is_media()
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("ico"))
 }
 
 pub(super) fn large_file_icon_for_path_sized(path: &Path, size: f32) -> Div {
@@ -728,6 +732,16 @@ mod tests {
             FileIconKind::for_path(Path::new("data.csv")),
             FileIconKind::Text
         );
+    }
+
+    #[test]
+    fn media_view_file_detection_includes_ico_case_insensitively() {
+        assert!(file_path_counts_for_media_view(Path::new("photo.jpg")));
+        assert!(file_path_counts_for_media_view(Path::new("movie.mp4")));
+        assert!(file_path_counts_for_media_view(Path::new("favicon.ico")));
+        assert!(file_path_counts_for_media_view(Path::new("favicon.ICO")));
+        assert!(!file_path_counts_for_media_view(Path::new("image.iso")));
+        assert!(!file_path_counts_for_media_view(Path::new("notes.txt")));
     }
 
     #[test]

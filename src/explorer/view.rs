@@ -1527,7 +1527,7 @@ fn directory_is_media_majority(entries: &[FileEntry]) -> bool {
     let media_entries = entries
         .iter()
         .filter(|entry| !entry.is_directory_like())
-        .filter(|entry| super::icons::file_path_is_image_or_video(&entry.path))
+        .filter(|entry| super::icons::file_path_counts_for_media_view(&entry.path))
         .count();
 
     (media_entries as u128) * 4 > (entries.len() as u128) * 3
@@ -1821,6 +1821,13 @@ mod tests {
             test_file("clip.mp4"),
             test_file("scan.PNG"),
             test_file("poster.webp"),
+        ]));
+        assert!(directory_is_media_majority(&[
+            test_file("photo.jpg"),
+            test_file("clip.mp4"),
+            test_file("scan.png"),
+            test_file("favicon.ICO"),
+            test_file("notes.txt"),
         ]));
     }
 
