@@ -9,8 +9,9 @@ use std::{
 };
 
 use gpui::{
-    App, Application, Bounds, Context, KeyBinding, Pixels, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px, size,
+    App, Application, Bounds, Context, DisplayId, KeyBinding, Pixels, SharedString,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px,
+    size,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,17 +24,17 @@ use crate::explorer::{
     CloseTab, CopySelected, CreateNewFolder, CutSelected, DialogCancel, DialogConfirm,
     DialogFocusPrimary, DialogFocusSecondary, EnterSelected, EnterSelectedInNewTab, ExplorerTabs,
     ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
-    MoveHome, MoveUp, NewTab, OpenProperties, OpenSelected, OpenSelectedInNewTab, OpenSettings,
-    PasteClipboard, PermanentlyDeleteSelected, RecursiveSearchEdit, Refresh, RenameBackspace,
-    RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
-    RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
-    RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
-    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
-    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
-    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
-    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TrashSelected,
+    MoveHome, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected, OpenSelectedInNewTab,
+    OpenSettings, PasteClipboard, PermanentlyDeleteSelected, RecursiveSearchEdit, Refresh,
+    RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
+    RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
+    RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
+    RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight,
+    SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut,
+    SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
+    SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
+    SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected,
 };
 use crate::settings::{APP_ID, SettingsState, config_dir};
 
@@ -43,6 +44,7 @@ const DEFAULT_WINDOW_WIDTH: f32 = 1024.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const MIN_WINDOW_WIDTH: f32 = 400.0;
 const MIN_WINDOW_HEIGHT: f32 = 120.0;
+const NEW_WINDOW_OFFSET: f32 = 50.0;
 const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/fonts/Segoe Fluent Icons.ttf");
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/fonts/Segoe MDL2 Assets.ttf");
 #[cfg(any(target_os = "linux", test))]
@@ -341,6 +343,111 @@ fn startup_window_bounds(cx: &App) -> WindowBounds {
     )
 }
 
+fn window_bounds_rect(window_bounds: WindowBounds) -> Bounds<Pixels> {
+    match window_bounds {
+        WindowBounds::Windowed(bounds)
+        | WindowBounds::Maximized(bounds)
+        | WindowBounds::Fullscreen(bounds) => bounds,
+    }
+}
+
+fn display_index_for_window_bounds(
+    window_bounds: Bounds<Pixels>,
+    display_bounds: &[Bounds<Pixels>],
+) -> Option<usize> {
+    let center = window_bounds.center();
+    display_bounds
+        .iter()
+        .position(|display_bounds| display_bounds.contains(&center))
+        .or_else(|| {
+            display_bounds
+                .iter()
+                .position(|display_bounds| window_bounds.intersects(display_bounds))
+        })
+        .or_else(|| (!display_bounds.is_empty()).then_some(0))
+}
+
+fn offset_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            bounds.origin.x + px(NEW_WINDOW_OFFSET),
+            bounds.origin.y + px(NEW_WINDOW_OFFSET),
+        ),
+        bounds.size,
+    )
+}
+
+fn wrapped_bounds_for_display(
+    source_bounds: Bounds<Pixels>,
+    display_bounds: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    let origin = point(
+        display_bounds.origin.x + px(NEW_WINDOW_OFFSET),
+        display_bounds.origin.y + px(NEW_WINDOW_OFFSET),
+    );
+    let display_right = f32::from(display_bounds.origin.x) + f32::from(display_bounds.size.width);
+    let display_bottom = f32::from(display_bounds.origin.y) + f32::from(display_bounds.size.height);
+    let max_width_from_origin = display_right - f32::from(origin.x);
+    let max_height_from_origin = display_bottom - f32::from(origin.y);
+    let width = f32::from(source_bounds.size.width);
+    let height = f32::from(source_bounds.size.height);
+
+    Bounds::new(
+        origin,
+        size(
+            px(width.min(max_width_from_origin.max(MIN_WINDOW_WIDTH))),
+            px(height.min(max_height_from_origin.max(MIN_WINDOW_HEIGHT))),
+        ),
+    )
+}
+
+fn clamp_window_bounds_to_display(
+    bounds: Bounds<Pixels>,
+    display_bounds: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    let display_left = f32::from(display_bounds.origin.x);
+    let display_top = f32::from(display_bounds.origin.y);
+    let display_right = display_left + f32::from(display_bounds.size.width);
+    let display_bottom = display_top + f32::from(display_bounds.size.height);
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let x = f32::from(bounds.origin.x);
+    let y = f32::from(bounds.origin.y);
+    let max_x = (display_right - width).max(display_left);
+    let max_y = (display_bottom - height).max(display_top);
+
+    Bounds::new(
+        point(
+            px(x.clamp(display_left, max_x)),
+            px(y.clamp(display_top, max_y)),
+        ),
+        bounds.size,
+    )
+}
+
+fn new_window_placement_from_source(
+    source_window_bounds: WindowBounds,
+    display_bounds: &[Bounds<Pixels>],
+) -> (WindowBounds, Option<usize>) {
+    let source_bounds = window_bounds_rect(source_window_bounds);
+    let display_index = display_index_for_window_bounds(source_bounds, display_bounds);
+    let bounds = if let Some(display_bounds) = display_index.map(|index| display_bounds[index]) {
+        let offset = offset_bounds(source_bounds);
+        if offset.is_contained_within(&display_bounds) {
+            offset
+        } else {
+            clamp_window_bounds_to_display(
+                wrapped_bounds_for_display(source_bounds, display_bounds),
+                display_bounds,
+            )
+        }
+    } else {
+        offset_bounds(source_bounds)
+    };
+
+    (WindowBounds::Windowed(bounds), display_index)
+}
+
 fn load_window_state() -> Option<StoredWindowState> {
     load_window_state_from_path(&window_state_path()?)
 }
@@ -350,6 +457,7 @@ fn load_window_state_from_path(path: &Path) -> Option<StoredWindowState> {
     state.is_valid().then_some(state)
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn save_window_bounds(window_bounds: WindowBounds) {
     let Some(state) = StoredWindowState::from_window_bounds(window_bounds) else {
         return;
@@ -370,12 +478,27 @@ fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Resu
     fs::write(path, json)
 }
 
-fn open_explorer_window(cx: &mut App) {
-    let window_bounds = startup_window_bounds(cx);
+#[cfg(not(test))]
+fn observe_explorer_window_bounds(window: &mut Window, cx: &mut Context<Explorer>) {
+    cx.observe_window_bounds(window, |_, window, _| {
+        save_window_bounds(window.window_bounds());
+    })
+    .detach();
+}
 
+#[cfg(test)]
+fn observe_explorer_window_bounds(_: &mut Window, _: &mut Context<Explorer>) {}
+
+pub(crate) fn open_explorer_window_at(
+    initial_path: PathBuf,
+    window_bounds: WindowBounds,
+    display_id: Option<DisplayId>,
+    cx: &mut App,
+) {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
+            display_id,
             window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
             titlebar: Some(TitlebarOptions {
                 title: Some(SharedString::from(APP_TITLE)),
@@ -392,29 +515,46 @@ fn open_explorer_window(cx: &mut App) {
             app_id: Some(APP_ID.to_owned()),
             ..Default::default()
         },
-        |window, cx| {
+        move |window, cx| {
+            let path = initial_path;
             let explorer = cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                ExplorerTabs::new(
-                    cx.global::<SettingsState>().startup_path(),
-                    focus_handle,
-                    window,
-                    cx,
-                )
+                ExplorerTabs::new(path, focus_handle, window, cx)
             });
 
             cx.new(|cx| {
-                cx.observe_window_bounds(window, |_, window, _| {
-                    save_window_bounds(window.window_bounds());
-                })
-                .detach();
+                observe_explorer_window_bounds(window, cx);
 
                 Explorer { explorer }
             })
         },
     )
     .expect("failed to open Explorer window");
+}
+
+fn open_explorer_window(cx: &mut App) {
+    let initial_path = cx.global::<SettingsState>().startup_path();
+    let window_bounds = startup_window_bounds(cx);
+    open_explorer_window_at(initial_path, window_bounds, None, cx);
+}
+
+pub(crate) fn open_new_explorer_window(
+    initial_path: PathBuf,
+    source_window_bounds: WindowBounds,
+    cx: &mut App,
+) {
+    let displays = cx.displays();
+    let display_bounds = displays
+        .iter()
+        .map(|display| display.bounds())
+        .collect::<Vec<_>>();
+    let (window_bounds, display_index) =
+        new_window_placement_from_source(source_window_bounds, &display_bounds);
+    let display_id =
+        display_index.and_then(|index| displays.get(index).map(|display| display.id()));
+
+    open_explorer_window_at(initial_path, window_bounds, display_id, cx);
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -485,6 +625,7 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
             KeyBinding::new("ctrl-shift-f", RecursiveSearchEdit, Some("Explorer")),
             KeyBinding::new("ctrl-shift-s", OpenSettings, None),
+            KeyBinding::new("ctrl-n", NewWindow, None),
             KeyBinding::new("ctrl-t", NewTab, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", SelectNextTab, None),
@@ -635,7 +776,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{ConfigPlatform, config_dir_for};
+    use crate::settings::{ConfigPlatform, ExplorerSettings, config_dir_for};
+    use gpui::TestAppContext;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -801,6 +943,116 @@ mod tests {
             ),
             default_bounds
         );
+    }
+
+    #[test]
+    fn new_window_placement_offsets_windowed_source_by_fifty_pixels() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let source = Bounds::new(point(px(100.0), px(120.0)), size(px(800.0), px(600.0)));
+        let expected = Bounds::new(point(px(150.0), px(170.0)), source.size);
+
+        assert_eq!(
+            new_window_placement_from_source(WindowBounds::Windowed(source), &[display]),
+            (WindowBounds::Windowed(expected), Some(0))
+        );
+    }
+
+    #[test]
+    fn new_window_placement_opens_maximized_source_as_offset_windowed_bounds() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let source = Bounds::new(point(px(100.0), px(120.0)), size(px(800.0), px(600.0)));
+        let expected = Bounds::new(point(px(150.0), px(170.0)), source.size);
+
+        assert_eq!(
+            new_window_placement_from_source(WindowBounds::Maximized(source), &[display]),
+            (WindowBounds::Windowed(expected), Some(0))
+        );
+    }
+
+    #[test]
+    fn new_window_placement_wraps_near_display_edge() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(720.0)));
+        let source = Bounds::new(point(px(900.0), px(500.0)), size(px(800.0), px(400.0)));
+        let expected = Bounds::new(point(px(50.0), px(50.0)), source.size);
+
+        assert_eq!(
+            new_window_placement_from_source(WindowBounds::Windowed(source), &[display]),
+            (WindowBounds::Windowed(expected), Some(0))
+        );
+    }
+
+    #[test]
+    fn new_window_placement_clamps_oversized_wrapped_bounds_to_display() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(720.0)));
+        let source = Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(720.0)));
+        let expected = Bounds::new(point(px(50.0), px(50.0)), size(px(1230.0), px(670.0)));
+
+        assert_eq!(
+            new_window_placement_from_source(WindowBounds::Fullscreen(source), &[display]),
+            (WindowBounds::Windowed(expected), Some(0))
+        );
+    }
+
+    #[test]
+    fn new_window_placement_prefers_display_containing_source_center() {
+        let first = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let second = Bounds::new(point(px(1920.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let source = Bounds::new(point(px(2100.0), px(120.0)), size(px(800.0), px(600.0)));
+        let expected = Bounds::new(point(px(2150.0), px(170.0)), source.size);
+
+        assert_eq!(
+            new_window_placement_from_source(WindowBounds::Windowed(source), &[first, second]),
+            (WindowBounds::Windowed(expected), Some(1))
+        );
+    }
+
+    #[gpui::test]
+    fn new_window_action_opens_offset_window_at_active_path(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("new-window-action");
+        fs::create_dir_all(&dir).expect("create test directory");
+        let initial_bounds = Bounds::new(point(px(100.0), px(120.0)), size(px(800.0), px(600.0)));
+
+        cx.update(|app| {
+            open_explorer_window_at(
+                dir.clone(),
+                WindowBounds::Windowed(initial_bounds),
+                None,
+                app,
+            );
+        });
+        cx.run_until_parked();
+
+        let first_window = cx.windows()[0];
+        cx.dispatch_action(first_window, NewWindow);
+        cx.run_until_parked();
+
+        let windows = cx.windows();
+        assert_eq!(windows.len(), 2);
+        let new_window_bounds = windows[1]
+            .update(cx, |_, window, _| window.window_bounds())
+            .expect("read new window bounds");
+        assert_eq!(
+            new_window_bounds,
+            WindowBounds::Windowed(Bounds::new(
+                point(px(150.0), px(170.0)),
+                initial_bounds.size
+            ))
+        );
+
+        let new_window_path = windows[1]
+            .read(cx, |explorer: gpui::Entity<Explorer>, app| {
+                explorer.read(app).explorer.read(app).active_path(app)
+            })
+            .expect("read new window root")
+            .expect("new window has active tab");
+        assert_eq!(new_window_path, dir);
+
+        for window in windows {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+        cx.run_until_parked();
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1106,6 +1358,17 @@ mod tests {
         vars.iter()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| OsString::from(value))
+    }
+
+    fn initialize_test_explorer_app(cx: &TestAppContext) {
+        cx.update(|app| {
+            register_embedded_fonts(app);
+            app.set_global(SettingsState::for_test(ExplorerSettings::default()));
+            crate::explorer::initialize_native_icon_cache(app);
+            crate::explorer::initialize_image_thumbnail_cache(app);
+            crate::explorer::initialize_folder_size_cache(app);
+            crate::explorer::initialize_file_checksum_cache(app);
+        });
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {

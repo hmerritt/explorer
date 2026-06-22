@@ -108,6 +108,7 @@ actions!(
         SearchCopy,
         SearchCut,
         SearchPaste,
+        NewWindow,
         NewTab,
         CloseTab,
         SelectNextTab,

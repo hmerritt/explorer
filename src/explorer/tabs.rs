@@ -12,7 +12,7 @@ use gpui::{CursorStyle, transparent_black};
 use gpui::{ResizeEdge, Tiling, WindowControls};
 
 use crate::explorer::{
-    CloseTab, NewTab, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
+    CloseTab, NewTab, NewWindow, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
     icons::folder_icon,
@@ -212,6 +212,11 @@ impl ExplorerTabs {
 
     fn active_tab(&self) -> Option<&ExplorerTab> {
         self.tabs.iter().find(|tab| tab.id == self.active_tab)
+    }
+
+    pub(crate) fn active_path(&self, cx: &App) -> Option<PathBuf> {
+        self.active_tab()
+            .map(|tab| tab.view.read(cx).path().to_path_buf())
     }
 
     fn tab_view(&self, id: TabId) -> Option<Entity<ExplorerView>> {
@@ -485,6 +490,12 @@ impl ExplorerTabs {
     fn handle_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.add_new_tab(window, cx);
         cx.notify();
+    }
+
+    fn handle_new_window(&mut self, _: &NewWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.active_path(cx) {
+            crate::app::open_new_explorer_window(path, window.window_bounds(), cx);
+        }
     }
 
     fn handle_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -875,6 +886,7 @@ impl Render for ExplorerTabs {
             .font(app_font.clone())
             .key_context("ExplorerTabs")
             .on_action(cx.listener(Self::handle_new_tab))
+            .on_action(cx.listener(Self::handle_new_window))
             .on_action(cx.listener(Self::handle_close_tab))
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
