@@ -1,9 +1,14 @@
 ## Todo
 
+- rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
+- Add "rclone" top-level object into settings with:
+    - enabled
+    - conf_path
+
 ## 1
 
 - Network drives (rclone https://rclone.org/ builtin)
-- rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
+- Image + video hover popup box should have border-radius of 15px, overflow hidden
 
 ## 2
 

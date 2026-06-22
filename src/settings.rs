@@ -82,6 +82,7 @@ pub enum AddressSlash {
 pub struct ExplorerSettings {
     pub app: AppSettings,
     pub contextmenu: ContextMenuSettings,
+    pub rclone: RcloneSettings,
     pub sidebar: SidebarSettings,
     pub tabs: TabSettings,
     pub view: ViewSettings,
@@ -278,6 +279,13 @@ pub struct AppSettings {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
+pub struct RcloneSettings {
+    pub conf_path: Option<PathBuf>,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct SidebarSettings {
     #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
     pub hide: Vec<DriveHideKind>,
@@ -379,6 +387,7 @@ impl Default for ExplorerSettings {
         Self {
             app: AppSettings::default(),
             contextmenu: ContextMenuSettings::default(),
+            rclone: RcloneSettings::default(),
             sidebar: SidebarSettings::default(),
             tabs: TabSettings::default(),
             view: ViewSettings::default(),
@@ -390,6 +399,15 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             start: StartLocation::Downloads,
+        }
+    }
+}
+
+impl Default for RcloneSettings {
+    fn default() -> Self {
+        Self {
+            conf_path: None,
+            enabled: true,
         }
     }
 }
@@ -1023,6 +1041,9 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
     if let StartLocation::Custom { path } = &settings.app.start {
         validate_configured_path(path)?;
     }
+    if let Some(path) = &settings.rclone.conf_path {
+        validate_configured_path(path)?;
+    }
     validate_custom_context_menu_items(&settings.contextmenu.items)?;
     Ok(())
 }
@@ -1174,7 +1195,7 @@ const CONTEXT_MENU_VIDEO_EXTENSIONS: &[&str] = &[
     "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
 ];
 
-fn expand_configured_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     if path.is_absolute() {
         return Some(path.to_path_buf());
     }

@@ -197,7 +197,63 @@ impl ExplorerView {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "rclone")]
+        if crate::explorer::rclone::is_transfer_path(&path) {
+            self.connect_rclone_remote_path_with_watcher(path, cx);
+            return;
+        }
+
         self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    #[cfg(feature = "rclone")]
+    fn connect_rclone_remote_path_with_watcher(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.rclone_connect_task.is_some() {
+            return;
+        }
+
+        let Some(remote) = crate::explorer::rclone::remote_for_virtual_path(&path) else {
+            self.open_error = Some(format!(
+                "Could not find rclone remote for {}",
+                path.display()
+            ));
+            return;
+        };
+        let parsed = crate::explorer::rclone::parse_virtual_path(&path);
+        self.open_error = Some(format!("Connecting to {}...", remote.display_name));
+        let task = cx.spawn(async move |this, cx| {
+            let connection = cx
+                .background_executor()
+                .spawn(async move { crate::explorer::rclone::connect_remote(remote) })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.rclone_connect_task = None;
+                let target = match connection {
+                    crate::explorer::rclone::RcloneConnection::Mounted(mounted) => parsed
+                        .as_ref()
+                        .map(|path| mounted.mount_root.join(&path.relative_path))
+                        .unwrap_or(mounted.mount_root),
+                    crate::explorer::rclone::RcloneConnection::TransferMode(transfer) => parsed
+                        .as_ref()
+                        .map(|path| {
+                            crate::explorer::rclone::virtual_root_for_remote(&path.remote_name)
+                                .join(&path.relative_path)
+                        })
+                        .unwrap_or_else(|| {
+                            crate::explorer::rclone::virtual_root_for_remote(&transfer.remote.name)
+                        }),
+                };
+                explorer.navigate_to_directory_inner_with_options(
+                    target,
+                    HistoryMode::Record,
+                    Some(cx),
+                    true,
+                );
+                cx.notify();
+            });
+        });
+        self.rclone_connect_task = Some(task);
     }
 
     pub(super) fn redirect_after_mounted_volume_ejected_with_watcher(

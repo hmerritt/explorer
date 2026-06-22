@@ -2112,8 +2112,10 @@ mod tests {
                     path: sidebar_path.clone(),
                     label: Some("a".to_owned()),
                 }];
-                view.sidebar_sections =
-                    crate::explorer::sidebar::sidebar_sections(&view.sidebar_settings);
+                view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
+                    &view.sidebar_settings,
+                    &view.rclone_settings,
+                );
             });
         });
         cx.run_until_parked();

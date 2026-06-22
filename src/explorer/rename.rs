@@ -1261,6 +1261,20 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
 }
 
 fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(original_path)
+        || crate::explorer::rclone::is_transfer_path(target_path)
+    {
+        if crate::explorer::rclone::is_transfer_path(original_path)
+            && crate::explorer::rclone::is_transfer_path(target_path)
+        {
+            return crate::explorer::rclone::rename_transfer_path(original_path, target_path);
+        }
+        return Err(io::Error::other(
+            "rename must stay within the rclone transfer browser",
+        ));
+    }
+
     if destination_conflicts_with_existing_file(original_path, target_path) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,

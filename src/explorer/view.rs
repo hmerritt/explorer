@@ -26,7 +26,7 @@ use crate::explorer::{
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries,
+        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries_with_rclone_settings,
         path_is_filesystem_root, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
@@ -43,7 +43,7 @@ use crate::explorer::{
 };
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
-    FileViewMode, SidebarSettings, SortDirection,
+    FileViewMode, RcloneSettings, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -69,6 +69,8 @@ pub struct ExplorerView {
     pub(super) run_elevated_task: Option<Task<()>>,
     pub(super) volume_eject_task: Option<Task<()>>,
     pub(super) image_mount_task: Option<Task<()>>,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_connect_task: Option<Task<()>>,
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) forward_stack: Vec<PathBuf>,
     pub(super) scroll_handle: UniformListScrollHandle,
@@ -130,6 +132,7 @@ pub struct ExplorerView {
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
+    pub(super) rclone_settings: RcloneSettings,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
@@ -325,6 +328,8 @@ impl ExplorerView {
             run_elevated_task: None,
             volume_eject_task: None,
             image_mount_task: None,
+            #[cfg(feature = "rclone")]
+            rclone_connect_task: None,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -387,6 +392,7 @@ impl ExplorerView {
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
+            rclone_settings: settings.rclone.clone(),
             sidebar_settings: settings.sidebar.clone(),
             sidebar_sections: SidebarSections::default(),
             shell_shortcut_resolution_generation: 0,
@@ -408,6 +414,7 @@ impl ExplorerView {
             || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
+        let rclone_changed = self.rclone_settings != settings.rclone;
         let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
@@ -437,6 +444,7 @@ impl ExplorerView {
         }
 
         self.sidebar_settings = settings.sidebar.clone();
+        self.rclone_settings = settings.rclone.clone();
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
         }
@@ -463,7 +471,18 @@ impl ExplorerView {
             self.file_columns = settings.view.file_columns.clone();
         }
 
-        if visibility_changed {
+        let rclone_transfer_path_changed = {
+            #[cfg(feature = "rclone")]
+            {
+                rclone_changed && crate::explorer::rclone::is_transfer_path(&self.path)
+            }
+            #[cfg(not(feature = "rclone"))]
+            {
+                false
+            }
+        };
+
+        if visibility_changed || rclone_transfer_path_changed {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
@@ -488,8 +507,11 @@ impl ExplorerView {
             if file_sort_changed {
                 self.apply_file_sort_preserving_selection();
             }
-            if sidebar_changed || !folder_size_changed {
-                self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            if sidebar_changed || rclone_changed || !folder_size_changed {
+                self.sidebar_sections = sidebar_sections(
+                    &self.sidebar_settings,
+                    &self.rclone_settings,
+                );
             }
         }
         cx.notify();
@@ -516,7 +538,11 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(mode);
 
         let load_started = Instant::now();
-        match load_entries(&self.path, self.entry_visibility()) {
+        match load_entries_with_rclone_settings(
+            &self.path,
+            self.entry_visibility(),
+            rclone_settings_for_load(self),
+        ) {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
                     load_started.elapsed(),
@@ -574,7 +600,8 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            self.sidebar_sections =
+                sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -737,6 +764,7 @@ impl ExplorerView {
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
+        let rclone_settings = self.rclone_settings.clone();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -748,7 +776,9 @@ impl ExplorerView {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { load_entries(&path, visibility) }
+                    async move {
+                        load_entries_with_rclone_settings(&path, visibility, &rclone_settings)
+                    }
                 })
                 .await;
             crate::debug_options::log_nav_timing(

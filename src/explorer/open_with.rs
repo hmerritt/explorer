@@ -229,6 +229,15 @@ impl ExplorerView {
             return;
         }
 
+        #[cfg(feature = "rclone")]
+        if let Some(message) = paths
+            .iter()
+            .find_map(|path| crate::explorer::rclone::normal_open_block_message(path))
+        {
+            self.open_error = Some(message);
+            return;
+        }
+
         #[cfg(target_os = "linux")]
         {
             use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

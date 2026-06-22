@@ -1483,6 +1483,20 @@ impl ExplorerView {
             children.push(self.render_sidebar_row(index + 3_000, item, cx));
         }
 
+        #[cfg(feature = "rclone")]
+        {
+            if !children.is_empty() && !sections.rclone_remotes.is_empty() {
+                children.push(sidebar_separator().into_any_element());
+            }
+
+            for (index, item) in sections.rclone_remotes.iter().cloned().enumerate() {
+                if index > 0 {
+                    children.push(sidebar_item_gap().into_any_element());
+                }
+                children.push(self.render_sidebar_row(index + 4_000, item, cx));
+            }
+        }
+
         div()
             .id("explorer-sidebar")
             .relative()
@@ -2976,9 +2990,15 @@ fn sidebar_context_menu_target(
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
+        #[cfg(feature = "rclone")]
+        SidebarItemKind::RcloneRemote(_) => Some(DirectoryKind::Drive),
     };
-    let can_eject =
-        matches!(item.kind, SidebarItemKind::Drive) && drive_root_is_ejectable(&item.path);
+    let can_eject = match item.kind {
+        SidebarItemKind::Drive => drive_root_is_ejectable(&item.path),
+        #[cfg(feature = "rclone")]
+        SidebarItemKind::RcloneRemote(crate::explorer::rclone::RcloneSidebarState::Mounted) => true,
+        _ => false,
+    };
     (
         item.path.clone(),
         item.configured_index,
@@ -3023,6 +3043,8 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
+        #[cfg(feature = "rclone")]
+        SidebarItemKind::RcloneRemote(_) => drive_icon().into_any_element(),
     }
 }
 
@@ -6712,6 +6734,15 @@ mod tests {
             kind: SidebarItemKind::DriveWsl,
             configured_index: None,
         };
+        #[cfg(feature = "rclone")]
+        let rclone_mounted = SidebarItem {
+            label: "gdrive (mounted)".to_owned(),
+            path: PathBuf::from(r"\\rclone\gdrive"),
+            kind: SidebarItemKind::RcloneRemote(
+                crate::explorer::rclone::RcloneSidebarState::Mounted,
+            ),
+            configured_index: None,
+        };
 
         assert_eq!(
             sidebar_context_menu_target(&custom),
@@ -6750,6 +6781,16 @@ mod tests {
                 None,
                 Some(DirectoryKind::DriveWsl),
                 false
+            )
+        );
+        #[cfg(feature = "rclone")]
+        assert_eq!(
+            sidebar_context_menu_target(&rclone_mounted),
+            (
+                PathBuf::from(r"\\rclone\gdrive"),
+                None,
+                Some(DirectoryKind::Drive),
+                true
             )
         );
     }

@@ -172,6 +172,43 @@ impl ExplorerView {
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
+        #[cfg(feature = "rclone")]
+        if crate::explorer::rclone::is_transfer_path(&self.path)
+            || clipboard
+                .paths
+                .iter()
+                .any(|path| crate::explorer::rclone::is_transfer_path(path))
+        {
+            let operation = match clipboard.operation {
+                FileClipboardOperation::Copy => {
+                    crate::explorer::rclone::RcloneTransferOperation::Copy
+                }
+                FileClipboardOperation::Cut => {
+                    crate::explorer::rclone::RcloneTransferOperation::Move
+                }
+            };
+            match crate::explorer::rclone::copy_or_move_paths_to_transfer_destination(
+                &clipboard.paths,
+                &self.path,
+                operation,
+            ) {
+                Ok(destinations) => {
+                    if clipboard.operation == FileClipboardOperation::Cut {
+                        self.remove_cut_paths(&clipboard.paths);
+                    }
+                    self.reload_with_entry_metadata_resolution(cx);
+                    self.restore_selection_from_paths(&destinations);
+                    self.open_error = None;
+                    self.emit_filesystem_changed(cx);
+                }
+                Err(error) => {
+                    self.reload_with_entry_metadata_resolution(cx);
+                    self.open_error = Some(error);
+                }
+            }
+            return;
+        }
+
         match clipboard.operation {
             FileClipboardOperation::Copy => {
                 self.handle_prepared_file_command_result_and_open_dialog(
@@ -223,6 +260,10 @@ impl ExplorerView {
         if paths.is_empty() {
             return;
         }
+        #[cfg(feature = "rclone")]
+        if self.delete_rclone_transfer_paths_if_needed(&paths, cx) {
+            return;
+        }
 
         let trash_undo = TrashUndoCapture::before_delete(&paths);
         match trash_paths(&paths) {
@@ -259,6 +300,10 @@ impl ExplorerView {
         let Some(pending) = self.pending_trash.take() else {
             return;
         };
+        #[cfg(feature = "rclone")]
+        if self.delete_rclone_transfer_paths_if_needed(&pending.paths, cx) {
+            return;
+        }
 
         let trash_undo = TrashUndoCapture::before_delete(&pending.paths);
         match trash_paths(&pending.paths) {
@@ -296,6 +341,10 @@ impl ExplorerView {
         let Some(pending) = self.pending_permanent_delete.take() else {
             return;
         };
+        #[cfg(feature = "rclone")]
+        if self.delete_rclone_transfer_paths_if_needed(&pending.paths, cx) {
+            return;
+        }
 
         match remove_paths_permanently(&pending.paths) {
             Ok(()) => {
@@ -400,6 +449,43 @@ impl ExplorerView {
     pub(super) fn remove_cut_paths(&mut self, paths: &[PathBuf]) {
         let paths = paths.iter().collect::<BTreeSet<_>>();
         self.cut_paths.retain(|path| !paths.contains(path));
+    }
+
+    #[cfg(feature = "rclone")]
+    fn delete_rclone_transfer_paths_if_needed(
+        &mut self,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let has_transfer_path = paths
+            .iter()
+            .any(|path| crate::explorer::rclone::is_transfer_path(path));
+        if !has_transfer_path {
+            return false;
+        }
+        if !paths
+            .iter()
+            .all(|path| crate::explorer::rclone::is_transfer_path(path))
+        {
+            self.open_error =
+                Some("Delete transfer-mode rclone items separately from local files.".to_owned());
+            return true;
+        }
+
+        match crate::explorer::rclone::delete_transfer_paths(paths) {
+            Ok(()) => {
+                self.remove_cut_paths(paths);
+                self.reload_with_entry_metadata_resolution(cx);
+                self.clear_selection();
+                self.open_error = None;
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.open_error = Some(error);
+                self.reload_with_entry_metadata_resolution(cx);
+            }
+        }
+        true
     }
 
     pub(super) fn entry_is_cut(&self, path: &Path) -> bool {
@@ -1022,6 +1108,11 @@ fn trash_undo_path_key(path: &Path) -> String {
 }
 
 fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<PathBuf, String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(parent) {
+        return create_new_transfer_item_in_directory(parent, kind);
+    }
+
     let mut index = 1usize;
 
     loop {
@@ -1044,6 +1135,39 @@ fn create_new_item_in_directory(parent: &Path, kind: NewItemKind) -> Result<Path
                     kind.operation_label(),
                     name
                 ));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rclone")]
+fn create_new_transfer_item_in_directory(
+    parent: &Path,
+    kind: NewItemKind,
+) -> Result<PathBuf, String> {
+    if kind != NewItemKind::Folder {
+        return Err(
+            "Could not create file in rclone transfer mode: use upload semantics instead."
+                .to_owned(),
+        );
+    }
+
+    let mut index = 1usize;
+    loop {
+        let name = new_item_name(kind.base_name(), index);
+        let path = parent.join(&name);
+        if crate::explorer::rclone::transfer_path_exists(&path)? {
+            index = next_new_item_index(index, &name)?;
+            continue;
+        }
+
+        match crate::explorer::rclone::create_transfer_folder(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.to_ascii_lowercase().contains("already exist") => {
+                index = next_new_item_index(index, &name)?;
+            }
+            Err(error) => {
+                return Err(format!("Could not create folder \"{name}\": {error}"));
             }
         }
     }

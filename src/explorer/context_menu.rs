@@ -148,6 +148,11 @@ pub(super) enum ContextMenuCommand {
     EjectMountedVolume {
         path: PathBuf,
     },
+    #[cfg(feature = "rclone")]
+    DownloadAndOpenRcloneCopies {
+        paths: Vec<PathBuf>,
+        read_only: bool,
+    },
     UnpinSidebar {
         configured_index: usize,
     },
@@ -434,6 +439,10 @@ impl ExplorerView {
             }
             ContextMenuCommand::EjectMountedVolume { path } => {
                 self.eject_mounted_volume(path, cx);
+            }
+            #[cfg(feature = "rclone")]
+            ContextMenuCommand::DownloadAndOpenRcloneCopies { paths, read_only } => {
+                self.download_and_open_rclone_copies(paths, read_only, cx);
             }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
@@ -816,6 +825,11 @@ struct PlatformCommand {
 }
 
 fn eject_mounted_volume_path(path: &Path) -> io::Result<()> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_managed_mount_root(path) {
+        return crate::explorer::rclone::disconnect_mounted_remote(path).map_err(io::Error::other);
+    }
+
     let Some(command) = mounted_volume_eject_command(path) else {
         return Err(io::Error::other("eject is not supported on this platform"));
     };
@@ -1197,26 +1211,65 @@ fn entry_context_menu_items_with_custom(
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     if selected_count == 1 {
-        let command = match single_directory_open_target {
-            Some(path) => ContextMenuCommand::OpenDirectory { path },
-            None => ContextMenuCommand::OpenSelectedFiles,
-        };
-        let icon = if selected_file_count > 0 {
-            if use_native_file_icon {
-                ContextMenuIcon::NativeFile
+        #[cfg(feature = "rclone")]
+        let mut handled_transfer_open = false;
+        #[cfg(not(feature = "rclone"))]
+        let handled_transfer_open = false;
+        #[cfg(feature = "rclone")]
+        if selected_file_count > 0
+            && targets
+                .first()
+                .is_some_and(|path| crate::explorer::rclone::is_transfer_path(path))
+        {
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open".to_owned(),
+                icon: Some(ContextMenuIcon::File),
+                label: crate::explorer::rclone::transfer_open_action_label(&targets[0], false)
+                    .unwrap_or("Download and open copy")
+                    .to_owned(),
+                command: ContextMenuCommand::DownloadAndOpenRcloneCopies {
+                    paths: targets.to_vec(),
+                    read_only: false,
+                },
+                enabled: true,
+            });
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open-read-only-copy".to_owned(),
+                icon: Some(ContextMenuIcon::File),
+                label: crate::explorer::rclone::transfer_open_action_label(&targets[0], true)
+                    .unwrap_or("Open read-only copy")
+                    .to_owned(),
+                command: ContextMenuCommand::DownloadAndOpenRcloneCopies {
+                    paths: targets.to_vec(),
+                    read_only: true,
+                },
+                enabled: true,
+            });
+            handled_transfer_open = true;
+        }
+
+        if !handled_transfer_open {
+            let command = match single_directory_open_target {
+                Some(path) => ContextMenuCommand::OpenDirectory { path },
+                None => ContextMenuCommand::OpenSelectedFiles,
+            };
+            let icon = if selected_file_count > 0 {
+                if use_native_file_icon {
+                    ContextMenuIcon::NativeFile
+                } else {
+                    ContextMenuIcon::File
+                }
             } else {
-                ContextMenuIcon::File
-            }
-        } else {
-            ContextMenuIcon::FolderKind(None)
-        };
-        items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-open".to_owned(),
-            icon: Some(icon),
-            label: "Open".to_owned(),
-            command,
-            enabled: true,
-        });
+                ContextMenuIcon::FolderKind(None)
+            };
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open".to_owned(),
+                icon: Some(icon),
+                label: "Open".to_owned(),
+                command,
+                enabled: true,
+            });
+        }
 
         if selected_entries_are_supported_mountable_images(selected_entries) {
             items.push(ContextMenuItem::Action {
@@ -1236,6 +1289,17 @@ fn entry_context_menu_items_with_custom(
         if let Some(entry) = selected_entries
             .first()
             .filter(|entry| entry_is_open_with_context_menu_target(entry))
+            .filter(|entry| {
+                #[cfg(feature = "rclone")]
+                {
+                    !crate::explorer::rclone::is_transfer_path(&entry.path)
+                }
+                #[cfg(not(feature = "rclone"))]
+                {
+                    let _ = entry;
+                    true
+                }
+            })
         {
             items.push(crate::explorer::open_with::context_menu_item(&entry.path));
         }

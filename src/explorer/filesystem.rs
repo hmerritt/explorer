@@ -1050,7 +1050,25 @@ pub(super) fn load_entries(
     path: &Path,
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
-    load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility.into()))
+    load_entries_with_rclone_settings(
+        path,
+        visibility,
+        &crate::settings::RcloneSettings::default(),
+    )
+}
+
+pub(super) fn load_entries_with_rclone_settings(
+    path: &Path,
+    visibility: impl Into<EntryVisibility>,
+    rclone_settings: &crate::settings::RcloneSettings,
+) -> std::io::Result<Vec<FileEntry>> {
+    let visibility = visibility.into();
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        return crate::explorer::rclone::load_transfer_entries(path, visibility, rclone_settings);
+    }
+
+    load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility))
 }
 
 #[derive(Clone, Copy)]
