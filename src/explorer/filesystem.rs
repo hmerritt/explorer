@@ -960,7 +960,7 @@ struct MacosDiskutilDiscEvidence {
 
 #[cfg(target_os = "macos")]
 fn macos_diskutil_disc_evidence(path: &Path) -> Option<MacosDiskutilDiscEvidence> {
-    use std::process::Command;
+    use std::{io::Cursor, process::Command};
 
     let output = Command::new("/usr/sbin/diskutil")
         .args(["info", "-plist"])
@@ -971,7 +971,7 @@ fn macos_diskutil_disc_evidence(path: &Path) -> Option<MacosDiskutilDiscEvidence
         return None;
     }
 
-    let value = plist::Value::from_reader(output.stdout.as_slice()).ok()?;
+    let value = plist::Value::from_reader(Cursor::new(output.stdout)).ok()?;
     let dictionary = value.as_dictionary()?;
     Some(MacosDiskutilDiscEvidence {
         optical: dictionary.get("Optical").and_then(plist::Value::as_boolean),
