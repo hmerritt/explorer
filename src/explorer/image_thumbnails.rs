@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures::{StreamExt, stream::FuturesUnordered};
-use gpui::{App, Context, Global, Image};
+use gpui::{App, Context, Global, RenderImage};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -22,10 +22,11 @@ use crate::{
     explorer::{
         entry::FileEntry,
         image_preview::{
-            ImageThumbnailExtractionTimings, hover_image_preview_dimensions,
-            load_hover_image_preview_png_with_cancel_timed,
-            load_image_thumbnail_png_with_cancel_timed, path_may_have_image_preview,
+            ImageThumbnailExtractionTimings, encode_rgba_png_bytes,
+            load_hover_image_preview_rgba_with_cancel_timed,
+            load_image_thumbnail_rgba_with_cancel_timed, path_may_have_image_preview,
         },
+        image_resize::dimensions_for_longest_side,
         video::{
             ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe,
             path_may_have_video_metadata, video_thumbnail_frame_seek_seconds,
@@ -35,7 +36,12 @@ use crate::{
     settings::{APP_ID, ConfigPlatform, config_dir_for},
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v6";
+#[cfg(test)]
+use crate::explorer::image_preview::{
+    hover_image_preview_dimensions, load_image_thumbnail_png_with_cancel_timed,
+};
+
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v7";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -134,7 +140,7 @@ enum ImageThumbnailState {
 
 #[derive(Clone, Debug)]
 pub(super) struct CachedThumbnailImage {
-    pub(super) image: Arc<Image>,
+    pub(super) image: Arc<RenderImage>,
     pub(super) width: u32,
     pub(super) height: u32,
 }
@@ -161,7 +167,7 @@ struct ImageThumbnailLoadJob {
 struct ImageThumbnailCacheWriteJob {
     cache_dir: PathBuf,
     key: String,
-    bytes: Vec<u8>,
+    image: image::RgbaImage,
 }
 
 impl ImageThumbnailCacheInner {
@@ -206,15 +212,17 @@ impl ImageThumbnailCacheInner {
             return (state.hover_preview(), None);
         }
 
-        let Ok((width, height)) =
-            hover_image_preview_dimensions(&request.path, HOVER_IMAGE_PREVIEW_SIZE)
-        else {
-            self.states.insert(request.key, ImageThumbnailState::Failed);
-            return (HoverImagePreviewLookup::Failed, None);
-        };
-
-        let loading_thumbnail = self.cached_thumbnail_without_loading(&standard_request);
-        self.pending.push_back(request.key.clone());
+        let loading_thumbnail = self
+            .states
+            .get(&standard_request.key)
+            .and_then(ImageThumbnailState::thumbnail);
+        let (width, height) = loading_thumbnail
+            .as_ref()
+            .and_then(|thumbnail| {
+                dimensions_for_preview(thumbnail.width, thumbnail.height, HOVER_IMAGE_PREVIEW_SIZE)
+            })
+            .unwrap_or((HOVER_IMAGE_PREVIEW_SIZE, HOVER_IMAGE_PREVIEW_SIZE));
+        self.pending.push_front(request.key.clone());
         self.states.insert(
             request.key.clone(),
             ImageThumbnailState::Pending {
@@ -233,23 +241,6 @@ impl ImageThumbnailCacheInner {
             },
             self.start_loader(),
         )
-    }
-
-    fn cached_thumbnail_without_loading(
-        &mut self,
-        request: &ImageThumbnailRequest,
-    ) -> Option<CachedThumbnailImage> {
-        if let Some(state) = self.states.get(&request.key) {
-            return state.thumbnail();
-        }
-
-        let thumbnail = read_cached_thumbnail(self.cache_dir.as_deref(), &request.key)
-            .and_then(cached_thumbnail_image_from_png_bytes)?;
-        self.states.insert(
-            request.key.clone(),
-            ImageThumbnailState::Ready(thumbnail.clone()),
-        );
-        Some(thumbnail)
     }
 
     fn start_loader(&mut self) -> Option<u64> {
@@ -303,11 +294,11 @@ impl ImageThumbnailCacheInner {
         None
     }
 
-    fn finish_request(
+    fn finish_prepared_request(
         &mut self,
         request: ImageThumbnailRequest,
         generation: u64,
-        bytes: Option<Vec<u8>>,
+        image: Option<CachedThumbnailImage>,
     ) -> bool {
         let should_finish = self.states.get(&request.key).is_some_and(|state| {
             matches!(
@@ -324,13 +315,27 @@ impl ImageThumbnailCacheInner {
             return false;
         }
 
-        let state = match bytes.and_then(cached_thumbnail_image_from_png_bytes) {
+        let state = match image {
             Some(image) => ImageThumbnailState::Ready(image),
             None => ImageThumbnailState::Failed,
         };
 
         self.states.insert(request.key, state);
         true
+    }
+
+    #[cfg(test)]
+    fn finish_request(
+        &mut self,
+        request: ImageThumbnailRequest,
+        generation: u64,
+        bytes: Option<Vec<u8>>,
+    ) -> bool {
+        self.finish_prepared_request(
+            request,
+            generation,
+            bytes.and_then(cached_thumbnail_image_from_png_bytes),
+        )
     }
 
     fn cancel_directory(&mut self, directory: &Path) -> Option<u64> {
@@ -406,7 +411,7 @@ impl ExplorerView {
         &mut self,
         entry: &FileEntry,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         let request = image_thumbnail_request_for_entry(entry, &self.path)?;
         let (thumbnail, loader_generation) = cx
             .try_global::<ImageThumbnailCache>()
@@ -553,7 +558,7 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
 
                 let timings_enabled = timings.enabled();
                 let load_task = cx.background_executor().spawn(async move {
-                    let thumbnail = load_or_create_thumbnail_png_with_timings(
+                    let thumbnail = load_or_create_thumbnail_with_timings(
                         &job.request,
                         job.cache_dir.as_deref(),
                         &job.cancel,
@@ -573,10 +578,10 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
             let commit_started = timings.now();
             let finished = cx
                 .update_global::<ImageThumbnailCache, _>(|cache, _| {
-                    cache.inner.borrow_mut().finish_request(
+                    cache.inner.borrow_mut().finish_prepared_request(
                         job.request,
                         job.generation,
-                        thumbnail.bytes,
+                        thumbnail.image,
                     )
                 })
                 .unwrap_or(false);
@@ -588,11 +593,18 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
 
             if finished && let Some(cache_write) = cache_write {
                 let write_task = cx.background_executor().spawn(async move {
-                    write_cached_thumbnail(
-                        Some(&cache_write.cache_dir),
-                        &cache_write.key,
-                        &cache_write.bytes,
+                    encode_rgba_png_bytes(
+                        cache_write.image.as_raw(),
+                        cache_write.image.width(),
+                        cache_write.image.height(),
                     )
+                    .is_some_and(|bytes| {
+                        write_cached_thumbnail(
+                            Some(&cache_write.cache_dir),
+                            &cache_write.key,
+                            &bytes,
+                        )
+                    })
                 });
                 write_task.detach();
                 timings.record_cache_write_scheduled();
@@ -608,7 +620,7 @@ fn image_thumbnail_loader_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(4)
-        .clamp(2, 8)
+        .clamp(2, 4)
 }
 
 #[cfg(test)]
@@ -617,10 +629,31 @@ fn load_or_create_thumbnail_png(
     cache_dir: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Option<Vec<u8>> {
-    load_or_create_thumbnail_png_with_timings(request, cache_dir, cancel, false).bytes
+    if let Some(bytes) = read_cached_thumbnail(cache_dir, &request.key) {
+        return Some(bytes);
+    }
+    let extracted = match request.usage {
+        ImageThumbnailUsage::Standard => {
+            crate::explorer::image_preview::load_image_thumbnail_png_with_cancel_timed(
+                &request.path,
+                request.usage.size(),
+                cancel,
+                false,
+            )
+        }
+        ImageThumbnailUsage::HoverPreview => {
+            crate::explorer::image_preview::load_hover_image_preview_png_with_cancel_timed(
+                &request.path,
+                request.usage.size(),
+                cancel,
+                false,
+            )
+        }
+    };
+    extracted.result.ok()
 }
 
-fn load_or_create_thumbnail_png_with_timings(
+fn load_or_create_thumbnail_with_timings(
     request: &ImageThumbnailRequest,
     cache_dir: Option<&Path>,
     cancel: &AtomicBool,
@@ -642,7 +675,19 @@ fn load_or_create_thumbnail_png_with_timings(
             );
         }
 
-        return ImageThumbnailLoadResult::cache_hit(bytes, cache_read_elapsed);
+        let decode_started = timings_enabled.then(Instant::now);
+        let image = decode_png_rgba(&bytes);
+        let cache_decode_elapsed = decode_started.map(|started| started.elapsed());
+        return match image {
+            Some(image) => {
+                ImageThumbnailLoadResult::cache_hit(image, cache_read_elapsed, cache_decode_elapsed)
+            }
+            None => ImageThumbnailLoadResult::failed(
+                cache_read_elapsed,
+                None,
+                ImageThumbnailExtractionTimings::default(),
+            ),
+        };
     }
 
     if cancel.load(Ordering::Relaxed) {
@@ -653,14 +698,14 @@ fn load_or_create_thumbnail_png_with_timings(
     let (result, extraction_timings) = match request.kind {
         ImageThumbnailKind::Image => {
             let extracted = match request.usage {
-                ImageThumbnailUsage::Standard => load_image_thumbnail_png_with_cancel_timed(
+                ImageThumbnailUsage::Standard => load_image_thumbnail_rgba_with_cancel_timed(
                     &request.path,
                     request.usage.size(),
                     cancel,
                     timings_enabled,
                 ),
                 ImageThumbnailUsage::HoverPreview => {
-                    load_hover_image_preview_png_with_cancel_timed(
+                    load_hover_image_preview_rgba_with_cancel_timed(
                         &request.path,
                         request.usage.size(),
                         cancel,
@@ -670,13 +715,18 @@ fn load_or_create_thumbnail_png_with_timings(
             };
             (extracted.result, extracted.timings)
         }
-        ImageThumbnailKind::Video => (
-            load_video_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel),
-            ImageThumbnailExtractionTimings::default(),
-        ),
+        ImageThumbnailKind::Video => {
+            let result =
+                load_video_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
+                    .and_then(|bytes| {
+                        decode_png_rgba(&bytes)
+                            .ok_or_else(|| "Failed to decode video thumbnail.".to_owned())
+                    });
+            (result, ImageThumbnailExtractionTimings::default())
+        }
     };
-    let bytes = match result {
-        Ok(bytes) => bytes,
+    let image = match result {
+        Ok(image) => image,
         Err(_) if cancel.load(Ordering::Relaxed) => {
             return ImageThumbnailLoadResult::cancelled_after_extract(
                 cache_read_elapsed,
@@ -702,10 +752,9 @@ fn load_or_create_thumbnail_png_with_timings(
     }
 
     ImageThumbnailLoadResult::generated(
-        bytes,
+        image,
         cache_read_elapsed,
         extract_elapsed,
-        None,
         extraction_timings,
     )
 }
@@ -910,11 +959,13 @@ fn check_thumbnail_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 }
 
 struct ImageThumbnailLoadResult {
-    bytes: Option<Vec<u8>>,
+    image: Option<CachedThumbnailImage>,
+    cache_image: Option<image::RgbaImage>,
     cache_hit: Option<bool>,
     cache_read_elapsed: Option<Duration>,
+    cache_decode_elapsed: Option<Duration>,
     extract_elapsed: Option<Duration>,
-    cache_write_elapsed: Option<Duration>,
+    render_prepare_elapsed: Option<Duration>,
     extraction_timings: ImageThumbnailExtractionTimings,
     outcome: ImageThumbnailLoadOutcome,
 }
@@ -928,31 +979,43 @@ enum ImageThumbnailLoadOutcome {
 }
 
 impl ImageThumbnailLoadResult {
-    fn cache_hit(bytes: Vec<u8>, cache_read_elapsed: Option<Duration>) -> Self {
+    fn cache_hit(
+        image: image::RgbaImage,
+        cache_read_elapsed: Option<Duration>,
+        cache_decode_elapsed: Option<Duration>,
+    ) -> Self {
+        let render_started = Instant::now();
+        let image = cached_thumbnail_image_from_rgba(image);
         Self {
-            bytes: Some(bytes),
+            image: Some(image),
+            cache_image: None,
             cache_hit: Some(true),
             cache_read_elapsed,
+            cache_decode_elapsed,
             extract_elapsed: None,
-            cache_write_elapsed: None,
+            render_prepare_elapsed: Some(render_started.elapsed()),
             extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::CacheHit,
         }
     }
 
     fn generated(
-        bytes: Vec<u8>,
+        image: image::RgbaImage,
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
-        cache_write_elapsed: Option<Duration>,
         extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
+        let cache_image = image.clone();
+        let render_started = Instant::now();
+        let image = cached_thumbnail_image_from_rgba(image);
         Self {
-            bytes: Some(bytes),
+            image: Some(image),
+            cache_image: Some(cache_image),
             cache_hit: Some(false),
             cache_read_elapsed,
+            cache_decode_elapsed: None,
             extract_elapsed,
-            cache_write_elapsed,
+            render_prepare_elapsed: Some(render_started.elapsed()),
             extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Generated,
         }
@@ -964,11 +1027,13 @@ impl ImageThumbnailLoadResult {
         extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         Self {
-            bytes: None,
+            image: None,
+            cache_image: None,
             cache_hit: Some(false),
             cache_read_elapsed,
+            cache_decode_elapsed: None,
             extract_elapsed,
-            cache_write_elapsed: None,
+            render_prepare_elapsed: None,
             extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Failed,
         }
@@ -976,11 +1041,13 @@ impl ImageThumbnailLoadResult {
 
     fn cancelled() -> Self {
         Self {
-            bytes: None,
+            image: None,
+            cache_image: None,
             cache_hit: None,
             cache_read_elapsed: None,
+            cache_decode_elapsed: None,
             extract_elapsed: None,
-            cache_write_elapsed: None,
+            render_prepare_elapsed: None,
             extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
@@ -988,11 +1055,13 @@ impl ImageThumbnailLoadResult {
 
     fn cancelled_after_cache_read(cache_hit: bool, cache_read_elapsed: Option<Duration>) -> Self {
         Self {
-            bytes: None,
+            image: None,
+            cache_image: None,
             cache_hit: Some(cache_hit),
             cache_read_elapsed,
+            cache_decode_elapsed: None,
             extract_elapsed: None,
-            cache_write_elapsed: None,
+            render_prepare_elapsed: None,
             extraction_timings: ImageThumbnailExtractionTimings::default(),
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
@@ -1004,11 +1073,13 @@ impl ImageThumbnailLoadResult {
         extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         Self {
-            bytes: None,
+            image: None,
+            cache_image: None,
             cache_hit: Some(false),
             cache_read_elapsed,
+            cache_decode_elapsed: None,
             extract_elapsed,
-            cache_write_elapsed: None,
+            render_prepare_elapsed: None,
             extraction_timings,
             outcome: ImageThumbnailLoadOutcome::Cancelled,
         }
@@ -1022,7 +1093,7 @@ impl ImageThumbnailLoadResult {
         Some(ImageThumbnailCacheWriteJob {
             cache_dir: job.cache_dir.clone()?,
             key: job.request.key.clone(),
-            bytes: self.bytes.clone()?,
+            image: self.cache_image.clone()?,
         })
     }
 }
@@ -1041,6 +1112,7 @@ struct ImageThumbnailTimingBatch {
     cache_writes_scheduled: usize,
     queue_wait: ImageThumbnailStageTimingStats,
     cache_read: ImageThumbnailStageTimingStats,
+    cache_decode: ImageThumbnailStageTimingStats,
     extract: ImageThumbnailStageTimingStats,
     embedded_thumbnail_scan: ImageThumbnailStageTimingStats,
     embedded_thumbnail_decode: ImageThumbnailStageTimingStats,
@@ -1058,6 +1130,7 @@ struct ImageThumbnailTimingBatch {
     resize_canvas: ImageThumbnailStageTimingStats,
     png_encode: ImageThumbnailStageTimingStats,
     cache_write: ImageThumbnailStageTimingStats,
+    render_prepare: ImageThumbnailStageTimingStats,
     commit: ImageThumbnailStageTimingStats,
     request_total: ImageThumbnailStageTimingStats,
 }
@@ -1109,6 +1182,9 @@ impl ImageThumbnailTimingBatch {
         if let Some(elapsed) = result.cache_read_elapsed {
             self.cache_read.record(elapsed);
         }
+        if let Some(elapsed) = result.cache_decode_elapsed {
+            self.cache_decode.record(elapsed);
+        }
         if let Some(cache_hit) = result.cache_hit {
             if cache_hit {
                 self.cache_hits += 1;
@@ -1120,8 +1196,8 @@ impl ImageThumbnailTimingBatch {
             self.extract.record(elapsed);
         }
         self.record_extraction_timings(&result.extraction_timings);
-        if let Some(elapsed) = result.cache_write_elapsed {
-            self.cache_write.record(elapsed);
+        if let Some(elapsed) = result.render_prepare_elapsed {
+            self.render_prepare.record(elapsed);
         }
 
         match result.outcome {
@@ -1230,6 +1306,7 @@ impl ImageThumbnailTimingBatch {
         )];
         push_image_thumbnail_stage_line(&mut lines, "queue_wait", &self.queue_wait);
         push_image_thumbnail_stage_line(&mut lines, "cache_read", &self.cache_read);
+        push_image_thumbnail_stage_line(&mut lines, "cache_decode", &self.cache_decode);
         push_image_thumbnail_stage_line(&mut lines, "extract", &self.extract);
         push_image_thumbnail_stage_line(
             &mut lines,
@@ -1255,6 +1332,7 @@ impl ImageThumbnailTimingBatch {
         push_image_thumbnail_stage_line(&mut lines, "resize_canvas", &self.resize_canvas);
         push_image_thumbnail_stage_line(&mut lines, "png_encode", &self.png_encode);
         push_image_thumbnail_stage_line(&mut lines, "cache_write", &self.cache_write);
+        push_image_thumbnail_stage_line(&mut lines, "render_prepare", &self.render_prepare);
         push_image_thumbnail_stage_line(&mut lines, "commit", &self.commit);
         push_image_thumbnail_stage_line(&mut lines, "request_total", &self.request_total);
         lines
@@ -1428,19 +1506,35 @@ fn thumbnail_file_path(cache_dir: Option<&Path>, key: &str) -> Option<PathBuf> {
     Some(cache_dir?.join(format!("{key}.png")))
 }
 
-fn image_from_png_bytes(bytes: Vec<u8>) -> Arc<Image> {
-    Arc::new(Image::from_bytes(gpui::ImageFormat::Png, bytes))
+fn dimensions_for_preview(width: u32, height: u32, size: u32) -> Option<(u32, u32)> {
+    dimensions_for_longest_side(width, height, size)
 }
 
+#[cfg(test)]
 fn cached_thumbnail_image_from_png_bytes(bytes: Vec<u8>) -> Option<CachedThumbnailImage> {
-    let (width, height) = png_dimensions(&bytes)?;
-    Some(CachedThumbnailImage {
-        image: image_from_png_bytes(bytes),
+    cached_thumbnail_image_from_rgba(decode_png_rgba(&bytes)?).into()
+}
+
+fn decode_png_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
+    image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .ok()
+        .map(image::DynamicImage::into_rgba8)
+}
+
+fn cached_thumbnail_image_from_rgba(mut image: image::RgbaImage) -> CachedThumbnailImage {
+    let width = image.width();
+    let height = image.height();
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    CachedThumbnailImage {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
         width,
         height,
-    })
+    }
 }
 
+#[cfg(test)]
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || !bytes.starts_with(PNG_SIGNATURE) || &bytes[12..16] != b"IHDR" {
         return None;
@@ -1515,6 +1609,14 @@ fn normalized_path_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+#[cfg(feature = "benchmarks")]
+pub mod benchmark_support {
+    pub fn prepare_cached_thumbnail_for_benchmark(bytes: Vec<u8>) -> Option<(u32, u32)> {
+        let image = super::cached_thumbnail_image_from_rgba(super::decode_png_rgba(&bytes)?);
+        Some((image.width, image.height))
+    }
+}
+
 struct StableHash(u64);
 
 impl StableHash {
@@ -1554,8 +1656,8 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn thumbnail_cache_version_invalidates_pre_bilinear_images() {
-        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v6");
+    fn thumbnail_cache_version_invalidates_prepared_render_images() {
+        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v7");
     }
 
     #[test]
@@ -1620,7 +1722,7 @@ mod tests {
 
         assert_eq!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
-            "f5147175a0e76dd2"
+            "91426f780197402b"
         );
     }
 
@@ -1749,10 +1851,9 @@ mod tests {
         let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
         batch.requests = 1;
         let result = ImageThumbnailLoadResult::generated(
-            vec![1],
+            image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
             None,
             Some(Duration::from_millis(10)),
-            None,
             ImageThumbnailExtractionTimings {
                 embedded_thumbnail_scan: Some(Duration::from_millis(11)),
                 embedded_thumbnail_decode: Some(Duration::from_millis(12)),
@@ -1813,17 +1914,16 @@ mod tests {
             queued_at: Instant::now(),
         };
         let generated = ImageThumbnailLoadResult::generated(
-            vec![1, 2, 3],
+            image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
             Some(Duration::from_millis(1)),
             Some(Duration::from_millis(2)),
-            Some(Duration::from_millis(3)),
             ImageThumbnailExtractionTimings::default(),
         );
 
         let write = generated.cache_write_job(&job).expect("cache write job");
         assert_eq!(write.cache_dir, cache_dir);
         assert_eq!(write.key, "generated");
-        assert_eq!(write.bytes, vec![1, 2, 3]);
+        assert_eq!(write.image.as_raw(), &[1, 2, 3, 255]);
 
         let uncached_job = ImageThumbnailLoadJob {
             request: job.request.clone(),
@@ -1873,7 +1973,8 @@ mod tests {
         assert_eq!(batch.cache_misses, 3);
         assert_eq!(batch.cache_read.count, 4);
         assert_eq!(batch.extract.count, 3);
-        assert_eq!(batch.cache_write.count, 1);
+        assert_eq!(batch.cache_write.count, 0);
+        assert_eq!(batch.render_prepare.count, 1);
     }
 
     #[test]
@@ -1969,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_lookup_reports_probed_loading_dimensions() {
+    fn hover_preview_lookup_uses_placeholder_dimensions_without_file_io() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
         fs::write(&source, png_bytes(8, 4)).unwrap();
@@ -1995,7 +2096,7 @@ mod tests {
             lookup,
             HoverImagePreviewLookup::Loading {
                 width: 400,
-                height: 200,
+                height: 400,
                 thumbnail: None
             }
         ));
@@ -2003,7 +2104,7 @@ mod tests {
             cache.hover_preview_for_request(request, standard_request).0,
             HoverImagePreviewLookup::Loading {
                 width: 400,
-                height: 200,
+                height: 400,
                 thumbnail: None
             }
         ));
@@ -2044,7 +2145,7 @@ mod tests {
             lookup,
             HoverImagePreviewLookup::Loading {
                 width: 400,
-                height: 200,
+                height: 400,
                 thumbnail: Some(CachedThumbnailImage {
                     width: 128,
                     height: 128,
@@ -2105,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_reuses_disk_cached_standard_thumbnail_without_loading_it() {
+    fn hover_preview_does_not_read_standard_thumbnail_disk_cache_on_render_path() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
         fs::write(&source, png_bytes(8, 4)).unwrap();
@@ -2137,19 +2238,12 @@ mod tests {
         assert!(matches!(
             lookup,
             HoverImagePreviewLookup::Loading {
-                thumbnail: Some(CachedThumbnailImage {
-                    width: 128,
-                    height: 128,
-                    ..
-                }),
+                thumbnail: None,
                 ..
             }
         ));
         assert_eq!(cache.pending.len(), 1);
-        assert!(matches!(
-            cache.states.get(&standard_request.key),
-            Some(ImageThumbnailState::Ready(_))
-        ));
+        assert!(!cache.states.contains_key(&standard_request.key));
     }
 
     #[test]
@@ -2198,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_lookup_fails_before_loading_when_dimensions_are_invalid() {
+    fn hover_preview_invalid_image_is_failed_by_background_loader() {
         let temp = TempDir::new();
         let source = temp.path().join("broken.png");
         fs::write(&source, b"not an image").unwrap();
@@ -2218,9 +2312,16 @@ mod tests {
         };
         let (lookup, generation) = cache.hover_preview_for_request(request, standard_request);
 
-        assert!(matches!(lookup, HoverImagePreviewLookup::Failed));
-        assert!(generation.is_none());
-        assert!(cache.pending.is_empty());
+        assert!(matches!(
+            lookup,
+            HoverImagePreviewLookup::Loading {
+                width: 400,
+                height: 400,
+                thumbnail: None
+            }
+        ));
+        assert!(generation.is_some());
+        assert_eq!(cache.pending.len(), 1);
     }
 
     #[test]
@@ -2269,6 +2370,38 @@ mod tests {
             cache.states.get(&second_job.request.key),
             Some(ImageThumbnailState::Loading { .. })
         ));
+    }
+
+    #[test]
+    fn hover_preview_is_dequeued_before_older_standard_thumbnails() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let first = request("first", "folder");
+        let second = request("second", "folder");
+        push_pending(&mut cache, first);
+        push_pending(&mut cache, second);
+
+        let hover = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "hover".to_owned(),
+            ..request("hover-source", "folder")
+        };
+        let standard = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::Standard,
+            key: "hover-standard".to_owned(),
+            ..hover.clone()
+        };
+        let (_, generation) = cache.hover_preview_for_request(hover.clone(), standard);
+        let generation = generation.expect("loader generation");
+
+        assert_eq!(
+            cache.next_load_job(generation).unwrap().request.key,
+            hover.key
+        );
+    }
+
+    #[test]
+    fn thumbnail_loader_concurrency_is_capped_at_four() {
+        assert!((2..=4).contains(&image_thumbnail_loader_concurrency()));
     }
 
     #[test]

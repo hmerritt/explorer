@@ -5549,11 +5549,16 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
 
 fn large_entry_icon(
     entry: &FileEntry,
-    image_thumbnail: Option<Arc<Image>>,
+    image_thumbnail: Option<Arc<gpui::RenderImage>>,
     app_icon: Option<Arc<Image>>,
 ) -> AnyElement {
     if let Some(image_thumbnail) = image_thumbnail {
-        return image_icon(image_thumbnail, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
+        return gpui::img(image_thumbnail)
+            .w(px(LARGE_ICON_SIZE))
+            .h(px(LARGE_ICON_SIZE))
+            .flex_shrink_0()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
     }
 
     if entry.uses_directory_shortcut_icon() {
@@ -7707,7 +7712,8 @@ mod tests {
         assert_eq!(thumbnail.origin.x, preview.origin.x + gpui::px(1.0));
         assert_eq!(thumbnail.origin.y, preview.origin.y + gpui::px(1.0));
         assert_eq!(thumbnail.size.width, preview.size.width - gpui::px(2.0));
-        assert_eq!(thumbnail.size.height, preview.size.height - gpui::px(2.0));
+        assert_eq!(thumbnail.size.height, thumbnail.size.width / 2.0);
+        assert!(thumbnail.size.height <= preview.size.height - gpui::px(1.0));
         assert!(
             cx.debug_bounds("image-hover-preview-loading-label")
                 .is_none()

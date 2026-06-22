@@ -88,6 +88,7 @@ pub mod benchmark_support {
         set_copy_parallelism,
     };
     pub use super::image_preview::benchmark_support::*;
+    pub use super::image_thumbnails::benchmark_support::*;
     pub use super::properties::benchmark_support::*;
     pub use super::recursive_search::benchmark_support::*;
 

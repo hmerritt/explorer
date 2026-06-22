@@ -30,10 +30,17 @@ cargo bench --features benchmarks --bench recursive_search -- --baseline before
 The navigation benchmark creates its fixture under
 `target/navigation-pipeline-benchmark-v1`.
 
-The image-thumbnail benchmark measures isolated Bilinear RGBA resizing at
-thumbnail and hover-preview sizes for opaque and transparent inputs, then the
-full PNG, JPEG, TIFF, SVG, and parallel batch JPEG pipelines. It creates
-deterministic file fixtures under `target/image-thumbnails-benchmark-v3`.
+The image-thumbnail benchmark measures isolated Bilinear RGBA resizing,
+ready-for-display extraction at 128px and 400px, PNG disk-cache decoding, full
+PNG-encoded cache generation, and parallel JPEG batches. Fixtures cover opaque
+and transparent PNG, JPEG (including 12MP), TIFF, WebP, and SVG under
+`target/image-thumbnails-benchmark-v4`.
+
+Use the release profile when comparing shipped application performance:
+
+```sh
+cargo bench --profile release --features benchmarks --bench image_thumbnails
+```
 
 The properties benchmark creates a deterministic large directory fixture under
 `target/properties-benchmark-v1`.

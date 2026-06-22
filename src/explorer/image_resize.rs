@@ -37,6 +37,68 @@ pub(super) fn resize_rgba(
     Ok(resized)
 }
 
+pub(super) fn resize_rgb(
+    image: image::RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<image::RgbImage, String> {
+    if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+        return Err("Image resize dimensions must be non-zero.".to_owned());
+    }
+    if image.width() == width && image.height() == height {
+        return Ok(image);
+    }
+
+    let mut resized = image::RgbImage::new(width, height);
+    RGBA_RESIZER.with(|resizer| {
+        resizer
+            .borrow_mut()
+            .resize(&image, &mut resized, &BILINEAR_OPTIONS)
+            .map_err(|error| format!("Failed to resize image: {error}"))
+    })?;
+    Ok(resized)
+}
+
+pub(super) fn resize_luma(
+    image: image::GrayImage,
+    width: u32,
+    height: u32,
+) -> Result<image::GrayImage, String> {
+    if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+        return Err("Image resize dimensions must be non-zero.".to_owned());
+    }
+    if image.width() == width && image.height() == height {
+        return Ok(image);
+    }
+
+    let mut resized = image::GrayImage::new(width, height);
+    RGBA_RESIZER.with(|resizer| {
+        resizer
+            .borrow_mut()
+            .resize(&image, &mut resized, &BILINEAR_OPTIONS)
+            .map_err(|error| format!("Failed to resize image: {error}"))
+    })?;
+    Ok(resized)
+}
+
+pub(super) fn resize_dynamic_to_rgba(
+    image: image::DynamicImage,
+    longest_side: u32,
+) -> Result<image::RgbaImage, String> {
+    let (width, height) = dimensions_for_longest_side(image.width(), image.height(), longest_side)
+        .ok_or_else(|| "Image has no dimensions.".to_owned())?;
+    match image {
+        image::DynamicImage::ImageRgb8(image) => {
+            Ok(image::DynamicImage::ImageRgb8(resize_rgb(image, width, height)?).into_rgba8())
+        }
+        image::DynamicImage::ImageLuma8(image) => {
+            Ok(image::DynamicImage::ImageLuma8(resize_luma(image, width, height)?).into_rgba8())
+        }
+        image::DynamicImage::ImageRgba8(image) => resize_rgba(image, width, height),
+        image => resize_rgba(image.into_rgba8(), width, height),
+    }
+}
+
 pub(super) fn resize_rgba_to_longest_side(
     image: image::RgbaImage,
     longest_side: u32,

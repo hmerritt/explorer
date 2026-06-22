@@ -11,9 +11,12 @@ use std::{
 };
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use explorer::benchmark_support::{load_image_thumbnail_for_benchmark, resize_rgba_for_benchmark};
+use explorer::benchmark_support::{
+    load_image_thumbnail_for_benchmark, load_image_thumbnail_ready_for_benchmark,
+    prepare_cached_thumbnail_for_benchmark, resize_rgba_for_benchmark,
+};
 
-const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v3";
+const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v4";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
 const LARGE_HEIGHT: u32 = 1200;
@@ -21,8 +24,11 @@ const BATCH_COUNT: usize = 32;
 
 struct Fixture {
     large_png: PathBuf,
+    large_transparent_png: PathBuf,
     large_jpeg: PathBuf,
+    photo_jpeg: PathBuf,
     large_tiff: PathBuf,
+    large_webp: PathBuf,
     large_svg: PathBuf,
     batch_jpegs: Vec<PathBuf>,
 }
@@ -39,8 +45,15 @@ impl Fixture {
             }
             fs::create_dir_all(&root).expect("create thumbnail fixture");
             create_png(&root.join("large.png"), LARGE_WIDTH, LARGE_HEIGHT);
+            create_transparent_png(
+                &root.join("large-transparent.png"),
+                LARGE_WIDTH,
+                LARGE_HEIGHT,
+            );
             create_jpeg(&root.join("large.jpg"), LARGE_WIDTH, LARGE_HEIGHT, 0);
+            create_jpeg(&root.join("photo-12mp.jpg"), 4000, 3000, 1);
             create_tiff(&root.join("large.tif"), LARGE_WIDTH, LARGE_HEIGHT);
+            create_webp(&root.join("large.webp"), LARGE_WIDTH, LARGE_HEIGHT);
             create_svg(&root.join("large.svg"));
             for index in 0..BATCH_COUNT {
                 create_jpeg(
@@ -55,14 +68,41 @@ impl Fixture {
 
         Self {
             large_png: root.join("large.png"),
+            large_transparent_png: root.join("large-transparent.png"),
             large_jpeg: root.join("large.jpg"),
+            photo_jpeg: root.join("photo-12mp.jpg"),
             large_tiff: root.join("large.tif"),
+            large_webp: root.join("large.webp"),
             large_svg: root.join("large.svg"),
             batch_jpegs: (0..BATCH_COUNT)
                 .map(|index| root.join(format!("batch-{index:02}.jpg")))
                 .collect(),
         }
     }
+}
+
+fn create_transparent_png(path: &Path, width: u32, height: u32) {
+    let image = image::DynamicImage::ImageRgba8(transparent_gradient_rgba(width, height));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode transparent benchmark png");
+    fs::write(path, bytes).expect("write transparent benchmark png");
+}
+
+fn create_webp(path: &Path, width: u32, height: u32) {
+    let image = image::DynamicImage::ImageRgb8(gradient_rgb(width, height, 0));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::WebP,
+        )
+        .expect("encode benchmark webp");
+    fs::write(path, bytes).expect("write benchmark webp");
 }
 
 fn create_png(path: &Path, width: u32, height: u32) {
@@ -154,6 +194,12 @@ fn load_thumbnail(path: &Path) -> usize {
         .len()
 }
 
+fn load_ready_thumbnail(path: &Path, size: u32) -> usize {
+    load_image_thumbnail_ready_for_benchmark(path, size)
+        .expect("prepare benchmark thumbnail")
+        .len()
+}
+
 fn load_batch(paths: &[PathBuf], parallelism: usize) -> usize {
     if parallelism <= 1 {
         return paths.iter().map(|path| load_thumbnail(path)).sum();
@@ -213,6 +259,26 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
     }
     resize.finish();
 
+    let mut ready = criterion.benchmark_group("image_thumbnails/ready_for_display");
+    ready.sample_size(10);
+    ready.measurement_time(Duration::from_secs(5));
+    for (name, path) in [
+        ("png_large", &fixture.large_png),
+        ("png_transparent", &fixture.large_transparent_png),
+        ("jpeg_large", &fixture.large_jpeg),
+        ("jpeg_12mp", &fixture.photo_jpeg),
+        ("tiff_large_uncompressed", &fixture.large_tiff),
+        ("webp_large", &fixture.large_webp),
+        ("svg_large", &fixture.large_svg),
+    ] {
+        for size in [THUMBNAIL_SIZE, 400] {
+            ready.bench_with_input(BenchmarkId::new(name, size), &size, |bencher, size| {
+                bencher.iter(|| black_box(load_ready_thumbnail(black_box(path), black_box(*size))));
+            });
+        }
+    }
+    ready.finish();
+
     let mut single = criterion.benchmark_group("image_thumbnails/single_file");
     single.sample_size(10);
     single.measurement_time(Duration::from_secs(5));
@@ -230,6 +296,20 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         });
     }
     single.finish();
+
+    let cached_png = load_image_thumbnail_for_benchmark(&fixture.large_png, THUMBNAIL_SIZE)
+        .expect("create cache decode fixture");
+    let mut cache = criterion.benchmark_group("image_thumbnails/disk_cache_decode");
+    cache.sample_size(20);
+    cache.measurement_time(Duration::from_secs(5));
+    cache.bench_function("png_to_render_image", |bencher| {
+        bencher.iter_batched(
+            || cached_png.clone(),
+            |bytes| black_box(prepare_cached_thumbnail_for_benchmark(bytes)),
+            BatchSize::SmallInput,
+        );
+    });
+    cache.finish();
 
     let total_bytes = fixture
         .batch_jpegs
