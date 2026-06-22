@@ -1136,11 +1136,16 @@ fn allowed_dropeffects_for_operations(operations: ExternalPathDragOperations) ->
     if operations.move_() {
         effect |= DROPEFFECT_MOVE;
     }
+    if operations.link() {
+        effect |= DROPEFFECT_LINK;
+    }
     effect
 }
 
 fn preferred_dropeffect_for_operations(operations: ExternalPathDragOperations) -> DROPEFFECT {
-    if operations.move_() && !operations.copy() {
+    if operations.link() && !operations.copy() && !operations.move_() {
+        DROPEFFECT_LINK
+    } else if operations.move_() && !operations.copy() {
         DROPEFFECT_MOVE
     } else if operations.copy() {
         DROPEFFECT_COPY
@@ -1154,7 +1159,9 @@ fn windows_external_drag_result(
     performed_effect: DROPEFFECT,
     logical_performed_effect: DROPEFFECT,
 ) -> ExternalPathsDragResult {
-    if drop_effect == DROPEFFECT_MOVE {
+    if drop_effect == DROPEFFECT_LINK {
+        ExternalPathsDragResult::link()
+    } else if drop_effect == DROPEFFECT_MOVE {
         let cleanup_source = performed_effect == DROPEFFECT_MOVE
             || (performed_effect == DROPEFFECT_NONE && logical_performed_effect == DROPEFFECT_MOVE);
         ExternalPathsDragResult::move_(cleanup_source)
@@ -1440,7 +1447,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 mod external_paths_drag_tests {
     use super::{
         build_hdrop_payload, windows_external_drag_result, DROPFILES, DROPEFFECT_COPY,
-        DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
     };
     use crate::{ExternalPathDragOperation, ExternalPathsDragResult};
     use std::{mem, path::PathBuf};
@@ -1489,6 +1496,17 @@ mod external_paths_drag_tests {
             windows_external_drag_result(DROPEFFECT_COPY, DROPEFFECT_COPY, DROPEFFECT_NONE),
             ExternalPathsDragResult::Completed {
                 operation: ExternalPathDragOperation::Copy,
+                cleanup_source: false,
+            }
+        );
+    }
+
+    #[test]
+    fn windows_drag_result_links_without_source_cleanup() {
+        assert_eq!(
+            windows_external_drag_result(DROPEFFECT_LINK, DROPEFFECT_LINK, DROPEFFECT_NONE),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Link,
                 cleanup_source: false,
             }
         );

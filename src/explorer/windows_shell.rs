@@ -98,3 +98,29 @@ pub(super) fn shell_execute_file_request(
 pub(super) fn execute_shell_request(request: &mut ShellExecuteRequest) -> io::Result<bool> {
     shell_execute_result(unsafe { ShellExecuteExW(request.execute_info_mut()) })
 }
+
+pub(super) fn create_shell_shortcut(shortcut: &Path, target: &Path) -> io::Result<()> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize, IPersistFile,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::Interface;
+
+    unsafe {
+        let initialized_com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| -> windows::core::Result<()> {
+            let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            let target_path = null_terminated_wide(target.as_os_str());
+            shell_link.SetPath(PCWSTR::from_raw(target_path.as_ptr()))?;
+
+            let persist_file: IPersistFile = shell_link.cast()?;
+            let shortcut_path = null_terminated_wide(shortcut.as_os_str());
+            persist_file.Save(PCWSTR::from_raw(shortcut_path.as_ptr()), true)
+        })();
+        if initialized_com {
+            CoUninitialize();
+        }
+        result.map_err(io::Error::other)
+    }
+}

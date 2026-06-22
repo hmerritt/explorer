@@ -49,6 +49,7 @@ x11rb::atom_manager! {
         XdndTypeList,
         XdndActionCopy,
         XdndActionMove,
+        XdndActionLink,
         XdndActionList,
         TARGETS,
         TextUriList: b"text/uri-list",

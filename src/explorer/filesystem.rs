@@ -1793,6 +1793,21 @@ pub(super) fn prepare_copy_paths_to_directory_with_copy_names(
 }
 
 #[cfg(test)]
+pub(super) fn create_links_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<FileOperationOutcome, String> {
+    prepare_create_links_to_directory(paths, destination).and_then(run_prepared_file_operation)
+}
+
+pub(super) fn prepare_create_links_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<PreparedFileOperation, String> {
+    prepare_link_operation(paths, destination).map(prepared_or_conflicts)
+}
+
+#[cfg(test)]
 pub(super) fn copy_paths_to_directory_for_paste(
     paths: &[PathBuf],
     destination: &Path,
@@ -2018,6 +2033,7 @@ pub(super) enum ConflictChoice {
 pub(super) enum FileOperationKind {
     Move,
     Copy,
+    Link,
     Extract,
 }
 
@@ -2026,6 +2042,7 @@ impl FileOperationKind {
         match self {
             FileOperationKind::Move => "Moving",
             FileOperationKind::Copy => "Copying",
+            FileOperationKind::Link => "Creating links",
             FileOperationKind::Extract => "Extracting",
         }
     }
@@ -2037,6 +2054,7 @@ pub(super) enum FileOperationPhase {
     Indexing,
     Resuming,
     Copying,
+    Linking,
     Verifying,
     Extracting,
     Moving,
@@ -2214,6 +2232,11 @@ enum FileOperationStep {
         conflict: bool,
         copy_engine: CopyEngine,
     },
+    CreateLink {
+        source: PathBuf,
+        destination: PathBuf,
+        conflict: bool,
+    },
     ExtractArchive {
         archive: PathBuf,
         destination: PathBuf,
@@ -2383,6 +2406,7 @@ fn prepare_file_operation(
                 let operation = match kind {
                     FileOperationKind::Move => "move",
                     FileOperationKind::Copy => "copy",
+                    FileOperationKind::Link => "link",
                     FileOperationKind::Extract => "extract",
                 };
                 return Err(format!(
@@ -2518,11 +2542,83 @@ fn plan_path_operation(
                 conflict,
                 copy_engine,
             }),
-            FileOperationKind::Extract => {}
+            FileOperationKind::Link | FileOperationKind::Extract => {}
         }
     }
 
     Ok(())
+}
+
+fn prepare_link_operation(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<FileOperationJob, String> {
+    if paths.is_empty() {
+        return Err("No items were selected for drag-and-drop.".to_owned());
+    }
+
+    if !destination.is_dir() {
+        return Err(format!(
+            "{} is not a folder.",
+            path_display_name(destination)
+        ));
+    }
+
+    let destination_canonical = canonicalize_for_operation(destination)?;
+    let mut reserved_destinations = HashSet::new();
+    let mut steps = Vec::new();
+    let mut roots = Vec::new();
+    let mut stats = FileOperationStats {
+        total_bytes: 0,
+        total_files: 0,
+    };
+
+    for source in paths {
+        if !source.exists() {
+            return Err(format!("Could not find {}.", path_display_name(source)));
+        }
+
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| format!("{} cannot be linked.", path_display_name(source)))?;
+        let planned_destination =
+            link_destination(destination, file_name, &mut reserved_destinations);
+
+        if source.is_dir() {
+            let source_canonical = canonicalize_for_operation(source)?;
+            let canonical_planned_destination = destination_canonical.join(
+                planned_destination
+                    .file_name()
+                    .unwrap_or_else(|| OsStr::new("")),
+            );
+            if canonical_planned_destination.starts_with(&source_canonical) {
+                return Err(format!(
+                    "Cannot link {} into itself.",
+                    path_display_name(source)
+                ));
+            }
+        }
+
+        steps.push(FileOperationStep::CreateLink {
+            source: source.clone(),
+            destination: planned_destination.clone(),
+            conflict: planned_destination.exists(),
+        });
+        roots.push(FileOperationRoot {
+            source: source.clone(),
+            destination: planned_destination,
+            source_is_dir: source.is_dir(),
+        });
+        stats.total_files = stats.total_files.saturating_add(1);
+    }
+
+    Ok(FileOperationJob {
+        kind: FileOperationKind::Link,
+        stats,
+        steps,
+        roots,
+        archive_diagnostics: None,
+    })
 }
 
 fn prepare_extract_archive_operation(
@@ -2670,6 +2766,11 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 destination,
                 conflict: true,
                 ..
+            }
+            | FileOperationStep::CreateLink {
+                source,
+                destination,
+                conflict: true,
             } => file_conflicts.push(FileConflict {
                 source: source.clone(),
                 destination: destination.clone(),
@@ -2814,6 +2915,37 @@ fn execute_copy_move_operation_with_progress_impl(
         operated_destinations.insert(result.destination.clone());
         if job.kind == FileOperationKind::Copy {
             copy_undo.extend(result.into_copy_undo());
+        }
+    }
+
+    for step in &job.steps {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress);
+            return Err(FileOperationError::Cancelled);
+        }
+
+        if let FileOperationStep::CreateLink {
+            source,
+            destination,
+            conflict,
+        } = step
+        {
+            if *conflict && conflict_choice == ConflictChoice::Skip {
+                continue;
+            }
+
+            progress.phase = FileOperationPhase::Linking;
+            progress.current_item = Some(source.clone());
+            on_progress(progress.clone());
+            create_link(source, destination)
+                .map_err(|error| operation_error("link", source, error))?;
+            sync_parent_directory_best_effort(destination);
+            operated_destinations.insert(destination.clone());
+            copy_undo.created_files.push(destination.clone());
+            progress.completed_files = progress.completed_files.saturating_add(1);
+            on_progress(progress.clone());
         }
     }
 
@@ -3383,6 +3515,7 @@ pub(super) fn execute_file_operation_with_progress(
                 }
                 operated_destinations.insert(destination.clone());
             }
+            FileOperationStep::CreateLink { .. } => {}
             FileOperationStep::ExtractArchive {
                 archive,
                 destination,
@@ -4966,6 +5099,16 @@ fn remove_source(source: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
+    crate::explorer::windows_shell::create_shell_shortcut(destination, source)
+}
+
+#[cfg(unix)]
+fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
 fn paste_copy_destination(
     destination: &Path,
     file_name: &OsStr,
@@ -4979,6 +5122,50 @@ fn paste_copy_destination(
             return candidate;
         }
         copy_number += 1;
+    }
+}
+
+fn link_destination(
+    destination: &Path,
+    file_name: &OsStr,
+    reserved_destinations: &mut HashSet<PathBuf>,
+) -> PathBuf {
+    let mut copy_number = 1;
+
+    loop {
+        let candidate = destination.join(link_file_name(file_name, copy_number));
+        if path_available_for_new_entry(&candidate)
+            && reserved_destinations.insert(candidate.clone())
+        {
+            return candidate;
+        }
+        copy_number += 1;
+    }
+}
+
+fn link_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
+    let file_name = file_name.to_string_lossy();
+    let suffix = if copy_number == 1 {
+        " - Shortcut".to_owned()
+    } else {
+        format!(" - Shortcut ({copy_number})")
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        OsString::from(format!("{file_name}{suffix}.lnk"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        OsString::from(format!("{file_name}{suffix}"))
+    }
+}
+
+fn path_available_for_new_entry(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => false,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -5194,6 +5381,10 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort_unstable();
         names
+    }
+
+    fn test_shortcut_path(directory: &Path, source_name: &str, copy_number: usize) -> PathBuf {
+        directory.join(link_file_name(OsStr::new(source_name), copy_number))
     }
 
     #[test]
@@ -7068,6 +7259,83 @@ mod tests {
         let copied_folder = temp.path().join("folder - Copy");
         assert_eq!(copied.destination_paths, vec![copied_folder.clone()]);
         assert_eq!(fs::read(copied_folder.join("nested.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn link_file_uses_shortcut_name_and_preserves_source() {
+        let temp = TempDir::new();
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+
+        let linked = finished_summary(create_links_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let shortcut = test_shortcut_path(&destination, "file.txt", 1);
+
+        assert_eq!(linked.kind, FileOperationKind::Link);
+        assert_eq!(linked.destination_paths, vec![shortcut.clone()]);
+        assert_eq!(linked.copy_undo.created_files, vec![shortcut.clone()]);
+        assert!(source.exists());
+        assert!(fs::symlink_metadata(&shortcut).is_ok());
+
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(&shortcut).unwrap(), source);
+
+        #[cfg(target_os = "windows")]
+        {
+            let entry = FileEntry::from_path(shortcut).expect("shortcut entry");
+            let (_, target) = entry
+                .pending_shell_shortcut_target()
+                .expect("shortcut target");
+            assert_eq!(
+                fs::canonicalize(target).unwrap(),
+                fs::canonicalize(source).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn link_directory_uses_shortcut_name_and_preserves_source() {
+        let temp = TempDir::new();
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let source = temp.path().join("folder");
+        fs::create_dir(&source).expect("create source directory");
+
+        let linked = finished_summary(create_links_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        let shortcut = test_shortcut_path(&destination, "folder", 1);
+
+        assert_eq!(linked.destination_paths, vec![shortcut.clone()]);
+        assert_eq!(linked.copy_undo.created_files, vec![shortcut.clone()]);
+        assert!(source.is_dir());
+        assert!(fs::symlink_metadata(&shortcut).is_ok());
+
+        #[cfg(unix)]
+        assert_eq!(fs::read_link(&shortcut).unwrap(), source);
+    }
+
+    #[test]
+    fn link_in_same_directory_increments_shortcut_names() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+        fs::write(test_shortcut_path(temp.path(), "file.txt", 1), b"existing")
+            .expect("create existing shortcut name");
+
+        let linked = finished_summary(create_links_to_directory(
+            std::slice::from_ref(&source),
+            temp.path(),
+        ));
+        let shortcut = test_shortcut_path(temp.path(), "file.txt", 2);
+
+        assert_eq!(linked.destination_paths, vec![shortcut.clone()]);
+        assert!(fs::symlink_metadata(shortcut).is_ok());
     }
 
     #[test]

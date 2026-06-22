@@ -1,9 +1,9 @@
 ## Todo
 
-- Copy undo can delete pre-existing data. Undo records top-level destinations, then recursively deletes them. Copying into an existing folder or replacing a file destroys original destination content on Ctrl+Z. See [file_commands.rs (line 620)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:620), [file_commands.rs (line 693)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:693), and [filesystem.rs (line 2355)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/filesystem.rs:2355).
-- Drag-and-drop — Alt-drag should create a shortcut or simlink of the selected file/directory
-
 ## 1
+
+- Network drives (rclone https://rclone.org/ builtin)
+- rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 
 ## 2
 
@@ -24,9 +24,7 @@
 - Shell-extension system
 - SSH drive support
 - Google Drive, OneDrive, etc... mounting
-- Network drives (rclone https://rclone.org/ builtin)
 - rclone hook for drive, B2, S3, etc...
-- rclone https://rclone.org/ builtin, adding support for
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 - A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
 

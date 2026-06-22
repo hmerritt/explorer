@@ -2828,6 +2828,7 @@ pub(super) fn render_drop_indicator(
     let (icon, action_label) = match indicator.operation {
         FileOperationKind::Move => (NavIcon::Forward.glyph(), "Move to"),
         FileOperationKind::Copy => ("\u{E710}", "Copy to"),
+        FileOperationKind::Link => ("\u{E71B}", "Create link in"),
     };
     let target_width = drop_indicator_target_width(measure_drop_indicator_target_text(
         &indicator.target_label,

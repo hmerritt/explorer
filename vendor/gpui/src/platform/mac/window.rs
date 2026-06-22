@@ -87,6 +87,8 @@ const NSDragOperationNone: NSDragOperation = 0;
 #[allow(non_upper_case_globals)]
 const NSDragOperationCopy: NSDragOperation = 1;
 #[allow(non_upper_case_globals)]
+const NSDragOperationLink: NSDragOperation = 2;
+#[allow(non_upper_case_globals)]
 const NSDragOperationMove: NSDragOperation = 16;
 #[derive(PartialEq)]
 pub enum UserTabbingPreference {
@@ -2414,11 +2416,16 @@ fn macos_drag_operation_mask(operations: ExternalPathDragOperations) -> NSDragOp
     if operations.move_() {
         mask |= NSDragOperationMove;
     }
+    if operations.link() {
+        mask |= NSDragOperationLink;
+    }
     mask
 }
 
 fn macos_external_drag_result(operation: NSDragOperation) -> ExternalPathsDragResult {
-    if operation & NSDragOperationMove != 0 {
+    if operation & NSDragOperationLink != 0 {
+        ExternalPathsDragResult::link()
+    } else if operation & NSDragOperationMove != 0 {
         ExternalPathsDragResult::move_(false)
     } else if operation & NSDragOperationCopy != 0 {
         ExternalPathsDragResult::copy()

@@ -36,8 +36,8 @@ use crate::explorer::{
 
 #[cfg(test)]
 use crate::explorer::filesystem::{
-    FileConflictBatch, FileOperationOutcome, copy_paths_to_directory, move_paths_to_directory,
-    resolve_file_conflicts,
+    FileConflictBatch, FileOperationOutcome, copy_paths_to_directory, create_links_to_directory,
+    move_paths_to_directory, resolve_file_conflicts,
 };
 
 const FILE_OPERATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -622,7 +622,7 @@ impl ExplorerView {
 
     fn record_file_operation_undo(&mut self, summary: &FileOperationSummary) {
         match summary.kind {
-            FileOperationKind::Copy => {
+            FileOperationKind::Copy | FileOperationKind::Link => {
                 if !summary.copy_undo.is_empty() {
                     self.push_file_operation_undo(Some(FileOperationUndo::Copy {
                         undo: summary.copy_undo.clone(),
@@ -1921,6 +1921,34 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"source");
         assert_eq!(fs::read(&existing).unwrap(), b"existing");
         assert!(view.file_operation_undo_stack.is_empty());
+    }
+
+    #[test]
+    fn undo_link_removes_created_link_and_preserves_source() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"data").expect("create source file");
+        fs::create_dir(&destination).expect("create destination");
+
+        let mut view = ExplorerView::new(destination.clone());
+        let result = create_links_to_directory(std::slice::from_ref(&source), &view.path);
+        view.handle_file_command_result(result);
+
+        let shortcut = destination.join(if cfg!(target_os = "windows") {
+            "file.txt - Shortcut.lnk"
+        } else {
+            "file.txt - Shortcut"
+        });
+        assert!(source.exists());
+        assert!(fs::symlink_metadata(&shortcut).is_ok());
+        assert_eq!(view.file_operation_undo_stack.len(), 1);
+
+        let undo = view.file_operation_undo_stack.last().cloned().unwrap();
+        view.apply_file_operation_undo(undo).expect("undo link");
+
+        assert_eq!(fs::read(&source).unwrap(), b"data");
+        assert!(fs::symlink_metadata(&shortcut).is_err());
     }
 
     #[test]

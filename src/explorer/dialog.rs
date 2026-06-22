@@ -1557,6 +1557,7 @@ fn file_operation_transfer_bytes(progress: &FileOperationProgress) -> Option<u64
         FileOperationPhase::Preparing
         | FileOperationPhase::Indexing
         | FileOperationPhase::Resuming
+        | FileOperationPhase::Linking
         | FileOperationPhase::Removing
         | FileOperationPhase::Finished
         | FileOperationPhase::Cancelled => None,
@@ -1584,6 +1585,7 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
         FileOperationPhase::Indexing => "Indexing",
         FileOperationPhase::Resuming => "Resuming",
         FileOperationPhase::Copying => "Copying",
+        FileOperationPhase::Linking => "Creating link",
         FileOperationPhase::Verifying => "Verifying",
         FileOperationPhase::Extracting => "Extracting",
         FileOperationPhase::Moving => "Moving",

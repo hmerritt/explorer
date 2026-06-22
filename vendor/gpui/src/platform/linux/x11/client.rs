@@ -2341,34 +2341,51 @@ fn xdnd_actions_for_operations(
     operations: ExternalPathDragOperations,
     atoms: &XcbAtoms,
 ) -> Vec<u32> {
-    xdnd_actions_for_operations_with_atoms(operations, atoms.XdndActionCopy, atoms.XdndActionMove)
+    xdnd_actions_for_operations_with_atoms(
+        operations,
+        atoms.XdndActionCopy,
+        atoms.XdndActionMove,
+        atoms.XdndActionLink,
+    )
 }
 
 fn xdnd_actions_for_operations_with_atoms(
     operations: ExternalPathDragOperations,
     copy_action: u32,
     move_action: u32,
+    link_action: u32,
 ) -> Vec<u32> {
-    let mut actions = Vec::with_capacity(2);
+    let mut actions = Vec::with_capacity(3);
     if operations.copy() {
         actions.push(copy_action);
     }
     if operations.move_() {
         actions.push(move_action);
     }
+    if operations.link() {
+        actions.push(link_action);
+    }
     actions
 }
 
 fn xdnd_action_for_operations(operations: ExternalPathDragOperations, atoms: &XcbAtoms) -> u32 {
-    xdnd_action_for_operations_with_atoms(operations, atoms.XdndActionCopy, atoms.XdndActionMove)
+    xdnd_action_for_operations_with_atoms(
+        operations,
+        atoms.XdndActionCopy,
+        atoms.XdndActionMove,
+        atoms.XdndActionLink,
+    )
 }
 
 fn xdnd_action_for_operations_with_atoms(
     operations: ExternalPathDragOperations,
     copy_action: u32,
     move_action: u32,
+    link_action: u32,
 ) -> u32 {
-    if operations.move_() && !operations.copy() {
+    if operations.link() && !operations.copy() && !operations.move_() {
+        link_action
+    } else if operations.move_() && !operations.copy() {
         move_action
     } else if operations.copy() {
         copy_action
@@ -2383,6 +2400,7 @@ fn xdnd_finished_result(accepted: bool, action: u32, atoms: &XcbAtoms) -> Extern
         action,
         atoms.XdndActionCopy,
         atoms.XdndActionMove,
+        atoms.XdndActionLink,
     )
 }
 
@@ -2391,12 +2409,15 @@ fn xdnd_finished_result_with_atoms(
     action: u32,
     copy_action: u32,
     move_action: u32,
+    link_action: u32,
 ) -> ExternalPathsDragResult {
     if !accepted {
         return ExternalPathsDragResult::Cancelled;
     }
 
-    if action == move_action {
+    if action == link_action {
+        ExternalPathsDragResult::link()
+    } else if action == move_action {
         ExternalPathsDragResult::move_(false)
     } else if action == copy_action {
         ExternalPathsDragResult::copy()
@@ -2687,40 +2708,52 @@ mod tests {
     fn x11_xdnd_actions_advertise_copy_and_move() {
         assert_eq!(
             xdnd_actions_for_operations_with_atoms(
-                ExternalPathDragOperations::COPY_MOVE,
+                ExternalPathDragOperations::COPY_MOVE_LINK,
                 10,
                 20,
+                30,
             ),
-            vec![10, 20]
+            vec![10, 20, 30]
         );
         assert_eq!(
-            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::MOVE, 10, 20),
+            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::MOVE, 10, 20, 30),
             20
         );
         assert_eq!(
-            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::COPY, 10, 20),
+            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::COPY, 10, 20, 30),
             10
+        );
+        assert_eq!(
+            xdnd_action_for_operations_with_atoms(ExternalPathDragOperations::LINK, 10, 20, 30),
+            30
         );
     }
 
     #[test]
     fn x11_xdnd_finished_maps_copy_move_and_cancel() {
         assert_eq!(
-            xdnd_finished_result_with_atoms(true, 10, 10, 20),
+            xdnd_finished_result_with_atoms(true, 10, 10, 20, 30),
             ExternalPathsDragResult::Completed {
                 operation: ExternalPathDragOperation::Copy,
                 cleanup_source: false,
             }
         );
         assert_eq!(
-            xdnd_finished_result_with_atoms(true, 20, 10, 20),
+            xdnd_finished_result_with_atoms(true, 20, 10, 20, 30),
             ExternalPathsDragResult::Completed {
                 operation: ExternalPathDragOperation::Move,
                 cleanup_source: false,
             }
         );
         assert_eq!(
-            xdnd_finished_result_with_atoms(false, 20, 10, 20),
+            xdnd_finished_result_with_atoms(true, 30, 10, 20, 30),
+            ExternalPathsDragResult::Completed {
+                operation: ExternalPathDragOperation::Link,
+                cleanup_source: false,
+            }
+        );
+        assert_eq!(
+            xdnd_finished_result_with_atoms(false, 20, 10, 20, 30),
             ExternalPathsDragResult::Cancelled
         );
     }

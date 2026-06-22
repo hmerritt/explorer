@@ -14,14 +14,14 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{
         paths_are_on_same_volume, prepare_copy_paths_to_directory_with_copy_names,
-        prepare_move_paths_to_directory,
+        prepare_create_links_to_directory, prepare_move_paths_to_directory,
     },
     view::ExplorerView,
 };
 
 #[cfg(test)]
 use crate::explorer::filesystem::{
-    copy_paths_to_directory_with_copy_names, move_paths_to_directory,
+    copy_paths_to_directory_with_copy_names, create_links_to_directory, move_paths_to_directory,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,6 +47,7 @@ pub(super) enum DropDestination {
 pub(super) enum FileOperationKind {
     Move,
     Copy,
+    Link,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,27 +55,27 @@ pub(super) struct DropIndicator {
     pub(super) operation: FileOperationKind,
     pub(super) target_label: String,
     pub(super) mouse_position: Point<Pixels>,
-    copy_modifier_required: bool,
+    explicit_operation_required: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ResolvedDrop {
     Move,
     Copy,
-    UnsupportedShortcut,
+    Link,
     Invalid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DraggedValueDropResolution {
     resolved: ResolvedDrop,
-    copy_modifier_required: bool,
+    explicit_operation_required: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DropTargetValidity {
     valid: bool,
-    copy_modifier_required: bool,
+    explicit_operation_required: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -218,14 +219,16 @@ impl ResolvedDrop {
         match self {
             Self::Move => Some(FileOperationKind::Move),
             Self::Copy => Some(FileOperationKind::Copy),
-            Self::UnsupportedShortcut | Self::Invalid => None,
+            Self::Link => Some(FileOperationKind::Link),
+            Self::Invalid => None,
         }
     }
 
     pub(super) fn cursor_style(self) -> CursorStyle {
         match self {
             Self::Copy => CursorStyle::DragCopy,
-            Self::UnsupportedShortcut | Self::Invalid => CursorStyle::OperationNotAllowed,
+            Self::Link => CursorStyle::DragLink,
+            Self::Invalid => CursorStyle::OperationNotAllowed,
             Self::Move => CursorStyle::Arrow,
         }
     }
@@ -259,7 +262,7 @@ impl DraggedEntries {
     pub(super) fn external_paths(&self) -> gpui::ExternalPaths {
         gpui::ExternalPaths::with_operations(
             self.paths.clone(),
-            gpui::ExternalPathDragOperations::COPY_MOVE,
+            gpui::ExternalPathDragOperations::COPY_MOVE_LINK,
         )
     }
 }
@@ -383,7 +386,7 @@ impl ExplorerView {
             operation,
             target_label: drop_target_display_name(destination, &self.path),
             mouse_position,
-            copy_modifier_required: resolution.copy_modifier_required,
+            explicit_operation_required: resolution.explicit_operation_required,
         })
     }
 
@@ -414,7 +417,7 @@ impl ExplorerView {
             return true;
         };
 
-        if indicator.copy_modifier_required && operation != FileOperationKind::Copy {
+        if indicator.explicit_operation_required && operation == FileOperationKind::Move {
             self.active_drop_indicator = None;
             true
         } else if indicator.operation == operation {
@@ -545,8 +548,8 @@ impl ExplorerView {
                     destination,
                 ));
             }
-            ResolvedDrop::UnsupportedShortcut => {
-                self.open_error = Some("Shortcut drag-and-drop is not supported yet.".to_owned());
+            ResolvedDrop::Link => {
+                self.handle_file_command_result(create_links_to_directory(paths, destination));
             }
             ResolvedDrop::Invalid => {
                 self.open_error = Some("This drop target is not valid.".to_owned());
@@ -575,8 +578,11 @@ impl ExplorerView {
                     cx,
                 );
             }
-            ResolvedDrop::UnsupportedShortcut => {
-                self.open_error = Some("Shortcut drag-and-drop is not supported yet.".to_owned());
+            ResolvedDrop::Link => {
+                self.handle_prepared_file_command_result_and_open_dialog(
+                    prepare_create_links_to_directory(paths, destination),
+                    cx,
+                );
             }
             ResolvedDrop::Invalid => {
                 self.open_error = Some("This drop target is not valid.".to_owned());
@@ -600,7 +606,7 @@ pub(super) fn resolve_drop_operation_for_paths(
     }
 
     if modifiers.alt || (modifiers.secondary() && modifiers.shift) {
-        return ResolvedDrop::UnsupportedShortcut;
+        return ResolvedDrop::Link;
     }
 
     if modifiers.secondary() {
@@ -638,7 +644,7 @@ fn resolve_dragged_value_drop(
                 dragged.paths.as_slice(),
                 destination,
             ),
-            copy_modifier_required: validity.copy_modifier_required,
+            explicit_operation_required: validity.explicit_operation_required,
         };
     }
 
@@ -658,13 +664,13 @@ fn resolve_dragged_value_drop(
                 &paths,
                 destination,
             ),
-            copy_modifier_required: validity.copy_modifier_required,
+            explicit_operation_required: validity.explicit_operation_required,
         };
     }
 
     DraggedValueDropResolution {
         resolved: resolve_drop_operation_for_paths(modifiers, false, &[], destination),
-        copy_modifier_required: false,
+        explicit_operation_required: false,
     }
 }
 
@@ -700,7 +706,7 @@ fn internal_drop_target_validity(
     {
         return DropTargetValidity {
             valid: false,
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         };
     }
 
@@ -726,7 +732,7 @@ fn external_drop_target_validity(
     {
         return DropTargetValidity {
             valid: false,
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         };
     }
 
@@ -743,17 +749,20 @@ fn drop_target_validity_for_same_source_destination(
     same_source_destination: bool,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
-    let copy_modifier_required =
-        same_source_destination && same_source_destination_copy_requested(modifiers);
+    let explicit_operation_required =
+        same_source_destination && same_source_destination_explicit_operation_requested(modifiers);
 
     DropTargetValidity {
-        valid: !same_source_destination || copy_modifier_required,
-        copy_modifier_required,
+        valid: !same_source_destination || explicit_operation_required,
+        explicit_operation_required,
     }
 }
 
-fn same_source_destination_copy_requested(modifiers: Modifiers) -> bool {
-    matches!(resolve_drop_operation(modifiers, true), ResolvedDrop::Copy)
+fn same_source_destination_explicit_operation_requested(modifiers: Modifiers) -> bool {
+    matches!(
+        resolve_drop_operation(modifiers, true),
+        ResolvedDrop::Copy | ResolvedDrop::Link
+    )
 }
 
 fn destination_contains_internal_drag_source(
@@ -850,6 +859,28 @@ mod tests {
     };
     use std::fs;
 
+    fn shortcut_path(directory: &Path, source_name: &str, copy_number: usize) -> PathBuf {
+        let suffix = if copy_number == 1 {
+            " - Shortcut".to_owned()
+        } else {
+            format!(" - Shortcut ({copy_number})")
+        };
+
+        #[cfg(target_os = "windows")]
+        {
+            directory.join(format!("{source_name}{suffix}.lnk"))
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            directory.join(format!("{source_name}{suffix}"))
+        }
+    }
+
+    fn shortcut_exists(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+
     #[test]
     fn modifiers_resolve_drag_operation() {
         assert_eq!(
@@ -885,7 +916,7 @@ mod tests {
                 },
                 true,
             ),
-            ResolvedDrop::UnsupportedShortcut
+            ResolvedDrop::Link
         );
         assert_eq!(
             resolve_drop_operation(
@@ -897,7 +928,7 @@ mod tests {
                 },
                 true,
             ),
-            ResolvedDrop::UnsupportedShortcut
+            ResolvedDrop::Link
         );
         assert_eq!(
             resolve_drop_operation(Modifiers::default(), false),
@@ -1303,6 +1334,7 @@ mod tests {
         );
         assert!(external_paths.operations().copy());
         assert!(external_paths.operations().move_());
+        assert!(external_paths.operations().link());
     }
 
     #[test]
@@ -1316,6 +1348,7 @@ mod tests {
         assert_eq!(external_paths.paths(), &[PathBuf::from("c.txt")]);
         assert!(external_paths.operations().copy());
         assert!(external_paths.operations().move_());
+        assert!(external_paths.operations().link());
     }
 
     #[test]
@@ -1328,6 +1361,7 @@ mod tests {
         assert_eq!(external_paths.paths(), &[PathBuf::from("b.txt")]);
         assert!(external_paths.operations().copy());
         assert!(external_paths.operations().move_());
+        assert!(external_paths.operations().link());
     }
 
     #[test]
@@ -1430,13 +1464,51 @@ mod tests {
     }
 
     #[test]
+    fn alt_modifier_drop_indicator_uses_link_operation() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        let target = temp.path().join("target");
+        fs::write(&source, b"data").expect("create source");
+        fs::create_dir(&target).expect("create target folder");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let ix = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry");
+        let dragged = view
+            .test_dragged_entries_for_index(ix)
+            .expect("dragged row");
+
+        let indicator = view
+            .drop_indicator_for_value(
+                &dragged,
+                &DropDestination::Directory {
+                    item_path: target.clone(),
+                    target_path: target,
+                },
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                gpui::point(px(32.0), px(48.0)),
+            )
+            .expect("drop indicator");
+
+        assert_eq!(indicator.operation, FileOperationKind::Link);
+        assert_eq!(indicator.target_label, "target");
+    }
+
+    #[test]
     fn active_drop_indicator_updates_operation_when_modifiers_change() {
         let mut view = test_view_with_entries(&["file.txt"]);
         view.active_drop_indicator = Some(DropIndicator {
             operation: FileOperationKind::Move,
             target_label: "target".to_owned(),
             mouse_position: gpui::point(px(32.0), px(48.0)),
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         });
 
         assert!(view.update_drop_indicator_modifiers(Modifiers::secondary_key()));
@@ -1454,7 +1526,7 @@ mod tests {
             operation: FileOperationKind::Copy,
             target_label: "target".to_owned(),
             mouse_position: gpui::point(px(32.0), px(48.0)),
-            copy_modifier_required: true,
+            explicit_operation_required: true,
         });
 
         assert!(view.update_drop_indicator_modifiers(Modifiers::default()));
@@ -1463,13 +1535,13 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_modifier_combination_clears_active_drop_indicator() {
+    fn alt_modifier_updates_active_drop_indicator_to_link() {
         let mut view = test_view_with_entries(&["file.txt"]);
         view.active_drop_indicator = Some(DropIndicator {
             operation: FileOperationKind::Move,
             target_label: "target".to_owned(),
             mouse_position: gpui::point(px(32.0), px(48.0)),
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         });
 
         assert!(view.update_drop_indicator_modifiers(Modifiers {
@@ -1477,7 +1549,10 @@ mod tests {
             ..Modifiers::default()
         }));
 
-        assert_eq!(view.active_drop_indicator, None);
+        assert_eq!(
+            view.active_drop_indicator.as_ref().unwrap().operation,
+            FileOperationKind::Link
+        );
     }
 
     #[test]
@@ -1487,7 +1562,7 @@ mod tests {
             operation: FileOperationKind::Move,
             target_label: "target".to_owned(),
             mouse_position: gpui::point(px(32.0), px(48.0)),
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         });
 
         assert!(view.clear_stale_drop_indicator(gpui::point(px(33.0), px(48.0))));
@@ -1503,7 +1578,7 @@ mod tests {
             operation: FileOperationKind::Move,
             target_label: "target".to_owned(),
             mouse_position,
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         });
 
         assert!(!view.clear_stale_drop_indicator(mouse_position));
@@ -1518,7 +1593,7 @@ mod tests {
             operation: FileOperationKind::Copy,
             target_label: "target".to_owned(),
             mouse_position: gpui::point(px(32.0), px(48.0)),
-            copy_modifier_required: false,
+            explicit_operation_required: false,
         });
 
         assert!(view.clear_drop_indicator());
@@ -1610,7 +1685,7 @@ mod tests {
             Modifiers::secondary_key(),
         ));
         assert_eq!(indicator.operation, FileOperationKind::Copy);
-        assert!(indicator.copy_modifier_required);
+        assert!(indicator.explicit_operation_required);
     }
 
     #[test]
@@ -1656,6 +1731,30 @@ mod tests {
         let copied = temp.path().join("folder - Copy");
         assert!(source.is_dir());
         assert_eq!(fs::read(copied.join("nested.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn alt_modifier_same_folder_current_directory_drop_creates_link() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.txt");
+        fs::write(&source, b"data").expect("create source");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&source);
+        let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
+
+        view.drop_internal_entries(
+            &dragged,
+            DropDestination::CurrentDirectory,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        );
+
+        let shortcut = shortcut_path(temp.path(), "file.txt", 1);
+        assert!(source.exists());
+        assert!(shortcut_exists(&shortcut));
     }
 
     #[test]

@@ -497,6 +497,7 @@ impl Deref for MouseExitEvent {
 pub struct ExternalPathDragOperations {
     copy: bool,
     move_: bool,
+    link: bool,
 }
 
 impl ExternalPathDragOperations {
@@ -504,16 +505,31 @@ impl ExternalPathDragOperations {
     pub const COPY: Self = Self {
         copy: true,
         move_: false,
+        link: false,
     };
     /// Advertise that native targets may move the dragged paths.
     pub const MOVE: Self = Self {
         copy: false,
         move_: true,
+        link: false,
+    };
+    /// Advertise that native targets may create links to the dragged paths.
+    pub const LINK: Self = Self {
+        copy: false,
+        move_: false,
+        link: true,
     };
     /// Advertise that native targets may either copy or move the dragged paths.
     pub const COPY_MOVE: Self = Self {
         copy: true,
         move_: true,
+        link: false,
+    };
+    /// Advertise that native targets may copy, move, or create links to the dragged paths.
+    pub const COPY_MOVE_LINK: Self = Self {
+        copy: true,
+        move_: true,
+        link: true,
     };
 
     /// Returns true when copy is an allowed native drag operation.
@@ -524,6 +540,11 @@ impl ExternalPathDragOperations {
     /// Returns true when move is an allowed native drag operation.
     pub fn move_(self) -> bool {
         self.move_
+    }
+
+    /// Returns true when link is an allowed native drag operation.
+    pub fn link(self) -> bool {
+        self.link
     }
 }
 
@@ -540,6 +561,8 @@ pub enum ExternalPathDragOperation {
     Copy,
     /// The target moved the dragged paths.
     Move,
+    /// The target created links to the dragged paths.
+    Link,
 }
 
 /// The result of a native file drag that was handed off to the operating system.
@@ -570,6 +593,14 @@ impl ExternalPathsDragResult {
         Self::Completed {
             operation: ExternalPathDragOperation::Move,
             cleanup_source,
+        }
+    }
+
+    /// Construct a completed native link result.
+    pub fn link() -> Self {
+        Self::Completed {
+            operation: ExternalPathDragOperation::Link,
+            cleanup_source: false,
         }
     }
 }
@@ -838,11 +869,12 @@ mod test {
     fn external_paths_accept_copy_move_operations() {
         let paths = ExternalPaths::with_operations(
             [PathBuf::from("/tmp/a.txt")],
-            ExternalPathDragOperations::COPY_MOVE,
+            ExternalPathDragOperations::COPY_MOVE_LINK,
         );
 
         assert!(paths.operations().copy());
         assert!(paths.operations().move_());
+        assert!(paths.operations().link());
     }
 
     #[test]
