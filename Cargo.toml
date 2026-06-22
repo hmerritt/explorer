@@ -10,6 +10,7 @@ license = "MIT"
 
 [features]
 benchmarks = []
+rclone = ["dep:librclone"]
 
 [package.metadata.bundle]
 name = "Explorer"
@@ -108,6 +109,8 @@ required-features = ["benchmarks"]
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 decompress = { path = "vendor/decompress" }
+librclone = { path = "vendor/librclone" }
+librclone-sys = { path = "vendor/librclone/librclone-sys" }
 
 [profile.dev]
 opt-level = 0
@@ -130,6 +133,7 @@ lto = true
 [dependencies]
 git2 = { version = "0.20.4", default-features = false }
 languages = "0.0.2"
+librclone = { version = "0.10.0", optional = true }
 paste = "1.0.15"
 thousands = "0.2.0"
 tokei = { version = "14.0.0", default-features = false }
