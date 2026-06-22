@@ -2482,7 +2482,7 @@ extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -
 }
 
 fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths> {
-    let mut paths = SmallVec::new();
+    let mut paths = SmallVec::<[PathBuf; 2]>::new();
     let pasteboard: id = unsafe { msg_send![dragging_info, draggingPasteboard] };
     let filenames = unsafe { NSPasteboard::propertyListForType(pasteboard, NSFilenamesPboardType) };
     if filenames == nil {
@@ -2505,7 +2505,7 @@ fn start_macos_external_paths_drag(
     let mut dragging_items = Vec::new();
 
     unsafe {
-        let window_state = get_window_state(native_view);
+        let window_state = get_window_state(&*native_view);
         window_state.lock().external_paths_drag_operations = paths.operations();
 
         for path in paths.paths() {
