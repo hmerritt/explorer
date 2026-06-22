@@ -139,8 +139,8 @@ const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
 const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 500.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 2.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 2.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -980,7 +980,8 @@ impl ExplorerView {
             f32::from(viewport_size.height),
         );
         let preview_size = image_hover_preview_render_size(width, height, window_size);
-        let (left, top) = image_hover_preview_origin(state.position, preview_size, window_size);
+        let local_position = state.position - self.view_origin;
+        let (left, top) = image_hover_preview_origin(local_position, preview_size, window_size);
 
         Some(
             div()
@@ -6211,12 +6212,13 @@ mod tests {
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
         DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_SORT_CHEVRON_ICON_SIZE,
-        ImageHoverPreview, NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP,
-        RecursiveSearchProgressSnapshot, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, codebase_makeup_segments,
-        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
-        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
-        copied_directory_address, directory_open_mode_for_entry_click, drop_indicator_target_width,
+        IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
+        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
+        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
+        codebase_makeup_segments, context_menu_action_width_for_text_width,
+        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
+        context_menu_width_for_natural_width, copied_directory_address,
+        directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
         git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
@@ -7788,6 +7790,32 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn image_hover_preview_offsets_from_view_local_mouse_position(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        let mouse_position = hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.view_origin = gpui::point(gpui::px(0.0), gpui::px(42.0));
+                cx.notify();
+            });
+        });
+        let preview = run_until_image_hover_preview(cx);
+
+        assert_eq!(
+            preview.origin.x,
+            mouse_position.x + gpui::px(IMAGE_HOVER_PREVIEW_OFFSET_X)
+        );
+        assert_eq!(
+            preview.origin.y,
+            mouse_position.y - gpui::px(42.0) + gpui::px(IMAGE_HOVER_PREVIEW_OFFSET_Y)
+        );
     }
 
     #[gpui::test]
