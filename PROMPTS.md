@@ -1,11 +1,9 @@
 ## Todo
 
-- Add UPX compression to release pipeline
+- Copy undo can delete pre-existing data. Undo records top-level destinations, then recursively deletes them. Copying into an existing folder or replacing a file destroys original destination content on Ctrl+Z. See [file_commands.rs (line 620)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:620), [file_commands.rs (line 693)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:693), and [filesystem.rs (line 2355)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/filesystem.rs:2355).
+- Drag-and-drop — Alt-drag should create a shortcut or simlink of the selected file/directory
 
 ## 1
-
-- Copy undo can delete pre-existing data. Undo records top-level destinations, then recursively deletes them. Copying into an existing folder or replacing a file destroys original destination content on Ctrl+Z. See [file_commands.rs (line 620)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:620), [file_commands.rs (line 693)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:693), and [filesystem.rs (line 2355)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/filesystem.rs:2355).
-- Implement SIMD PNG decoder specifially for PNG decode paths. This was done previously without success (it was 20% slower than without it), I beleive it was only slower due to the implementation. Make sure to read the docs and apply this library properly to get the benifit
 
 ## 2
 
@@ -14,7 +12,6 @@
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
-- Properties "Opens with" "Change" button currently opens the file after a change. It should only set the default program, and not open the program.
 - Special settings value for "date_format" called "relative" and another "relative-timestamp", which shows relative human-readable "ago" times, and "-timestamp" varient includes "at <%H:%M>", e.g. "1 minute ago", "2 hours ago", "yesterday at 15:29", "2 days ago"...
 
 ## 3
@@ -30,10 +27,7 @@
 - Network drives (rclone https://rclone.org/ builtin)
 - rclone hook for drive, B2, S3, etc...
 - rclone https://rclone.org/ builtin, adding support for
-- Drag-and-drop — How should Alt-drag shortcut behavior be handled in this task?
-  Alt-drag should create a shortcut or simlink of the selected file/directory
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
-- Add UI button to calc folder sizes (button disapears once pressed, it's a one-time button that must be pressed per-directory as-and-when it is needed) Only show when "show_folder_size: false"
 - A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
 
 ## Left to implement
@@ -63,10 +57,6 @@ Major remaining Windows Explorer parity areas:
 - Image metadata
     - Rotate images Left/Right
     - Edit metadata values
-- Video metadata
-    - Frames tab, add a context menu to each frame with:
-        - Copy
-        - Save
 - Audio metadata
     - Channels
     - Format
@@ -74,12 +64,5 @@ Major remaining Windows Explorer parity areas:
 - Text file
     - Lines
     - Lines of text
-    - Blanks
-- Code file
-    - https://crates.io/crates/tokei
-    - https://docs.rs/tokei/latest/tokei/index.html
-    - Language
-    - Lines
-    - Lines of Code
     - Blanks
 - PDF view: https://crates.io/crates/pdf_oxide

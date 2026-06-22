@@ -51,6 +51,12 @@ jobs:
               with:
                   key: ${{ matrix.target }}
 
+            - name: Install UPX
+              if: steps.tag_check.outputs.valid == 'true'
+              uses: step-security/ghaction-upx@v4
+              with:
+                  install-only: true
+
             - name: Install release tools
               if: steps.tag_check.outputs.valid == 'true'
               run: |
@@ -119,6 +125,8 @@ jobs:
                   done
 
                   patchelf --set-rpath '$ORIGIN/../lib' "$binary"
+                  upx -9 "$binary"
+                  upx -t "$binary"
 
                   test -x "$app_dir/bin/explorer"
                   test -x "$binary"
@@ -173,6 +181,12 @@ jobs:
               with:
                   key: ${{ matrix.target }}
 
+            - name: Install UPX
+              if: steps.tag_check.outputs.valid == 'true'
+              uses: step-security/ghaction-upx@v4
+              with:
+                  install-only: true
+
             - name: Build
               if: steps.tag_check.outputs.valid == 'true'
               run: cargo build --release --locked --target ${{ matrix.target }}
@@ -183,6 +197,8 @@ jobs:
               run: |
                   New-Item -ItemType Directory -Force -Path dist, package | Out-Null
                   Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.binary }}"
+                  upx -9 "package/${{ matrix.binary }}"
+                  upx -t "package/${{ matrix.binary }}"
                   Compress-Archive -Path "package/${{ matrix.binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
 
             - name: Upload release asset
