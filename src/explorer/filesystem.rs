@@ -585,9 +585,145 @@ fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
+    macos_volume_drive_roots_from_dir(Path::new("/Volumes"))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
+    linux_mountinfo_drive_roots_from_path(Path::new("/proc/self/mountinfo"))
+        .unwrap_or_else(|_| vec![PathBuf::from("/")])
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_volume_drive_roots_from_dir(volumes_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/")];
+    let Ok(entries) = fs::read_dir(volumes_dir) else {
+        return roots;
+    };
+
+    let mut volumes = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    volumes.sort();
+    volumes.dedup();
+    roots.extend(volumes);
+    roots
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_drive_roots_from_path(path: &Path) -> io::Result<Vec<PathBuf>> {
+    fs::read_to_string(path).map(|mountinfo| linux_mountinfo_drive_roots(&mountinfo))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_drive_roots(mountinfo: &str) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/")];
+    let mut seen = HashSet::from([PathBuf::from("/")]);
+    let mut mounted_volumes = mountinfo
+        .lines()
+        .filter_map(linux_mountinfo_mount_point)
+        .filter(|path| linux_mount_point_is_visible_drive(path))
+        .filter(|path| seen.insert(path.clone()))
+        .collect::<Vec<_>>();
+
+    mounted_volumes.sort();
+    roots.extend(mounted_volumes);
+    roots
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_mount_point(line: &str) -> Option<PathBuf> {
+    line.split_whitespace()
+        .nth(4)
+        .map(linux_mountinfo_unescape)
+        .map(PathBuf::from)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_unescape(value: &str) -> String {
+    let mut bytes = Vec::with_capacity(value.len());
+    let raw = value.as_bytes();
+    let mut index = 0;
+
+    while index < raw.len() {
+        if raw[index] == b'\\' && index + 3 < raw.len() {
+            let digits = &raw[index + 1..index + 4];
+            if digits.iter().all(u8::is_ascii_digit)
+                && let Ok(octal) = std::str::from_utf8(digits)
+                && let Ok(byte) = u8::from_str_radix(octal, 8)
+            {
+                bytes.push(byte);
+                index += 4;
+                continue;
+            }
+        }
+        bytes.push(raw[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mount_point_is_visible_drive(path: &Path) -> bool {
+    path_has_components_below(path, Path::new("/media"), 2)
+        || path_has_components_below(path, Path::new("/run/media"), 2)
+        || path_has_components_below(path, Path::new("/mnt"), 1)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn path_has_components_below(path: &Path, root: &Path, min_components: usize) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.components().count() >= min_components)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn drive_root_is_ejectable(path: &Path) -> bool {
+    windows_drive_type(path).is_some_and(|drive_type| matches!(drive_type, 2 | 5))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn drive_root_is_ejectable(path: &Path) -> bool {
+    path != Path::new("/") && path.starts_with("/Volumes")
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn drive_root_is_ejectable(path: &Path) -> bool {
+    linux_mount_point_is_visible_drive(path)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub(crate) fn drive_root_is_ejectable(_: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_type(path: &Path) -> Option<u32> {
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    use windows::core::PCWSTR;
+
+    let root = path
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Prefix(prefix) => {
+                Some(format!("{}\\", prefix.as_os_str().to_string_lossy()))
+            }
+            _ => None,
+        })?;
+    let encoded = wide_null(&root);
+    Some(unsafe { GetDriveTypeW(PCWSTR(encoded.as_ptr())) })
 }
 
 pub(super) fn load_entries(
@@ -4795,10 +4931,59 @@ mod tests {
         assert_eq!(preferred_start_path(None, None, None), PathBuf::from("."));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn local_drive_roots_falls_back_to_unix_root() {
-        assert_eq!(local_drive_roots(), vec![PathBuf::from("/")]);
+    fn macos_volume_drive_roots_include_volumes_after_filesystem_root() {
+        let temp = TempDir::new();
+        let volumes = temp.path().join("Volumes");
+        let archive = volumes.join("Archive Disk");
+        let backup = volumes.join("Backup");
+        fs::create_dir_all(&archive).expect("create archive volume");
+        fs::create_dir_all(&backup).expect("create backup volume");
+        fs::write(volumes.join("not-a-volume"), "").expect("create file");
+
+        assert_eq!(
+            macos_volume_drive_roots_from_dir(&volumes),
+            vec![PathBuf::from("/"), archive, backup]
+        );
+    }
+
+    #[test]
+    fn linux_mountinfo_drive_roots_include_visible_user_mounts() {
+        let mountinfo = "\
+36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+40 25 8:17 / /media/alex/USB\\040Disk rw,relatime - vfat /dev/sdb1 rw
+41 25 8:33 / /run/media/alex/Camera rw,relatime - vfat /dev/sdc1 rw
+42 25 8:49 / /mnt/projects rw,relatime - ext4 /dev/sdd1 rw
+43 25 0:4 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+44 25 8:17 / /media/alex/USB\\040Disk rw,relatime - vfat /dev/sdb1 rw
+";
+
+        assert_eq!(
+            linux_mountinfo_drive_roots(mountinfo),
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/media/alex/USB Disk"),
+                PathBuf::from("/mnt/projects"),
+                PathBuf::from("/run/media/alex/Camera"),
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_mountinfo_drive_roots_can_read_mountinfo_file() {
+        let temp = TempDir::new();
+        let mountinfo = temp.path().join("mountinfo");
+        fs::write(
+            &mountinfo,
+            "36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n\
+             40 25 8:17 / /media/alex/USB rw,relatime - vfat /dev/sdb1 rw\n",
+        )
+        .expect("write mountinfo");
+
+        assert_eq!(
+            linux_mountinfo_drive_roots_from_path(&mountinfo).expect("parse mountinfo"),
+            vec![PathBuf::from("/"), PathBuf::from("/media/alex/USB")]
+        );
     }
 
     #[test]

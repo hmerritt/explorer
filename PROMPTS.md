@@ -3,10 +3,14 @@
 ## 1
 
 - Copy/move/delete are strong, but missing common Explorer behaviors: Ctrl+Z undo for file operations
-- mounted volume eject
 - drag-out interoperability with other apps
-- Windows-only, "Run as administrator" in contextmenu, and also in Properties to always run as Administrator "Run this program as an administrator"
-- Ctrl+N new window (open new window with offset x/y position on screen so user knows there is a new window)
+
+---
+
+- rsync copy/sync builtin
+- Windows, run as Administrator
+- admin/elevation prompts
+- Mount ISO (and other mountable files) as drive
 
 ## 2
 

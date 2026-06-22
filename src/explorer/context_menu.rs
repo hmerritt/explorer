@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
     time::SystemTime,
@@ -14,7 +14,7 @@ use crate::explorer::{
     filesystem::archive_path_is_supported,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
-    view::ExplorerView,
+    view::{ExplorerView, ReloadMode},
 };
 use crate::settings::{
     ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
@@ -91,6 +91,7 @@ pub(super) enum ContextMenuIcon {
     NativePathOptional(PathBuf),
     NewTab,
     OpenWith,
+    Eject,
     Unpin,
 }
 
@@ -131,6 +132,9 @@ pub(super) enum ContextMenuCommand {
         executable: PathBuf,
         args: Vec<String>,
         targets: Vec<PathBuf>,
+    },
+    EjectMountedVolume {
+        path: PathBuf,
     },
     UnpinSidebar {
         configured_index: usize,
@@ -217,6 +221,7 @@ impl ExplorerView {
         row_id: usize,
         configured_index: Option<usize>,
         open_icon_kind: Option<DirectoryKind>,
+        can_eject: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -231,7 +236,7 @@ impl ExplorerView {
         self.open_utility_menu = None;
         self.context_menu = Some(ContextMenuState::new_with_source(
             origin,
-            sidebar_context_menu_items(path, configured_index, open_icon_kind),
+            sidebar_context_menu_items(path, configured_index, open_icon_kind, can_eject),
             ContextMenuSource::SidebarItem { row_id },
         ));
         true
@@ -406,6 +411,9 @@ impl ExplorerView {
                     run_custom_command(&executable, &args, &targets),
                 );
             }
+            ContextMenuCommand::EjectMountedVolume { path } => {
+                self.eject_mounted_volume(path, cx);
+            }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
             }
@@ -422,6 +430,57 @@ impl ExplorerView {
                         .file_name()
                         .unwrap_or(executable.as_os_str())
                         .to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    fn eject_mounted_volume(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.volume_eject_task.is_some() {
+            return;
+        }
+
+        self.open_error = None;
+        let task_path = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { eject_mounted_volume_path(&task_path) })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.volume_eject_task = None;
+                explorer.handle_mounted_volume_eject_result(&path, result, cx);
+                cx.notify();
+            });
+        });
+        self.volume_eject_task = Some(task);
+    }
+
+    fn handle_mounted_volume_eject_result(
+        &mut self,
+        path: &Path,
+        result: io::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.reload_async_with_options(
+                    ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    Vec::new(),
+                    true,
+                    true,
+                    true,
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.open_error = Some(format!(
+                    "Could not eject {}: {error}",
+                    mounted_volume_error_name(path)
                 ));
             }
         }
@@ -568,6 +627,7 @@ pub(super) fn sidebar_context_menu_items(
     path: PathBuf,
     configured_index: Option<usize>,
     open_icon_kind: Option<DirectoryKind>,
+    can_eject: bool,
 ) -> Vec<ContextMenuItem> {
     let mut items = vec![
         ContextMenuItem::Action {
@@ -584,10 +644,20 @@ pub(super) fn sidebar_context_menu_items(
             id: "context-menu-sidebar-open-new-tab".to_owned(),
             icon: Some(ContextMenuIcon::NewTab),
             label: "Open in new tab".to_owned(),
-            command: ContextMenuCommand::OpenDirectoryInNewTab { path },
+            command: ContextMenuCommand::OpenDirectoryInNewTab { path: path.clone() },
             enabled: true,
         },
     ];
+    if can_eject {
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-sidebar-eject".to_owned(),
+            icon: Some(ContextMenuIcon::Eject),
+            label: "Eject".to_owned(),
+            command: ContextMenuCommand::EjectMountedVolume { path: path.clone() },
+            enabled: true,
+        });
+    }
     if let Some(configured_index) = configured_index {
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Action {
@@ -599,6 +669,115 @@ pub(super) fn sidebar_context_menu_items(
         });
     }
     items
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlatformCommand {
+    executable: OsString,
+    args: Vec<OsString>,
+}
+
+fn eject_mounted_volume_path(path: &Path) -> io::Result<()> {
+    let Some(command) = mounted_volume_eject_command(path) else {
+        return Err(io::Error::other("eject is not supported on this platform"));
+    };
+    run_platform_command(&command)
+}
+
+fn run_platform_command(command: &PlatformCommand) -> io::Result<()> {
+    let output = Command::new(&command.executable)
+        .args(&command.args)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(io::Error::other(platform_command_error_message(&output)))
+}
+
+fn platform_command_error_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_owned();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_owned();
+    }
+
+    output.status.to_string()
+}
+
+fn mounted_volume_error_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn mounted_volume_eject_command(path: &Path) -> Option<PlatformCommand> {
+    #[cfg(target_os = "windows")]
+    {
+        return Some(windows_mounted_volume_eject_command(path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Some(macos_mounted_volume_eject_command(path));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return Some(linux_mounted_volume_eject_command(path));
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("powershell.exe"),
+        args: vec![
+            OsString::from("-NoProfile"),
+            OsString::from("-NonInteractive"),
+            OsString::from("-ExecutionPolicy"),
+            OsString::from("Bypass"),
+            OsString::from("-Command"),
+            OsString::from(
+                "$drive = [System.IO.Path]::GetPathRoot($args[0]).TrimEnd('\\'); \
+                 $item = (New-Object -ComObject Shell.Application).Namespace(17).ParseName($drive); \
+                 if ($null -eq $item) { throw \"Drive not found: $drive\" }; \
+                 $item.InvokeVerb('Eject')",
+            ),
+            path.as_os_str().to_os_string(),
+        ],
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("/usr/sbin/diskutil"),
+        args: vec![OsString::from("eject"), path.as_os_str().to_os_string()],
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
+    PlatformCommand {
+        executable: OsString::from("gio"),
+        args: vec![
+            OsString::from("mount"),
+            OsString::from("--eject"),
+            path.as_os_str().to_os_string(),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -1588,8 +1767,12 @@ mod tests {
     #[test]
     fn configured_sidebar_menu_contains_expected_items_icons_and_commands() {
         let path = PathBuf::from("/tmp/custom");
-        let items =
-            sidebar_context_menu_items(path.clone(), Some(2), Some(DirectoryKind::Downloads));
+        let items = sidebar_context_menu_items(
+            path.clone(),
+            Some(2),
+            Some(DirectoryKind::Downloads),
+            false,
+        );
 
         assert_eq!(items.len(), 4);
         assert_eq!(
@@ -1633,7 +1816,8 @@ mod tests {
     #[test]
     fn unconfigured_sidebar_menu_omits_separator_and_unpin() {
         let path = PathBuf::from("/tmp/drive");
-        let items = sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive));
+        let items =
+            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive), false);
 
         assert_eq!(items.len(), 2);
         assert_eq!(
@@ -1664,7 +1848,8 @@ mod tests {
     #[test]
     fn unconfigured_wsl_sidebar_menu_uses_wsl_icon_kind() {
         let path = PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\");
-        let items = sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::DriveWsl));
+        let items =
+            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::DriveWsl), false);
 
         assert_eq!(items.len(), 2);
         assert_eq!(
@@ -1687,6 +1872,26 @@ mod tests {
                 icon: Some(ContextMenuIcon::NewTab),
                 label: "Open in new tab".to_owned(),
                 command: ContextMenuCommand::OpenDirectoryInNewTab { path },
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn ejectable_sidebar_drive_menu_contains_eject() {
+        let path = PathBuf::from("/Volumes/Backup");
+        let items =
+            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive), true);
+
+        assert_eq!(items.len(), 4);
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert_eq!(
+            items[3],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-eject".to_owned(),
+                icon: Some(ContextMenuIcon::Eject),
+                label: "Eject".to_owned(),
+                command: ContextMenuCommand::EjectMountedVolume { path },
                 enabled: true,
             }
         );
@@ -3043,6 +3248,48 @@ mod tests {
 
         view.handle_custom_command_result(&executable, Ok(()));
         assert_eq!(view.open_error, None);
+    }
+
+    #[test]
+    fn mounted_volume_eject_commands_use_platform_tools() {
+        let path = PathBuf::from("/Volumes/Backup Disk");
+
+        assert_eq!(
+            macos_mounted_volume_eject_command(&path),
+            PlatformCommand {
+                executable: OsString::from("/usr/sbin/diskutil"),
+                args: vec![OsString::from("eject"), path.as_os_str().to_os_string()],
+            }
+        );
+        assert_eq!(
+            linux_mounted_volume_eject_command(&path),
+            PlatformCommand {
+                executable: OsString::from("gio"),
+                args: vec![
+                    OsString::from("mount"),
+                    OsString::from("--eject"),
+                    path.as_os_str().to_os_string(),
+                ],
+            }
+        );
+
+        let windows_path = PathBuf::from("E:\\");
+        let windows_command = windows_mounted_volume_eject_command(&windows_path);
+        assert_eq!(windows_command.executable, OsString::from("powershell.exe"));
+        assert!(windows_command.args.iter().any(|arg| arg == "-NoProfile"));
+        assert_eq!(
+            windows_command.args.last().cloned(),
+            Some(windows_path.as_os_str().to_os_string())
+        );
+    }
+
+    #[test]
+    fn mounted_volume_error_name_prefers_last_path_component() {
+        assert_eq!(
+            mounted_volume_error_name(Path::new("/Volumes/Backup Disk")),
+            "Backup Disk"
+        );
+        assert_eq!(mounted_volume_error_name(Path::new("/")), "/");
     }
 
     #[test]

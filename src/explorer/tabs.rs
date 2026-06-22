@@ -2259,6 +2259,7 @@ mod tests {
                     42,
                     None,
                     None,
+                    false,
                     window,
                     cx,
                 ));

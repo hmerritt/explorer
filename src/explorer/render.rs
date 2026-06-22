@@ -64,7 +64,7 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
-    filesystem::wsl_distro_kind_for_path,
+    filesystem::{drive_root_is_ejectable, wsl_distro_kind_for_path},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
@@ -238,6 +238,7 @@ const CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 14.0;
 const CONTEXT_MENU_ICON_SIZE: f32 = 14.0;
 const CONTEXT_MENU_SUBMENU_OVERLAP: f32 = 1.0;
 const CONTEXT_MENU_CHEVRON: &str = "\u{E76C}";
+const CONTEXT_MENU_EJECT_ICON: &str = "\u{E759}";
 const CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
 const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 0.0;
 const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 18.0;
@@ -1524,7 +1525,8 @@ impl ExplorerView {
                     .child(SharedString::from(label)),
             );
 
-        let (context_path, context_configured_index, open_icon_kind) = context_menu_target;
+        let (context_path, context_configured_index, open_icon_kind, can_eject) =
+            context_menu_target;
         row = row.on_mouse_up(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseUpEvent, window, cx| {
@@ -1535,6 +1537,7 @@ impl ExplorerView {
                     id,
                     context_configured_index,
                     open_icon_kind,
+                    can_eject,
                     window,
                     cx,
                 );
@@ -2691,7 +2694,7 @@ fn sidebar_item_is_dragging(
 
 fn sidebar_context_menu_target(
     item: &SidebarItem,
-) -> (PathBuf, Option<usize>, Option<DirectoryKind>) {
+) -> (PathBuf, Option<usize>, Option<DirectoryKind>, bool) {
     let open_icon_kind = match item.kind {
         SidebarItemKind::Directory(kind) => Some(kind),
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
@@ -2699,7 +2702,14 @@ fn sidebar_context_menu_target(
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
     };
-    (item.path.clone(), item.configured_index, open_icon_kind)
+    let can_eject =
+        matches!(item.kind, SidebarItemKind::Drive) && drive_root_is_ejectable(&item.path);
+    (
+        item.path.clone(),
+        item.configured_index,
+        open_icon_kind,
+        can_eject,
+    )
 }
 
 fn sidebar_context_menu_is_active(
@@ -2969,6 +2979,7 @@ fn open_sidebar_context_menu_from_event(
     row_id: usize,
     configured_index: Option<usize>,
     open_icon_kind: Option<DirectoryKind>,
+    can_eject: bool,
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
@@ -2979,6 +2990,7 @@ fn open_sidebar_context_menu_from_event(
         row_id,
         configured_index,
         open_icon_kind,
+        can_eject,
         window,
         cx,
     ) {
@@ -3985,11 +3997,26 @@ fn context_menu_icon_element(
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
+        ContextMenuIcon::Eject => context_menu_glyph_icon(CONTEXT_MENU_EJECT_ICON),
         ContextMenuIcon::Unpin => gpui::img(FAVORITE_PIN_REMOVE_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
     })
+}
+
+fn context_menu_glyph_icon(icon: &'static str) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(CONTEXT_MENU_ICON_SIZE))
+        .h(px(CONTEXT_MENU_ICON_SIZE))
+        .font(nav_icon_font())
+        .text_size(px(13.0))
+        .text_color(rgb(0x1f1f1f))
+        .child(icon)
+        .into_any_element()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6172,30 +6199,32 @@ mod tests {
 
         assert_eq!(
             sidebar_context_menu_target(&custom),
-            (path.clone(), Some(3), None)
+            (path.clone(), Some(3), None, false)
         );
         assert_eq!(
             sidebar_context_menu_target(&builtin_configured),
             (
                 path.join("downloads"),
                 Some(1),
-                Some(DirectoryKind::Downloads)
+                Some(DirectoryKind::Downloads),
+                false
             )
         );
         assert_eq!(
             sidebar_context_menu_target(&custom_unconfigured),
-            (PathBuf::from("/other"), None, None)
+            (PathBuf::from("/other"), None, None, false)
         );
         assert_eq!(
             sidebar_context_menu_target(&drive),
-            (PathBuf::from("/"), None, Some(DirectoryKind::Drive))
+            (PathBuf::from("/"), None, Some(DirectoryKind::Drive), false)
         );
         assert_eq!(
             sidebar_context_menu_target(&windows_drive),
             (
                 PathBuf::from("C:\\"),
                 None,
-                Some(DirectoryKind::DriveWindows)
+                Some(DirectoryKind::DriveWindows),
+                false
             )
         );
         assert_eq!(
@@ -6203,7 +6232,8 @@ mod tests {
             (
                 PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
                 None,
-                Some(DirectoryKind::DriveWsl)
+                Some(DirectoryKind::DriveWsl),
+                false
             )
         );
     }
