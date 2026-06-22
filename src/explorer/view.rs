@@ -544,10 +544,21 @@ impl ExplorerView {
         entries: Vec<FileEntry>,
     ) {
         self.read_error = None;
-        let filter_started = Instant::now();
         let mut entries = entries;
-        sort_entries(&mut entries, self.file_sort);
 
+        let sort_started = Instant::now();
+        sort_entries(&mut entries, self.file_sort);
+        crate::debug_options::log_nav_timing(
+            sort_started.elapsed(),
+            format_args!(
+                "reload.sort path={:?} entries={} sort={:?}",
+                self.path,
+                entries.len(),
+                self.file_sort
+            ),
+        );
+
+        let filter_started = Instant::now();
         if self.search_is_active() {
             self.all_entries = entries;
             self.apply_search_filter_preserving_selection(&selected_paths);
@@ -1678,6 +1689,38 @@ mod tests {
         );
 
         assert_eq!(view.file_sort, sort);
+    }
+
+    #[test]
+    fn apply_loaded_entries_sorts_with_active_file_sort() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.file_sort = FileSortSettings {
+            column: FileSortColumn::Size,
+            direction: SortDirection::Ascending,
+        };
+
+        view.apply_loaded_entries(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: false,
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![
+                FileEntry::test("large.txt", false, Some(30), None),
+                FileEntry::test("small.txt", false, Some(10), None),
+                FileEntry::test("medium.txt", false, Some(20), None),
+            ],
+        );
+
+        assert_eq!(
+            names(&view.entries),
+            vec!["small.txt", "medium.txt", "large.txt"]
+        );
+        assert_eq!(
+            names(&view.all_entries),
+            vec!["small.txt", "medium.txt", "large.txt"]
+        );
     }
 
     #[test]

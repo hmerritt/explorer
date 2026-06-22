@@ -2,11 +2,15 @@
 
 ## 1
 
-- rsync copy/sync builtin
+- Copy/move/delete are strong, but missing common Explorer behaviors: Ctrl+Z undo for file operations
+- mounted volume eject
+- drag-out interoperability with other apps
+- Windows-only, "Run as administrator" in contextmenu, and also in Properties to always run as Administrator "Run this program as an administrator"
+- Ctrl+N new window (open new window with offset x/y position on screen so user knows there is a new window)
 
 ## 2
 
-- Windows, run as Administrator
+- rsync copy/sync builtin
 - Improve readme - add screenshots / branding
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)

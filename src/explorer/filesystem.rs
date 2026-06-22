@@ -24,7 +24,6 @@ use crate::explorer::{
         copy_file_contents_parallel_with_progress, copy_with_delta_progress_with_options,
         destination_content_matches_source_with_progress, destination_quick_matches_source,
     },
-    sorting::sort_entries,
 };
 
 #[cfg(unix)]
@@ -41,13 +40,6 @@ const MACOSX_ARCHIVE_METADATA_DIRECTORY: &str = "__MACOSX";
 const ARCHIVE_PROGRESS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 static COPY_PARALLELISM_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
-
-fn name_ascending_sort() -> crate::settings::FileSortSettings {
-    crate::settings::FileSortSettings {
-        column: crate::settings::FileSortColumn::Name,
-        direction: crate::settings::SortDirection::Ascending,
-    }
-}
 
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
@@ -706,12 +698,6 @@ fn load_entries_with_options(
         ),
     );
 
-    let sort_started = Instant::now();
-    sort_entries(&mut entries, name_ascending_sort());
-    crate::debug_options::log_nav_timing(
-        sort_started.elapsed(),
-        format_args!("load_entries.sort path={path:?} entries={}", entries.len()),
-    );
     crate::debug_options::log_nav_timing(
         total_started.elapsed(),
         format_args!(
@@ -830,15 +816,6 @@ fn load_applications_entries(
         ),
     );
 
-    let sort_started = Instant::now();
-    sort_entries(&mut entries, name_ascending_sort());
-    crate::debug_options::log_nav_timing(
-        sort_started.elapsed(),
-        format_args!(
-            "load_entries.sort path={path:?} applications_view=true entries={}",
-            entries.len()
-        ),
-    );
     crate::debug_options::log_nav_timing(
         total_started.elapsed(),
         format_args!(
@@ -4462,6 +4439,25 @@ mod tests {
         builder.into_inner().expect("finish ar archive");
     }
 
+    fn sorted_entry_names(entries: &[FileEntry]) -> Vec<&str> {
+        let mut names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sorted_entry_paths(entries: &[FileEntry]) -> Vec<PathBuf> {
+        let mut paths = entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
     #[test]
     fn archive_extract_root_name_strips_simple_and_compound_extensions() {
         assert_eq!(
@@ -4964,13 +4960,7 @@ mod tests {
         )
         .expect("load entries");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["visible.txt"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec!["visible.txt"]);
     }
 
     #[test]
@@ -4988,13 +4978,7 @@ mod tests {
         )
         .expect("load entries");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![".hidden", "visible.txt"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec![".hidden", "visible.txt"]);
     }
 
     #[test]
@@ -5005,13 +4989,7 @@ mod tests {
 
         let entries = load_entries(temp.path(), false).expect("load entries");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["visible.txt"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec!["visible.txt"]);
     }
 
     #[cfg(target_os = "windows")]
@@ -5026,18 +5004,9 @@ mod tests {
         let hidden_off = load_entries(temp.path(), false).expect("load entries");
         let hidden_on = load_entries(temp.path(), true).expect("load entries");
 
+        assert_eq!(sorted_entry_names(&hidden_off), vec!["visible.txt"]);
         assert_eq!(
-            hidden_off
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["visible.txt"]
-        );
-        assert_eq!(
-            hidden_on
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
+            sorted_entry_names(&hidden_on),
             vec!["hidden.txt", "visible.txt"]
         );
 
@@ -5053,13 +5022,7 @@ mod tests {
 
         let entries = load_entries(temp.path(), true).expect("load entries");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![".hidden", "visible.txt"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec![".hidden", "visible.txt"]);
     }
 
     #[test]
@@ -5080,13 +5043,7 @@ mod tests {
         )
         .expect("load entries");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![".hidden", "visible.txt"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec![".hidden", "visible.txt"]);
     }
 
     #[test]
@@ -5112,13 +5069,7 @@ mod tests {
         )
         .expect("load applications view");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.path.clone())
-                .collect::<Vec<_>>(),
-            vec![preview, terminal]
-        );
+        assert_eq!(sorted_entry_paths(&entries), vec![preview, terminal]);
     }
 
     #[test]
@@ -5143,13 +5094,7 @@ mod tests {
         )
         .expect("load applications view");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.path.clone())
-                .collect::<Vec<_>>(),
-            vec![visible]
-        );
+        assert_eq!(sorted_entry_paths(&entries), vec![visible]);
     }
 
     #[test]
@@ -5169,13 +5114,7 @@ mod tests {
         )
         .expect("load normal view");
 
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Utilities"]
-        );
+        assert_eq!(sorted_entry_names(&entries), vec!["Utilities"]);
     }
 
     #[cfg(target_os = "windows")]
