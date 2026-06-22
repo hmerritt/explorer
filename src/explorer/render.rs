@@ -79,7 +79,7 @@ use crate::explorer::{
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
-    image_thumbnails::entry_may_have_hover_image_preview,
+    image_thumbnails::{HoverImagePreviewLookup, entry_may_have_hover_image_preview},
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
         large_icon_max_tile_height,
@@ -138,9 +138,9 @@ const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
-const IMAGE_HOVER_PREVIEW_SIZE: f32 = 250.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 16.0;
-const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 18.0;
+const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 400.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 8.0;
+const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -940,15 +940,33 @@ impl ExplorerView {
         }
 
         let state = self.image_hover_preview.clone()?;
-        let thumbnail = self.image_thumbnail_for_entry(&state.entry, cx)?;
-        let image = self
-            .hover_image_preview_for_entry(&state.entry, cx)
-            .unwrap_or(thumbnail);
+        let preview = self.hover_image_preview_for_entry(&state.entry, cx)?;
+        let (width, height, content) = match preview {
+            HoverImagePreviewLookup::Loading {
+                width,
+                height,
+                thumbnail,
+            } => (
+                width,
+                height,
+                image_hover_preview_loading_content(thumbnail),
+            ),
+            HoverImagePreviewLookup::Ready(preview) => (
+                preview.width,
+                preview.height,
+                gpui::img(preview.image)
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+            ),
+            HoverImagePreviewLookup::Failed => return None,
+        };
         let window_size = (
             f32::from(window.bounds().size.width),
             f32::from(window.bounds().size.height),
         );
-        let (left, top) = image_hover_preview_origin(state.position, window_size);
+        let preview_size = image_hover_preview_render_size(width, height, window_size);
+        let (left, top) = image_hover_preview_origin(state.position, preview_size, window_size);
 
         Some(
             div()
@@ -957,8 +975,8 @@ impl ExplorerView {
                 .absolute()
                 .left(px(left))
                 .top(px(top))
-                .w(px(IMAGE_HOVER_PREVIEW_SIZE))
-                .h(px(IMAGE_HOVER_PREVIEW_SIZE))
+                .w(px(preview_size.0))
+                .h(px(preview_size.1))
                 .bg(rgb(0xffffff))
                 .border_1()
                 .border_color(rgb(0xd8d8d8))
@@ -969,7 +987,7 @@ impl ExplorerView {
                         cx.notify();
                     }
                 }))
-                .child(gpui::img(image).size_full().object_fit(ObjectFit::Contain))
+                .child(content)
                 .into_any_element(),
         )
     }
@@ -3014,9 +3032,80 @@ fn local_context_menu_origin(
     window_position - view_origin
 }
 
-fn image_hover_preview_origin(position: Point<Pixels>, window_size: (f32, f32)) -> (f32, f32) {
-    let max_x = (window_size.0 - IMAGE_HOVER_PREVIEW_SIZE).max(0.0);
-    let max_y = (window_size.1 - IMAGE_HOVER_PREVIEW_SIZE).max(0.0);
+fn image_hover_preview_render_size(width: u32, height: u32, window_size: (f32, f32)) -> (f32, f32) {
+    let width = width.max(1) as f32;
+    let height = height.max(1) as f32;
+    let max_width = IMAGE_HOVER_PREVIEW_MAX_SIZE.min(window_size.0.max(1.0));
+    let max_height = IMAGE_HOVER_PREVIEW_MAX_SIZE.min(window_size.1.max(1.0));
+    let scale = (max_width / width).min(max_height / height).min(1.0);
+
+    ((width * scale).max(1.0), (height * scale).max(1.0))
+}
+
+fn image_hover_preview_loading_content(
+    thumbnail: Option<crate::explorer::image_thumbnails::CachedThumbnailImage>,
+) -> AnyElement {
+    if let Some(thumbnail) = thumbnail {
+        return div()
+            .relative()
+            .size_full()
+            .child(
+                gpui::img(thumbnail.image)
+                    .debug_selector(|| "image-hover-preview-loading-thumbnail".to_owned())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "image-hover-preview-loading-progress".to_owned())
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .child(image_hover_preview_loading_progress()),
+            )
+            .into_any_element();
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .size_full()
+        .child(
+            div()
+                .debug_selector(|| "image-hover-preview-loading-label".to_owned())
+                .flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.0))
+                .text_color(rgb(0x5f5f5f))
+                .child("Loading..."),
+        )
+        .child(
+            div()
+                .debug_selector(|| "image-hover-preview-loading-progress".to_owned())
+                .w_full()
+                .flex_shrink_0()
+                .child(image_hover_preview_loading_progress()),
+        )
+        .into_any_element()
+}
+
+fn image_hover_preview_loading_progress() -> impl IntoElement {
+    linear_indeterminate(
+        "image-hover-preview-loading-progress-bar",
+        LinearProgressStyle::explorer_copy_green(),
+    )
+}
+
+fn image_hover_preview_origin(
+    position: Point<Pixels>,
+    preview_size: (f32, f32),
+    window_size: (f32, f32),
+) -> (f32, f32) {
+    let max_x = (window_size.0 - preview_size.0).max(0.0);
+    let max_y = (window_size.1 - preview_size.1).max(0.0);
     let left = f32::from(position.x) + IMAGE_HOVER_PREVIEW_OFFSET_X;
     let top = f32::from(position.y) + IMAGE_HOVER_PREVIEW_OFFSET_Y;
 
@@ -6112,8 +6201,8 @@ mod tests {
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
         git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
-        is_alt_entry_double_click, is_ctrl_entry_double_click, is_normal_entry_click,
-        lines_of_code_tooltip, open_current_folder_context_menu_from_event,
+        image_hover_preview_render_size, is_alt_entry_double_click, is_ctrl_entry_double_click,
+        is_normal_entry_click, lines_of_code_tooltip, open_current_folder_context_menu_from_event,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
         sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
@@ -6158,9 +6247,13 @@ mod tests {
     }
 
     fn write_test_png(path: &Path) {
+        write_test_png_with_dimensions(path, 8, 4);
+    }
+
+    fn write_test_png_with_dimensions(path: &Path, width: u32, height: u32) {
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            8,
-            4,
+            width,
+            height,
             image::Rgba([220, 40, 80, 255]),
         ));
         let mut bytes = Vec::new();
@@ -7485,13 +7578,169 @@ mod tests {
     }
 
     #[test]
+    fn image_hover_preview_render_size_preserves_aspect_and_caps_to_window() {
+        assert_eq!(
+            image_hover_preview_render_size(400, 200, (800.0, 600.0)),
+            (400.0, 200.0)
+        );
+        assert_eq!(
+            image_hover_preview_render_size(400, 200, (300.0, 300.0)),
+            (300.0, 150.0)
+        );
+    }
+
+    #[test]
+    fn image_hover_preview_origin_uses_close_bottom_right_offset() {
+        assert_eq!(
+            image_hover_preview_origin(
+                gpui::point(gpui::px(100.0), gpui::px(100.0)),
+                (200.0, 100.0),
+                (800.0, 600.0),
+            ),
+            (108.0, 110.0)
+        );
+    }
+
+    #[test]
     fn image_hover_preview_origin_clamps_inside_window() {
         assert_eq!(
             image_hover_preview_origin(
                 gpui::point(gpui::px(295.0), gpui::px(295.0)),
+                (200.0, 100.0),
                 (300.0, 300.0),
             ),
-            (50.0, 50.0)
+            (100.0, 200.0)
+        );
+    }
+
+    #[gpui::test]
+    fn alt_hover_loading_preview_uses_probed_aspect_ratio_and_bottom_progress(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                view.hold_hover_image_preview_loading_for_test(&entry, cx);
+                view.image_hover_preview = Some(ImageHoverPreview {
+                    entry,
+                    position: gpui::point(gpui::px(40.0), gpui::px(40.0)),
+                });
+                view.image_hover_preview_alt = true;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let preview = cx
+            .debug_bounds("image-hover-preview")
+            .expect("loading preview bounds");
+        let label = cx
+            .debug_bounds("image-hover-preview-loading-label")
+            .expect("loading label bounds");
+        let progress = cx
+            .debug_bounds("image-hover-preview-loading-progress")
+            .expect("loading progress bounds");
+
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
+        assert!(label.origin.y <= preview.center().y);
+        assert!(label.origin.y + label.size.height >= preview.center().y);
+        assert!(progress.origin.y >= preview.origin.y + preview.size.height - gpui::px(5.0));
+        assert!(progress.origin.y + progress.size.height <= preview.origin.y + preview.size.height);
+    }
+
+    #[gpui::test]
+    fn alt_hover_loading_preview_uses_cached_thumbnail_without_loading_text(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                view.hold_hover_image_preview_loading_with_thumbnail_for_test(&entry, cx);
+                view.image_hover_preview = Some(ImageHoverPreview {
+                    entry,
+                    position: gpui::point(gpui::px(40.0), gpui::px(40.0)),
+                });
+                view.image_hover_preview_alt = true;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let preview = cx
+            .debug_bounds("image-hover-preview")
+            .expect("loading preview bounds");
+        let thumbnail = cx
+            .debug_bounds("image-hover-preview-loading-thumbnail")
+            .expect("loading thumbnail bounds");
+        let progress = cx
+            .debug_bounds("image-hover-preview-loading-progress")
+            .expect("loading progress bounds");
+
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
+        assert_eq!(thumbnail.origin.x, preview.origin.x + gpui::px(1.0));
+        assert_eq!(thumbnail.origin.y, preview.origin.y + gpui::px(1.0));
+        assert_eq!(thumbnail.size.width, preview.size.width - gpui::px(2.0));
+        assert_eq!(thumbnail.size.height, preview.size.height - gpui::px(2.0));
+        assert!(
+            cx.debug_bounds("image-hover-preview-loading-label")
+                .is_none()
+        );
+        assert!(progress.origin.y >= preview.origin.y + preview.size.height - gpui::px(5.0));
+        assert!(progress.origin.y + progress.size.height <= preview.origin.y + preview.size.height);
+    }
+
+    #[gpui::test]
+    fn alt_hover_cached_loading_thumbnail_fills_portrait_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png_with_dimensions(&temp.path().join("image.png"), 4, 8);
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                view.hold_hover_image_preview_loading_with_thumbnail_for_test(&entry, cx);
+                view.image_hover_preview = Some(ImageHoverPreview {
+                    entry,
+                    position: gpui::point(gpui::px(40.0), gpui::px(40.0)),
+                });
+                view.image_hover_preview_alt = true;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let preview = cx
+            .debug_bounds("image-hover-preview")
+            .expect("loading preview bounds");
+        let thumbnail = cx
+            .debug_bounds("image-hover-preview-loading-thumbnail")
+            .expect("loading thumbnail bounds");
+
+        assert_eq!(preview.size.width, gpui::px(200.0));
+        assert_eq!(preview.size.height, gpui::px(400.0));
+        assert_eq!(thumbnail.origin.x, preview.origin.x + gpui::px(1.0));
+        assert_eq!(thumbnail.origin.y, preview.origin.y + gpui::px(1.0));
+        assert_eq!(thumbnail.size.width, preview.size.width - gpui::px(2.0));
+        assert_eq!(thumbnail.size.height, preview.size.height - gpui::px(2.0));
+        assert!(
+            cx.debug_bounds("image-hover-preview-loading-label")
+                .is_none()
         );
     }
 
@@ -7505,8 +7754,8 @@ mod tests {
         hover_selector(cx, "explorer-entry-0", alt_modifiers());
         let preview = run_until_image_hover_preview(cx);
 
-        assert_eq!(preview.size.width, gpui::px(250.0));
-        assert_eq!(preview.size.height, gpui::px(250.0));
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
     }
 
     #[gpui::test]
@@ -7523,7 +7772,10 @@ mod tests {
         assert!(cx.debug_bounds("image-hover-preview").is_none());
 
         cx.simulate_modifiers_change(alt_modifiers());
-        assert!(run_until_image_hover_preview(cx).size.width == gpui::px(250.0));
+        assert_eq!(
+            run_until_image_hover_preview(cx).size.width,
+            gpui::px(400.0)
+        );
 
         cx.simulate_modifiers_change(Modifiers::default());
         cx.run_until_parked();
@@ -7551,6 +7803,19 @@ mod tests {
     }
 
     #[gpui::test]
+    fn alt_hover_invalid_image_does_not_show_loading_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("broken.png"), b"not an image").expect("write broken image");
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("image-hover-preview").is_none());
+    }
+
+    #[gpui::test]
     fn alt_hover_image_entry_shows_preview_in_large_icons(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         write_test_png(&temp.path().join("image.png"));
@@ -7560,8 +7825,8 @@ mod tests {
         hover_selector(cx, "explorer-large-icon-entry-0", alt_modifiers());
         let preview = run_until_image_hover_preview(cx);
 
-        assert_eq!(preview.size.width, gpui::px(250.0));
-        assert_eq!(preview.size.height, gpui::px(250.0));
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
     }
 
     #[gpui::test]
@@ -7586,8 +7851,10 @@ mod tests {
         });
         let preview = run_until_image_hover_preview(cx);
 
-        assert_eq!(preview.origin.x, gpui::px(50.0));
-        assert_eq!(preview.origin.y, gpui::px(50.0));
+        assert_eq!(preview.origin.x, gpui::px(0.0));
+        assert_eq!(preview.origin.y, gpui::px(150.0));
+        assert_eq!(preview.size.width, gpui::px(300.0));
+        assert_eq!(preview.size.height, gpui::px(150.0));
         assert!(preview.origin.x + preview.size.width <= gpui::px(300.0));
         assert!(preview.origin.y + preview.size.height <= gpui::px(300.0));
     }

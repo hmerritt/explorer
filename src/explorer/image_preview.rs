@@ -77,6 +77,29 @@ pub(super) fn load_property_image_preview(path: &Path) -> Result<PropertyImagePr
     property_image_preview_from_rgba(image)
 }
 
+pub(super) fn hover_image_preview_dimensions(
+    path: &Path,
+    longest_side: u32,
+) -> Result<(u32, u32), String> {
+    if longest_side == 0 {
+        return Err("Image preview target has no dimensions.".to_owned());
+    }
+
+    if path_is_svg(path) {
+        let bytes = fs::read(path).map_err(|error| format!("Failed to read SVG file: {error}"))?;
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default())
+            .map_err(|error| format!("Failed to parse SVG: {error}"))?;
+        let size = tree.size();
+        return svg_raster_dimensions(size.width(), size.height(), longest_side)
+            .ok_or_else(|| "SVG has no renderable dimensions.".to_owned());
+    }
+
+    let (width, height) = image::image_dimensions(path)
+        .map_err(|error| format!("Failed to read image dimensions: {error}"))?;
+    thumbnail_content_dimensions(width, height, longest_side)
+        .ok_or_else(|| "Image has no dimensions.".to_owned())
+}
+
 #[cfg(test)]
 pub(super) fn load_image_thumbnail_png(path: &Path, size: u32) -> Result<Vec<u8>, String> {
     let cancel = AtomicBool::new(false);
@@ -100,6 +123,23 @@ pub(super) fn load_image_thumbnail_png_with_cancel_timed(
 ) -> TimedImageThumbnailPng {
     let mut timings = ImageThumbnailExtractionTimings::default();
     let result = load_image_thumbnail_png_with_cancel_timed_result(
+        path,
+        size,
+        cancel,
+        timings_enabled,
+        &mut timings,
+    );
+    TimedImageThumbnailPng { result, timings }
+}
+
+pub(super) fn load_hover_image_preview_png_with_cancel_timed(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+) -> TimedImageThumbnailPng {
+    let mut timings = ImageThumbnailExtractionTimings::default();
+    let result = load_hover_image_preview_png_with_cancel_timed_result(
         path,
         size,
         cancel,
@@ -133,6 +173,32 @@ fn load_image_thumbnail_png_with_cancel_timed_result(
     let encoded = encode_rgba_png_bytes(thumbnail.as_raw(), size, size);
     thumbnail_timing_finished(&mut timings.png_encode, encode_started);
     encoded.ok_or_else(|| "Failed to encode image thumbnail.".to_owned())
+}
+
+fn load_hover_image_preview_png_with_cancel_timed_result(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
+) -> Result<Vec<u8>, String> {
+    if size == 0 {
+        return Err("Image preview target has no dimensions.".to_owned());
+    }
+
+    check_image_cancelled(cancel)?;
+    let image =
+        load_image_thumbnail_rgba_with_cancel_timed(path, size, cancel, timings_enabled, timings)?;
+    check_image_cancelled(cancel)?;
+    let resize_started = thumbnail_timing_started(timings_enabled);
+    let preview = resize_rgba_image_to_longest_side(image, size);
+    thumbnail_timing_finished(&mut timings.resize_canvas, resize_started);
+    let preview = preview?;
+    check_image_cancelled(cancel)?;
+    let encode_started = thumbnail_timing_started(timings_enabled);
+    let encoded = encode_rgba_png_bytes(preview.as_raw(), preview.width(), preview.height());
+    thumbnail_timing_finished(&mut timings.png_encode, encode_started);
+    encoded.ok_or_else(|| "Failed to encode image preview.".to_owned())
 }
 
 fn load_image_thumbnail_rgba_with_cancel_timed(
@@ -1068,16 +1134,29 @@ fn fit_rgba_image_on_square_canvas(
     image: image::RgbaImage,
     size: u32,
 ) -> Result<image::RgbaImage, String> {
-    let width = image.width();
-    let height = image.height();
-    let (resized_width, resized_height) = thumbnail_content_dimensions(width, height, size)
-        .ok_or_else(|| "Image has no dimensions.".to_owned())?;
-    let resized = image::imageops::thumbnail(&image, resized_width, resized_height);
+    let resized = resize_rgba_image_to_longest_side(image, size)?;
+    let resized_width = resized.width();
+    let resized_height = resized.height();
     let mut canvas = image::RgbaImage::from_pixel(size, size, image::Rgba([0, 0, 0, 0]));
     let x = ((size - resized_width) / 2) as i64;
     let y = ((size - resized_height) / 2) as i64;
     image::imageops::overlay(&mut canvas, &resized, x, y);
     Ok(canvas)
+}
+
+fn resize_rgba_image_to_longest_side(
+    image: image::RgbaImage,
+    size: u32,
+) -> Result<image::RgbaImage, String> {
+    let width = image.width();
+    let height = image.height();
+    let (resized_width, resized_height) = thumbnail_content_dimensions(width, height, size)
+        .ok_or_else(|| "Image has no dimensions.".to_owned())?;
+    Ok(image::imageops::thumbnail(
+        &image,
+        resized_width,
+        resized_height,
+    ))
 }
 
 fn thumbnail_content_dimensions(width: u32, height: u32, size: u32) -> Option<(u32, u32)> {
@@ -1219,6 +1298,49 @@ mod tests {
         assert_eq!(svg_raster_dimensions(f32::NAN, 100.0, 500), None);
         assert_eq!(svg_raster_dimensions(100.0, f32::INFINITY, 500), None);
         assert_eq!(svg_raster_dimensions(100.0, 100.0, 0), None);
+    }
+
+    #[test]
+    fn hover_preview_dimensions_probe_raster_aspect_ratio() {
+        let temp = TempDir::new();
+        let landscape = temp.path().join("landscape.png");
+        let portrait = temp.path().join("portrait.png");
+        write_test_png(&landscape, 8, 4);
+        write_test_png(&portrait, 3, 6);
+
+        assert_eq!(
+            hover_image_preview_dimensions(&landscape, 400).unwrap(),
+            (400, 200)
+        );
+        assert_eq!(
+            hover_image_preview_dimensions(&portrait, 400).unwrap(),
+            (200, 400)
+        );
+    }
+
+    #[test]
+    fn hover_preview_dimensions_probe_svg_aspect_ratio() {
+        let temp = TempDir::new();
+        let path = temp.path().join("image.svg");
+        fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="250"></svg>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            hover_image_preview_dimensions(&path, 400).unwrap(),
+            (400, 100)
+        );
+    }
+
+    #[test]
+    fn hover_preview_dimensions_reject_invalid_images() {
+        let temp = TempDir::new();
+        let path = temp.path().join("broken.png");
+        fs::write(&path, b"not an image").unwrap();
+
+        assert!(hover_image_preview_dimensions(&path, 400).is_err());
     }
 
     #[test]
@@ -1742,5 +1864,14 @@ mod tests {
         let size = preview.image.size(0);
         assert_eq!(size.width.0, width as i32);
         assert_eq!(size.height.0, height as i32);
+    }
+
+    fn write_test_png(path: &Path, width: u32, height: u32) {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(path, bytes).unwrap();
     }
 }

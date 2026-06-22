@@ -22,8 +22,9 @@ use crate::{
     explorer::{
         entry::FileEntry,
         image_preview::{
-            ImageThumbnailExtractionTimings, load_image_thumbnail_png_with_cancel_timed,
-            path_may_have_image_preview,
+            ImageThumbnailExtractionTimings, hover_image_preview_dimensions,
+            load_hover_image_preview_png_with_cancel_timed,
+            load_image_thumbnail_png_with_cancel_timed, path_may_have_image_preview,
         },
         video::{
             ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe,
@@ -36,7 +37,7 @@ use crate::{
 
 const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v4";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
-const HOVER_IMAGE_PREVIEW_SIZE: u32 = 250;
+const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -92,8 +93,8 @@ impl ImageThumbnailUsage {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image",
             (Self::Standard, ImageThumbnailKind::Video) => "video",
-            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-250",
-            (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview-250",
+            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-400",
+            (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview-400",
         }
     }
 
@@ -117,13 +118,35 @@ enum ImageThumbnailState {
     Pending {
         request: ImageThumbnailRequest,
         queued_at: Instant,
+        preview_dimensions: Option<(u32, u32)>,
+        loading_thumbnail: Option<CachedThumbnailImage>,
     },
     Loading {
         request: ImageThumbnailRequest,
         generation: u64,
         cancel: Arc<AtomicBool>,
+        preview_dimensions: Option<(u32, u32)>,
+        loading_thumbnail: Option<CachedThumbnailImage>,
     },
-    Ready(Arc<Image>),
+    Ready(CachedThumbnailImage),
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CachedThumbnailImage {
+    pub(super) image: Arc<Image>,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum HoverImagePreviewLookup {
+    Loading {
+        width: u32,
+        height: u32,
+        thumbnail: Option<CachedThumbnailImage>,
+    },
+    Ready(CachedThumbnailImage),
     Failed,
 }
 
@@ -155,7 +178,7 @@ impl ImageThumbnailCacheInner {
     fn thumbnail_for_request(
         &mut self,
         request: ImageThumbnailRequest,
-    ) -> (Option<Arc<Image>>, Option<u64>) {
+    ) -> (Option<CachedThumbnailImage>, Option<u64>) {
         if let Some(state) = self.states.get(&request.key) {
             return (state.thumbnail(), None);
         }
@@ -166,10 +189,67 @@ impl ImageThumbnailCacheInner {
             ImageThumbnailState::Pending {
                 request,
                 queued_at: Instant::now(),
+                preview_dimensions: None,
+                loading_thumbnail: None,
             },
         );
 
         (None, self.start_loader())
+    }
+
+    fn hover_preview_for_request(
+        &mut self,
+        request: ImageThumbnailRequest,
+        standard_request: ImageThumbnailRequest,
+    ) -> (HoverImagePreviewLookup, Option<u64>) {
+        if let Some(state) = self.states.get(&request.key) {
+            return (state.hover_preview(), None);
+        }
+
+        let Ok((width, height)) =
+            hover_image_preview_dimensions(&request.path, HOVER_IMAGE_PREVIEW_SIZE)
+        else {
+            self.states.insert(request.key, ImageThumbnailState::Failed);
+            return (HoverImagePreviewLookup::Failed, None);
+        };
+
+        let loading_thumbnail = self.cached_thumbnail_without_loading(&standard_request);
+        self.pending.push_back(request.key.clone());
+        self.states.insert(
+            request.key.clone(),
+            ImageThumbnailState::Pending {
+                request,
+                queued_at: Instant::now(),
+                preview_dimensions: Some((width, height)),
+                loading_thumbnail: loading_thumbnail.clone(),
+            },
+        );
+
+        (
+            HoverImagePreviewLookup::Loading {
+                width,
+                height,
+                thumbnail: loading_thumbnail,
+            },
+            self.start_loader(),
+        )
+    }
+
+    fn cached_thumbnail_without_loading(
+        &mut self,
+        request: &ImageThumbnailRequest,
+    ) -> Option<CachedThumbnailImage> {
+        if let Some(state) = self.states.get(&request.key) {
+            return state.thumbnail();
+        }
+
+        let thumbnail = read_cached_thumbnail(self.cache_dir.as_deref(), &request.key)
+            .and_then(cached_thumbnail_image_from_png_bytes)?;
+        self.states.insert(
+            request.key.clone(),
+            ImageThumbnailState::Ready(thumbnail.clone()),
+        );
+        Some(thumbnail)
     }
 
     fn start_loader(&mut self) -> Option<u64> {
@@ -188,8 +268,12 @@ impl ImageThumbnailCacheInner {
         }
 
         while let Some(key) = self.pending.pop_front() {
-            let Some(ImageThumbnailState::Pending { request, queued_at }) =
-                self.states.remove(&key)
+            let Some(ImageThumbnailState::Pending {
+                request,
+                queued_at,
+                preview_dimensions,
+                loading_thumbnail,
+            }) = self.states.remove(&key)
             else {
                 continue;
             };
@@ -201,6 +285,8 @@ impl ImageThumbnailCacheInner {
                     request: request.clone(),
                     generation,
                     cancel: cancel.clone(),
+                    preview_dimensions,
+                    loading_thumbnail,
                 },
             );
 
@@ -238,8 +324,8 @@ impl ImageThumbnailCacheInner {
             return false;
         }
 
-        let state = match bytes.and_then(valid_png_bytes) {
-            Some(bytes) => ImageThumbnailState::Ready(image_from_png_bytes(bytes)),
+        let state = match bytes.and_then(cached_thumbnail_image_from_png_bytes) {
+            Some(image) => ImageThumbnailState::Ready(image),
             None => ImageThumbnailState::Failed,
         };
 
@@ -279,10 +365,33 @@ impl ImageThumbnailCacheInner {
 }
 
 impl ImageThumbnailState {
-    fn thumbnail(&self) -> Option<Arc<Image>> {
+    fn thumbnail(&self) -> Option<CachedThumbnailImage> {
         match self {
             Self::Ready(image) => Some(image.clone()),
             Self::Pending { .. } | Self::Loading { .. } | Self::Failed => None,
+        }
+    }
+
+    fn hover_preview(&self) -> HoverImagePreviewLookup {
+        match self {
+            Self::Pending {
+                preview_dimensions: Some((width, height)),
+                loading_thumbnail,
+                ..
+            }
+            | Self::Loading {
+                preview_dimensions: Some((width, height)),
+                loading_thumbnail,
+                ..
+            } => HoverImagePreviewLookup::Loading {
+                width: *width,
+                height: *height,
+                thumbnail: loading_thumbnail.clone(),
+            },
+            Self::Ready(image) => HoverImagePreviewLookup::Ready(image.clone()),
+            Self::Pending { .. } | Self::Loading { .. } | Self::Failed => {
+                HoverImagePreviewLookup::Failed
+            }
         }
     }
 }
@@ -308,25 +417,31 @@ impl ExplorerView {
             start_image_thumbnail_loader(cx, generation);
         }
 
-        thumbnail
+        thumbnail.map(|thumbnail| thumbnail.image)
     }
 
     pub(super) fn hover_image_preview_for_entry(
         &mut self,
         entry: &FileEntry,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<HoverImagePreviewLookup> {
         let request = hover_image_preview_request_for_entry(entry, &self.path)?;
+        let standard_request = image_thumbnail_request_for_entry(entry, &self.path)?;
         let (preview, loader_generation) = cx
             .try_global::<ImageThumbnailCache>()
-            .map(|cache| cache.inner.borrow_mut().thumbnail_for_request(request))
-            .unwrap_or((None, None));
+            .map(|cache| {
+                cache
+                    .inner
+                    .borrow_mut()
+                    .hover_preview_for_request(request, standard_request)
+            })
+            .unwrap_or((HoverImagePreviewLookup::Failed, None));
 
         if let Some(generation) = loader_generation {
             start_image_thumbnail_loader(cx, generation);
         }
 
-        preview
+        Some(preview)
     }
 
     pub(super) fn cancel_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
@@ -337,6 +452,78 @@ impl ExplorerView {
 
         if let Some(generation) = loader_generation {
             start_image_thumbnail_loader(cx, generation);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_hover_image_preview_loading_for_test(
+        &mut self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = hover_image_preview_request_for_entry(entry, &self.path) else {
+            return;
+        };
+        let Ok((width, height)) =
+            hover_image_preview_dimensions(&request.path, HOVER_IMAGE_PREVIEW_SIZE)
+        else {
+            return;
+        };
+        if let Some(cache) = cx.try_global::<ImageThumbnailCache>() {
+            cache.inner.borrow_mut().states.insert(
+                request.key.clone(),
+                ImageThumbnailState::Pending {
+                    request,
+                    queued_at: Instant::now(),
+                    preview_dimensions: Some((width, height)),
+                    loading_thumbnail: None,
+                },
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_hover_image_preview_loading_with_thumbnail_for_test(
+        &mut self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = hover_image_preview_request_for_entry(entry, &self.path) else {
+            return;
+        };
+        let Some(standard_request) = image_thumbnail_request_for_entry(entry, &self.path) else {
+            return;
+        };
+        let Ok((width, height)) =
+            hover_image_preview_dimensions(&request.path, HOVER_IMAGE_PREVIEW_SIZE)
+        else {
+            return;
+        };
+        let thumbnail = load_image_thumbnail_png_with_cancel_timed(
+            &standard_request.path,
+            IMAGE_THUMBNAIL_SIZE,
+            &AtomicBool::new(false),
+            false,
+        )
+        .result
+        .ok()
+        .and_then(cached_thumbnail_image_from_png_bytes);
+        if let (Some(cache), Some(thumbnail)) = (cx.try_global::<ImageThumbnailCache>(), thumbnail)
+        {
+            let mut cache = cache.inner.borrow_mut();
+            cache.states.insert(
+                standard_request.key,
+                ImageThumbnailState::Ready(thumbnail.clone()),
+            );
+            cache.states.insert(
+                request.key.clone(),
+                ImageThumbnailState::Pending {
+                    request,
+                    queued_at: Instant::now(),
+                    preview_dimensions: Some((width, height)),
+                    loading_thumbnail: Some(thumbnail),
+                },
+            );
         }
     }
 }
@@ -465,12 +652,22 @@ fn load_or_create_thumbnail_png_with_timings(
     let extract_started = timings_enabled.then(Instant::now);
     let (result, extraction_timings) = match request.kind {
         ImageThumbnailKind::Image => {
-            let extracted = load_image_thumbnail_png_with_cancel_timed(
-                &request.path,
-                request.usage.size(),
-                cancel,
-                timings_enabled,
-            );
+            let extracted = match request.usage {
+                ImageThumbnailUsage::Standard => load_image_thumbnail_png_with_cancel_timed(
+                    &request.path,
+                    request.usage.size(),
+                    cancel,
+                    timings_enabled,
+                ),
+                ImageThumbnailUsage::HoverPreview => {
+                    load_hover_image_preview_png_with_cancel_timed(
+                        &request.path,
+                        request.usage.size(),
+                        cancel,
+                        timings_enabled,
+                    )
+                }
+            };
             (extracted.result, extracted.timings)
         }
         ImageThumbnailKind::Video => (
@@ -1235,6 +1432,25 @@ fn image_from_png_bytes(bytes: Vec<u8>) -> Arc<Image> {
     Arc::new(Image::from_bytes(gpui::ImageFormat::Png, bytes))
 }
 
+fn cached_thumbnail_image_from_png_bytes(bytes: Vec<u8>) -> Option<CachedThumbnailImage> {
+    let (width, height) = png_dimensions(&bytes)?;
+    Some(CachedThumbnailImage {
+        image: image_from_png_bytes(bytes),
+        width,
+        height,
+    })
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || !bytes.starts_with(PNG_SIGNATURE) || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 fn valid_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
     bytes.starts_with(PNG_SIGNATURE).then_some(bytes)
 }
@@ -1700,12 +1916,7 @@ mod tests {
     fn cached_thumbnail_round_trips_from_disk() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
-        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
-        fs::write(&source, bytes).unwrap();
+        fs::write(&source, png_bytes(4, 2)).unwrap();
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
@@ -1716,6 +1927,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
+        assert_eq!(png_dimensions(&generated), Some((128, 128)));
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             &request.key,
@@ -1729,6 +1941,295 @@ mod tests {
                 .unwrap()
                 .is_file()
         );
+    }
+
+    #[test]
+    fn hover_preview_thumbnail_preserves_aspect_ratio() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(8, 4)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let cancel = AtomicBool::new(false);
+
+        let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
+        let image = cached_thumbnail_image_from_png_bytes(generated).unwrap();
+
+        assert_eq!((image.width, image.height), (400, 200));
+    }
+
+    #[test]
+    fn hover_preview_lookup_reports_probed_loading_dimensions() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(8, 4)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let mut cache = ImageThumbnailCacheInner::new(None);
+
+        let standard_request = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::Standard,
+            key: "fedcba9876543210".to_owned(),
+            ..request.clone()
+        };
+        let (lookup, generation) =
+            cache.hover_preview_for_request(request.clone(), standard_request.clone());
+
+        assert!(generation.is_some());
+        assert!(matches!(
+            lookup,
+            HoverImagePreviewLookup::Loading {
+                width: 400,
+                height: 200,
+                thumbnail: None
+            }
+        ));
+        assert!(matches!(
+            cache.hover_preview_for_request(request, standard_request).0,
+            HoverImagePreviewLookup::Loading {
+                width: 400,
+                height: 200,
+                thumbnail: None
+            }
+        ));
+    }
+
+    #[test]
+    fn hover_preview_reuses_ready_standard_thumbnail_without_loading_it() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(8, 4)).unwrap();
+        let hover_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source.clone(),
+            directory: temp.path().to_path_buf(),
+        };
+        let standard_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            key: "fedcba9876543210".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let thumbnail =
+            cached_thumbnail_image_from_png_bytes(png_bytes(128, 128)).expect("thumbnail");
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        cache.states.insert(
+            standard_request.key.clone(),
+            ImageThumbnailState::Ready(thumbnail),
+        );
+
+        let (lookup, generation) =
+            cache.hover_preview_for_request(hover_request, standard_request.clone());
+
+        assert!(generation.is_some());
+        assert!(matches!(
+            lookup,
+            HoverImagePreviewLookup::Loading {
+                width: 400,
+                height: 200,
+                thumbnail: Some(CachedThumbnailImage {
+                    width: 128,
+                    height: 128,
+                    ..
+                })
+            }
+        ));
+        assert_eq!(cache.pending.len(), 1);
+        assert!(matches!(
+            cache.states.get(&standard_request.key),
+            Some(ImageThumbnailState::Ready(_))
+        ));
+    }
+
+    #[test]
+    fn hover_preview_replaces_loading_thumbnail_with_ready_preview() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(8, 4)).unwrap();
+        let hover_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source.clone(),
+            directory: temp.path().to_path_buf(),
+        };
+        let standard_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            key: "fedcba9876543210".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let thumbnail =
+            cached_thumbnail_image_from_png_bytes(png_bytes(128, 128)).expect("thumbnail");
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        cache.states.insert(
+            standard_request.key.clone(),
+            ImageThumbnailState::Ready(thumbnail),
+        );
+        let (_, generation) =
+            cache.hover_preview_for_request(hover_request.clone(), standard_request.clone());
+        let generation = generation.expect("loader generation");
+        let _job = cache.next_load_job(generation).expect("hover preview job");
+
+        assert!(cache.finish_request(hover_request.clone(), generation, Some(png_bytes(400, 200))));
+
+        assert!(matches!(
+            cache
+                .hover_preview_for_request(hover_request, standard_request)
+                .0,
+            HoverImagePreviewLookup::Ready(CachedThumbnailImage {
+                width: 400,
+                height: 200,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hover_preview_reuses_disk_cached_standard_thumbnail_without_loading_it() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(8, 4)).unwrap();
+        let hover_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source.clone(),
+            directory: temp.path().to_path_buf(),
+        };
+        let standard_request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            key: "fedcba9876543210".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            &standard_request.key,
+            &png_bytes(128, 128)
+        ));
+        let mut cache = ImageThumbnailCacheInner::new(Some(temp.path().to_path_buf()));
+
+        let (lookup, generation) =
+            cache.hover_preview_for_request(hover_request, standard_request.clone());
+
+        assert!(generation.is_some());
+        assert!(matches!(
+            lookup,
+            HoverImagePreviewLookup::Loading {
+                thumbnail: Some(CachedThumbnailImage {
+                    width: 128,
+                    height: 128,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert_eq!(cache.pending.len(), 1);
+        assert!(matches!(
+            cache.states.get(&standard_request.key),
+            Some(ImageThumbnailState::Ready(_))
+        ));
+    }
+
+    #[test]
+    fn hover_preview_does_not_queue_missing_or_invalid_standard_thumbnail() {
+        for invalid_cache in [false, true] {
+            let temp = TempDir::new();
+            let source = temp.path().join("image.png");
+            fs::write(&source, png_bytes(8, 4)).unwrap();
+            let hover_request = ImageThumbnailRequest {
+                kind: ImageThumbnailKind::Image,
+                usage: ImageThumbnailUsage::HoverPreview,
+                key: "0123456789abcdef".to_owned(),
+                path: source.clone(),
+                directory: temp.path().to_path_buf(),
+            };
+            let standard_request = ImageThumbnailRequest {
+                kind: ImageThumbnailKind::Image,
+                usage: ImageThumbnailUsage::Standard,
+                key: "fedcba9876543210".to_owned(),
+                path: source,
+                directory: temp.path().to_path_buf(),
+            };
+            if invalid_cache {
+                fs::write(
+                    thumbnail_file_path(Some(temp.path()), &standard_request.key).unwrap(),
+                    b"not a png",
+                )
+                .unwrap();
+            }
+            let mut cache = ImageThumbnailCacheInner::new(Some(temp.path().to_path_buf()));
+
+            let (lookup, generation) =
+                cache.hover_preview_for_request(hover_request, standard_request.clone());
+
+            assert!(generation.is_some());
+            assert!(matches!(
+                lookup,
+                HoverImagePreviewLookup::Loading {
+                    thumbnail: None,
+                    ..
+                }
+            ));
+            assert_eq!(cache.pending.len(), 1);
+            assert!(!cache.states.contains_key(&standard_request.key));
+        }
+    }
+
+    #[test]
+    fn hover_preview_lookup_fails_before_loading_when_dimensions_are_invalid() {
+        let temp = TempDir::new();
+        let source = temp.path().join("broken.png");
+        fs::write(&source, b"not an image").unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "0123456789abcdef".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let mut cache = ImageThumbnailCacheInner::new(None);
+
+        let standard_request = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::Standard,
+            key: "fedcba9876543210".to_owned(),
+            ..request.clone()
+        };
+        let (lookup, generation) = cache.hover_preview_for_request(request, standard_request);
+
+        assert!(matches!(lookup, HoverImagePreviewLookup::Failed));
+        assert!(generation.is_none());
+        assert!(cache.pending.is_empty());
+    }
+
+    #[test]
+    fn finish_request_stores_ready_thumbnail_dimensions() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let request = request("preview", "folder");
+        push_pending(&mut cache, request.clone());
+        let generation = cache.start_loader().unwrap();
+        let _job = cache.next_load_job(generation).unwrap();
+
+        assert!(cache.finish_request(request.clone(), generation, Some(png_bytes(400, 200))));
+        let thumbnail = cache.thumbnail_for_request(request).0.unwrap();
+
+        assert_eq!((thumbnail.width, thumbnail.height), (400, 200));
     }
 
     #[test]
@@ -1776,7 +2277,9 @@ mod tests {
         push_pending(&mut cache, old_two.clone());
         cache.states.insert(
             "ready".to_owned(),
-            ImageThumbnailState::Ready(image_from_png_bytes(one_pixel_png_bytes())),
+            ImageThumbnailState::Ready(
+                cached_thumbnail_image_from_png_bytes(one_pixel_png_bytes()).unwrap(),
+            ),
         );
 
         let generation = cache.cancel_directory(Path::new("old"));
@@ -1916,6 +2419,8 @@ mod tests {
             ImageThumbnailState::Pending {
                 request,
                 queued_at: Instant::now(),
+                preview_dimensions: None,
+                loading_thumbnail: None,
             },
         );
     }
@@ -1927,7 +2432,11 @@ mod tests {
     }
 
     fn one_pixel_png_bytes() -> Vec<u8> {
-        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(1, 1));
+        png_bytes(1, 1)
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
         let mut bytes = Vec::new();
         image
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)

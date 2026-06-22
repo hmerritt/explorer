@@ -4,10 +4,10 @@
 
 - Settings option not to hide "." items (only items with hidden attribute)
 - Improve Alt+hover functionality:
-    - Change size from 250x250, to match media aspect ratio, with a max width/height of 400px
-    - The hovering popup is currently rendered too far away from the mouse. I like the bottom-right angle, but make it closer to the mouse
-- Improve Alt+hover functionality:
     - Render gifs+videos via fast ffmpeg/ffprobe link
+- Alt-hover performs image/SVG dimension probing synchronously during rendering, potentially freezing GPUI on large, complex, remote, or slow files. Move probing into the background loader
+- Change the implementation of view.mode_media. Instead of forcing a directory into a selection (which cannot be overridden), instead it should change the current selection in the View dropdown, so a user can still swap back if they want to. Prevent this changing the settings file each time, just change as a temporary view
+- Copy undo can delete pre-existing data. Undo records top-level destinations, then recursively deletes them. Copying into an existing folder or replacing a file destroys original destination content on Ctrl+Z. See [file_commands.rs (line 620)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:620), [file_commands.rs (line 693)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/file_commands.rs:693), and [filesystem.rs (line 2355)](C:/Users/hrmer/Documents/my/projects/explorer/src/explorer/filesystem.rs:2355).
 
 ## 2
 
@@ -21,6 +21,7 @@
 
 ## 3
 
+- Auto clear caches every so often (30 days?) - run through cached items and check their item path to see if it still exists, if it does not then delete the cached item
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu
