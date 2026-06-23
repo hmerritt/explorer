@@ -58,6 +58,7 @@ pub(super) struct MountedRemote {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TransferRemote {
     pub(super) remote: RcloneRemoteIdentity,
+    pub(super) mount_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -287,9 +288,7 @@ pub(super) fn connect_remote(
     prepare_librclone(settings)?;
     Ok(
         connect_remote_with_client(&LibrcloneClient, remote, settings).unwrap_or_else(|remote| {
-            RcloneConnection::TransferMode(TransferRemote {
-                remote: remote.identity(),
-            })
+            RcloneConnection::TransferMode(transfer_remote(remote.identity(), None))
         }),
     )
 }
@@ -315,21 +314,32 @@ pub(super) fn connect_remote_with_client(
 ) -> Result<RcloneConnection, RcloneRemote> {
     let mount_types = match mount_types(client) {
         Ok(types) if !types.is_empty() => types,
-        _ => {
-            return Ok(RcloneConnection::TransferMode(TransferRemote {
-                remote: remote.identity(),
-            }));
+        Err(error) => {
+            return Ok(RcloneConnection::TransferMode(transfer_remote(
+                remote.identity(),
+                Some(error),
+            )));
+        }
+        Ok(_) => {
+            return Ok(RcloneConnection::TransferMode(transfer_remote(
+                remote.identity(),
+                Some("rclone did not report any supported mount types".to_owned()),
+            )));
         }
     };
 
     let requested_mount_root = mount_root_for_remote(&remote.name);
     if !cfg!(target_os = "windows")
         && let Some(parent) = requested_mount_root.parent()
-        && fs::create_dir_all(parent).is_err()
+        && let Err(error) = fs::create_dir_all(parent)
     {
-        return Ok(RcloneConnection::TransferMode(TransferRemote {
-            remote: remote.identity(),
-        }));
+        return Ok(RcloneConnection::TransferMode(transfer_remote(
+            remote.identity(),
+            Some(format!(
+                "Could not create rclone mount parent {}: {error}",
+                parent.display()
+            )),
+        )));
     }
 
     let mut config = json!({
@@ -364,10 +374,14 @@ pub(super) fn connect_remote_with_client(
         },
     });
     let mounted = client.rpc("mount/mount", input);
-    let Ok(response) = mounted else {
-        return Ok(RcloneConnection::TransferMode(TransferRemote {
-            remote: remote.identity(),
-        }));
+    let response = match mounted {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(RcloneConnection::TransferMode(transfer_remote(
+                remote.identity(),
+                Some(error),
+            )));
+        }
     };
 
     let mount_root = response
@@ -383,6 +397,13 @@ pub(super) fn connect_remote_with_client(
         display_root: display_root_for_remote(&remote.display_name),
         mount_root,
     }))
+}
+
+fn transfer_remote(remote: RcloneRemoteIdentity, mount_error: Option<String>) -> TransferRemote {
+    TransferRemote {
+        remote,
+        mount_error: mount_error.filter(|error| !error.trim().is_empty()),
+    }
 }
 
 pub(super) fn disconnect_mounted_remote(
@@ -405,8 +426,24 @@ pub(super) fn disconnect_mounted_remote_with_client(
     Ok(())
 }
 
-pub(super) fn apply_known_mount_state(remote: &mut RcloneRemote) {
-    let Some(mount_root) = manifest_mount_root(&remote.name) else {
+pub(super) fn apply_known_mount_states(remotes: &mut [RcloneRemote]) {
+    let Ok(manifest) = load_reconciled_mount_manifest_with_client(&LibrcloneClient) else {
+        return;
+    };
+    for remote in remotes {
+        apply_known_mount_state_with_manifest(remote, &manifest);
+    }
+}
+
+fn apply_known_mount_state_with_manifest(
+    remote: &mut RcloneRemote,
+    manifest: &RcloneMountManifest,
+) {
+    let Some(mount_root) = manifest
+        .mounts
+        .get(&normalized_remote_name(&remote.name))
+        .cloned()
+    else {
         return;
     };
     remote.state = RcloneRemoteState::Mounted(Box::new(MountedRemote {
@@ -1079,7 +1116,7 @@ pub(super) fn virtual_root_for_remote(remote_name: &str) -> PathBuf {
 
 pub(super) fn mount_root_for_remote(remote_name: &str) -> PathBuf {
     let sanitized = sanitize_remote_name(remote_name);
-    manifest_mount_root(remote_name).unwrap_or_else(|| platform_mount_root(&sanitized))
+    platform_mount_root(&sanitized)
 }
 
 fn platform_mount_root(sanitized_remote_name: &str) -> PathBuf {
@@ -1119,6 +1156,67 @@ fn load_mount_manifest() -> RcloneMountManifest {
         .unwrap_or_default()
 }
 
+fn load_reconciled_mount_manifest_with_client(
+    client: &impl RcloneClient,
+) -> Result<RcloneMountManifest, String> {
+    let manifest = load_mount_manifest();
+    let reconciled = reconcile_mount_manifest_with_client(client, manifest)?;
+    let _ = save_mount_manifest(&reconciled);
+    Ok(reconciled)
+}
+
+fn reconcile_mount_manifest_with_client(
+    client: &impl RcloneClient,
+    manifest: RcloneMountManifest,
+) -> Result<RcloneMountManifest, String> {
+    let active_mount_points = active_mount_points_with_client(client)?;
+    Ok(reconcile_mount_manifest(manifest, &active_mount_points))
+}
+
+fn reconcile_mount_manifest(
+    mut manifest: RcloneMountManifest,
+    active_mount_points: &[PathBuf],
+) -> RcloneMountManifest {
+    manifest.mounts.retain(|_, mount_root| {
+        active_mount_points
+            .iter()
+            .any(|active| mount_paths_match(mount_root, active))
+    });
+    manifest
+}
+
+fn active_mount_points_with_client(client: &impl RcloneClient) -> Result<Vec<PathBuf>, String> {
+    let response = client.rpc("mount/listmounts", json!({}))?;
+    active_mount_points_from_response(&response)
+}
+
+fn active_mount_points_from_response(response: &Value) -> Result<Vec<PathBuf>, String> {
+    let mount_points = response
+        .get("mountPoints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "rclone mount/listmounts response did not contain mountPoints".to_owned())?;
+
+    Ok(mount_points
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn mount_paths_match(left: &Path, right: &Path) -> bool {
+    let left = left.to_string_lossy();
+    let right = right.to_string_lossy();
+    left.trim_end_matches(['\\', '/'])
+        .eq_ignore_ascii_case(right.trim_end_matches(['\\', '/']))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mount_paths_match(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
 fn save_mount_manifest(manifest: &RcloneMountManifest) -> io::Result<()> {
     let Some(path) = manifest_path() else {
         return Ok(());
@@ -1128,13 +1226,6 @@ fn save_mount_manifest(manifest: &RcloneMountManifest) -> io::Result<()> {
     }
     let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
     fs::write(path, json)
-}
-
-fn manifest_mount_root(remote_name: &str) -> Option<PathBuf> {
-    load_mount_manifest()
-        .mounts
-        .get(&normalized_remote_name(remote_name))
-        .cloned()
 }
 
 fn store_mount_manifest_entry(remote_name: &str, mount_root: &Path) {
@@ -1373,6 +1464,113 @@ mod tests {
     }
 
     #[test]
+    fn parses_active_mount_points_from_listmounts_response() {
+        let response = json!({
+            "mountPoints": ["/mnt/gdrive", "", 42, "/mnt/hbox"]
+        });
+
+        let mount_points =
+            active_mount_points_from_response(&response).expect("parse mount points");
+
+        assert_eq!(
+            mount_points,
+            vec![PathBuf::from("/mnt/gdrive"), PathBuf::from("/mnt/hbox")]
+        );
+    }
+
+    #[test]
+    fn reconciled_mount_manifest_keeps_only_active_mounts() {
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), PathBuf::from("/mnt/gdrive"));
+        manifest
+            .mounts
+            .insert("stale".to_owned(), PathBuf::from("/mnt/stale"));
+        let client = FakeRcloneClient::with_responses(vec![Ok(json!({
+            "mountPoints": ["/mnt/gdrive"]
+        }))]);
+
+        let reconciled =
+            reconcile_mount_manifest_with_client(&client, manifest).expect("reconcile manifest");
+
+        assert_eq!(
+            reconciled.mounts.keys().cloned().collect::<Vec<_>>(),
+            vec!["gdrive".to_owned()]
+        );
+        assert_eq!(client.calls()[0].0, "mount/listmounts");
+    }
+
+    #[test]
+    fn mount_list_failure_does_not_trust_manifest() {
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), PathBuf::from("/mnt/gdrive"));
+        let client = FakeRcloneClient::with_responses(vec![Err("mount list failed".to_owned())]);
+
+        let error =
+            reconcile_mount_manifest_with_client(&client, manifest).expect_err("list should fail");
+
+        assert_eq!(error, "mount list failed");
+    }
+
+    #[test]
+    fn known_mount_state_ignores_stale_reconciled_manifest() {
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), PathBuf::from("/mnt/gdrive"));
+        let reconciled = reconcile_mount_manifest(manifest, &[PathBuf::from("/mnt/other")]);
+        let mut remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+
+        apply_known_mount_state_with_manifest(&mut remote, &reconciled);
+
+        assert!(matches!(remote.state, RcloneRemoteState::Disconnected));
+    }
+
+    #[test]
+    fn known_mount_state_uses_active_reconciled_manifest() {
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), PathBuf::from("/mnt/gdrive"));
+        let mut remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+
+        apply_known_mount_state_with_manifest(&mut remote, &manifest);
+
+        assert!(matches!(
+            remote.state,
+            RcloneRemoteState::Mounted(ref mounted) if mounted.mount_root == Path::new("/mnt/gdrive")
+        ));
+    }
+
+    #[test]
+    fn mount_root_uses_platform_default_without_manifest() {
+        assert_eq!(
+            mount_root_for_remote("gdrive"),
+            platform_mount_root(&sanitize_remote_name("gdrive"))
+        );
+    }
+
+    #[test]
+    fn sidebar_path_uses_mount_root_only_for_mounted_remotes() {
+        let mut remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        assert_eq!(
+            sidebar_path_for_remote(&remote),
+            virtual_root_for_remote("gdrive")
+        );
+
+        remote.state = RcloneRemoteState::Mounted(Box::new(MountedRemote {
+            remote: remote.identity(),
+            mount_root: PathBuf::from("/mnt/gdrive"),
+            display_root: display_root_for_remote(&remote.display_name),
+        }));
+
+        assert_eq!(sidebar_path_for_remote(&remote), Path::new("/mnt/gdrive"));
+    }
+
+    #[test]
     fn managed_mount_move_file_uses_async_movefile() {
         let mount_root = if cfg!(target_os = "windows") {
             PathBuf::from(r"X:\Explorer\Rclone\gdrive")
@@ -1558,7 +1756,13 @@ mod tests {
         let connection = connect_remote_with_client(&client, remote, &RcloneSettings::default())
             .expect("connect remote");
 
-        assert!(matches!(connection, RcloneConnection::TransferMode(_)));
+        assert!(matches!(
+            connection,
+            RcloneConnection::TransferMode(TransferRemote {
+                mount_error: Some(ref error),
+                ..
+            }) if error == "mount failed"
+        ));
     }
 
     #[test]

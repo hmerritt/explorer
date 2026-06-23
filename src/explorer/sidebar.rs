@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::explorer::filesystem::windows_local_os_drive_root;
 #[cfg(feature = "rclone")]
 use crate::explorer::rclone::{
-    RcloneSidebarState, apply_known_mount_state, discover_remotes, sidebar_path_for_remote,
+    RcloneSidebarState, apply_known_mount_states, discover_remotes, sidebar_path_for_remote,
 };
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
@@ -242,16 +242,15 @@ fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
 
 #[cfg(feature = "rclone")]
 fn rclone_remote_items(settings: &RcloneSettings) -> Vec<SidebarItem> {
-    discover_remotes(settings)
+    let mut remotes = discover_remotes(settings);
+    apply_known_mount_states(&mut remotes);
+    remotes
         .into_iter()
-        .map(|mut remote| {
-            apply_known_mount_state(&mut remote);
-            SidebarItem {
-                label: rclone_remote_sidebar_label(&remote.display_name, remote.sidebar_state()),
-                path: sidebar_path_for_remote(&remote),
-                kind: SidebarItemKind::RcloneRemote(remote.sidebar_state()),
-                configured_index: None,
-            }
+        .map(|remote| SidebarItem {
+            label: rclone_remote_sidebar_label(&remote.display_name, remote.sidebar_state()),
+            path: sidebar_path_for_remote(&remote),
+            kind: SidebarItemKind::RcloneRemote(remote.sidebar_state()),
+            configured_index: None,
         })
         .collect()
 }

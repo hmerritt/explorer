@@ -245,6 +245,7 @@ impl ExplorerView {
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.rclone_connect_task = None;
+                let mut transfer_notice = None;
                 let target = match result {
                     Ok(crate::explorer::rclone::RcloneConnection::Mounted(mounted)) => parsed
                         .relative_path
@@ -252,17 +253,29 @@ impl ExplorerView {
                         .is_empty()
                         .then_some(mounted.mount_root.clone())
                         .unwrap_or_else(|| mounted.mount_root.join(&parsed.relative_path)),
-                    Ok(crate::explorer::rclone::RcloneConnection::TransferMode(transfer)) => parsed
-                        .relative_path
-                        .as_os_str()
-                        .is_empty()
-                        .then(|| {
-                            crate::explorer::rclone::virtual_root_for_remote(&transfer.remote.name)
-                        })
-                        .unwrap_or_else(|| {
-                            crate::explorer::rclone::virtual_root_for_remote(&parsed.remote_name)
+                    Ok(crate::explorer::rclone::RcloneConnection::TransferMode(transfer)) => {
+                        if let Some(error) = transfer.mount_error.as_deref() {
+                            transfer_notice = Some(format!(
+                                "Could not mount {}: {error}. Using rclone transfer mode.",
+                                transfer.remote.display_name
+                            ));
+                        }
+                        parsed
+                            .relative_path
+                            .as_os_str()
+                            .is_empty()
+                            .then(|| {
+                                crate::explorer::rclone::virtual_root_for_remote(
+                                    &transfer.remote.name,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                crate::explorer::rclone::virtual_root_for_remote(
+                                    &parsed.remote_name,
+                                )
                                 .join(&parsed.relative_path)
-                        }),
+                            })
+                    }
                     Err(error) => {
                         explorer.set_error_notice(error);
                         cx.notify();
@@ -275,6 +288,9 @@ impl ExplorerView {
                     Some(cx),
                     true,
                 );
+                if let Some(notice) = transfer_notice {
+                    explorer.set_info_notice(notice);
+                }
                 cx.notify();
             });
         });
