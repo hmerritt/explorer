@@ -153,20 +153,12 @@ pub(super) fn default_application_for_file(path: &Path) -> Option<DefaultApplica
     None
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub(super) fn change_default_application_for_file(
     path: &Path,
     window: &Window,
 ) -> io::Result<DefaultAppChangeOutcome> {
-    #[cfg(target_os = "windows")]
-    {
-        return windows_change_default_application_for_file(path, window);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return mac_change_default_application_for_file(path, window);
-    }
+    mac_change_default_application_for_file(path, window)
 }
 
 impl ExplorerView {
@@ -457,13 +449,12 @@ fn windows_choose_application(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_change_default_application_for_file(
+pub(super) fn windows_change_default_application_for_file_with_parent(
     path: &Path,
-    window: &Window,
+    parent: Option<windows::Win32::Foundation::HWND>,
 ) -> io::Result<DefaultAppChangeOutcome> {
     windows_default_app_change_outcome_from_shell_result(windows_show_open_with_picker(
-        path,
-        crate::explorer::windows_shell::parent_hwnd(window),
+        path, parent,
     ))
 }
 

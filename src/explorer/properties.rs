@@ -1419,7 +1419,37 @@ impl PropertiesDialog {
         self.apply_task = Some(task);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    fn change_default_app(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.default_app_task.is_some() {
+            return;
+        }
+        let Some(path) = single_file_default_app_path(snapshot).map(Path::to_path_buf) else {
+            return;
+        };
+
+        let before = snapshot.default_app.clone();
+        let parent = crate::explorer::windows_shell::parent_hwnd(window);
+        let task = cx.spawn(async move |this, cx| {
+            let result =
+                crate::explorer::open_with::windows_change_default_application_for_file_with_parent(
+                    &path, parent,
+                );
+
+            let _ = this.update(cx, |dialog, cx| {
+                dialog.refresh_after_default_app_change(path, before, result, cx);
+            });
+        });
+        self.default_app_task = Some(task);
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
     fn change_default_app(
         &mut self,
         snapshot: &PropertySnapshot,

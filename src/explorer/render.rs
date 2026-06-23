@@ -3179,8 +3179,8 @@ fn image_hover_preview_loading_content(
                 div()
                     .debug_selector(|| "image-hover-preview-loading-progress".to_owned())
                     .absolute()
-                    .left(px(0.0))
-                    .right(px(0.0))
+                    .left(px(IMAGE_HOVER_PREVIEW_RADIUS / 2.))
+                    .right(px(IMAGE_HOVER_PREVIEW_RADIUS / 2.))
                     .bottom(px(0.0))
                     .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                     .child(image_hover_preview_loading_progress()),
