@@ -345,6 +345,10 @@ pub struct ViewSettings {
     pub mode: FileViewMode,
     #[serde(default = "default_media_view_mode")]
     pub mode_media: FileViewMode,
+    #[serde(default)]
+    pub remote_mode_media: FileViewMode,
+    #[serde(default)]
+    pub remote_thumbnails: bool,
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
@@ -535,6 +539,8 @@ impl Default for ViewSettings {
             font: default_font(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
+            remote_mode_media: FileViewMode::Details,
+            remote_thumbnails: false,
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
@@ -2219,6 +2225,8 @@ mod tests {
         assert!(!settings.tabs.focus_new);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
+        assert!(!settings.view.remote_thumbnails);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(
@@ -2279,6 +2287,8 @@ mod tests {
         assert!(!settings.tabs.focus_new);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
+        assert!(!settings.view.remote_thumbnails);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert_eq!(settings.view.file_columns.name_width, None);
@@ -2373,6 +2383,21 @@ mod tests {
                 .expect("deserialize settings");
 
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+    }
+
+    #[test]
+    fn remote_view_settings_deserialize_and_round_trip() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"view":{"remote_thumbnails":true,"remote_mode_media":"large_icons"}}"#,
+        )
+        .expect("deserialize settings");
+
+        assert!(settings.view.remote_thumbnails);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::LargeIcons);
+
+        let value = serde_json::to_value(settings).expect("serialize settings");
+        assert_eq!(value["view"]["remote_thumbnails"], true);
+        assert_eq!(value["view"]["remote_mode_media"], "large_icons");
     }
 
     #[test]
@@ -2624,6 +2649,8 @@ mod tests {
         assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
         assert!(json.contains("\n    \"native_icons\": true"));
+        assert!(json.contains("\n    \"remote_mode_media\": \"details\""));
+        assert!(json.contains("\n    \"remote_thumbnails\": false"));
         assert!(json.contains("\n    \"show_folder_sizes\": false"));
         assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
         assert!(
@@ -3341,6 +3368,8 @@ mod tests {
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
+        assert_eq!(object["view"]["remote_mode_media"], "details");
+        assert_eq!(object["view"]["remote_thumbnails"], false);
         assert_eq!(object["view"]["show_extensions"], true);
         assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");

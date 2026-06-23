@@ -130,8 +130,11 @@ pub struct ExplorerView {
     pub(super) resolve_icons: bool,
     pub(super) base_view_mode: FileViewMode,
     pub(super) media_view_mode: FileViewMode,
+    pub(super) remote_media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
     pub(super) view_mode_selection: ViewModeSelection,
+    pub(super) directory_is_remote: bool,
+    pub(super) remote_thumbnails: bool,
     pub(super) thumbnail_source_policy: ThumbnailSourcePolicy,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
@@ -372,7 +375,11 @@ impl ExplorerView {
         focus_handle: Option<FocusHandle>,
         settings: &ExplorerSettings,
     ) -> Self {
-        let thumbnail_source_policy = thumbnail_source_policy_for_path(&initial_path);
+        let directory_is_remote = path_is_remote_drive(&initial_path);
+        let thumbnail_source_policy = thumbnail_source_policy_for_remote(
+            directory_is_remote,
+            settings.view.remote_thumbnails,
+        );
         Self {
             path: initial_path,
             entries: Vec::new(),
@@ -445,8 +452,11 @@ impl ExplorerView {
             resolve_icons: settings.view.native_icons,
             base_view_mode: settings.view.mode,
             media_view_mode: settings.view.mode_media,
+            remote_media_view_mode: settings.view.remote_mode_media,
             view_mode: settings.view.mode,
             view_mode_selection: ViewModeSelection::Pending,
+            directory_is_remote,
+            remote_thumbnails: settings.view.remote_thumbnails,
             thumbnail_source_policy,
             open_utility_menu: None,
             context_menu: None,
@@ -490,12 +500,25 @@ impl ExplorerView {
         }
         let base_view_mode_changed = self.base_view_mode != settings.view.mode;
         let media_view_mode_changed = self.media_view_mode != settings.view.mode_media;
+        let remote_media_view_mode_changed =
+            self.remote_media_view_mode != settings.view.remote_mode_media;
+        let old_thumbnail_source_policy = self.thumbnail_source_policy;
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
+        self.remote_media_view_mode = settings.view.remote_mode_media;
+        self.remote_thumbnails = settings.view.remote_thumbnails;
+        self.thumbnail_source_policy =
+            thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
+        if old_thumbnail_source_policy == ThumbnailSourcePolicy::ReadSource
+            && self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly
+        {
+            self.cancel_image_thumbnail_extraction(cx);
+            self.cancel_video_hover_preview(cx);
+        }
         if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
             self.set_active_view_mode(self.base_view_mode);
-        } else if media_view_mode_changed
+        } else if (media_view_mode_changed || remote_media_view_mode_changed)
             && self.view_mode_selection == ViewModeSelection::Automatic
         {
             self.apply_automatic_view_mode();
@@ -638,7 +661,9 @@ impl ExplorerView {
 
     fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
-        self.thumbnail_source_policy = thumbnail_source_policy_for_path(&self.path);
+        self.directory_is_remote = path_is_remote_drive(&self.path);
+        self.thumbnail_source_policy =
+            thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
         self.context_menu = None;
         self.clear_operation_notice();
         self.read_error = None;
@@ -1598,8 +1623,16 @@ impl ExplorerView {
     }
 }
 
-fn thumbnail_source_policy_for_path(path: &Path) -> ThumbnailSourcePolicy {
-    if path_is_remote_drive(path) {
+#[cfg(test)]
+fn thumbnail_source_policy_for_path(path: &Path, remote_thumbnails: bool) -> ThumbnailSourcePolicy {
+    thumbnail_source_policy_for_remote(path_is_remote_drive(path), remote_thumbnails)
+}
+
+fn thumbnail_source_policy_for_remote(
+    directory_is_remote: bool,
+    remote_thumbnails: bool,
+) -> ThumbnailSourcePolicy {
+    if directory_is_remote && !remote_thumbnails {
         ThumbnailSourcePolicy::CacheOnly
     } else {
         ThumbnailSourcePolicy::ReadSource
@@ -1724,6 +1757,8 @@ impl ExplorerView {
             &self.all_entries,
             self.base_view_mode,
             self.media_view_mode,
+            self.remote_media_view_mode,
+            self.directory_is_remote,
         );
         self.set_active_view_mode(view_mode)
     }
@@ -1744,9 +1779,15 @@ fn effective_view_mode_for_entries(
     entries: &[FileEntry],
     base_view_mode: FileViewMode,
     media_view_mode: FileViewMode,
+    remote_media_view_mode: FileViewMode,
+    directory_is_remote: bool,
 ) -> FileViewMode {
     if directory_is_media_majority(entries) {
-        media_view_mode
+        if directory_is_remote {
+            remote_media_view_mode
+        } else {
+            media_view_mode
+        }
     } else {
         base_view_mode
     }
@@ -1861,8 +1902,14 @@ mod tests {
             view.media_view_mode,
             crate::settings::FileViewMode::LargeIcons
         );
+        assert_eq!(
+            view.remote_media_view_mode,
+            crate::settings::FileViewMode::Details
+        );
         assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        assert!(!view.directory_is_remote);
+        assert!(!view.remote_thumbnails);
         assert_eq!(
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
@@ -2076,6 +2123,8 @@ mod tests {
                 &entries,
                 crate::settings::FileViewMode::LargeIcons,
                 crate::settings::FileViewMode::Details,
+                crate::settings::FileViewMode::Details,
+                false,
             ),
             crate::settings::FileViewMode::LargeIcons
         );
@@ -2096,8 +2145,32 @@ mod tests {
                 &entries,
                 crate::settings::FileViewMode::Details,
                 crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::Details,
+                false,
             ),
             crate::settings::FileViewMode::LargeIcons
+        );
+    }
+
+    #[test]
+    fn effective_view_mode_uses_remote_media_mode_for_remote_media_majority_directories() {
+        let entries = vec![
+            test_folder("folder"),
+            test_file("photo.jpg"),
+            test_file("clip.mov"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+        ];
+
+        assert_eq!(
+            effective_view_mode_for_entries(
+                &entries,
+                crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::Details,
+                true,
+            ),
+            crate::settings::FileViewMode::Details
         );
     }
 
@@ -2200,7 +2273,23 @@ mod tests {
     #[test]
     fn thumbnail_source_policy_defaults_to_read_source_for_local_paths() {
         assert_eq!(
-            thumbnail_source_policy_for_path(Path::new("local-folder")),
+            thumbnail_source_policy_for_path(Path::new("local-folder"), false),
+            ThumbnailSourcePolicy::ReadSource
+        );
+    }
+
+    #[test]
+    fn thumbnail_source_policy_uses_cache_only_for_remote_paths_by_default() {
+        assert_eq!(
+            thumbnail_source_policy_for_remote(true, false),
+            ThumbnailSourcePolicy::CacheOnly
+        );
+    }
+
+    #[test]
+    fn thumbnail_source_policy_reads_remote_source_when_setting_enabled() {
+        assert_eq!(
+            thumbnail_source_policy_for_remote(true, true),
             ThumbnailSourcePolicy::ReadSource
         );
     }
@@ -2211,8 +2300,19 @@ mod tests {
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
 
         assert_eq!(
-            thumbnail_source_policy_for_path(&path),
+            thumbnail_source_policy_for_path(&path, false),
             ThumbnailSourcePolicy::CacheOnly
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn thumbnail_source_policy_reads_rclone_virtual_source_when_setting_enabled() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
+
+        assert_eq!(
+            thumbnail_source_policy_for_path(&path, true),
+            ThumbnailSourcePolicy::ReadSource
         );
     }
 
@@ -2405,6 +2505,134 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
             assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_recomputes_remote_media_view_mode_when_automatic(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote-media"),
+                Some(focus_handle),
+                &ExplorerSettings::default(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.all_entries = vec![
+                    test_folder("folder"),
+                    test_file("photo.jpg"),
+                    test_file("clip.mov"),
+                    test_file("scan.png"),
+                    test_file("poster.webp"),
+                ];
+                view.entries = view.all_entries.clone();
+                view.view_mode_selection = ViewModeSelection::Automatic;
+                view.set_active_view_mode(crate::settings::FileViewMode::Details);
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            remote_mode_media: crate::settings::FileViewMode::LargeIcons,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_does_not_replace_manual_view_with_remote_media_mode(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote-media"),
+                Some(focus_handle),
+                &ExplorerSettings::default(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.all_entries = vec![
+                    test_folder("folder"),
+                    test_file("photo.jpg"),
+                    test_file("clip.mov"),
+                    test_file("scan.png"),
+                    test_file("poster.webp"),
+                ];
+                view.entries = view.all_entries.clone();
+                view.view_mode_selection = ViewModeSelection::Manual;
+                view.set_active_view_mode(crate::settings::FileViewMode::Details);
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            remote_mode_media: crate::settings::FileViewMode::LargeIcons,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Manual);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_disables_remote_thumbnail_source_reads(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote"),
+                Some(focus_handle),
+                &ExplorerSettings {
+                    view: crate::settings::ViewSettings {
+                        remote_thumbnails: true,
+                        ..crate::settings::ViewSettings::default()
+                    },
+                    ..ExplorerSettings::default()
+                },
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.remote_thumbnails = true;
+                view.thumbnail_source_policy = ThumbnailSourcePolicy::ReadSource;
+                view.apply_settings(&ExplorerSettings::default(), cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.remote_thumbnails);
+            assert_eq!(
+                view.thumbnail_source_policy,
+                ThumbnailSourcePolicy::CacheOnly
+            );
         });
     }
 
