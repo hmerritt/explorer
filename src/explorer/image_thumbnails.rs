@@ -77,9 +77,16 @@ pub(super) fn initialize_for_test(cx: &mut App) {
 struct ImageThumbnailRequest {
     kind: ImageThumbnailKind,
     usage: ImageThumbnailUsage,
+    source_policy: ThumbnailSourcePolicy,
     key: String,
     path: PathBuf,
     directory: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ThumbnailSourcePolicy {
+    ReadSource,
+    CacheOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,7 +142,9 @@ enum ImageThumbnailState {
         loading_thumbnail: Option<CachedThumbnailImage>,
     },
     Ready(CachedThumbnailImage),
-    Failed,
+    Failed {
+        request: ImageThumbnailRequest,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +194,14 @@ impl ImageThumbnailCacheInner {
         &mut self,
         request: ImageThumbnailRequest,
     ) -> (Option<CachedThumbnailImage>, Option<u64>) {
+        if let Some(state) = self.states.get(&request.key) {
+            if state.should_retry_for_request(&request) {
+                self.states.remove(&request.key);
+            } else {
+                return (state.thumbnail(), None);
+            }
+        }
+
         if let Some(state) = self.states.get(&request.key) {
             return (state.thumbnail(), None);
         }
@@ -317,7 +334,9 @@ impl ImageThumbnailCacheInner {
 
         let state = match image {
             Some(image) => ImageThumbnailState::Ready(image),
-            None => ImageThumbnailState::Failed,
+            None => ImageThumbnailState::Failed {
+                request: request.clone(),
+            },
         };
 
         self.states.insert(request.key, state);
@@ -370,10 +389,20 @@ impl ImageThumbnailCacheInner {
 }
 
 impl ImageThumbnailState {
+    fn should_retry_for_request(&self, request: &ImageThumbnailRequest) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                request: failed_request
+            } if failed_request.source_policy == ThumbnailSourcePolicy::CacheOnly
+                && request.source_policy == ThumbnailSourcePolicy::ReadSource
+        )
+    }
+
     fn thumbnail(&self) -> Option<CachedThumbnailImage> {
         match self {
             Self::Ready(image) => Some(image.clone()),
-            Self::Pending { .. } | Self::Loading { .. } | Self::Failed => None,
+            Self::Pending { .. } | Self::Loading { .. } | Self::Failed { .. } => None,
         }
     }
 
@@ -394,7 +423,7 @@ impl ImageThumbnailState {
                 thumbnail: loading_thumbnail.clone(),
             },
             Self::Ready(image) => HoverImagePreviewLookup::Ready(image.clone()),
-            Self::Pending { .. } | Self::Loading { .. } | Self::Failed => {
+            Self::Pending { .. } | Self::Loading { .. } | Self::Failed { .. } => {
                 HoverImagePreviewLookup::Failed
             }
         }
@@ -412,7 +441,8 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<Arc<RenderImage>> {
-        let request = image_thumbnail_request_for_entry(entry, &self.path)?;
+        let request =
+            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         let (thumbnail, loader_generation) = cx
             .try_global::<ImageThumbnailCache>()
             .map(|cache| cache.inner.borrow_mut().thumbnail_for_request(request))
@@ -430,8 +460,10 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<HoverImagePreviewLookup> {
-        let request = hover_image_preview_request_for_entry(entry, &self.path)?;
-        let standard_request = image_thumbnail_request_for_entry(entry, &self.path)?;
+        let request =
+            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
+        let standard_request =
+            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         let (preview, loader_generation) = cx
             .try_global::<ImageThumbnailCache>()
             .map(|cache| {
@@ -454,7 +486,8 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<CachedThumbnailImage> {
-        let request = image_thumbnail_request_for_entry(entry, &self.path)?;
+        let request =
+            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         if request.kind != ImageThumbnailKind::Video
             || request.usage != ImageThumbnailUsage::Standard
         {
@@ -488,7 +521,9 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) {
-        let Some(request) = hover_image_preview_request_for_entry(entry, &self.path) else {
+        let Some(request) =
+            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)
+        else {
             return;
         };
         let Ok((width, height)) =
@@ -515,10 +550,14 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) {
-        let Some(request) = hover_image_preview_request_for_entry(entry, &self.path) else {
+        let Some(request) =
+            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)
+        else {
             return;
         };
-        let Some(standard_request) = image_thumbnail_request_for_entry(entry, &self.path) else {
+        let Some(standard_request) =
+            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)
+        else {
             return;
         };
         let Ok((width, height)) =
@@ -654,6 +693,9 @@ fn load_or_create_thumbnail_png(
     if let Some(bytes) = read_cached_thumbnail(cache_dir, &request.key) {
         return Some(bytes);
     }
+    if request.source_policy == ThumbnailSourcePolicy::CacheOnly {
+        return None;
+    }
     let extracted = match request.usage {
         ImageThumbnailUsage::Standard => {
             crate::explorer::image_preview::load_image_thumbnail_png_with_cancel_timed(
@@ -714,6 +756,14 @@ fn load_or_create_thumbnail_with_timings(
 
     if cancel.load(Ordering::Relaxed) {
         return ImageThumbnailLoadResult::cancelled_after_cache_read(cache_hit, cache_read_elapsed);
+    }
+
+    if request.source_policy == ThumbnailSourcePolicy::CacheOnly {
+        return ImageThumbnailLoadResult::failed(
+            cache_read_elapsed,
+            None,
+            ImageThumbnailExtractionTimings::default(),
+        );
     }
 
     let extract_started = timings_enabled.then(Instant::now);
@@ -1418,6 +1468,7 @@ fn format_image_thumbnail_timing_duration(elapsed: Duration) -> String {
 fn image_thumbnail_request_for_entry(
     entry: &FileEntry,
     directory: &Path,
+    source_policy: ThumbnailSourcePolicy,
 ) -> Option<ImageThumbnailRequest> {
     if entry.is_directory_like() {
         return None;
@@ -1428,6 +1479,7 @@ fn image_thumbnail_request_for_entry(
     Some(ImageThumbnailRequest {
         kind,
         usage: ImageThumbnailUsage::Standard,
+        source_policy,
         key: image_thumbnail_key(entry, kind),
         path: entry.path.clone(),
         directory: directory.to_path_buf(),
@@ -1445,6 +1497,7 @@ pub(super) fn entry_may_have_hover_video_preview(entry: &FileEntry) -> bool {
 fn hover_image_preview_request_for_entry(
     entry: &FileEntry,
     directory: &Path,
+    source_policy: ThumbnailSourcePolicy,
 ) -> Option<ImageThumbnailRequest> {
     if !entry_may_have_hover_image_preview(entry) {
         return None;
@@ -1453,6 +1506,7 @@ fn hover_image_preview_request_for_entry(
     Some(ImageThumbnailRequest {
         kind: ImageThumbnailKind::Image,
         usage: ImageThumbnailUsage::HoverPreview,
+        source_policy,
         key: hover_image_preview_key(entry),
         path: entry.path.clone(),
         directory: directory.to_path_buf(),
@@ -1690,8 +1744,12 @@ mod tests {
     fn thumbnail_requests_include_supported_image_extensions() {
         for name in ["image.png", "photo.jpg", "poster.webp", "vector.svg"] {
             let entry = FileEntry::test(name, false, Some(1), Some(UNIX_EPOCH));
-            let request = image_thumbnail_request_for_entry(&entry, Path::new("folder"))
-                .unwrap_or_else(|| panic!("expected request for {name}"));
+            let request = image_thumbnail_request_for_entry(
+                &entry,
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
+            )
+            .unwrap_or_else(|| panic!("expected request for {name}"));
             assert_eq!(request.kind, ImageThumbnailKind::Image);
             assert_eq!(request.usage, ImageThumbnailUsage::Standard);
         }
@@ -1701,8 +1759,12 @@ mod tests {
     fn thumbnail_requests_include_supported_video_extensions() {
         for name in ["movie.mp4", "clip.mkv", "camera.mov"] {
             let entry = FileEntry::test(name, false, Some(1), Some(UNIX_EPOCH));
-            let request = image_thumbnail_request_for_entry(&entry, Path::new("folder"))
-                .unwrap_or_else(|| panic!("expected request for {name}"));
+            let request = image_thumbnail_request_for_entry(
+                &entry,
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
+            )
+            .unwrap_or_else(|| panic!("expected request for {name}"));
             assert_eq!(request.kind, ImageThumbnailKind::Video);
             assert_eq!(request.usage, ImageThumbnailUsage::Standard);
         }
@@ -1713,14 +1775,16 @@ mod tests {
         assert!(
             image_thumbnail_request_for_entry(
                 &FileEntry::test("folder", true, None, Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_none()
         );
         assert!(
             image_thumbnail_request_for_entry(
                 &FileEntry::test("notes.txt", false, Some(1), Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_none()
         );
@@ -1765,8 +1829,12 @@ mod tests {
     #[test]
     fn hover_preview_key_is_distinct_from_standard_image_thumbnail_key() {
         let entry = FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH));
-        let preview = hover_image_preview_request_for_entry(&entry, Path::new("folder"))
-            .expect("expected hover preview request");
+        let preview = hover_image_preview_request_for_entry(
+            &entry,
+            Path::new("folder"),
+            ThumbnailSourcePolicy::ReadSource,
+        )
+        .expect("expected hover preview request");
 
         assert_eq!(preview.kind, ImageThumbnailKind::Image);
         assert_eq!(preview.usage, ImageThumbnailUsage::HoverPreview);
@@ -1782,28 +1850,32 @@ mod tests {
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("folder", true, None, Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_none()
         );
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("notes.txt", false, Some(1), Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_none()
         );
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("clip.mp4", false, Some(1), Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_none()
         );
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH)),
-                Path::new("folder")
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
             )
             .is_some()
         );
@@ -2052,6 +2124,7 @@ mod tests {
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2076,6 +2149,120 @@ mod tests {
     }
 
     #[test]
+    fn cache_only_thumbnail_returns_cached_png() {
+        let temp = TempDir::new();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            key: "0123456789abcdef".to_owned(),
+            path: temp.path().join("missing.png"),
+            directory: temp.path().to_path_buf(),
+        };
+        write_cached_thumbnail(Some(temp.path()), &request.key, &png_bytes(4, 2));
+
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
+
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::CacheHit);
+        assert_eq!(
+            result
+                .image
+                .as_ref()
+                .map(|image| (image.width, image.height)),
+            Some((4, 2))
+        );
+        assert!(result.extract_elapsed.is_none());
+    }
+
+    #[test]
+    fn cache_only_thumbnail_miss_does_not_read_image_source() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(4, 2)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            key: "0123456789abcdef".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
+
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
+        assert!(result.image.is_none());
+        assert!(result.extract_elapsed.is_none());
+        assert_eq!(
+            load_or_create_thumbnail_png(&request, Some(temp.path()), &AtomicBool::new(false)),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_only_video_thumbnail_miss_does_not_start_probe_or_ffmpeg() {
+        let temp = TempDir::new();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Video,
+            usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            key: "0123456789abcdef".to_owned(),
+            path: temp.path().join("movie.mp4"),
+            directory: temp.path().to_path_buf(),
+        };
+
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
+
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
+        assert!(result.image.is_none());
+        assert!(result.extract_elapsed.is_none());
+    }
+
+    #[test]
+    fn cache_only_failed_thumbnail_can_retry_as_read_source() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let cache_only = ImageThumbnailRequest {
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            ..request("shared", "folder")
+        };
+        let read_source = ImageThumbnailRequest {
+            source_policy: ThumbnailSourcePolicy::ReadSource,
+            ..cache_only.clone()
+        };
+        let (_, cache_only_generation) = cache.thumbnail_for_request(cache_only.clone());
+        let cache_only_generation = cache_only_generation.expect("cache-only generation");
+        let _job = cache
+            .next_load_job(cache_only_generation)
+            .expect("cache-only job");
+        assert!(cache.finish_request(cache_only, cache_only_generation, None));
+        assert!(cache.next_load_job(cache_only_generation).is_none());
+
+        let (_, read_source_generation) = cache.thumbnail_for_request(read_source.clone());
+
+        assert!(read_source_generation.is_some());
+        assert!(matches!(
+            cache.states.get(&read_source.key),
+            Some(ImageThumbnailState::Pending { request, .. })
+                if request.source_policy == ThumbnailSourcePolicy::ReadSource
+        ));
+    }
+
+    #[test]
     fn hover_preview_thumbnail_preserves_aspect_ratio() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
@@ -2083,6 +2270,7 @@ mod tests {
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2103,6 +2291,7 @@ mod tests {
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2144,6 +2333,7 @@ mod tests {
         let hover_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source.clone(),
             directory: temp.path().to_path_buf(),
@@ -2151,6 +2341,7 @@ mod tests {
         let standard_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "fedcba9876543210".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2194,6 +2385,7 @@ mod tests {
         let hover_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source.clone(),
             directory: temp.path().to_path_buf(),
@@ -2201,6 +2393,7 @@ mod tests {
         let standard_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "fedcba9876543210".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2239,6 +2432,7 @@ mod tests {
         let hover_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source.clone(),
             directory: temp.path().to_path_buf(),
@@ -2246,6 +2440,7 @@ mod tests {
         let standard_request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "fedcba9876543210".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2281,6 +2476,7 @@ mod tests {
             let hover_request = ImageThumbnailRequest {
                 kind: ImageThumbnailKind::Image,
                 usage: ImageThumbnailUsage::HoverPreview,
+                source_policy: ThumbnailSourcePolicy::ReadSource,
                 key: "0123456789abcdef".to_owned(),
                 path: source.clone(),
                 directory: temp.path().to_path_buf(),
@@ -2288,6 +2484,7 @@ mod tests {
             let standard_request = ImageThumbnailRequest {
                 kind: ImageThumbnailKind::Image,
                 usage: ImageThumbnailUsage::Standard,
+                source_policy: ThumbnailSourcePolicy::ReadSource,
                 key: "fedcba9876543210".to_owned(),
                 path: source,
                 directory: temp.path().to_path_buf(),
@@ -2325,6 +2522,7 @@ mod tests {
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "0123456789abcdef".to_owned(),
             path: source,
             directory: temp.path().to_path_buf(),
@@ -2408,11 +2606,13 @@ mod tests {
 
         let hover = ImageThumbnailRequest {
             usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "hover".to_owned(),
             ..request("hover-source", "folder")
         };
         let standard = ImageThumbnailRequest {
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: "hover-standard".to_owned(),
             ..hover.clone()
         };
@@ -2570,6 +2770,7 @@ mod tests {
         ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
             usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
             key: key.to_owned(),
             path: PathBuf::from(directory).join(format!("{key}.png")),
             directory: PathBuf::from(directory),

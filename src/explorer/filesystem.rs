@@ -341,6 +341,19 @@ fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
     left == right
 }
 
+pub(super) fn path_is_remote_drive(path: &Path) -> bool {
+    #[cfg(feature = "rclone")]
+    {
+        if crate::explorer::rclone::parse_virtual_path(path).is_some()
+            || crate::explorer::rclone::is_active_managed_mount_path(path)
+        {
+            return true;
+        }
+    }
+
+    platform_path_is_remote_drive(path)
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn path_is_wsl_unc(path: &Path) -> bool {
     windows_wsl_unc_distribution_name(path).is_some()
@@ -439,6 +452,16 @@ fn windows_drive_display_label(path_display: &str, volume_label: Option<&str>) -
 #[cfg(target_os = "windows")]
 fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
     matches!(drive_type, 2 | 3 | 5 | 6)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    path_is_wsl_unc(path) || windows_drive_type(path).is_some_and(windows_drive_type_is_remote)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_drive_type_is_remote(drive_type: u32) -> bool {
+    drive_type == 4
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -622,15 +645,59 @@ pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     macos_volume_drive_roots_from_dir(Path::new("/Volumes"))
 }
 
+#[cfg(target_os = "macos")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    use std::{
+        ffi::{CStr, CString},
+        mem::MaybeUninit,
+        os::unix::ffi::OsStrExt,
+    };
+
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+
+    let mut stat = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let fs_type = unsafe { CStr::from_ptr(stat.f_fstypename.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+
+    macos_filesystem_type_is_remote(&fs_type) || stat.f_flags & libc::MNT_LOCAL == 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_filesystem_type_is_remote(fs_type: &str) -> bool {
+    matches!(
+        fs_type.to_ascii_lowercase().as_str(),
+        "afpfs" | "cifs" | "nfs" | "smbfs" | "sshfs" | "webdav" | "webdavfs"
+    ) || fs_type.to_ascii_lowercase().contains("rclone")
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     linux_mountinfo_drive_roots_from_path(Path::new("/proc/self/mountinfo"))
         .unwrap_or_else(|_| vec![PathBuf::from("/")])
 }
 
+#[cfg(target_os = "linux")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .is_some_and(|mountinfo| linux_mountinfo_path_is_remote_drive(&mountinfo, path))
+}
+
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_path_is_remote_drive(_: &Path) -> bool {
+    false
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -730,6 +797,53 @@ fn linux_mount_point_is_visible_drive(path: &Path) -> bool {
     path_has_components_below(path, Path::new("/media"), 2)
         || path_has_components_below(path, Path::new("/run/media"), 2)
         || path_has_components_below(path, Path::new("/mnt"), 1)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_path_is_remote_drive(mountinfo: &str, path: &Path) -> bool {
+    linux_mountinfo_deepest_entry_for_path(mountinfo, path)
+        .as_ref()
+        .is_some_and(linux_mountinfo_entry_is_remote)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_deepest_entry_for_path(
+    mountinfo: &str,
+    path: &Path,
+) -> Option<LinuxMountInfoEntry> {
+    mountinfo
+        .lines()
+        .filter_map(linux_mountinfo_entry)
+        .filter(|entry| path_is_same_or_descendant(path, &entry.mount_point))
+        .max_by_key(|entry| entry.mount_point.components().count())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_entry_is_remote(entry: &LinuxMountInfoEntry) -> bool {
+    linux_filesystem_type_is_remote(&entry.fs_type)
+        || entry.source.starts_with("//")
+        || entry.source.contains(':')
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_filesystem_type_is_remote(fs_type: &str) -> bool {
+    let fs_type = fs_type.to_ascii_lowercase();
+    matches!(
+        fs_type.as_str(),
+        "9p" | "afpfs"
+            | "cifs"
+            | "curlftpfs"
+            | "davfs"
+            | "davfs2"
+            | "fusedav"
+            | "nfs"
+            | "nfs4"
+            | "rclone"
+            | "smb3"
+            | "smbfs"
+            | "sshfs"
+    ) || fs_type.contains("rclone")
+        || fs_type.contains("sshfs")
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -6065,6 +6179,58 @@ mod tests {
             linux_mountinfo_drive_roots_from_path(&mountinfo).expect("parse mountinfo"),
             vec![PathBuf::from("/"), PathBuf::from("/media/alex/USB")]
         );
+    }
+
+    #[test]
+    fn linux_mountinfo_remote_detection_uses_deepest_mount() {
+        let mountinfo = "\
+36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+40 25 0:45 / /mnt/media rw,relatime - nfs nas:/media rw
+41 40 8:17 / /mnt/media/local rw,relatime - ext4 /dev/sdb1 rw
+42 25 0:46 / /mnt/rclone rw,relatime - fuse.rclone remote: rw
+43 25 0:47 / /mnt/smb rw,relatime - cifs //nas/share rw
+";
+
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/media/photos")
+        ));
+        assert!(!linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/media/local/photos")
+        ));
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/rclone/photos")
+        ));
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/smb/photos")
+        ));
+        assert!(!linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/home/alex")
+        ));
+    }
+
+    #[test]
+    fn macos_remote_filesystem_type_detection_covers_common_network_mounts() {
+        for fs_type in ["smbfs", "nfs", "webdav", "sshfs", "fuse.rclone"] {
+            assert!(
+                macos_filesystem_type_is_remote(fs_type),
+                "{fs_type} should be remote"
+            );
+        }
+
+        assert!(!macos_filesystem_type_is_remote("apfs"));
+        assert!(!macos_filesystem_type_is_remote("hfs"));
+    }
+
+    #[test]
+    fn windows_drive_type_remote_detection_matches_network_drives() {
+        assert!(windows_drive_type_is_remote(4));
+        assert!(!windows_drive_type_is_remote(3));
+        assert!(!windows_drive_type_is_remote(2));
     }
 
     #[test]

@@ -29,10 +29,12 @@ use crate::explorer::{
     file_commands::FileOperationUndo,
     filesystem::{
         EntryVisibility, FileConflictBatch, FileOperationProgress,
-        load_entries_with_rclone_settings, path_is_filesystem_root, path_is_wsl_unc_root,
+        load_entries_with_rclone_settings, path_is_filesystem_root, path_is_remote_drive,
+        path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
+    image_thumbnails::ThumbnailSourcePolicy,
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
@@ -130,6 +132,7 @@ pub struct ExplorerView {
     pub(super) media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
     pub(super) view_mode_selection: ViewModeSelection,
+    pub(super) thumbnail_source_policy: ThumbnailSourcePolicy,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
@@ -369,6 +372,7 @@ impl ExplorerView {
         focus_handle: Option<FocusHandle>,
         settings: &ExplorerSettings,
     ) -> Self {
+        let thumbnail_source_policy = thumbnail_source_policy_for_path(&initial_path);
         Self {
             path: initial_path,
             entries: Vec::new(),
@@ -443,6 +447,7 @@ impl ExplorerView {
             media_view_mode: settings.view.mode_media,
             view_mode: settings.view.mode,
             view_mode_selection: ViewModeSelection::Pending,
+            thumbnail_source_policy,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
@@ -633,6 +638,7 @@ impl ExplorerView {
 
     fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
+        self.thumbnail_source_policy = thumbnail_source_policy_for_path(&self.path);
         self.context_menu = None;
         self.clear_operation_notice();
         self.read_error = None;
@@ -1592,6 +1598,14 @@ impl ExplorerView {
     }
 }
 
+fn thumbnail_source_policy_for_path(path: &Path) -> ThumbnailSourcePolicy {
+    if path_is_remote_drive(path) {
+        ThumbnailSourcePolicy::CacheOnly
+    } else {
+        ThumbnailSourcePolicy::ReadSource
+    }
+}
+
 pub(super) fn normalized_sidebar_width_f32(width: f32) -> f32 {
     if width.is_finite() {
         width.max(crate::settings::SIDEBAR_MIN_WIDTH as f32)
@@ -2181,6 +2195,25 @@ mod tests {
         );
 
         assert_eq!(view.font.family, "Inter");
+    }
+
+    #[test]
+    fn thumbnail_source_policy_defaults_to_read_source_for_local_paths() {
+        assert_eq!(
+            thumbnail_source_policy_for_path(Path::new("local-folder")),
+            ThumbnailSourcePolicy::ReadSource
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn thumbnail_source_policy_uses_cache_only_for_rclone_virtual_paths() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
+
+        assert_eq!(
+            thumbnail_source_policy_for_path(&path),
+            ThumbnailSourcePolicy::CacheOnly
+        );
     }
 
     #[gpui::test]

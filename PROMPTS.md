@@ -1,8 +1,25 @@
 ## Todo
 
+The change we just made - disabling thumbnail generation for remote drives - I would like to make this a settings option to let the user decide.
+
+view.remote_thumbnails
+
+Default is false
+
+---
+
+I would also like to add a settings option:
+
+view.remote_mode_media
+
+Default to "details" - this option overrides view.mode_media setting for remote drives
+
+---
+
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 - UI for files that are uploading
 - Image + video hover popup box should have border-radius of 15px, overflow hidden
+- Support windows %% shortcuts, like %APPDATA%
 
 ## 1
 

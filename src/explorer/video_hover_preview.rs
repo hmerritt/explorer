@@ -18,8 +18,8 @@ use gpui::{Context, RenderImage, Task};
 use crate::explorer::{
     entry::FileEntry,
     image_thumbnails::{
-        CachedThumbnailImage, dimensions_for_preview, entry_may_have_hover_image_preview,
-        entry_may_have_hover_video_preview,
+        CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
+        entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
     },
     video::path_may_have_video_metadata,
     view::ExplorerView,
@@ -80,6 +80,9 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<VideoHoverPreviewLookup> {
         if !entry_may_have_hover_video_preview(entry) {
+            return None;
+        }
+        if self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly {
             return None;
         }
 
@@ -422,6 +425,32 @@ pub(super) fn hover_preview_is_video(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn cache_only_policy_prevents_video_hover_preview_source_playback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("remote"),
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            );
+            view.thumbnail_source_policy = ThumbnailSourcePolicy::CacheOnly;
+            view
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = FileEntry::test("movie.mp4", false, Some(1), None);
+
+                assert!(view.hover_video_preview_for_entry(&entry, cx).is_none());
+                assert!(view.video_hover_preview.is_none());
+            });
+        });
+    }
 
     #[test]
     fn video_hover_preview_filter_caps_size_and_corrects_sar() {
