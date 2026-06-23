@@ -25,7 +25,7 @@ use crate::explorer::{
         ConflictChoice, FileOperationCopyUndo, FileOperationError, FileOperationJob,
         FileOperationKind, FileOperationMove, FileOperationReplacedFile, FileOperationSummary,
         PreparedFileOperation, archive_path_is_supported, cleanup_copy_undo_backups,
-        execute_file_operation, execute_file_operation_with_progress,
+        execute_file_operation, execute_file_operation_with_progress_and_rclone_settings,
         mountable_image_path_is_supported, prepare_copy_paths_to_directory_for_paste,
         prepare_extract_archives_to_directory, prepare_move_paths_to_directory,
         remove_existing_paths_permanently, remove_paths_permanently,
@@ -597,6 +597,7 @@ impl ExplorerView {
 
         let (progress_tx, progress_rx) = mpsc::channel();
         let finished = Arc::new(AtomicBool::new(false));
+        let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn({
             let cancel = cancel.clone();
             let terminate = terminate.clone();
@@ -606,11 +607,12 @@ impl ExplorerView {
                     let progress_tx = progress_tx.clone();
                     let finished = finished.clone();
                     async move {
-                        let result = execute_file_operation_with_progress(
+                        let result = execute_file_operation_with_progress_and_rclone_settings(
                             job,
                             conflict_choice,
                             cancel,
                             terminate,
+                            &rclone_settings,
                             |progress| {
                                 let _ = progress_tx.send(progress);
                             },

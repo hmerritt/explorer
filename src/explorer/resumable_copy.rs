@@ -18,9 +18,10 @@ use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::explorer::filesystem::{
-    FileOperationPhase, FileOperationProgress, paths_are_on_same_volume, preserve_file_metadata,
-    replace_destination_with_temp,
+    FileOperationPhase, FileOperationProgress, finalize_copied_file, paths_are_on_same_volume,
+    preserve_file_metadata,
 };
+use crate::settings::RcloneSettings;
 
 const JOURNAL_VERSION: u32 = 1;
 pub(super) const RSYNC_MIN_BLOCK_SIZE: usize = 700;
@@ -378,6 +379,7 @@ pub(super) fn copy_with_delta_progress(
         progress,
         on_progress,
         CopyOptions::explorer_safe(),
+        &RcloneSettings::default(),
     )
 }
 
@@ -388,6 +390,7 @@ pub(super) fn copy_with_delta_progress_with_options(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> io::Result<()> {
     let source_len = fs::metadata(source)?.len();
     copy_with_delta_progress_impl(
@@ -398,6 +401,7 @@ pub(super) fn copy_with_delta_progress_with_options(
         progress,
         on_progress,
         options,
+        rclone_settings,
     )
 }
 
@@ -430,6 +434,7 @@ pub(super) fn copy_with_delta_progress_for_test(
         progress,
         on_progress,
         CopyOptions::explorer_safe(),
+        &RcloneSettings::default(),
     )
 }
 
@@ -441,6 +446,7 @@ fn copy_with_delta_progress_impl(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> io::Result<()> {
     if block_size == 0 {
         return Err(io::Error::new(
@@ -580,7 +586,17 @@ fn copy_with_delta_progress_impl(
     }
 
     preserve_file_metadata(&metadata, &sidecars.partial)?;
-    replace_destination_with_temp(&sidecars.partial, destination)?;
+    finalize_copied_file(
+        source,
+        &sidecars.partial,
+        destination,
+        &metadata,
+        cancel,
+        progress,
+        on_progress,
+        options,
+        rclone_settings,
+    )?;
     if options.should_sync() {
         sync_parent_directory(destination);
     }
@@ -2309,6 +2325,7 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Safe),
+            &RcloneSettings::default(),
         )
         .expect("quick skip");
 
@@ -2338,6 +2355,7 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Safe),
+            &RcloneSettings::default(),
         )
         .expect("delta update");
 
@@ -2361,6 +2379,7 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Fast),
+            &RcloneSettings::default(),
         )
         .expect("fast copy");
 

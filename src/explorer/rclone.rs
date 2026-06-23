@@ -430,6 +430,67 @@ pub(super) fn is_managed_mount_root(path: &Path) -> bool {
         .any(|mount_root| mount_root == path)
 }
 
+fn managed_mounted_path_with_manifest(
+    path: &Path,
+    manifest: &RcloneMountManifest,
+) -> Option<RclonePath> {
+    manifest
+        .mounts
+        .iter()
+        .filter_map(|(remote_name, mount_root)| {
+            let relative_path = path.strip_prefix(mount_root).ok()?;
+            Some((
+                mount_root.components().count(),
+                RclonePath {
+                    remote_name: remote_name.clone(),
+                    relative_path: relative_path.to_path_buf(),
+                },
+            ))
+        })
+        .max_by_key(|(component_count, _)| *component_count)
+        .map(|(_, rclone_path)| rclone_path)
+}
+
+pub(super) fn move_managed_mounted_file(
+    source_path: &Path,
+    target_path: &Path,
+    settings: &RcloneSettings,
+) -> Result<bool, String> {
+    prepare_librclone(settings)?;
+    move_managed_mounted_file_with_client_and_manifest(
+        &LibrcloneClient,
+        source_path,
+        target_path,
+        &load_mount_manifest(),
+    )
+}
+
+fn move_managed_mounted_file_with_client_and_manifest(
+    client: &impl RcloneClient,
+    source_path: &Path,
+    target_path: &Path,
+    manifest: &RcloneMountManifest,
+) -> Result<bool, String> {
+    let Some(source) = managed_mounted_path_with_manifest(source_path, manifest) else {
+        return Ok(false);
+    };
+    let Some(target) = managed_mounted_path_with_manifest(target_path, manifest) else {
+        return Ok(false);
+    };
+
+    run_transfer_job(
+        client,
+        "operations/movefile",
+        json!({
+            "srcFs": rclone_fs_for_remote(&source.remote_name),
+            "srcRemote": remote_path_string(&source.relative_path),
+            "dstFs": rclone_fs_for_remote(&target.remote_name),
+            "dstRemote": remote_path_string(&target.relative_path),
+        }),
+    )?;
+    Ok(true)
+}
+
 fn mount_types(client: &impl RcloneClient) -> Result<Vec<String>, String> {
     let response = client.rpc("mount/types", json!({}))?;
     Ok(response
@@ -1289,6 +1350,64 @@ mod tests {
 
         assert_eq!(parsed.remote_name, "gdrive");
         assert_eq!(remote_path_string(&parsed.relative_path), "Folder/File.txt");
+    }
+
+    #[test]
+    fn parses_managed_mounted_paths_from_manifest() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\Explorer\Rclone\gdrive")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let path = mount_root.join("Folder").join("File.txt");
+
+        let parsed =
+            managed_mounted_path_with_manifest(&path, &manifest).expect("managed mount path");
+
+        assert_eq!(parsed.remote_name, "gdrive");
+        assert_eq!(remote_path_string(&parsed.relative_path), "Folder/File.txt");
+    }
+
+    #[test]
+    fn managed_mount_move_file_uses_async_movefile() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\Explorer\Rclone\gdrive")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let source = mount_root.join(".explorer-copy-key-file.txt.partial");
+        let target = mount_root.join("Folder").join("file.txt");
+        let mut responses = Vec::new();
+        responses.extend(queued_finished_job(11));
+        let client = FakeRcloneClient::with_responses(responses);
+
+        let handled = move_managed_mounted_file_with_client_and_manifest(
+            &client, &source, &target, &manifest,
+        )
+        .expect("move managed mount file");
+
+        assert!(handled);
+        let calls = client.calls();
+        assert_eq!(calls[0].0, "operations/movefile");
+        assert_eq!(calls[0].1["srcFs"], "gdrive:");
+        assert_eq!(
+            calls[0].1["srcRemote"],
+            ".explorer-copy-key-file.txt.partial"
+        );
+        assert_eq!(calls[0].1["dstFs"], "gdrive:");
+        assert_eq!(calls[0].1["dstRemote"], "Folder/file.txt");
+        assert_eq!(calls[0].1["_async"], true);
+        assert_eq!(calls[0].1["_group"], RCLONE_TRANSFER_GROUP);
+        assert_eq!(calls[1].0, "job/status");
+        assert_eq!(calls[1].1["jobid"], 11);
     }
 
     #[test]
