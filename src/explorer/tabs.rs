@@ -371,7 +371,7 @@ impl ExplorerTabs {
         };
 
         let closing = self.tabs.remove(index);
-        let has_active_operation = closing.view.read(cx).has_active_file_operation();
+        let has_active_operation = closing.view.read(cx).has_background_operation();
         let _ = closing.view.update(cx, |view, cx| {
             view.prepare_for_tab_close(cx);
             cx.notify();
@@ -497,7 +497,7 @@ impl ExplorerTabs {
         let mut still_running = Vec::new();
 
         for view in std::mem::take(&mut self.background_operation_tabs) {
-            if view.read(cx).has_active_file_operation() {
+            if view.read(cx).has_background_operation() {
                 still_running.push(view);
             }
         }

@@ -279,6 +279,12 @@ struct DirectoryLoadState {
     restart_watcher: bool,
 }
 
+#[derive(Debug)]
+struct DirectoryLoadResult {
+    entries: io::Result<Vec<FileEntry>>,
+    sidebar_sections: Option<SidebarSections>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UtilityMenu {
     New,
@@ -512,7 +518,7 @@ impl ExplorerView {
         let rclone_transfer_path_changed = {
             #[cfg(feature = "rclone")]
             {
-                rclone_changed && crate::explorer::rclone::is_transfer_path(&self.path)
+                rclone_changed && crate::explorer::rclone::parse_virtual_path(&self.path).is_some()
             }
             #[cfg(not(feature = "rclone"))]
             {
@@ -786,7 +792,10 @@ impl ExplorerView {
         self.directory_load_task = None;
         self.loading_path = Some(self.path.clone());
 
-        let selected_paths = self.prepare_directory_reload(mode);
+        let selected_paths = self.prepare_directory_reload(ReloadMode {
+            preserve_selection: mode.preserve_selection,
+            rebuild_sidebar: false,
+        });
         let state = DirectoryLoadState {
             path: self.path.clone(),
             generation,
@@ -800,6 +809,8 @@ impl ExplorerView {
         let path = state.path.clone();
         let visibility = self.entry_visibility();
         let rclone_settings = self.rclone_settings.clone();
+        let sidebar_settings = self.sidebar_settings.clone();
+        let rebuild_sidebar = mode.rebuild_sidebar;
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -812,7 +823,14 @@ impl ExplorerView {
                     .spawn({
                         let path = path.clone();
                         async move {
-                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings)
+                            let entries =
+                                load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
+                            let sidebar_sections = rebuild_sidebar
+                                .then(|| sidebar_sections(&sidebar_settings, &rclone_settings));
+                            DirectoryLoadResult {
+                                entries,
+                                sidebar_sections,
+                            }
                         }
                     })
                     .await;
@@ -822,7 +840,7 @@ impl ExplorerView {
                     "reload.async_load path={:?} generation={} ok={}",
                     state.path,
                     state.generation,
-                    result.is_ok()
+                    result.entries.is_ok()
                 ),
             );
 
@@ -838,7 +856,7 @@ impl ExplorerView {
     fn apply_directory_load_result(
         &mut self,
         state: DirectoryLoadState,
-        result: io::Result<Vec<FileEntry>>,
+        result: DirectoryLoadResult,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.directory_load_generation != state.generation || self.path != state.path {
@@ -848,7 +866,11 @@ impl ExplorerView {
         self.directory_load_task = None;
         self.loading_path = None;
 
-        match result {
+        if let Some(sidebar_sections) = result.sidebar_sections {
+            self.sidebar_sections = sidebar_sections;
+        }
+
+        match result.entries {
             Ok(entries) => {
                 self.apply_loaded_entries(
                     state.mode,
@@ -1256,6 +1278,10 @@ impl ExplorerView {
 
     pub(super) fn has_active_file_operation(&self) -> bool {
         self.active_file_operation.is_some()
+    }
+
+    pub(super) fn has_background_operation(&self) -> bool {
+        self.has_active_file_operation() || self.rclone_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -2760,10 +2786,66 @@ mod tests {
 
                 assert!(!view.apply_directory_load_result(
                     state,
-                    Ok(vec![FileEntry::test("stale.txt", false, Some(1), None)]),
+                    DirectoryLoadResult {
+                        entries: Ok(vec![FileEntry::test("stale.txt", false, Some(1), None)]),
+                        sidebar_sections: None,
+                    },
                     cx,
                 ));
                 assert!(view.entries.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn async_directory_load_result_applies_rebuilt_sidebar_sections(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = path.clone();
+                view.directory_load_generation = 3;
+                let mut rebuilt_sidebar = SidebarSections::default();
+                rebuilt_sidebar.drives.push(crate::explorer::sidebar::SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: PathBuf::from("/drive"),
+                    kind: crate::explorer::sidebar::SidebarItemKind::Drive,
+                    configured_index: None,
+                });
+                let state = DirectoryLoadState {
+                    path: path.clone(),
+                    generation: 3,
+                    selected_paths: Vec::new(),
+                    select_after_load: Vec::new(),
+                    mode: ReloadMode {
+                        preserve_selection: false,
+                        rebuild_sidebar: true,
+                    },
+                    schedule_metadata: false,
+                    refresh_search: false,
+                    restart_watcher: false,
+                };
+
+                assert!(view.apply_directory_load_result(
+                    state,
+                    DirectoryLoadResult {
+                        entries: Ok(Vec::new()),
+                        sidebar_sections: Some(rebuilt_sidebar.clone()),
+                    },
+                    cx,
+                ));
+                assert_eq!(view.sidebar_sections, rebuilt_sidebar);
             });
         });
     }

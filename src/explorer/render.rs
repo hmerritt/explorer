@@ -18,6 +18,8 @@ use gpui::{
 
 #[cfg(test)]
 use crate::explorer::address_bar::format_address_path;
+#[cfg(feature = "rclone")]
+use crate::explorer::icons::rclone_drive_icon;
 use crate::explorer::{
     DirectoryKind, OpenSettings,
     address_bar::{
@@ -3051,7 +3053,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
         #[cfg(feature = "rclone")]
-        SidebarItemKind::RcloneRemote(_) => drive_icon().into_any_element(),
+        SidebarItemKind::RcloneRemote(state) => rclone_drive_icon(state).into_any_element(),
     }
 }
 

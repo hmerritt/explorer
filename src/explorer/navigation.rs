@@ -44,6 +44,14 @@ impl ExplorerView {
         history_mode: HistoryMode,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "rclone")]
+        {
+            if crate::explorer::rclone::parse_virtual_path(&path).is_some() {
+                self.connect_rclone_remote_path_with_watcher(path, history_mode, cx);
+                return;
+            }
+        }
+
         self.navigate_to_directory_inner(path, history_mode, Some(cx));
     }
 
@@ -197,41 +205,16 @@ impl ExplorerView {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(feature = "rclone")]
-        {
-            self.navigate_to_sidebar_path_with_transfer_check(
-                path,
-                cx,
-                crate::explorer::rclone::is_transfer_path,
-            );
-            return;
-        }
-
-        #[cfg(not(feature = "rclone"))]
         self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
     }
 
     #[cfg(feature = "rclone")]
-    fn navigate_to_sidebar_path_with_transfer_check(
+    fn connect_rclone_remote_path_with_watcher(
         &mut self,
         path: PathBuf,
+        history_mode: HistoryMode,
         cx: &mut Context<Self>,
-        is_transfer_path: impl FnOnce(&Path) -> bool,
     ) {
-        if is_transfer_path(&path) {
-            self.connect_rclone_remote_path_with_watcher(path, cx);
-            return;
-        }
-
-        self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
-    }
-
-    #[cfg(feature = "rclone")]
-    fn connect_rclone_remote_path_with_watcher(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.rclone_connect_task.is_some() {
-            return;
-        }
-
         let Some(parsed) = crate::explorer::rclone::parse_virtual_path(&path) else {
             self.set_error_notice(format!(
                 "Could not find rclone remote for {}",
@@ -240,10 +223,20 @@ impl ExplorerView {
             return;
         };
         let display_name = parsed.remote_name.clone();
+        if self.rclone_connect_task.is_some() {
+            self.set_info_notice(format!("Connecting to {}...", display_name));
+            return;
+        }
+        let Some(permit) = crate::explorer::rclone::try_begin_remote_connection(&parsed.remote_name)
+        else {
+            self.set_info_notice(format!("Connecting to {}...", display_name));
+            return;
+        };
         let settings = self.rclone_settings.clone();
         let lookup_path = path.clone();
         self.set_info_notice(format!("Connecting to {}...", display_name));
         let task = cx.spawn(async move |this, cx| {
+            let _permit = permit;
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -304,7 +297,7 @@ impl ExplorerView {
                 };
                 explorer.navigate_to_directory_inner_with_options(
                     target,
-                    HistoryMode::Record,
+                    history_mode,
                     Some(cx),
                     true,
                 );
@@ -682,10 +675,17 @@ mod tests {
         test_support::TempDir,
         view::{ExplorerView, ViewModeSelection},
     };
-    use crate::settings::FileViewMode;
+    use crate::settings::{ExplorerSettings, FileViewMode};
     #[cfg(feature = "rclone")]
     use gpui::AppContext;
     use std::{fs, path::PathBuf};
+
+    #[cfg(feature = "rclone")]
+    fn rclone_disabled_view(path: PathBuf) -> ExplorerView {
+        let mut settings = ExplorerSettings::default();
+        settings.rclone.enabled = false;
+        ExplorerView::new_with_settings_for_test(path, None, &settings)
+    }
 
     #[test]
     fn navigating_to_valid_directory_updates_path_and_clears_selection() {
@@ -1419,12 +1419,12 @@ mod tests {
     fn rclone_sidebar_navigation_sets_info_notice_before_background_work(
         cx: &mut gpui::TestAppContext,
     ) {
-        let view = cx.update(|cx| cx.new(|_| ExplorerView::new(PathBuf::from("root"))));
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
+        let view = cx.update(|cx| cx.new(|_| rclone_disabled_view(PathBuf::from("root"))));
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
 
         cx.update(|cx| {
             view.update(cx, |view, cx| {
-                view.rclone_settings.enabled = false;
                 view.navigate_to_sidebar_path_with_watcher(path, cx);
 
                 assert!(view.rclone_connect_task.is_some());
@@ -1436,24 +1436,40 @@ mod tests {
                 assert_eq!(notice.text, "Connecting to gdrive...");
             });
         });
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
     }
 
     #[cfg(feature = "rclone")]
     #[gpui::test]
-    fn rclone_sidebar_navigation_opens_active_mount_without_connect_task(
+    fn duplicate_rclone_navigation_is_noop_across_tabs(
         cx: &mut gpui::TestAppContext,
     ) {
-        let view = cx.update(|cx| cx.new(|_| ExplorerView::new(PathBuf::from("root"))));
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
+        let first = cx.update(|cx| cx.new(|_| rclone_disabled_view(PathBuf::from("first"))));
+        let second = cx.update(|cx| cx.new(|_| rclone_disabled_view(PathBuf::from("second"))));
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
 
         cx.update(|cx| {
-            view.update(cx, |view, cx| {
-                view.navigate_to_sidebar_path_with_transfer_check(path.clone(), cx, |_| false);
+            first.update(cx, |view, cx| {
+                view.navigate_to_sidebar_path_with_watcher(path.clone(), cx);
+
+                assert!(view.rclone_connect_task.is_some());
+                assert_eq!(view.path, Path::new("first"));
+            });
+            second.update(cx, |view, cx| {
+                view.navigate_to_sidebar_path_with_watcher(path.clone(), cx);
 
                 assert!(view.rclone_connect_task.is_none());
-                assert_eq!(view.path, path);
+                assert_eq!(view.path, Path::new("second"));
+                let notice = view.operation_notice.as_ref().expect("connecting notice");
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Info
+                );
+                assert_eq!(notice.text, "Connecting to gdrive...");
             });
         });
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
     }
 
     #[test]

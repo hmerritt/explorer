@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs, io,
     path::{Component, Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime},
 };
@@ -117,6 +117,11 @@ struct TransferPathMetadata {
     is_dir: bool,
 }
 
+#[derive(Debug)]
+pub(super) struct RcloneConnectPermit {
+    remote_name: String,
+}
+
 pub(super) trait RcloneClient {
     fn rpc(&self, method: &str, input: Value) -> Result<Value, String>;
 }
@@ -189,6 +194,46 @@ fn initialize_librclone() -> Result<(), String> {
     INITIALIZED
         .get_or_init(|| librclone::try_initialize().map_err(|error| error.to_string()))
         .clone()
+}
+
+fn connecting_remotes() -> &'static Mutex<BTreeSet<String>> {
+    static CONNECTING_REMOTES: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    CONNECTING_REMOTES.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+pub(super) fn try_begin_remote_connection(remote_name: &str) -> Option<RcloneConnectPermit> {
+    let remote_name = normalized_remote_name(remote_name);
+    let mut connecting = connecting_remotes()
+        .lock()
+        .expect("rclone connecting remotes mutex poisoned");
+    connecting.insert(remote_name.clone()).then_some(RcloneConnectPermit {
+        remote_name,
+    })
+}
+
+pub(super) fn remote_is_connecting(remote_name: &str) -> bool {
+    let remote_name = normalized_remote_name(remote_name);
+    connecting_remotes()
+        .lock()
+        .expect("rclone connecting remotes mutex poisoned")
+        .contains(&remote_name)
+}
+
+impl Drop for RcloneConnectPermit {
+    fn drop(&mut self) {
+        let mut connecting = connecting_remotes()
+            .lock()
+            .expect("rclone connecting remotes mutex poisoned");
+        connecting.remove(&self.remote_name);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reset_connecting_remotes_for_test() {
+    connecting_remotes()
+        .lock()
+        .expect("rclone connecting remotes mutex poisoned")
+        .clear();
 }
 
 impl RcloneRemote {
@@ -507,6 +552,17 @@ pub(super) fn apply_known_mount_states(remotes: &mut [RcloneRemote]) {
             manifest.as_ref(),
             production_existing_mount_policy(),
         );
+    }
+}
+
+pub(super) fn apply_connecting_remote_states(remotes: &mut [RcloneRemote]) {
+    for remote in remotes {
+        if matches!(remote.state, RcloneRemoteState::Mounted(_)) {
+            continue;
+        }
+        if remote_is_connecting(&remote.name) {
+            remote.state = RcloneRemoteState::Connecting;
+        }
     }
 }
 
@@ -1147,6 +1203,44 @@ pub(super) fn parse_virtual_path(path: &Path) -> Option<RclonePath> {
     }
 }
 
+pub(super) fn is_virtual_namespace_path(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        is_windows_virtual_namespace_path(path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        is_unix_virtual_namespace_path(path)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_virtual_namespace_path(path: &Path) -> bool {
+    use std::path::Prefix;
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return false;
+    };
+    let server = match prefix.kind() {
+        Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => server,
+        _ => return false,
+    };
+    server
+        .to_string_lossy()
+        .eq_ignore_ascii_case(RCLONE_VIRTUAL_ROOT)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_unix_virtual_namespace_path(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    matches!(components.next(), Some(Component::Normal(root)) if root == OsStr::new(RCLONE_VIRTUAL_ROOT))
+}
+
 fn existing_accessible_mount_root_for_path(
     path: &Path,
     existing_mount_policy: ExistingMountPolicy,
@@ -1753,6 +1847,45 @@ mod tests {
             remote.state,
             RcloneRemoteState::Mounted(ref mounted) if mounted.mount_root == Path::new("/mnt/gdrive")
         ));
+    }
+
+    #[test]
+    fn remote_connection_permit_blocks_same_remote_until_drop() {
+        reset_connecting_remotes_for_test();
+
+        let gdrive = try_begin_remote_connection("gdrive").expect("first permit");
+        assert!(remote_is_connecting("gdrive"));
+        assert!(try_begin_remote_connection("gdrive:").is_none());
+
+        let dropbox = try_begin_remote_connection("dropbox").expect("different remote permit");
+        assert!(remote_is_connecting("dropbox"));
+
+        drop(gdrive);
+        assert!(!remote_is_connecting("gdrive"));
+        assert!(remote_is_connecting("dropbox"));
+
+        drop(dropbox);
+        assert!(!remote_is_connecting("dropbox"));
+    }
+
+    #[test]
+    fn connecting_state_applies_without_overriding_mounted_remote() {
+        reset_connecting_remotes_for_test();
+        let permit = try_begin_remote_connection("gdrive").expect("connect permit");
+        let mut connecting = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        let mut mounted = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        mounted.state = RcloneRemoteState::Mounted(Box::new(mounted_remote(
+            &mounted,
+            PathBuf::from("/mnt/gdrive"),
+        )));
+
+        apply_connecting_remote_states(std::slice::from_mut(&mut connecting));
+        apply_connecting_remote_states(std::slice::from_mut(&mut mounted));
+
+        assert!(matches!(connecting.state, RcloneRemoteState::Connecting));
+        assert!(matches!(mounted.state, RcloneRemoteState::Mounted(_)));
+
+        drop(permit);
     }
 
     #[test]
