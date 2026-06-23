@@ -8,13 +8,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 use filetime::FileTime;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::explorer::filesystem::{
@@ -23,7 +21,6 @@ use crate::explorer::filesystem::{
 };
 use crate::settings::RcloneSettings;
 
-const JOURNAL_VERSION: u32 = 1;
 pub(super) const RSYNC_MIN_BLOCK_SIZE: usize = 700;
 const RSYNC_MAX_BLOCK_SIZE: usize = 128 * 1024;
 const RSYNC_WRITE_SIZE: usize = 32 * 1024;
@@ -76,29 +73,6 @@ impl CopyOptions {
     pub(super) fn should_sync(self) -> bool {
         self.durability == CopyDurability::Safe
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct CopyJournal {
-    version: u32,
-    operation_key: String,
-    source: String,
-    destination: String,
-    source_len: u64,
-    source_modified: String,
-    block_size: usize,
-}
-
-#[derive(Clone, Debug)]
-struct OperationIdentity {
-    journal: CopyJournal,
-}
-
-#[derive(Clone, Debug)]
-struct SidecarPaths {
-    partial: PathBuf,
-    next: PathBuf,
-    journal: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -405,16 +379,8 @@ pub(super) fn copy_with_delta_progress_with_options(
     )
 }
 
-pub(super) fn cleanup_resumable_copy_progress(source: &Path, destination: &Path) {
-    let Ok(metadata) = fs::metadata(source) else {
-        return;
-    };
-    let block_size = rsync_block_size(metadata.len());
-    let Ok(identity) = OperationIdentity::new(source, destination, &metadata, block_size) else {
-        return;
-    };
-    let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
-    cleanup_sidecars(&sidecars);
+pub(super) fn cleanup_resumable_copy_progress(_source: &Path, destination: &Path) {
+    remove_partial_file(&partial_path_for(destination));
 }
 
 #[cfg(test)]
@@ -457,8 +423,8 @@ fn copy_with_delta_progress_impl(
 
     let metadata = fs::metadata(source)?;
     let source_len = metadata.len();
-    let identity = OperationIdentity::new(source, destination, &metadata, block_size)?;
-    let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
+    let partial = partial_path_for(destination);
+    let resume_partial = partial_resume_state(&partial)?;
     let verified_before_existing_check = progress.verified_bytes;
 
     if destination.is_file() {
@@ -492,7 +458,7 @@ fn copy_with_delta_progress_impl(
                 sync_file(destination);
                 sync_parent_directory(destination);
             }
-            cleanup_sidecars(&sidecars);
+            remove_partial_file(&partial);
             return Ok(());
         }
     }
@@ -503,46 +469,30 @@ fn copy_with_delta_progress_impl(
         progress.reserve_work_bytes(existing_check_verified);
     }
 
-    let journal_matches = read_journal(&sidecars.journal)
-        .ok()
-        .flatten()
-        .is_some_and(|journal| journal == identity.journal);
-
-    if !journal_matches {
-        remove_sidecar_file(&sidecars.partial);
-        remove_sidecar_file(&sidecars.next);
-    }
-    write_journal(&sidecars.journal, &identity.journal)?;
-
-    let resume_partial = if journal_matches {
-        previous_partial_path(&sidecars)?
-    } else {
+    let basis = if resume_partial {
         None
-    };
-    let basis = if resume_partial.is_none() {
+    } else {
         destination.is_file().then(|| destination.to_path_buf())
-    } else {
-        None
     };
 
     let should_verify_after_write =
-        options.durability == CopyDurability::Safe || basis.is_some() || resume_partial.is_some();
+        options.durability == CopyDurability::Safe || basis.is_some() || resume_partial;
     if should_verify_after_write {
         progress.reserve_work_bytes(source_len);
     }
 
-    let stats = if let Some(partial) = resume_partial.as_deref() {
+    let stats = if resume_partial {
         progress.phase = FileOperationPhase::Resuming;
         progress.current_item = Some(source.to_path_buf());
         on_progress(progress.clone());
 
-        let valid_prefix = validate_partial_prefix(source, partial, source_len, cancel)?;
+        let valid_prefix = validate_partial_prefix(source, &partial, source_len, cancel)?;
         seed_resume_progress(valid_prefix, progress, on_progress);
         progress.phase = FileOperationPhase::Copying;
         on_progress(progress.clone());
         append_source_remainder_to_partial(
             source,
-            partial,
+            &partial,
             source_len,
             valid_prefix,
             cancel,
@@ -558,7 +508,7 @@ fn copy_with_delta_progress_impl(
         write_delta_scratch(
             source,
             basis.as_deref(),
-            &sidecars.partial,
+            &partial,
             source_len,
             block_size,
             cancel,
@@ -571,7 +521,7 @@ fn copy_with_delta_progress_impl(
     if should_verify_after_write || stats.literal_bytes != source_len || stats.reused_blocks != 0 {
         let verify_result = verify_and_repair(
             source,
-            &sidecars.partial,
+            &partial,
             source_len,
             block_size,
             cancel,
@@ -585,10 +535,10 @@ fn copy_with_delta_progress_impl(
         }
     }
 
-    preserve_file_metadata(&metadata, &sidecars.partial)?;
+    preserve_file_metadata(&metadata, &partial)?;
     finalize_copied_file(
         source,
-        &sidecars.partial,
+        &partial,
         destination,
         &metadata,
         cancel,
@@ -600,74 +550,8 @@ fn copy_with_delta_progress_impl(
     if options.should_sync() {
         sync_parent_directory(destination);
     }
-    cleanup_sidecars(&sidecars);
+    remove_partial_file(&partial);
     Ok(())
-}
-
-impl OperationIdentity {
-    fn new(
-        source: &Path,
-        destination: &Path,
-        metadata: &fs::Metadata,
-        block_size: usize,
-    ) -> io::Result<Self> {
-        let source = stable_source_path(source);
-        let destination = stable_destination_path(destination)?;
-        let source_len = metadata.len();
-        let source_modified = source_modified_fingerprint(metadata);
-        let operation_key = operation_key(
-            &source,
-            &destination,
-            source_len,
-            &source_modified,
-            block_size,
-        );
-
-        Ok(Self {
-            journal: CopyJournal {
-                version: JOURNAL_VERSION,
-                operation_key,
-                source,
-                destination,
-                source_len,
-                source_modified,
-                block_size,
-            },
-        })
-    }
-}
-
-fn stable_source_path(path: &Path) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn stable_destination_path(path: &Path) -> io::Result<String> {
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return Ok(canonical.to_string_lossy().into_owned());
-    }
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let parent = fs::canonicalize(parent)?;
-    Ok(parent
-        .join(path.file_name().unwrap_or_else(|| OsStr::new("file")))
-        .to_string_lossy()
-        .into_owned())
-}
-
-fn source_modified_fingerprint(metadata: &fs::Metadata) -> String {
-    match metadata.modified() {
-        Ok(modified) => match modified.duration_since(UNIX_EPOCH) {
-            Ok(duration) => format!("+{}.{:09}", duration.as_secs(), duration.subsec_nanos()),
-            Err(error) => {
-                let duration = error.duration();
-                format!("-{}.{:09}", duration.as_secs(), duration.subsec_nanos())
-            }
-        },
-        Err(_) => "unknown".to_owned(),
-    }
 }
 
 pub(super) fn destination_quick_matches_source(
@@ -710,71 +594,26 @@ pub(super) fn destination_content_matches_source_with_progress(
     )
 }
 
-fn operation_key(
-    source: &str,
-    destination: &str,
-    source_len: u64,
-    source_modified: &str,
-    block_size: usize,
-) -> String {
-    let mut hash = Sha256::new();
-    hash.update(format!("explorer-resumable-copy-v{JOURNAL_VERSION}\0"));
-    hash.update(source.as_bytes());
-    hash.update(b"\0");
-    hash.update(destination.as_bytes());
-    hash.update(b"\0");
-    hash.update(source_len.to_le_bytes());
-    hash.update(b"\0");
-    hash.update(source_modified.as_bytes());
-    hash.update(b"\0");
-    hash.update((block_size as u64).to_le_bytes());
-    hex_hash(hash.finalize().as_slice())
-}
-
-fn sidecar_paths(destination: &Path, operation_key: &str) -> SidecarPaths {
+fn partial_path_for(destination: &Path) -> PathBuf {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = destination
+    let mut file_name = destination
         .file_name()
         .unwrap_or_else(|| OsStr::new("file"))
-        .to_string_lossy();
-    let base = format!(".explorer-copy-{operation_key}-{file_name}");
-
-    SidecarPaths {
-        partial: parent.join(format!("{base}.partial")),
-        next: parent.join(format!("{base}.partial.next")),
-        journal: parent.join(format!("{base}.json")),
-    }
+        .to_os_string();
+    file_name.push(".partial");
+    parent.join(file_name)
 }
 
-fn read_journal(path: &Path) -> io::Result<Option<CopyJournal>> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+fn partial_resume_state(partial: &Path) -> io::Result<bool> {
+    match fs::metadata(partial) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(io::Error::other(format!(
+            "{} already exists and is not a file.",
+            partial.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-fn write_journal(path: &Path, journal: &CopyJournal) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(journal).map_err(io::Error::other)?;
-    fs::write(&tmp, bytes)?;
-    replace_sidecar_file(&tmp, path)
-}
-
-fn previous_partial_path(sidecars: &SidecarPaths) -> io::Result<Option<PathBuf>> {
-    if sidecars.partial.is_file() {
-        remove_sidecar_file(&sidecars.next);
-        return Ok(Some(sidecars.partial.clone()));
-    }
-
-    if sidecars.next.is_file() {
-        replace_sidecar_file(&sidecars.next, &sidecars.partial)?;
-        return Ok(Some(sidecars.partial.clone()));
-    }
-
-    Ok(None)
 }
 
 fn validate_partial_prefix(
@@ -1810,36 +1649,11 @@ fn strong_hash(bytes: &[u8]) -> u64 {
     xxh3_64_with_seed(bytes, RSYNC_CHECKSUM_SEED)
 }
 
-fn hex_hash(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push_str(&format!("{byte:02x}"));
-    }
-    encoded
-}
-
-fn cleanup_sidecars(sidecars: &SidecarPaths) {
-    remove_sidecar_file(&sidecars.partial);
-    remove_sidecar_file(&sidecars.next);
-    remove_sidecar_file(&sidecars.journal);
-}
-
-fn remove_sidecar_file(path: &Path) {
+fn remove_partial_file(path: &Path) {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => {}
-    }
-}
-
-fn replace_sidecar_file(source: &Path, destination: &Path) -> io::Result<()> {
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(error) if destination.exists() => {
-            fs::remove_file(destination)?;
-            fs::rename(source, destination).map_err(|_| error)
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -2149,16 +1963,14 @@ mod tests {
     }
 
     #[test]
-    fn identical_destination_is_no_op_and_cleans_matching_sidecars() {
+    fn identical_destination_is_no_op_and_cleans_partial() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
         fs::write(&source, b"same content").expect("write source");
         fs::write(&destination, b"same content").expect("write destination");
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 4);
-        fs::write(&sidecars.partial, b"stale partial").expect("write partial sidecar");
-        fs::write(&sidecars.next, b"stale next").expect("write next sidecar");
-        write_matching_journal_for_test(&source, &destination, 4);
+        let partial = partial_path_for(&destination);
+        fs::write(&partial, b"stale partial").expect("write partial");
         let mut progress = test_progress(12);
         let mut progress_events = Vec::new();
 
@@ -2181,9 +1993,7 @@ mod tests {
                 && progress.copied_bytes == 0
                 && progress.verified_bytes > 0
         }));
-        assert!(!sidecars.partial.exists());
-        assert!(!sidecars.next.exists());
-        assert!(!sidecars.journal.exists());
+        assert!(!partial.exists());
     }
 
     #[test]
@@ -2364,7 +2174,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_durability_copies_literal_file_without_sidecars() {
+    fn fast_durability_copies_literal_file_without_partial() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
@@ -2384,10 +2194,7 @@ mod tests {
         .expect("fast copy");
 
         assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
-        assert!(!sidecars.partial.exists());
-        assert!(!sidecars.next.exists());
-        assert!(!sidecars.journal.exists());
+        assert!(!partial_path_for(&destination).exists());
     }
 
     #[test]
@@ -2455,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_resumable_copy_preserves_sidecars_and_later_resumes() {
+    fn cancelled_resumable_copy_preserves_partial_and_later_resumes() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
@@ -2484,10 +2291,8 @@ mod tests {
             Err(ref error) if error.kind() == io::ErrorKind::Interrupted
         ));
         assert!(!destination.exists());
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
-        assert!(sidecars.partial.exists());
-        assert!(!sidecars.next.exists());
-        assert!(sidecars.journal.exists());
+        let partial = partial_path_for(&destination);
+        assert!(partial.exists());
 
         let mut progress = test_progress(data.len() as u64);
         copy_with_delta_progress_for_test(
@@ -2501,9 +2306,7 @@ mod tests {
         .expect("resume copy");
 
         assert_eq!(fs::read(&destination).unwrap(), data);
-        assert!(!sidecars.partial.exists());
-        assert!(!sidecars.next.exists());
-        assert!(!sidecars.journal.exists());
+        assert!(!partial.exists());
     }
 
     #[test]
@@ -2537,12 +2340,11 @@ mod tests {
             Err(ref error) if error.kind() == io::ErrorKind::Interrupted
         ));
 
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
-        let first_partial_len = fs::metadata(&sidecars.partial)
+        let partial = partial_path_for(&destination);
+        let first_partial_len = fs::metadata(&partial)
             .expect("first partial metadata")
             .len();
         assert!(first_partial_len > 0);
-        assert!(!sidecars.next.exists());
 
         let cancel = Arc::new(AtomicBool::new(false));
         let mut progress = test_progress(data.len() as u64);
@@ -2565,14 +2367,13 @@ mod tests {
             Err(ref error) if error.kind() == io::ErrorKind::Interrupted
         ));
 
-        let second_partial_len = fs::metadata(&sidecars.partial)
+        let second_partial_len = fs::metadata(&partial)
             .expect("second partial metadata")
             .len();
         assert!(
             second_partial_len > first_partial_len,
             "partial should grow across resume cancel: {first_partial_len} -> {second_partial_len}"
         );
-        assert!(!sidecars.next.exists());
 
         let mut progress = test_progress(data.len() as u64);
         copy_with_delta_progress_for_test(
@@ -2586,9 +2387,7 @@ mod tests {
         .expect("final resume");
 
         assert_eq!(fs::read(&destination).unwrap(), data);
-        assert!(!sidecars.partial.exists());
-        assert!(!sidecars.next.exists());
-        assert!(!sidecars.journal.exists());
+        assert!(!partial.exists());
     }
 
     #[test]
@@ -2600,10 +2399,9 @@ mod tests {
             .map(|index| (index % 251) as u8)
             .collect::<Vec<_>>();
         fs::write(&source, &data).expect("write source");
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
         let prefix_len = (RSYNC_IO_BUFFER_SIZE + 7) as u64;
-        fs::write(&sidecars.partial, &data[..prefix_len as usize]).expect("write partial prefix");
-        write_matching_journal_for_test(&source, &destination, 1024);
+        let partial = partial_path_for(&destination);
+        fs::write(&partial, &data[..prefix_len as usize]).expect("write partial prefix");
 
         let mut progress = test_progress(data.len() as u64);
         let mut progress_events = Vec::new();
@@ -2640,43 +2438,82 @@ mod tests {
         assert_eq!(first_copied.copied_bytes, prefix_len);
         assert!(first_copied.work_completed_bytes >= prefix_len);
         assert_eq!(fs::read(&destination).unwrap(), data);
+        assert!(!partial.exists());
     }
 
     #[test]
-    fn legacy_next_sidecar_is_promoted_when_partial_is_missing() {
+    fn resumed_copy_truncates_divergent_partial_prefix() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"aaaabbbbcccc").expect("write source");
+        let partial = partial_path_for(&destination);
+        fs::write(&partial, b"aaaaXXXXstale").expect("write divergent partial");
+        let mut progress = test_progress(12);
+
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect("resume from divergent partial");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"aaaabbbbcccc");
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn resumed_copy_truncates_overlong_partial() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
         fs::write(&source, b"source").expect("write source");
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
-        fs::write(&sidecars.next, b"legacy next").expect("write legacy next");
+        let partial = partial_path_for(&destination);
+        fs::write(&partial, b"sourcestale").expect("write overlong partial");
+        let mut progress = test_progress(6);
 
-        let partial = previous_partial_path(&sidecars)
-            .expect("promote legacy next")
-            .expect("partial path");
+        copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect("resume from overlong partial");
 
-        assert_eq!(partial, sidecars.partial);
-        assert_eq!(fs::read(&sidecars.partial).unwrap(), b"legacy next");
-        assert!(!sidecars.next.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"source");
+        assert!(!partial.exists());
     }
 
     #[test]
-    fn partial_sidecar_wins_over_legacy_next_sidecar() {
+    fn copy_fails_when_partial_path_is_not_a_file() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
         fs::write(&source, b"source").expect("write source");
-        let sidecars = resumable_sidecars_for_test(&source, &destination, 1024);
-        fs::write(&sidecars.partial, b"kept partial").expect("write partial");
-        fs::write(&sidecars.next, b"stale next").expect("write stale next");
+        let partial = partial_path_for(&destination);
+        fs::create_dir(&partial).expect("create partial directory");
+        let mut progress = test_progress(6);
 
-        let partial = previous_partial_path(&sidecars)
-            .expect("choose partial")
-            .expect("partial path");
+        let error = copy_with_delta_progress_for_test(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect_err("partial directory should fail");
 
-        assert_eq!(partial, sidecars.partial);
-        assert_eq!(fs::read(&sidecars.partial).unwrap(), b"kept partial");
-        assert!(!sidecars.next.exists());
+        assert!(
+            error
+                .to_string()
+                .contains("already exists and is not a file")
+        );
     }
 
     #[test]
@@ -2700,24 +2537,5 @@ mod tests {
 
         assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
         assert!(progress.copied_bytes >= 16);
-    }
-
-    fn resumable_sidecars_for_test(
-        source: &Path,
-        destination: &Path,
-        block_size: usize,
-    ) -> SidecarPaths {
-        let metadata = fs::metadata(source).expect("source metadata");
-        let identity =
-            OperationIdentity::new(source, destination, &metadata, block_size).expect("identity");
-        sidecar_paths(destination, &identity.journal.operation_key)
-    }
-
-    fn write_matching_journal_for_test(source: &Path, destination: &Path, block_size: usize) {
-        let metadata = fs::metadata(source).expect("source metadata");
-        let identity =
-            OperationIdentity::new(source, destination, &metadata, block_size).expect("identity");
-        let sidecars = sidecar_paths(destination, &identity.journal.operation_key);
-        write_journal(&sidecars.journal, &identity.journal).expect("write journal");
     }
 }

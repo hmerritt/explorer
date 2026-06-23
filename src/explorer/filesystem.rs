@@ -7291,7 +7291,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_delta_copy_preserves_sidecars_and_keeps_source() {
+    fn cancelling_delta_copy_preserves_partial_and_keeps_source() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
         let destination = temp.path().join("destination");
@@ -7320,21 +7320,12 @@ mod tests {
         assert_eq!(result, Err(FileOperationError::Cancelled));
         assert!(source.exists());
         assert!(!destination.join("large.bin").exists());
-        let copy_files = temp_copy_files(&destination);
-        assert!(copy_files.iter().any(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| name.ends_with(".partial"))
-        }));
-        assert!(copy_files.iter().any(|path| {
-            path.file_name()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| name.ends_with(".json"))
-        }));
+        assert!(destination.join("large.bin.partial").exists());
+        assert!(temp_copy_files(&destination).is_empty());
     }
 
     #[test]
-    fn terminating_delta_copy_removes_sidecars_and_keeps_source() {
+    fn terminating_delta_copy_removes_partial_and_keeps_source() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
         let destination = temp.path().join("destination");
@@ -7369,7 +7360,7 @@ mod tests {
     }
 
     #[test]
-    fn terminating_before_resume_starts_removes_existing_sidecars() {
+    fn terminating_before_resume_starts_removes_existing_partial() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
         let destination = temp.path().join("destination");
@@ -7395,7 +7386,8 @@ mod tests {
             },
         );
         assert_eq!(result, Err(FileOperationError::Cancelled));
-        assert!(!temp_copy_files(&destination).is_empty());
+        assert!(destination.join("large.bin.partial").exists());
+        assert!(temp_copy_files(&destination).is_empty());
 
         let job = ready_job(prepare_copy_paths_to_directory(
             std::slice::from_ref(&source),
@@ -7421,6 +7413,7 @@ mod tests {
         assert_eq!(result, Err(FileOperationError::Cancelled));
         assert!(source.exists());
         assert!(!destination.join("large.bin").exists());
+        assert!(!destination.join("large.bin.partial").exists());
         assert!(temp_copy_files(&destination).is_empty());
     }
 
