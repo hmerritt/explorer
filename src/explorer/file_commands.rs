@@ -113,7 +113,7 @@ impl ExplorerView {
     fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
         match create_new_item_in_directory(&self.path, kind, &self.rclone_settings) {
             Ok(path) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.reload_with_entry_metadata_resolution(cx);
                 self.select_single_path(&path);
                 self.start_rename_for_path(&path, window, cx);
@@ -121,7 +121,7 @@ impl ExplorerView {
             }
             Err(error) => {
                 self.reload_with_entry_metadata_resolution(cx);
-                self.open_error = Some(error);
+                self.set_error_notice(error);
             }
         }
     }
@@ -135,9 +135,9 @@ impl ExplorerView {
             Ok(item) => {
                 cx.write_to_clipboard(item);
                 self.cut_paths.clear();
-                self.open_error = None;
+                self.clear_operation_notice();
             }
-            Err(error) => self.open_error = Some(error),
+            Err(error) => self.set_error_notice(error),
         }
     }
 
@@ -150,9 +150,9 @@ impl ExplorerView {
             Ok(item) => {
                 cx.write_to_clipboard(item);
                 self.mark_cut_paths(&clipboard.paths);
-                self.open_error = None;
+                self.clear_operation_notice();
             }
-            Err(error) => self.open_error = Some(error),
+            Err(error) => self.set_error_notice(error),
         }
     }
 
@@ -199,12 +199,12 @@ impl ExplorerView {
                     }
                     self.reload_with_entry_metadata_resolution(cx);
                     self.restore_selection_from_paths(&destinations);
-                    self.open_error = None;
+                    self.clear_operation_notice();
                     self.emit_filesystem_changed(cx);
                 }
                 Err(error) => {
                     self.reload_with_entry_metadata_resolution(cx);
-                    self.open_error = Some(error);
+                    self.set_error_notice(error);
                 }
             }
             return;
@@ -232,7 +232,7 @@ impl ExplorerView {
     ) {
         match create_clipboard_image_file_in_directory(&self.path, image) {
             Ok(path) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.reload_with_entry_metadata_resolution(cx);
                 self.select_single_path(&path);
                 self.start_rename_for_path(&path, window, cx);
@@ -240,7 +240,7 @@ impl ExplorerView {
             }
             Err(error) => {
                 self.reload_with_entry_metadata_resolution(cx);
-                self.open_error = Some(error);
+                self.set_error_notice(error);
             }
         }
     }
@@ -273,11 +273,11 @@ impl ExplorerView {
                 self.remove_cut_paths(&paths);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.clear_selection();
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -293,7 +293,7 @@ impl ExplorerView {
         }
 
         self.pending_trash = Some(PendingTrash { paths });
-        self.open_error = None;
+        self.clear_operation_notice();
         self.open_pending_dialog_window(cx);
     }
 
@@ -313,11 +313,11 @@ impl ExplorerView {
                 self.remove_cut_paths(&pending.paths);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.clear_selection();
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -334,7 +334,7 @@ impl ExplorerView {
         }
 
         self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
-        self.open_error = None;
+        self.clear_operation_notice();
         self.open_pending_dialog_window(cx);
     }
 
@@ -352,11 +352,11 @@ impl ExplorerView {
                 self.remove_cut_paths(&pending.paths);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.clear_selection();
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -386,19 +386,19 @@ impl ExplorerView {
                     self.remove_cut_paths(source_paths);
                     self.reload_with_entry_metadata_resolution(cx);
                     self.clear_selection();
-                    self.open_error = None;
+                    self.clear_operation_notice();
                     if removed_any || operation == ExternalPathDragOperation::Move {
                         self.emit_filesystem_changed(cx);
                     }
                 }
                 Err(error) => {
-                    self.open_error = Some(error);
+                    self.set_error_notice(error);
                     self.reload_with_entry_metadata_resolution(cx);
                 }
             }
         } else {
             self.refresh_with_entry_metadata_resolution(cx);
-            self.open_error = None;
+            self.clear_operation_notice();
             if operation == ExternalPathDragOperation::Move {
                 self.emit_filesystem_changed(cx);
             }
@@ -468,8 +468,9 @@ impl ExplorerView {
             .iter()
             .all(|path| crate::explorer::rclone::is_transfer_path(path))
         {
-            self.open_error =
-                Some("Delete transfer-mode rclone items separately from local files.".to_owned());
+            self.set_error_notice(
+                "Delete transfer-mode rclone items separately from local files.".to_owned(),
+            );
             return true;
         }
 
@@ -478,11 +479,11 @@ impl ExplorerView {
                 self.remove_cut_paths(paths);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.clear_selection();
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -504,10 +505,10 @@ impl ExplorerView {
             }
             Ok(FileOperationOutcome::Conflicts(conflicts)) => {
                 self.pending_file_conflict = Some(conflicts);
-                self.open_error = None;
+                self.clear_operation_notice();
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload();
             }
         }
@@ -527,11 +528,11 @@ impl ExplorerView {
                     diagnostics.mark_conflict_wait_started();
                 }
                 self.pending_file_conflict = Some(conflicts);
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.open_pending_dialog_window(cx);
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -574,7 +575,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if self.active_file_operation.is_some() {
-            self.open_error = Some("Another file operation is already running.".to_owned());
+            self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
 
@@ -589,7 +590,7 @@ impl ExplorerView {
             task: None,
             archive_diagnostics: archive_diagnostics.clone(),
         });
-        self.open_error = None;
+        self.clear_operation_notice();
         self.open_file_operation_window(cx);
         if let Some(diagnostics) = &archive_diagnostics {
             diagnostics.mark_progress_dialog_visible();
@@ -687,11 +688,11 @@ impl ExplorerView {
                 self.emit_filesystem_changed(cx);
             }
             Err(FileOperationError::Cancelled) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.reload_with_entry_metadata_resolution(cx);
             }
             Err(FileOperationError::Failed(error)) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
@@ -699,7 +700,7 @@ impl ExplorerView {
 
     fn finish_file_operation(&mut self, summary: FileOperationSummary) {
         let reload_started = Instant::now();
-        self.open_error = None;
+        self.clear_operation_notice();
         self.record_file_operation_undo(&summary);
         self.remove_cut_paths(&summary.moved_source_paths);
         self.reload();
@@ -751,7 +752,7 @@ impl ExplorerView {
                 if let Some(applied) = self.file_operation_undo_stack.pop() {
                     cleanup_file_operation_undo(applied);
                 }
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.reload_with_entry_metadata_resolution(cx);
                 match selection {
                     UndoSelection::Clear => self.clear_selection(),
@@ -761,7 +762,7 @@ impl ExplorerView {
             }
             Err(error) => {
                 self.reload_with_entry_metadata_resolution(cx);
-                self.open_error = Some(error);
+                self.set_error_notice(error);
             }
         }
     }
@@ -1794,7 +1795,7 @@ mod tests {
                     cx,
                 );
                 assert!(view.pending_file_conflict.is_some());
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
 
                 view.pending_file_conflict = None;
                 view.clear_active_dialog_window();
@@ -1803,7 +1804,7 @@ mod tests {
                     cx,
                 );
                 assert!(view.pending_file_conflict.is_some());
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
             });
         });
     }
@@ -1836,7 +1837,7 @@ mod tests {
                 });
                 view.confirm_pending_permanent_delete(cx);
                 assert!(view.pending_permanent_delete.is_none());
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
                 assert!(!view.entry_is_cut(&file));
             });
         });
@@ -1861,7 +1862,7 @@ mod tests {
                     cx,
                 );
 
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
                 assert!(!view.entry_is_cut(&file));
             });
         });
@@ -1884,7 +1885,7 @@ mod tests {
                     cx,
                 );
 
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
             });
         });
 
@@ -1926,7 +1927,7 @@ mod tests {
 
                 view.complete_active_file_operation(Err(FileOperationError::Cancelled), cx);
                 assert!(view.active_file_operation.is_none());
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
 
                 view.active_file_operation = Some(FileOperationState {
                     progress: test_progress(),
@@ -2276,7 +2277,7 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |view, cx| {
                 view.handle_undo_file_operation(&crate::explorer::UndoFileOperation, window, cx);
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
 
                 view.file_operation_undo_stack
                     .push(FileOperationUndo::Trash(TrashUndo::Unsupported {
@@ -2285,7 +2286,12 @@ mod tests {
                     }));
                 view.handle_undo_file_operation(&crate::explorer::UndoFileOperation, window, cx);
 
-                assert_eq!(view.open_error.as_deref(), Some("unsupported undo"));
+                assert_eq!(
+                    view.operation_notice
+                        .as_ref()
+                        .map(|notice| notice.text.as_str()),
+                    Some("unsupported undo")
+                );
                 assert_eq!(view.file_operation_undo_stack.len(), 1);
             });
         });

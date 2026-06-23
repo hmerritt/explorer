@@ -64,7 +64,7 @@ pub struct ExplorerView {
     pub(super) loading_path: Option<PathBuf>,
     pub(super) selection: SelectionState,
     pub(super) read_error: Option<String>,
-    pub(super) open_error: Option<String>,
+    pub(super) operation_notice: Option<OperationNotice>,
     pub(super) open_with_task: Option<Task<()>>,
     pub(super) run_elevated_task: Option<Task<()>>,
     pub(super) volume_eject_task: Option<Task<()>>,
@@ -154,6 +154,44 @@ pub(super) struct FileOperationState {
     pub(super) terminate: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct OperationNotice {
+    pub(super) kind: OperationNoticeKind,
+    pub(super) text: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OperationNoticeKind {
+    Error,
+    Info,
+    Success,
+}
+
+impl OperationNotice {
+    pub(super) fn error(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Error,
+            text: text.into(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn info(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Info,
+            text: text.into(),
+        }
+    }
+
+    pub(super) fn success(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Success,
+            text: text.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -323,7 +361,7 @@ impl ExplorerView {
             loading_path: None,
             selection: SelectionState::default(),
             read_error: None,
-            open_error: None,
+            operation_notice: None,
             open_with_task: None,
             run_elevated_task: None,
             volume_eject_task: None,
@@ -579,7 +617,7 @@ impl ExplorerView {
     fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
         self.context_menu = None;
-        self.open_error = None;
+        self.clear_operation_notice();
         self.read_error = None;
         let selected_paths_started = Instant::now();
         let selected_paths = if mode.preserve_selection {
@@ -1545,6 +1583,24 @@ pub(super) fn tab_label_for_path(path: &Path) -> String {
 }
 
 impl ExplorerView {
+    pub(super) fn clear_operation_notice(&mut self) {
+        self.operation_notice = None;
+    }
+
+    pub(super) fn set_error_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::error(text));
+    }
+
+    #[cfg(feature = "rclone")]
+    pub(super) fn set_info_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::info(text));
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn set_success_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::success(text));
+    }
+
     pub(super) fn is_directory_loading(&self) -> bool {
         self.loading_path.as_deref() == Some(self.path.as_path())
             && self.directory_load_task.is_some()
@@ -1552,6 +1608,18 @@ impl ExplorerView {
 
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
         self.all_entries.is_empty() && self.read_error.is_none() && !self.is_directory_loading()
+    }
+
+    pub(super) fn rclone_connection_is_working(&self) -> bool {
+        #[cfg(feature = "rclone")]
+        {
+            self.rclone_connect_task.is_some()
+        }
+
+        #[cfg(not(feature = "rclone"))]
+        {
+            false
+        }
     }
 
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {

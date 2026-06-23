@@ -945,7 +945,7 @@ impl ExplorerView {
             return;
         }
 
-        self.open_error = None;
+        self.clear_operation_notice();
         let settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
@@ -962,7 +962,7 @@ impl ExplorerView {
             let _ = this.update(cx, |explorer, cx| {
                 explorer.open_with_task = None;
                 if let Err(error) = result {
-                    explorer.open_error = Some(format!("Could not open rclone copy: {error}"));
+                    explorer.set_error_notice(format!("Could not open rclone copy: {error}"));
                 }
                 cx.notify();
             });

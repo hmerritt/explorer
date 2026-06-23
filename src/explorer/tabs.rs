@@ -3274,7 +3274,7 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         cx.read_entity(&view, |view, _| {
             assert!(!view.has_active_text_input());
-            assert!(view.open_error.is_none());
+            assert!(view.operation_notice.is_none());
             assert_eq!(selected_names(view), vec!["b.txt"]);
         });
     }
@@ -3301,7 +3301,7 @@ mod tests {
         assert!(temp.path().join("a.txt").exists());
         cx.read_entity(&view, |view, _| {
             assert!(!view.has_active_text_input());
-            assert!(view.open_error.is_none());
+            assert!(view.operation_notice.is_none());
             assert_eq!(selected_names(view), vec!["b.txt"]);
         });
     }
@@ -3380,7 +3380,9 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(view.active_rename.is_some());
             assert_eq!(
-                view.open_error.as_deref(),
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
                 Some("The file name cannot be empty.")
             );
         });

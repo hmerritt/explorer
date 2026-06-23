@@ -325,7 +325,7 @@ impl ExplorerView {
         self.search.focus_handle = Some(focus_handle);
         self.search.focus_out = Some(subscription);
         self.search.select_all();
-        self.open_error = None;
+        self.clear_operation_notice();
         true
     }
 

@@ -550,7 +550,7 @@ impl ExplorerView {
         });
         address.focus_out = Some(subscription);
         self.active_address_bar = Some(address);
-        self.open_error = None;
+        self.clear_operation_notice();
         true
     }
 
@@ -649,11 +649,11 @@ impl ExplorerView {
         let input = self.active_address_bar.as_ref()?.content.clone();
         match resolve_address_input(&input, &self.path) {
             Ok(path) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 Some(path)
             }
             Err(error) => {
-                self.open_error = Some(error);
+                self.set_error_notice(error);
                 self.select_active_address_text();
                 None
             }
@@ -1617,7 +1617,7 @@ mod tests {
         assert_eq!(view.address_commit_target(), None);
         assert_eq!(view.path, temp.path());
         assert!(view.active_address_bar.is_some());
-        assert!(view.open_error.is_some());
+        assert!(view.operation_notice.is_some());
     }
 
     #[test]
@@ -2081,7 +2081,7 @@ mod tests {
                 set_active_address(view, "missing");
                 view.handle_address_commit(&AddressCommit, window, cx);
                 assert!(view.address_bar_is_editing());
-                assert!(view.open_error.is_some());
+                assert!(view.operation_notice.is_some());
 
                 view.handle_address_cancel(&AddressCancel, window, cx);
                 assert!(!view.address_bar_is_editing());

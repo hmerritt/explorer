@@ -690,7 +690,7 @@ impl ExplorerView {
             self.show_file_name_extensions,
             None,
         ));
-        self.open_error = None;
+        self.clear_operation_notice();
     }
 
     fn start_rename_for_entry(
@@ -708,7 +708,7 @@ impl ExplorerView {
             self.show_file_name_extensions,
             focus_handle.clone(),
         ));
-        self.open_error = None;
+        self.clear_operation_notice();
 
         if let Some(focus_handle) = focus_handle {
             focus_handle.focus(window);
@@ -724,7 +724,7 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.rename_focus_out = None;
         self.active_rename = None;
-        self.open_error = None;
+        self.clear_operation_notice();
     }
 
     fn commit_active_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -769,14 +769,14 @@ impl ExplorerView {
 
         let target_name = rename.target_file_name();
         if let Err(error) = validate_rename_text(&rename.content) {
-            self.open_error = Some(error);
+            self.set_error_notice(error);
             return false;
         }
 
         if target_name == rename.original_name {
             self.rename_focus_out = None;
             self.active_rename = None;
-            self.open_error = None;
+            self.clear_operation_notice();
             return true;
         }
 
@@ -787,7 +787,7 @@ impl ExplorerView {
             Ok(()) => {
                 self.rename_focus_out = None;
                 self.active_rename = None;
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.remove_cut_paths(&[original_path]);
                 self.reload();
                 self.select_single_path(&target_path);
@@ -798,7 +798,7 @@ impl ExplorerView {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| original_path.display().to_string());
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not rename \"{source}\" to \"{target_name}\": {error}"
                 ));
                 false
@@ -1744,9 +1744,9 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         assert!(view.active_rename.is_some());
         assert!(
-            view.open_error
+            view.operation_notice
                 .as_ref()
-                .is_some_and(|error| error.contains("Could not rename"))
+                .is_some_and(|notice| notice.text.contains("Could not rename"))
         );
     }
 
@@ -1765,7 +1765,9 @@ mod tests {
         assert!(temp.path().join("a.txt").exists());
         assert!(view.active_rename.is_some());
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("The file name cannot be empty.")
         );
     }
@@ -1821,7 +1823,7 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         assert_eq!(selected_names(&view), vec!["c.txt"]);
         assert!(view.active_rename.is_none());
-        assert!(view.open_error.is_none());
+        assert!(view.operation_notice.is_none());
     }
 
     #[gpui::test]

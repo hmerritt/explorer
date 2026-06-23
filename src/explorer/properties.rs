@@ -543,8 +543,8 @@ impl ExplorerView {
             self.date_format.clone(),
             cx,
         ) {
-            Ok(_) => self.open_error = None,
-            Err(error) => self.open_error = Some(format!("Failed to open Properties: {error}")),
+            Ok(_) => self.clear_operation_notice(),
+            Err(error) => self.set_error_notice(format!("Failed to open Properties: {error}")),
         }
     }
 }

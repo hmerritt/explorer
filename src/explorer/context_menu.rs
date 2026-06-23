@@ -402,12 +402,12 @@ impl ExplorerView {
             ContextMenuCommand::CopyPath { path } => {
                 cx.write_to_clipboard(ClipboardItem::new_string(self.address_text_for_path(&path)));
                 self.cut_paths.clear();
-                self.open_error = None;
+                self.clear_operation_notice();
             }
             ContextMenuCommand::CopyRepoRelativePath { relative_path } => {
                 cx.write_to_clipboard(ClipboardItem::new_string(relative_path));
                 self.cut_paths.clear();
-                self.open_error = None;
+                self.clear_operation_notice();
             }
             ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
             ContextMenuCommand::ExtractSelectedArchives => self.extract_selected_archives(cx),
@@ -463,7 +463,7 @@ impl ExplorerView {
         #[cfg(target_os = "windows")]
         {
             let parent = crate::explorer::windows_shell::parent_hwnd(window);
-            self.open_error = None;
+            self.clear_operation_notice();
             let task = cx.spawn(async move |this, cx| {
                 let results = run_elevated_paths_until_not_launched(paths, |path| {
                     windows_run_elevated_path(path, parent)
@@ -488,10 +488,10 @@ impl ExplorerView {
     fn handle_run_elevated_results(&mut self, results: Vec<(PathBuf, io::Result<bool>)>) {
         for (path, result) in results {
             match result {
-                Ok(true) => self.open_error = None,
+                Ok(true) => self.clear_operation_notice(),
                 Ok(false) => break,
                 Err(error) => {
-                    self.open_error = Some(format_open_error(&path, &error));
+                    self.set_error_notice(format_open_error(&path, &error));
                     break;
                 }
             }
@@ -500,9 +500,9 @@ impl ExplorerView {
 
     fn handle_custom_command_result(&mut self, executable: &Path, result: std::io::Result<()>) {
         match result {
-            Ok(()) => self.open_error = None,
+            Ok(()) => self.clear_operation_notice(),
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not run {}: {error}",
                     executable
                         .file_name()
@@ -518,7 +518,7 @@ impl ExplorerView {
             return;
         }
 
-        self.open_error = None;
+        self.clear_operation_notice();
         let task_path = path.clone();
         let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -547,7 +547,7 @@ impl ExplorerView {
                 cx.emit(ExplorerViewEvent::MountedVolumeEjected(path.to_path_buf()));
             }
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not eject {}: {error}",
                     mounted_volume_error_name(path)
                 ));
@@ -563,7 +563,7 @@ impl ExplorerView {
             return;
         }
 
-        self.open_error = None;
+        self.clear_operation_notice();
         let task_path = path.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
@@ -588,11 +588,11 @@ impl ExplorerView {
     ) {
         match result {
             Ok(()) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.refresh_with_entry_metadata_resolution(cx);
             }
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not mount {}: {error}",
                     mounted_volume_error_name(path)
                 ));
@@ -4086,12 +4086,14 @@ mod tests {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         );
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("Could not run missing-tool: missing")
         );
 
         view.handle_custom_command_result(&executable, Ok(()));
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]

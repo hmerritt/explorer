@@ -100,7 +100,8 @@ use crate::explorer::{
     },
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
-        ImageHoverPreview, UtilityMenu, normalized_sidebar_width_f32,
+        ImageHoverPreview, OperationNotice, OperationNoticeKind, UtilityMenu,
+        normalized_sidebar_width_f32,
     },
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
@@ -2802,8 +2803,14 @@ impl Render for ExplorerView {
                                 .w_full()
                                 .overflow_hidden(),
                             )
-                            .when_some(self.open_error.clone(), |this, error| {
-                                this.child(render_open_error(&error))
+                            .when_some(self.operation_notice.as_ref(), |this, notice| {
+                                this.child(render_operation_notice(notice))
+                            })
+                            .when(self.rclone_connection_is_working(), |this| {
+                                this.child(linear_indeterminate(
+                                    "rclone-connect-linear-progress",
+                                    LinearProgressStyle::neutral(),
+                                ))
                             })
                             .when(self.recursive_search_is_working(), |this| {
                                 this.child(linear_indeterminate(
@@ -3083,17 +3090,29 @@ fn search_working_detail(progress: RecursiveSearchProgressSnapshot) -> String {
     }
 }
 
-fn render_open_error(error: &str) -> Div {
+fn render_operation_notice(notice: &OperationNotice) -> AnyElement {
+    let (bg, border, text, selector) = operation_notice_style(notice.kind);
     div()
+        .id("operation-notice")
+        .debug_selector(move || selector.to_owned())
         .w_full()
         .py(px(OPEN_ERROR_VERTICAL_PADDING))
         .px(px(OPEN_ERROR_HORIZONTAL_PADDING))
-        .bg(rgb(0xfff4f4))
+        .bg(rgb(bg))
         .border_b_1()
-        .border_color(rgb(0xf1c7c7))
+        .border_color(rgb(border))
         .text_size(px(12.0))
-        .text_color(rgb(0x6f1d1d))
-        .child(SharedString::from(error.to_owned()))
+        .text_color(rgb(text))
+        .child(SharedString::from(notice.text.clone()))
+        .into_any_element()
+}
+
+fn operation_notice_style(kind: OperationNoticeKind) -> (u32, u32, u32, &'static str) {
+    match kind {
+        OperationNoticeKind::Error => (0xfff4f4, 0xf1c7c7, 0x6f1d1d, "operation-notice-error"),
+        OperationNoticeKind::Info => (0xf5f5f5, 0xd9d9d9, 0x404040, "operation-notice-info"),
+        OperationNoticeKind::Success => (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success"),
+    }
 }
 
 fn local_context_menu_origin(
@@ -6263,7 +6282,7 @@ mod tests {
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind},
         test_support::{TempDir, test_view_entity_at_path},
-        view::{ExplorerView, ViewModeSelection},
+        view::{ExplorerView, OperationNoticeKind, ViewModeSelection},
     };
 
     use super::{
@@ -6282,10 +6301,10 @@ mod tests {
         git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
         image_hover_preview_render_size, is_alt_entry_double_click, is_ctrl_entry_double_click,
         is_normal_entry_click, lines_of_code_tooltip, open_current_folder_context_menu_from_event,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
-        sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
-        sort_indicator_direction, text_cell_width,
+        operation_notice_style, recursive_result_text_width, search_working_detail,
+        selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
@@ -6985,7 +7004,9 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(
-                view.open_error.as_deref(),
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
                 Some("Could not open settings.json: settings file path is unavailable")
             );
         });
@@ -8415,6 +8436,22 @@ mod tests {
     #[test]
     fn explorer_copy_green_matches_dialog_copy_green() {
         assert_eq!(EXPLORER_COPY_GREEN, 0x36a646);
+    }
+
+    #[test]
+    fn operation_notice_styles_cover_error_info_and_success() {
+        assert_eq!(
+            operation_notice_style(OperationNoticeKind::Error),
+            (0xfff4f4, 0xf1c7c7, 0x6f1d1d, "operation-notice-error")
+        );
+        assert_eq!(
+            operation_notice_style(OperationNoticeKind::Info),
+            (0xf5f5f5, 0xd9d9d9, 0x404040, "operation-notice-info")
+        );
+        assert_eq!(
+            operation_notice_style(OperationNoticeKind::Success),
+            (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success")
+        );
     }
 
     #[test]

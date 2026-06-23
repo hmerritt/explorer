@@ -552,7 +552,7 @@ impl ExplorerView {
                 self.handle_file_command_result(create_links_to_directory(paths, destination));
             }
             ResolvedDrop::Invalid => {
-                self.open_error = Some("This drop target is not valid.".to_owned());
+                self.set_error_notice("This drop target is not valid.".to_owned());
             }
         }
     }
@@ -585,7 +585,7 @@ impl ExplorerView {
                 );
             }
             ResolvedDrop::Invalid => {
-                self.open_error = Some("This drop target is not valid.".to_owned());
+                self.set_error_notice("This drop target is not valid.".to_owned());
             }
         }
     }
@@ -2068,7 +2068,7 @@ mod tests {
         let source = temp.path().join("file.txt");
         fs::write(&source, b"data").expect("create source");
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         view.drop_external_paths(
             std::slice::from_ref(&source),
@@ -2077,7 +2077,12 @@ mod tests {
         );
 
         assert_eq!(fs::read(&source).unwrap(), b"data");
-        assert_eq!(view.open_error, Some("stale error".to_owned()));
+        assert_eq!(
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("stale error")
+        );
     }
 
     #[test]
@@ -2127,7 +2132,7 @@ mod tests {
         let source = target.join("file.txt");
         fs::write(&source, b"data").expect("create source");
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         view.drop_external_paths(
             std::slice::from_ref(&source),
@@ -2139,7 +2144,12 @@ mod tests {
         );
 
         assert_eq!(fs::read(&source).unwrap(), b"data");
-        assert_eq!(view.open_error, Some("stale error".to_owned()));
+        assert_eq!(
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("stale error")
+        );
         assert!(target.join("file.txt").exists());
     }
 
@@ -2166,7 +2176,7 @@ mod tests {
         );
 
         assert!(view.pending_file_conflict.is_some());
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
         assert_eq!(fs::read(&source).unwrap(), b"source");
         assert_eq!(fs::read(&existing).unwrap(), b"existing");
     }
@@ -2220,7 +2230,7 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.select_single_path(&folder);
         let dragged = view.test_dragged_entries_for_index(0).expect("dragged row");
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         view.drop_internal_entries(
             &dragged,
@@ -2231,7 +2241,12 @@ mod tests {
             Modifiers::default(),
         );
 
-        assert_eq!(view.open_error, Some("stale error".to_owned()));
+        assert_eq!(
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("stale error")
+        );
         assert!(folder.is_dir());
     }
 

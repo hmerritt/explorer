@@ -258,13 +258,8 @@ fn rclone_remote_items(settings: &RcloneSettings) -> Vec<SidebarItem> {
 
 #[cfg(feature = "rclone")]
 fn rclone_remote_sidebar_label(display_name: &str, state: RcloneSidebarState) -> String {
-    match state {
-        RcloneSidebarState::Disconnected => display_name.to_owned(),
-        RcloneSidebarState::Connecting => format!("{display_name} (connecting)"),
-        RcloneSidebarState::Mounted => format!("{display_name} (mounted)"),
-        RcloneSidebarState::TransferMode => format!("{display_name} (transfer)"),
-        RcloneSidebarState::Error => format!("{display_name} (error)"),
-    }
+    let _ = state;
+    display_name.to_owned()
 }
 
 fn sidebar_drive_label(path: &Path) -> String {
@@ -579,5 +574,19 @@ mod tests {
         );
 
         assert!(sections.rclone_remotes.is_empty());
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn rclone_remote_sidebar_label_omits_state_suffixes() {
+        for state in [
+            RcloneSidebarState::Disconnected,
+            RcloneSidebarState::Connecting,
+            RcloneSidebarState::Mounted,
+            RcloneSidebarState::TransferMode,
+            RcloneSidebarState::Error,
+        ] {
+            assert_eq!(rclone_remote_sidebar_label("gdrive", state), "gdrive");
+        }
     }
 }

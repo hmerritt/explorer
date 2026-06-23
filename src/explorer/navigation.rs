@@ -123,7 +123,7 @@ impl ExplorerView {
         self.reset_search_for_navigation();
         self.clear_selection();
         self.read_error = None;
-        self.open_error = None;
+        self.clear_operation_notice();
         self.scroll_to_top();
         crate::debug_options::log_nav_timing(
             pre_reload_started.elapsed(),
@@ -212,48 +212,59 @@ impl ExplorerView {
             return;
         }
 
-        let remote =
-            match crate::explorer::rclone::remote_for_virtual_path(&path, &self.rclone_settings) {
-                Ok(Some(remote)) => remote,
-                Ok(None) => {
-                    self.open_error = Some(format!(
-                        "Could not find rclone remote for {}",
-                        path.display()
-                    ));
-                    return;
-                }
-                Err(error) => {
-                    self.open_error = Some(error);
-                    return;
-                }
-            };
-        let parsed = crate::explorer::rclone::parse_virtual_path(&path);
+        let Some(parsed) = crate::explorer::rclone::parse_virtual_path(&path) else {
+            self.set_error_notice(format!(
+                "Could not find rclone remote for {}",
+                path.display()
+            ));
+            return;
+        };
+        let display_name = parsed.remote_name.clone();
         let settings = self.rclone_settings.clone();
-        self.open_error = Some(format!("Connecting to {}...", remote.display_name));
+        let lookup_path = path.clone();
+        self.set_info_notice(format!("Connecting to {}...", display_name));
         let task = cx.spawn(async move |this, cx| {
-            let connection = cx
+            let result = cx
                 .background_executor()
-                .spawn(async move { crate::explorer::rclone::connect_remote(remote, &settings) })
+                .spawn(async move {
+                    let remote = match crate::explorer::rclone::remote_for_virtual_path(
+                        &lookup_path,
+                        &settings,
+                    )? {
+                        Some(remote) => remote,
+                        None => {
+                            return Err(format!(
+                                "Could not find rclone remote for {}",
+                                lookup_path.display()
+                            ));
+                        }
+                    };
+                    crate::explorer::rclone::connect_remote(remote, &settings)
+                })
                 .await;
 
             let _ = this.update(cx, |explorer, cx| {
                 explorer.rclone_connect_task = None;
-                let target = match connection {
+                let target = match result {
                     Ok(crate::explorer::rclone::RcloneConnection::Mounted(mounted)) => parsed
-                        .as_ref()
-                        .map(|path| mounted.mount_root.join(&path.relative_path))
-                        .unwrap_or(mounted.mount_root),
+                        .relative_path
+                        .as_os_str()
+                        .is_empty()
+                        .then_some(mounted.mount_root.clone())
+                        .unwrap_or_else(|| mounted.mount_root.join(&parsed.relative_path)),
                     Ok(crate::explorer::rclone::RcloneConnection::TransferMode(transfer)) => parsed
-                        .as_ref()
-                        .map(|path| {
-                            crate::explorer::rclone::virtual_root_for_remote(&path.remote_name)
-                                .join(&path.relative_path)
+                        .relative_path
+                        .as_os_str()
+                        .is_empty()
+                        .then(|| {
+                            crate::explorer::rclone::virtual_root_for_remote(&transfer.remote.name)
                         })
                         .unwrap_or_else(|| {
-                            crate::explorer::rclone::virtual_root_for_remote(&transfer.remote.name)
+                            crate::explorer::rclone::virtual_root_for_remote(&parsed.remote_name)
+                                .join(&parsed.relative_path)
                         }),
                     Err(error) => {
-                        explorer.open_error = Some(error);
+                        explorer.set_error_notice(error);
                         cx.notify();
                         return;
                     }
@@ -482,7 +493,7 @@ impl ExplorerView {
         } else {
             self.clear_selection();
         }
-        self.open_error = None;
+        self.clear_operation_notice();
     }
 
     pub(super) fn handle_entry_middle_click(
@@ -499,7 +510,7 @@ impl ExplorerView {
         } else {
             self.clear_selection();
         }
-        self.open_error = None;
+        self.clear_operation_notice();
 
         Some(target)
     }
@@ -540,7 +551,7 @@ impl ExplorerView {
         cx: Option<&mut Context<Self>>,
     ) -> Option<EntryAction> {
         let entry = self.focused_entry()?.clone();
-        self.open_error = None;
+        self.clear_operation_notice();
 
         if entry.is_app_bundle() {
             if open_files {
@@ -597,8 +608,9 @@ impl ExplorerView {
         open: impl FnOnce(&Path) -> std::io::Result<()>,
     ) {
         let Some(path) = path else {
-            self.open_error =
-                Some("Could not open settings.json: settings file path is unavailable".to_owned());
+            self.set_error_notice(
+                "Could not open settings.json: settings file path is unavailable".to_owned(),
+            );
             return;
         };
 
@@ -608,9 +620,9 @@ impl ExplorerView {
     #[cfg(test)]
     pub(super) fn handle_open_file_result(&mut self, path: &Path, result: std::io::Result<()>) {
         match result {
-            Ok(()) => self.open_error = None,
+            Ok(()) => self.clear_operation_notice(),
             Err(error) => {
-                self.open_error = Some(format_open_error(path, &error));
+                self.set_error_notice(format_open_error(path, &error));
             }
         }
     }
@@ -635,6 +647,8 @@ mod tests {
         view::{ExplorerView, ViewModeSelection},
     };
     use crate::settings::FileViewMode;
+    #[cfg(feature = "rclone")]
+    use gpui::AppContext;
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -646,14 +660,14 @@ mod tests {
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
         view.select_single_path(&child);
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
         assert_eq!(view.path, child);
         assert!(view.selected_paths().is_empty());
         assert_eq!(view.read_error, None);
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
@@ -786,14 +800,14 @@ mod tests {
             size: None,
         };
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         let action = view.handle_entry_click(&entry, 1, SelectionModifiers::default());
 
         assert_eq!(action, None);
         assert_eq!(view.path, temp.path());
         assert_eq!(view.selected_paths(), vec![child]);
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
         assert!(view.back_stack.is_empty());
         assert!(view.forward_stack.is_empty());
     }
@@ -1075,13 +1089,15 @@ mod tests {
         );
 
         assert_eq!(
-            view.open_error,
-            Some("Could not open file.txt: missing".to_owned())
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("Could not open file.txt: missing")
         );
 
         view.handle_open_file_result(&file, Ok(()));
 
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]
@@ -1094,12 +1110,14 @@ mod tests {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
         });
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("Could not open settings.json: missing")
         );
 
         view.open_settings_file_with(Some(&settings), |_| Ok(()));
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]
@@ -1115,7 +1133,9 @@ mod tests {
 
         assert!(!opened);
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("Could not open settings.json: settings file path is unavailable")
         );
     }
@@ -1124,11 +1144,11 @@ mod tests {
     fn refresh_clears_open_error() {
         let temp = TempDir::new();
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.open_error = Some("stale error".to_owned());
+        view.set_error_notice("stale error".to_owned());
 
         view.reload();
 
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]
@@ -1356,6 +1376,30 @@ mod tests {
         assert!(view.selected_paths().is_empty());
         assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
         assert!(view.forward_stack.is_empty());
+    }
+
+    #[cfg(feature = "rclone")]
+    #[gpui::test]
+    fn rclone_sidebar_navigation_sets_info_notice_before_background_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let view = cx.update(|cx| cx.new(|_| ExplorerView::new(PathBuf::from("root"))));
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
+
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.rclone_settings.enabled = false;
+                view.navigate_to_sidebar_path_with_watcher(path, cx);
+
+                assert!(view.rclone_connect_task.is_some());
+                let notice = view.operation_notice.as_ref().expect("connecting notice");
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Info
+                );
+                assert_eq!(notice.text, "Connecting to gdrive...");
+            });
+        });
     }
 
     #[test]

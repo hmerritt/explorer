@@ -220,7 +220,7 @@ impl ExplorerView {
 
         match open_dialog_window(kind, cx.entity(), self.date_format.clone(), cx) {
             Ok(handle) => self.active_dialog_window = Some(handle),
-            Err(error) => self.open_error = Some(format!("Failed to open dialog: {error}")),
+            Err(error) => self.set_error_notice(format!("Failed to open dialog: {error}")),
         }
     }
 
@@ -250,9 +250,7 @@ impl ExplorerView {
             cx,
         ) {
             Ok(handle) => self.active_dialog_window = Some(handle),
-            Err(error) => {
-                self.open_error = Some(format!("Failed to open progress dialog: {error}"))
-            }
+            Err(error) => self.set_error_notice(format!("Failed to open progress dialog: {error}")),
         }
     }
 
@@ -2663,7 +2661,7 @@ mod tests {
             });
             explorer.update(app, |view, _| {
                 assert!(view.pending_permanent_delete.is_none());
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
             });
         });
         assert!(!file.exists());
