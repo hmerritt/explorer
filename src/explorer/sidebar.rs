@@ -8,9 +8,9 @@ use crate::explorer::rclone::{
 };
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
-    user_home_dir, wsl_drive_roots,
+    resolve_directory_kind, user_home_dir, wsl_drive_roots,
 };
-use crate::settings::{DriveHideKind, RcloneSettings, SidebarLocation, SidebarSettings};
+use crate::settings::{DriveHideKind, RcloneSettings, SidebarSettings, expand_configured_path};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -80,16 +80,18 @@ fn sidebar_sections_from_roots(
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    let mut sections = sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots);
     #[cfg(feature = "rclone")]
     {
+        let mut sections =
+            sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots);
         sections.rclone_remotes = rclone_remote_items(rclone_settings);
+        sections
     }
     #[cfg(not(feature = "rclone"))]
     {
         let _ = rclone_settings;
+        sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots)
     }
-    sections
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -133,53 +135,17 @@ fn user_directory_items_from_paths(
     .collect()
 }
 
-fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<SidebarItem> {
+fn configured_sidebar_items(configured_items: &[PathBuf]) -> Vec<SidebarItem> {
     configured_items
         .iter()
         .enumerate()
-        .filter_map(|(configured_index, location)| {
-            let path = location.resolve()?;
+        .filter_map(|(configured_index, configured_path)| {
+            let path = expand_configured_path(configured_path)?;
             if !path.is_dir() {
                 return None;
             }
-            let (label, kind) = match location {
-                SidebarLocation::Home => (
-                    home_sidebar_label(&path),
-                    SidebarItemKind::Directory(DirectoryKind::Home),
-                ),
-                SidebarLocation::Desktop => (
-                    "Desktop".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Desktop),
-                ),
-                SidebarLocation::Documents => (
-                    "Documents".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Documents),
-                ),
-                SidebarLocation::Downloads => (
-                    "Downloads".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Downloads),
-                ),
-                SidebarLocation::Music => (
-                    "Music".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Music),
-                ),
-                SidebarLocation::Pictures => (
-                    "Pictures".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Pictures),
-                ),
-                SidebarLocation::Videos => (
-                    "Videos".to_owned(),
-                    SidebarItemKind::Directory(DirectoryKind::Videos),
-                ),
-                SidebarLocation::Custom { label, .. } => (
-                    label
-                        .as_deref()
-                        .filter(|label| !label.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| home_sidebar_label(&path)),
-                    SidebarItemKind::CustomDirectory,
-                ),
-            };
+            let kind = sidebar_item_kind_for_path(&path);
+            let label = sidebar_item_label_for_path(&path, kind);
             Some(SidebarItem {
                 label,
                 path,
@@ -188,6 +154,39 @@ fn configured_sidebar_items(configured_items: &[SidebarLocation]) -> Vec<Sidebar
             })
         })
         .collect()
+}
+
+fn sidebar_item_kind_for_path(path: &Path) -> SidebarItemKind {
+    match resolve_directory_kind(path) {
+        Some(DirectoryKind::Drive) => SidebarItemKind::Drive,
+        Some(DirectoryKind::DriveWindows) => SidebarItemKind::DriveWindows,
+        Some(DirectoryKind::DriveWsl) => SidebarItemKind::DriveWsl,
+        Some(kind) => SidebarItemKind::Directory(kind),
+        None => SidebarItemKind::CustomDirectory,
+    }
+}
+
+fn sidebar_item_label_for_path(path: &Path, kind: SidebarItemKind) -> String {
+    match kind {
+        SidebarItemKind::Directory(DirectoryKind::Home) => home_sidebar_label(path),
+        SidebarItemKind::Directory(DirectoryKind::Desktop) => "Desktop".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Documents) => "Documents".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Downloads) => "Downloads".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Music) => "Music".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Pictures) => "Pictures".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Videos) => "Videos".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Applications) => "Applications".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Bin) => "Bin".to_owned(),
+        SidebarItemKind::Directory(DirectoryKind::Drive | DirectoryKind::DriveWindows) => {
+            sidebar_drive_label(path)
+        }
+        SidebarItemKind::Directory(DirectoryKind::DriveWsl) => sidebar_wsl_drive_label(path),
+        SidebarItemKind::Drive | SidebarItemKind::DriveWindows => sidebar_drive_label(path),
+        SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
+        SidebarItemKind::CustomDirectory => home_sidebar_label(path),
+        #[cfg(feature = "rclone")]
+        SidebarItemKind::RcloneRemote(_) => home_sidebar_label(path),
+    }
 }
 
 fn home_sidebar_label(path: &Path) -> String {
@@ -316,7 +315,7 @@ fn sidebar_wsl_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use crate::settings::{DriveHideKind, RcloneSettings, SidebarLocation, SidebarSettings};
+    use crate::settings::{DriveHideKind, RcloneSettings, SidebarSettings};
     use std::fs;
 
     #[test]
@@ -389,33 +388,21 @@ mod tests {
     }
 
     #[test]
-    fn configured_custom_items_preserve_order_labels_and_omit_missing_paths() {
+    fn configured_custom_items_preserve_order_infer_labels_and_omit_missing_paths() {
         let temp = TempDir::new();
         let first = temp.path().join("first");
         let second = temp.path().join("second");
         fs::create_dir_all(&first).expect("create first");
         fs::create_dir_all(&second).expect("create second");
 
-        let items = configured_sidebar_items(&[
-            SidebarLocation::Custom {
-                path: second.clone(),
-                label: Some("Pinned".to_owned()),
-            },
-            SidebarLocation::Custom {
-                path: temp.path().join("missing"),
-                label: None,
-            },
-            SidebarLocation::Custom {
-                path: first.clone(),
-                label: None,
-            },
-        ]);
+        let items =
+            configured_sidebar_items(&[second.clone(), temp.path().join("missing"), first.clone()]);
 
         assert_eq!(
             items,
             vec![
                 SidebarItem {
-                    label: "Pinned".to_owned(),
+                    label: "second".to_owned(),
                     path: second,
                     kind: SidebarItemKind::CustomDirectory,
                     configured_index: Some(0),

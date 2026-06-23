@@ -1745,9 +1745,13 @@ impl ExplorerView {
         let icon_item = item.clone();
         let configured_index = item.configured_index;
         let is_dragging = sidebar_item_is_dragging(configured_index, self.dragging_sidebar_item);
-        let is_user_directory = matches!(
+        let accepts_directory_drop = matches!(
             item.kind,
-            SidebarItemKind::Directory(_) | SidebarItemKind::CustomDirectory
+            SidebarItemKind::Directory(_)
+                | SidebarItemKind::CustomDirectory
+                | SidebarItemKind::Drive
+                | SidebarItemKind::DriveWindows
+                | SidebarItemKind::DriveWsl
         );
         let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
         let destination = DropDestination::Directory {
@@ -1907,7 +1911,7 @@ impl ExplorerView {
                 });
         }
 
-        if is_user_directory {
+        if accepts_directory_drop {
             row = row
                 .can_drop({
                     let destination = destination.clone();

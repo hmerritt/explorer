@@ -1553,7 +1553,7 @@ mod tests {
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
-    use crate::settings::{ExplorerSettings, SettingsState, SidebarLocation};
+    use crate::settings::{ExplorerSettings, SettingsState};
     use git2::Repository;
     use gpui::{
         AppContext, ClipboardItem, Image, ImageFormat, Modifiers, MouseButton, MouseDownEvent,
@@ -1975,10 +1975,7 @@ mod tests {
             path: start_path.clone(),
         };
         settings.rclone.enabled = false;
-        settings.sidebar.items = vec![SidebarLocation::Custom {
-            path: sidebar_path.clone(),
-            label: Some("Local".to_owned()),
-        }];
+        settings.sidebar.items = vec![sidebar_path.clone()];
         cx.set_global(SettingsState::for_test(settings));
         let permit =
             crate::explorer::rclone::try_begin_remote_connection("gdrive").expect("permit");
@@ -2152,10 +2149,7 @@ mod tests {
         cx.update(|window, app| {
             tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
             view.update(app, |view, _| {
-                view.sidebar_settings.items = vec![SidebarLocation::Custom {
-                    path: sidebar_path.clone(),
-                    label: Some("a".to_owned()),
-                }];
+                view.sidebar_settings.items = vec![sidebar_path.clone()];
                 view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
                     &view.sidebar_settings,
                     &view.rclone_settings,

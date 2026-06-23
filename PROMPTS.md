@@ -1,7 +1,6 @@
 ## Todo
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
-- Settings for sidebar improvement: sidebar.items should not have "kind" and "path", it should only be an array of strings. kinds get matched based on the path. Path should also use view.address_slash
 
 ## 1
 

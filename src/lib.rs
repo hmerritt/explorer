@@ -14,8 +14,7 @@ mod settings;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
     AppSettings, ContextMenuSettings, CustomContextMenuItem, DriveHideKind, ExplorerSettings,
-    FileColumnKind, FileColumnSettings, SidebarLocation, SidebarSettings, StartLocation,
-    TabSettings, ViewSettings,
+    FileColumnKind, FileColumnSettings, SidebarSettings, StartLocation, TabSettings, ViewSettings,
 };
 
 #[cfg(all(

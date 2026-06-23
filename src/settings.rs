@@ -33,9 +33,9 @@ pub(crate) enum ConfigPlatform {
     Windows,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-pub enum SidebarLocation {
+enum LegacySidebarLocation {
     Home,
     Desktop,
     Documents,
@@ -48,6 +48,13 @@ pub enum SidebarLocation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+enum SidebarItemSetting {
+    Path(PathBuf),
+    Legacy(LegacySidebarLocation),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -77,7 +84,7 @@ pub enum AddressSlash {
     Back,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct ExplorerSettings {
     pub app: AppSettings,
@@ -86,6 +93,22 @@ pub struct ExplorerSettings {
     pub sidebar: SidebarSettings,
     pub tabs: TabSettings,
     pub view: ViewSettings,
+}
+
+impl Serialize for ExplorerSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry("app", &self.app)?;
+        map.serialize_entry("contextmenu", &self.contextmenu)?;
+        map.serialize_entry("rclone", &self.rclone)?;
+        map.serialize_entry("sidebar", &SerializableSidebarSettings::new(self))?;
+        map.serialize_entry("tabs", &self.tabs)?;
+        map.serialize_entry("view", &self.view)?;
+        map.end()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -134,6 +157,58 @@ impl<'de> Deserialize<'de> for ContextMenuSettings {
                 "contextmenu must be an array of items or a legacy object",
             )),
         }
+    }
+}
+
+struct SerializableSidebarSettings<'a> {
+    settings: &'a SidebarSettings,
+    slash: AddressSlash,
+}
+
+impl<'a> SerializableSidebarSettings<'a> {
+    fn new(settings: &'a ExplorerSettings) -> Self {
+        Self {
+            settings: &settings.sidebar,
+            slash: settings_address_slash(settings),
+        }
+    }
+}
+
+impl Serialize for SerializableSidebarSettings<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("hide", &self.settings.hide)?;
+        map.serialize_entry(
+            "items",
+            &SerializableSidebarItems {
+                items: &self.settings.items,
+                slash: self.slash,
+            },
+        )?;
+        map.serialize_entry("width", &self.settings.width)?;
+        map.end()
+    }
+}
+
+struct SerializableSidebarItems<'a> {
+    items: &'a [PathBuf],
+    slash: AddressSlash,
+}
+
+impl Serialize for SerializableSidebarItems<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let items = self
+            .items
+            .iter()
+            .map(|path| format_configured_path(path, self.slash))
+            .collect::<Vec<_>>();
+        items.serialize(serializer)
     }
 }
 
@@ -313,7 +388,11 @@ pub enum RcloneCacheDirSetting {
 pub struct SidebarSettings {
     #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
     pub hide: Vec<DriveHideKind>,
-    pub items: Vec<SidebarLocation>,
+    #[serde(
+        default = "default_sidebar_items",
+        deserialize_with = "deserialize_sidebar_items"
+    )]
+    pub items: Vec<PathBuf>,
     #[serde(
         default = "default_sidebar_width",
         deserialize_with = "deserialize_sidebar_width"
@@ -512,12 +591,7 @@ impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
             hide: Vec::new(),
-            items: vec![
-                SidebarLocation::Home,
-                SidebarLocation::Desktop,
-                SidebarLocation::Documents,
-                SidebarLocation::Downloads,
-            ],
+            items: default_sidebar_items(),
             width: SIDEBAR_DEFAULT_WIDTH,
         }
     }
@@ -598,8 +672,8 @@ impl SettingsState {
     }
 }
 
-impl SidebarLocation {
-    pub(crate) fn resolve(&self) -> Option<PathBuf> {
+impl LegacySidebarLocation {
+    fn configured_path(self) -> Option<PathBuf> {
         match self {
             Self::Home => crate::explorer::user_home_dir(),
             Self::Desktop => {
@@ -626,7 +700,7 @@ impl SidebarLocation {
                 let home = crate::explorer::user_home_dir();
                 crate::explorer::user_music_dir(home.as_deref())
             }
-            Self::Custom { path, .. } => expand_configured_path(path),
+            Self::Custom { path, .. } => Some(path),
         }
     }
 }
@@ -832,7 +906,7 @@ pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> 
             .sidebar
             .items
             .iter()
-            .filter_map(SidebarLocation::resolve)
+            .filter_map(|path| expand_configured_path(path))
             .any(|configured_path| configured_path == path)
 }
 
@@ -860,7 +934,7 @@ pub(crate) fn reorder_sidebar_item(
 pub(crate) fn unpin_sidebar_item(
     configured_index: usize,
     cx: &mut impl BorrowAppContext,
-) -> Option<SidebarLocation> {
+) -> Option<PathBuf> {
     update_settings(cx, |settings| {
         unpin_sidebar_item_in_settings(configured_index, settings)
     })
@@ -943,20 +1017,7 @@ fn pin_sidebar_path_in_settings(
         return false;
     }
     let insertion_index = insertion_index.min(settings.sidebar.items.len());
-    let location = [
-        SidebarLocation::Home,
-        SidebarLocation::Desktop,
-        SidebarLocation::Documents,
-        SidebarLocation::Downloads,
-        SidebarLocation::Pictures,
-        SidebarLocation::Videos,
-        SidebarLocation::Music,
-    ]
-    .into_iter()
-    .find(|loc| loc.resolve().as_ref() == Some(&path))
-    .unwrap_or(SidebarLocation::Custom { path, label: None });
-
-    settings.sidebar.items.insert(insertion_index, location);
+    settings.sidebar.items.insert(insertion_index, path);
     true
 }
 
@@ -980,7 +1041,7 @@ fn reorder_sidebar_item_in_settings(
 fn unpin_sidebar_item_in_settings(
     configured_index: usize,
     settings: &mut ExplorerSettings,
-) -> Option<SidebarLocation> {
+) -> Option<PathBuf> {
     (configured_index < settings.sidebar.items.len())
         .then(|| settings.sidebar.items.remove(configured_index))
 }
@@ -1131,10 +1192,8 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
                 format!("invalid date_format: {error}"),
             )
         })?;
-    for location in &settings.sidebar.items {
-        if let SidebarLocation::Custom { path, .. } = location {
-            validate_configured_path(path)?;
-        }
+    for path in &settings.sidebar.items {
+        validate_configured_path(path)?;
     }
     if let StartLocation::Custom { path } = &settings.app.start {
         validate_configured_path(path)?;
@@ -1182,7 +1241,7 @@ fn validate_configured_path(path: &Path) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "configured paths must be absolute or begin with ~/: {}",
+                "configured paths must be absolute or begin with ~/ or ~\\: {}",
                 path.display()
             ),
         ))
@@ -1305,7 +1364,9 @@ pub(crate) fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     }
 
     let text = path.to_str()?;
-    let remainder = text.strip_prefix("~/")?;
+    let remainder = text
+        .strip_prefix("~/")
+        .or_else(|| text.strip_prefix(r"~\"))?;
     crate::explorer::user_home_dir().map(|home| home.join(remainder))
 }
 
@@ -1465,9 +1526,9 @@ fn windows_path_extensions(value: Option<OsString>) -> Vec<String> {
 
 fn is_tilde_path(path: &Path) -> bool {
     path == Path::new("~")
-        || path
-            .to_str()
-            .is_some_and(|text| text.starts_with("~/") && text.len() > 2)
+        || path.to_str().is_some_and(|text| {
+            (text.starts_with("~/") || text.starts_with(r"~\")) && text.len() > 2
+        })
 }
 
 #[cfg(test)]
@@ -1821,8 +1882,8 @@ fn sync_custom_context_menu_items(document: &mut Value, configured: &[CustomCont
 }
 
 fn sync_sidebar(document: &mut Value, settings: &ExplorerSettings) {
-    let known =
-        serde_json::to_value(&settings.sidebar).expect("SidebarSettings serialization cannot fail");
+    let known = serde_json::to_value(SerializableSidebarSettings::new(settings))
+        .expect("SidebarSettings serialization cannot fail");
     let Some(document) = document.as_object_mut() else {
         *document = known;
         return;
@@ -1832,40 +1893,8 @@ fn sync_sidebar(document: &mut Value, settings: &ExplorerSettings) {
         .expect("serialized SidebarSettings is an object");
 
     for (key, value) in known {
-        if key == "items" {
-            sync_sidebar_items(document.entry(key.clone()).or_insert(Value::Null), settings);
-        } else {
-            merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
-        }
+        merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
     }
-}
-
-fn sync_sidebar_items(document: &mut Value, settings: &ExplorerSettings) {
-    let existing = document.as_array().cloned().unwrap_or_default();
-    let mut used = vec![false; existing.len()];
-    let mut items = Vec::with_capacity(settings.sidebar.items.len());
-
-    for item in &settings.sidebar.items {
-        let known = serde_json::to_value(item).expect("SidebarLocation serialization cannot fail");
-        let matching = existing.iter().enumerate().find_map(|(index, value)| {
-            (!used[index]
-                && serde_json::from_value::<SidebarLocation>(value.clone())
-                    .ok()
-                    .as_ref()
-                    == Some(item))
-            .then_some(index)
-        });
-        if let Some(index) = matching {
-            used[index] = true;
-            let mut value = existing[index].clone();
-            merge_known_value(&mut value, &known);
-            items.push(value);
-        } else {
-            items.push(known);
-        }
-    }
-
-    *document = Value::Array(items);
 }
 
 fn merge_known_value(document: &mut Value, known: &Value) {
@@ -1894,6 +1923,50 @@ fn sort_json_objects(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+fn settings_address_slash(settings: &ExplorerSettings) -> AddressSlash {
+    #[cfg(target_os = "windows")]
+    {
+        settings.view.address_slash
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = settings;
+        AddressSlash::Forward
+    }
+}
+
+fn format_configured_path(path: &Path, slash: AddressSlash) -> String {
+    let text = path.display().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        match slash {
+            AddressSlash::Forward => text.replace('\\', "/"),
+            AddressSlash::Back => text.replace('/', "\\"),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = slash;
+        text
+    }
+}
+
+fn default_sidebar_items() -> Vec<PathBuf> {
+    let home = crate::explorer::user_home_dir();
+    [
+        home.clone(),
+        crate::explorer::user_desktop_dir(home.as_deref()),
+        crate::explorer::user_documents_dir(home.as_deref()),
+        crate::explorer::user_downloads_dir(home.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn default_sidebar_width() -> u32 {
@@ -1956,6 +2029,20 @@ fn drive_hide_kind_from_str(value: &str) -> Option<DriveHideKind> {
         "wsl" => Some(DriveHideKind::Wsl),
         _ => None,
     }
+}
+
+fn deserialize_sidebar_items<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let items = Vec::<SidebarItemSetting>::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match item {
+            SidebarItemSetting::Path(path) => Some(path),
+            SidebarItemSetting::Legacy(location) => location.configured_path(),
+        })
+        .collect())
 }
 
 fn deserialize_drive_hide_kinds<'de, D>(deserializer: D) -> Result<Vec<DriveHideKind>, D::Error>
@@ -2638,9 +2725,21 @@ mod tests {
             "2G"
         );
         assert!(json.contains("\n    \"hide\": [],"));
-        assert!(json.contains(
-            "\n    \"items\": [{\"kind\": \"home\"}, {\"kind\": \"desktop\"}, {\"kind\": \"documents\"}, {\"kind\": \"downloads\"}],"
-        ));
+        let expected_sidebar_items = settings
+            .sidebar
+            .items
+            .iter()
+            .map(|path| {
+                Value::String(format_configured_path(
+                    path,
+                    settings_address_slash(&settings),
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            document["sidebar"]["items"],
+            Value::Array(expected_sidebar_items)
+        );
         assert!(json.contains("\n  \"tabs\": {\"focus_new\": false},"));
         assert!(json.contains("\n      \"order\": [\"date_modified\", \"type\", \"size\"],"));
         assert!(json.contains(
@@ -3523,28 +3622,29 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_edits_keep_unknown_fields_attached_to_remaining_items() {
+    fn legacy_sidebar_items_load_and_normalize_to_strings() {
         let mut document: Value = serde_json::from_str(
             r#"{"sidebar":{"items":[{"kind":"home","note":"home"},{"kind":"downloads","note":"downloads"}]}}"#,
         )
         .unwrap();
         let mut settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
+        assert_eq!(settings.sidebar.items.len(), 2);
 
         assert_eq!(
             reorder_sidebar_item_in_settings(1, 0, true, &mut settings),
             Some(0)
         );
         sync_settings_document(&mut document, &settings);
-        assert_eq!(document["sidebar"]["items"][0]["note"], "downloads");
-        assert_eq!(document["sidebar"]["items"][1]["note"], "home");
+        assert!(document["sidebar"]["items"][0].is_string());
+        assert!(document["sidebar"]["items"][1].is_string());
 
         assert_eq!(
             unpin_sidebar_item_in_settings(1, &mut settings),
-            Some(SidebarLocation::Home)
+            Some(default_sidebar_items()[0].clone())
         );
         sync_settings_document(&mut document, &settings);
         assert_eq!(document["sidebar"]["items"].as_array().unwrap().len(), 1);
-        assert_eq!(document["sidebar"]["items"][0]["note"], "downloads");
+        assert!(document["sidebar"]["items"][0].is_string());
     }
 
     #[test]
@@ -3562,6 +3662,10 @@ mod tests {
         )
         .unwrap();
         assert!(load_settings_from_path(&relative).is_err());
+
+        let relative_string = dir.join("relative-string.json");
+        fs::write(&relative_string, r#"{"sidebar":{"items":["relative"]}}"#).unwrap();
+        assert!(load_settings_from_path(&relative_string).is_err());
 
         let relative_rclone = dir.join("relative-rclone.json");
         fs::write(
@@ -3583,6 +3687,7 @@ mod tests {
         assert!(validate_configured_path(absolute).is_ok());
         assert!(validate_configured_path(Path::new("~")).is_ok());
         assert!(validate_configured_path(Path::new("~/Downloads")).is_ok());
+        assert!(validate_configured_path(Path::new(r"~\Downloads")).is_ok());
         assert!(validate_configured_path(Path::new("~other/Downloads")).is_err());
         assert!(validate_configured_path(Path::new("Downloads")).is_err());
     }
@@ -3810,21 +3915,14 @@ mod tests {
             1,
             &mut settings
         ));
-        assert_eq!(
-            settings
-                .sidebar
-                .items
-                .iter()
-                .filter_map(SidebarLocation::resolve)
-                .collect::<Vec<_>>(),
-            vec![second, third, first]
-        );
+        assert_eq!(settings.sidebar.items, vec![second, third, first]);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn pinning_standard_directory_uses_dedicated_kind() {
-        let downloads = SidebarLocation::Downloads.resolve().unwrap();
+    fn pinning_standard_directory_stores_configured_path() {
+        let home = crate::explorer::user_home_dir();
+        let downloads = crate::explorer::user_downloads_dir(home.as_deref()).unwrap();
         if !downloads.exists() {
             fs::create_dir_all(&downloads).unwrap();
         }
@@ -3843,7 +3941,7 @@ mod tests {
             &mut settings
         ));
         assert_eq!(settings.sidebar.items.len(), 1);
-        assert_eq!(settings.sidebar.items[0], SidebarLocation::Downloads);
+        assert_eq!(settings.sidebar.items[0], downloads);
     }
 
     #[test]
@@ -3858,16 +3956,12 @@ mod tests {
     #[test]
     fn sidebar_reorder_preserves_invisible_configured_items() {
         let missing = unique_temp_dir("missing-sidebar");
+        let defaults = default_sidebar_items();
+        let home = defaults[0].clone();
+        let downloads = defaults[3].clone();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: vec![
-                    SidebarLocation::Home,
-                    SidebarLocation::Custom {
-                        path: missing.clone(),
-                        label: None,
-                    },
-                    SidebarLocation::Downloads,
-                ],
+                items: vec![home.clone(), missing.clone(), downloads.clone()],
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
@@ -3877,36 +3971,24 @@ mod tests {
             reorder_sidebar_item_in_settings(2, 0, true, &mut settings),
             Some(0)
         );
-        assert_eq!(
-            settings.sidebar.items,
-            vec![
-                SidebarLocation::Downloads,
-                SidebarLocation::Home,
-                SidebarLocation::Custom {
-                    path: missing,
-                    label: None,
-                },
-            ]
-        );
+        assert_eq!(settings.sidebar.items, vec![downloads, home, missing]);
     }
 
     #[test]
     fn sidebar_unpin_removes_requested_item_and_preserves_order() {
-        let first = PathBuf::from("/custom/first");
-        let second = PathBuf::from("/custom/second");
+        let dir = unique_temp_dir("unpin-sidebar");
+        let first = dir.join("first");
+        let second = dir.join("second");
+        let defaults = default_sidebar_items();
+        let home = defaults[0].clone();
+        let downloads = defaults[3].clone();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
                 items: vec![
-                    SidebarLocation::Home,
-                    SidebarLocation::Custom {
-                        path: first.clone(),
-                        label: None,
-                    },
-                    SidebarLocation::Custom {
-                        path: second.clone(),
-                        label: Some("Second".to_owned()),
-                    },
-                    SidebarLocation::Downloads,
+                    home.clone(),
+                    first.clone(),
+                    second.clone(),
+                    downloads.clone(),
                 ],
                 ..SidebarSettings::default()
             },
@@ -3915,29 +3997,18 @@ mod tests {
 
         assert_eq!(
             unpin_sidebar_item_in_settings(1, &mut settings),
-            Some(SidebarLocation::Custom {
-                path: first,
-                label: None,
-            })
+            Some(first)
         );
-        assert_eq!(
-            settings.sidebar.items,
-            vec![
-                SidebarLocation::Home,
-                SidebarLocation::Custom {
-                    path: second,
-                    label: Some("Second".to_owned()),
-                },
-                SidebarLocation::Downloads,
-            ]
-        );
+        assert_eq!(settings.sidebar.items, vec![home, second, downloads]);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn sidebar_unpin_ignores_invalid_indices() {
+        let defaults = default_sidebar_items();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: vec![SidebarLocation::Home, SidebarLocation::Downloads],
+                items: vec![defaults[0].clone(), defaults[3].clone()],
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
