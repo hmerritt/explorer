@@ -198,7 +198,27 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         #[cfg(feature = "rclone")]
-        if crate::explorer::rclone::is_transfer_path(&path) {
+        {
+            self.navigate_to_sidebar_path_with_transfer_check(
+                path,
+                cx,
+                crate::explorer::rclone::is_transfer_path,
+            );
+            return;
+        }
+
+        #[cfg(not(feature = "rclone"))]
+        self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    #[cfg(feature = "rclone")]
+    fn navigate_to_sidebar_path_with_transfer_check(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+        is_transfer_path: impl FnOnce(&Path) -> bool,
+    ) {
+        if is_transfer_path(&path) {
             self.connect_rclone_remote_path_with_watcher(path, cx);
             return;
         }
@@ -1414,6 +1434,24 @@ mod tests {
                     crate::explorer::view::OperationNoticeKind::Info
                 );
                 assert_eq!(notice.text, "Connecting to gdrive...");
+            });
+        });
+    }
+
+    #[cfg(feature = "rclone")]
+    #[gpui::test]
+    fn rclone_sidebar_navigation_opens_active_mount_without_connect_task(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let view = cx.update(|cx| cx.new(|_| ExplorerView::new(PathBuf::from("root"))));
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
+
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.navigate_to_sidebar_path_with_transfer_check(path.clone(), cx, |_| false);
+
+                assert!(view.rclone_connect_task.is_none());
+                assert_eq!(view.path, path);
             });
         });
     }

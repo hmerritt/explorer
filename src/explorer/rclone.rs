@@ -17,7 +17,7 @@ use crate::explorer::filesystem::user_home_dir;
 use crate::{
     explorer::{
         entry::{EntryKind, FileEntry},
-        filesystem::EntryVisibility,
+        filesystem::{EntryVisibility, path_is_same_or_descendant},
         view::ExplorerView,
     },
     settings::{RcloneSettings, config_dir},
@@ -98,6 +98,12 @@ struct RcloneMountManifest {
 pub(super) enum RcloneTransferOperation {
     Copy,
     Move,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExistingMountPolicy {
+    TrustAccessibleRoot,
+    RequireKnownMount,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -281,6 +287,28 @@ fn provider_type_from_config_dump(dump: &Value, remote_name: &str) -> Option<Str
         .map(str::to_owned)
 }
 
+fn production_existing_mount_policy() -> ExistingMountPolicy {
+    if cfg!(target_os = "windows") {
+        ExistingMountPolicy::TrustAccessibleRoot
+    } else {
+        ExistingMountPolicy::RequireKnownMount
+    }
+}
+
+fn existing_accessible_mount_root(
+    mount_root: &Path,
+    existing_mount_policy: ExistingMountPolicy,
+) -> Option<PathBuf> {
+    if existing_mount_policy != ExistingMountPolicy::TrustAccessibleRoot {
+        return None;
+    }
+    mount_root_is_accessible(mount_root).then(|| mount_root.to_path_buf())
+}
+
+fn mount_root_is_accessible(mount_root: &Path) -> bool {
+    fs::metadata(mount_root).is_ok_and(|metadata| metadata.is_dir())
+}
+
 pub(super) fn connect_remote(
     remote: RcloneRemote,
     settings: &RcloneSettings,
@@ -312,6 +340,29 @@ pub(super) fn connect_remote_with_client(
     remote: RcloneRemote,
     settings: &RcloneSettings,
 ) -> Result<RcloneConnection, RcloneRemote> {
+    let requested_mount_root = mount_root_for_remote(&remote.name);
+    connect_remote_with_client_and_mount_root(
+        client,
+        remote,
+        settings,
+        requested_mount_root,
+        production_existing_mount_policy(),
+    )
+}
+
+fn connect_remote_with_client_and_mount_root(
+    client: &impl RcloneClient,
+    remote: RcloneRemote,
+    settings: &RcloneSettings,
+    requested_mount_root: PathBuf,
+    existing_mount_policy: ExistingMountPolicy,
+) -> Result<RcloneConnection, RcloneRemote> {
+    if let Some(connection) =
+        existing_mounted_connection(&remote, &requested_mount_root, existing_mount_policy)
+    {
+        return Ok(connection);
+    }
+
     let mount_types = match mount_types(client) {
         Ok(types) if !types.is_empty() => types,
         Err(error) => {
@@ -328,7 +379,6 @@ pub(super) fn connect_remote_with_client(
         }
     };
 
-    let requested_mount_root = mount_root_for_remote(&remote.name);
     if !cfg!(target_os = "windows")
         && let Some(parent) = requested_mount_root.parent()
         && let Err(error) = fs::create_dir_all(parent)
@@ -377,6 +427,11 @@ pub(super) fn connect_remote_with_client(
     let response = match mounted {
         Ok(response) => response,
         Err(error) => {
+            if let Some(connection) =
+                existing_mounted_connection(&remote, &requested_mount_root, existing_mount_policy)
+            {
+                return Ok(connection);
+            }
             return Ok(RcloneConnection::TransferMode(transfer_remote(
                 remote.identity(),
                 Some(error),
@@ -392,11 +447,29 @@ pub(super) fn connect_remote_with_client(
         .unwrap_or(requested_mount_root);
     store_mount_manifest_entry(&remote.name, &mount_root);
 
-    Ok(RcloneConnection::Mounted(MountedRemote {
+    Ok(RcloneConnection::Mounted(mounted_remote(
+        &remote, mount_root,
+    )))
+}
+
+fn existing_mounted_connection(
+    remote: &RcloneRemote,
+    mount_root: &Path,
+    existing_mount_policy: ExistingMountPolicy,
+) -> Option<RcloneConnection> {
+    let mount_root = existing_accessible_mount_root(mount_root, existing_mount_policy)?;
+    store_mount_manifest_entry(&remote.name, &mount_root);
+    Some(RcloneConnection::Mounted(mounted_remote(
+        remote, mount_root,
+    )))
+}
+
+fn mounted_remote(remote: &RcloneRemote, mount_root: PathBuf) -> MountedRemote {
+    MountedRemote {
         remote: remote.identity(),
         display_root: display_root_for_remote(&remote.display_name),
         mount_root,
-    }))
+    }
 }
 
 fn transfer_remote(remote: RcloneRemoteIdentity, mount_error: Option<String>) -> TransferRemote {
@@ -427,30 +500,32 @@ pub(super) fn disconnect_mounted_remote_with_client(
 }
 
 pub(super) fn apply_known_mount_states(remotes: &mut [RcloneRemote]) {
-    let Ok(manifest) = load_reconciled_mount_manifest_with_client(&LibrcloneClient) else {
-        return;
-    };
+    let manifest = load_reconciled_mount_manifest_with_client(&LibrcloneClient).ok();
     for remote in remotes {
-        apply_known_mount_state_with_manifest(remote, &manifest);
+        apply_known_mount_state(
+            remote,
+            manifest.as_ref(),
+            production_existing_mount_policy(),
+        );
     }
 }
 
-fn apply_known_mount_state_with_manifest(
+fn apply_known_mount_state(
     remote: &mut RcloneRemote,
-    manifest: &RcloneMountManifest,
+    manifest: Option<&RcloneMountManifest>,
+    existing_mount_policy: ExistingMountPolicy,
 ) {
-    let Some(mount_root) = manifest
-        .mounts
-        .get(&normalized_remote_name(&remote.name))
+    if let Some(mount_root) = manifest
+        .and_then(|manifest| manifest.mounts.get(&normalized_remote_name(&remote.name)))
         .cloned()
-    else {
-        return;
-    };
-    remote.state = RcloneRemoteState::Mounted(Box::new(MountedRemote {
-        remote: remote.identity(),
-        display_root: display_root_for_remote(&remote.display_name),
-        mount_root,
-    }));
+        .or_else(|| {
+            let mount_root = mount_root_for_remote(&remote.name);
+            existing_accessible_mount_root(&mount_root, existing_mount_policy)
+        })
+    {
+        store_mount_manifest_entry(&remote.name, &mount_root);
+        remote.state = RcloneRemoteState::Mounted(Box::new(mounted_remote(remote, mount_root)));
+    }
 }
 
 pub(super) fn sidebar_path_for_remote(remote: &RcloneRemote) -> PathBuf {
@@ -486,6 +561,13 @@ fn managed_mounted_path_with_manifest(
         })
         .max_by_key(|(component_count, _)| *component_count)
         .map(|(_, rclone_path)| rclone_path)
+}
+
+fn path_is_managed_mount_with_manifest(path: &Path, manifest: &RcloneMountManifest) -> bool {
+    manifest
+        .mounts
+        .values()
+        .any(|mount_root| path_is_same_or_descendant(path, mount_root))
 }
 
 pub(super) fn move_managed_mounted_file(
@@ -1024,7 +1106,33 @@ fn unique_open_copy_dir(remote_name: &str) -> io::Result<PathBuf> {
 }
 
 pub(super) fn is_transfer_path(path: &Path) -> bool {
-    parse_virtual_path(path).is_some()
+    if parse_virtual_path(path).is_none() {
+        return false;
+    }
+    !is_active_managed_mount_path(path)
+}
+
+pub(super) fn is_active_managed_mount_path(path: &Path) -> bool {
+    if load_reconciled_mount_manifest_with_client(&LibrcloneClient)
+        .ok()
+        .is_some_and(|manifest| path_is_managed_mount_with_manifest(path, &manifest))
+    {
+        return true;
+    }
+
+    if let Some((remote_name, mount_root)) =
+        existing_accessible_mount_root_for_path(path, production_existing_mount_policy())
+    {
+        store_mount_manifest_entry(&remote_name, &mount_root);
+        return true;
+    }
+
+    false
+}
+
+#[cfg(test)]
+fn is_transfer_path_with_manifest(path: &Path, manifest: &RcloneMountManifest) -> bool {
+    parse_virtual_path(path).is_some() && !path_is_managed_mount_with_manifest(path, manifest)
 }
 
 pub(super) fn parse_virtual_path(path: &Path) -> Option<RclonePath> {
@@ -1037,6 +1145,19 @@ pub(super) fn parse_virtual_path(path: &Path) -> Option<RclonePath> {
     {
         parse_unix_virtual_path(path)
     }
+}
+
+fn existing_accessible_mount_root_for_path(
+    path: &Path,
+    existing_mount_policy: ExistingMountPolicy,
+) -> Option<(String, PathBuf)> {
+    let parsed = parse_virtual_path(path)?;
+    let mount_root = mount_root_for_remote(&parsed.remote_name);
+    if !path_is_same_or_descendant(path, &mount_root) {
+        return None;
+    }
+    existing_accessible_mount_root(&mount_root, existing_mount_policy)
+        .map(|mount_root| (parsed.remote_name, mount_root))
 }
 
 #[cfg(target_os = "windows")]
@@ -1368,6 +1489,7 @@ fn run_transfer_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::test_support::TempDir;
     use crate::settings::RcloneCacheDirSetting;
     use std::{cell::RefCell, collections::VecDeque};
 
@@ -1399,6 +1521,41 @@ mod tests {
                 .borrow_mut()
                 .pop_front()
                 .unwrap_or_else(|| Err(format!("unexpected call to {method}")))
+        }
+    }
+
+    struct MountErrorCreatesRootClient {
+        calls: RefCell<Vec<(String, Value)>>,
+        mount_root: PathBuf,
+    }
+
+    impl MountErrorCreatesRootClient {
+        fn new(mount_root: PathBuf) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                mount_root,
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Value)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl RcloneClient for MountErrorCreatesRootClient {
+        fn rpc(&self, method: &str, input: Value) -> Result<Value, String> {
+            self.calls
+                .borrow_mut()
+                .push((method.to_owned(), input.clone()));
+            match method {
+                "mount/types" => Ok(json!({ "mountTypes": ["mount"] })),
+                "mount/mount" => {
+                    fs::create_dir_all(&self.mount_root)
+                        .map_err(|error| format!("create mount root: {error}"))?;
+                    Err("Cannot create WinFsp-FUSE file system. Status=80070050".to_owned())
+                }
+                _ => Err(format!("unexpected call to {method}")),
+            }
         }
     }
 
@@ -1464,6 +1621,51 @@ mod tests {
     }
 
     #[test]
+    fn mount_root_accessibility_requires_directory() {
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        fs::write(&file, b"file").expect("write test file");
+
+        assert!(mount_root_is_accessible(temp.path()));
+        assert!(!mount_root_is_accessible(&file));
+        assert!(!mount_root_is_accessible(&temp.path().join("missing")));
+    }
+
+    #[test]
+    fn transfer_path_classification_prefers_active_managed_mounts() {
+        let mount_root = virtual_root_for_remote("gdrive");
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+
+        assert!(path_is_managed_mount_with_manifest(
+            &mount_root.join("Folder"),
+            &manifest
+        ));
+        assert!(!is_transfer_path_with_manifest(&mount_root, &manifest));
+        assert!(!is_transfer_path_with_manifest(
+            &mount_root.join("Folder"),
+            &manifest
+        ));
+    }
+
+    #[test]
+    fn transfer_path_classification_keeps_unmanaged_virtual_paths() {
+        let path = virtual_root_for_remote("gdrive");
+        let mut stale_manifest = RcloneMountManifest::default();
+        stale_manifest
+            .mounts
+            .insert("stale".to_owned(), virtual_root_for_remote("stale"));
+
+        assert!(is_transfer_path_with_manifest(
+            &path,
+            &RcloneMountManifest::default()
+        ));
+        assert!(is_transfer_path_with_manifest(&path, &stale_manifest));
+    }
+
+    #[test]
     fn parses_active_mount_points_from_listmounts_response() {
         let response = json!({
             "mountPoints": ["/mnt/gdrive", "", 42, "/mnt/hbox"]
@@ -1524,7 +1726,11 @@ mod tests {
         let reconciled = reconcile_mount_manifest(manifest, &[PathBuf::from("/mnt/other")]);
         let mut remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
 
-        apply_known_mount_state_with_manifest(&mut remote, &reconciled);
+        apply_known_mount_state(
+            &mut remote,
+            Some(&reconciled),
+            ExistingMountPolicy::RequireKnownMount,
+        );
 
         assert!(matches!(remote.state, RcloneRemoteState::Disconnected));
     }
@@ -1537,7 +1743,11 @@ mod tests {
             .insert("gdrive".to_owned(), PathBuf::from("/mnt/gdrive"));
         let mut remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
 
-        apply_known_mount_state_with_manifest(&mut remote, &manifest);
+        apply_known_mount_state(
+            &mut remote,
+            Some(&manifest),
+            ExistingMountPolicy::RequireKnownMount,
+        );
 
         assert!(matches!(
             remote.state,
@@ -1715,6 +1925,60 @@ mod tests {
         assert_eq!(calls[1].1["vfsOpt"]["ChunkSizeLimit"], "2G");
         assert_eq!(calls[1].1["_config"]["BufferSize"], "128M");
         assert!(calls[1].1["_config"].get("CacheDir").is_none());
+    }
+
+    #[test]
+    fn existing_accessible_mount_root_short_circuits_mount_rpc() {
+        let temp = TempDir::new();
+        let client = FakeRcloneClient::default();
+        let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+
+        let connection = connect_remote_with_client_and_mount_root(
+            &client,
+            remote,
+            &RcloneSettings::default(),
+            temp.path().to_path_buf(),
+            ExistingMountPolicy::TrustAccessibleRoot,
+        )
+        .expect("connect existing mount");
+
+        assert!(matches!(
+            connection,
+            RcloneConnection::Mounted(MountedRemote { ref mount_root, .. })
+                if mount_root == temp.path()
+        ));
+        assert!(client.calls().is_empty());
+    }
+
+    #[test]
+    fn mount_error_adopts_accessible_mount_root() {
+        let temp = TempDir::new();
+        let mount_root = temp.path().join("mounted-gdrive");
+        let client = MountErrorCreatesRootClient::new(mount_root.clone());
+        let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+
+        let connection = connect_remote_with_client_and_mount_root(
+            &client,
+            remote,
+            &RcloneSettings::default(),
+            mount_root.clone(),
+            ExistingMountPolicy::TrustAccessibleRoot,
+        )
+        .expect("connect existing mount after mount error");
+
+        assert!(matches!(
+            connection,
+            RcloneConnection::Mounted(MountedRemote { mount_root: ref actual, .. })
+                if actual == &mount_root
+        ));
+        assert_eq!(
+            client
+                .calls()
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mount/types", "mount/mount"]
+        );
     }
 
     #[test]
