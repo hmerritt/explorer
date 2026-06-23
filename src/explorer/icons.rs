@@ -186,6 +186,8 @@ svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 svg_icon!(RUN_ELEVATED_ICON, "utility", "run_elevated.svg");
 svg_icon!(SETTINGS_ICON, "utility", "settings.svg");
+#[cfg(feature = "rclone")]
+svg_icon!(SUCCESS_ICON, "utility", "success.svg");
 png_icon!(WSL_ALPINE_ICON, "wsl", "alpine.png");
 png_icon!(WSL_DEBIAN_ICON, "wsl", "debian.png");
 png_icon!(WSL_GENERIC_ICON, "wsl", "generic.png");
@@ -632,6 +634,8 @@ mod tests {
     fn utility_icons_use_bundled_svg_assets() {
         assert!(!EJECT_ICON_BYTES.is_empty());
         assert!(!SETTINGS_ICON_BYTES.is_empty());
+        #[cfg(feature = "rclone")]
+        assert!(!SUCCESS_ICON_BYTES.is_empty());
     }
 
     #[test]

@@ -2,17 +2,16 @@
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 - UI for files that are uploading
-- Image + video hover popup box should have border-radius of 15px, overflow hidden
-- Support windows %% shortcuts, like %APPDATA%
 
 ## 1
 
-- Network drives (rclone https://rclone.org/ builtin)
+- Debounce file view refreshes 1000ms
+- Support windows %% shortcuts, like %APPDATA%
+- Image + video hover popup box should have border-radius of 15px, overflow hidden
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 
 ## 2
 
-- rsync copy/sync builtin
 - Improve readme - add screenshots / branding
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)

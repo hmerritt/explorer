@@ -89,6 +89,42 @@ pub(super) struct RclonePath {
     pub(super) relative_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct RcloneUploadSnapshot {
+    pub(super) entries: BTreeMap<PathBuf, RcloneUploadState>,
+}
+
+impl RcloneUploadSnapshot {
+    pub(super) fn has_pending(&self) -> bool {
+        self.entries.values().any(RcloneUploadState::is_pending)
+    }
+
+    pub(super) fn state_for_path(&self, path: &Path) -> Option<&RcloneUploadState> {
+        self.entries.get(path)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RcloneUploadState {
+    Queued,
+    Uploading(u8),
+    Completed,
+}
+
+impl RcloneUploadState {
+    pub(super) fn is_pending(&self) -> bool {
+        matches!(self, Self::Queued | Self::Uploading(_))
+    }
+
+    pub(super) fn display_percent(&self) -> Option<u8> {
+        match self {
+            Self::Queued => Some(0),
+            Self::Uploading(percent) => Some(*percent),
+            Self::Completed => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct RcloneMountManifest {
     mounts: BTreeMap<String, PathBuf>,
@@ -110,6 +146,19 @@ enum ExistingMountPolicy {
 struct RcloneFileEndpoint {
     fs: String,
     remote: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RcloneUploadContext {
+    mount_root: PathBuf,
+    rclone_path: RclonePath,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RcloneUploadQueueItem {
+    local_path: PathBuf,
+    relative_path: PathBuf,
+    uploading: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -610,10 +659,21 @@ pub(super) fn is_managed_mount_root(path: &Path) -> bool {
         .any(|mount_root| mount_root == path)
 }
 
+pub(super) fn path_has_known_managed_mount(path: &Path) -> bool {
+    upload_context_with_manifest(path, &load_mount_manifest()).is_some()
+}
+
 fn managed_mounted_path_with_manifest(
     path: &Path,
     manifest: &RcloneMountManifest,
 ) -> Option<RclonePath> {
+    upload_context_with_manifest(path, manifest).map(|context| context.rclone_path)
+}
+
+fn upload_context_with_manifest(
+    path: &Path,
+    manifest: &RcloneMountManifest,
+) -> Option<RcloneUploadContext> {
     manifest
         .mounts
         .iter()
@@ -621,14 +681,17 @@ fn managed_mounted_path_with_manifest(
             let relative_path = path.strip_prefix(mount_root).ok()?;
             Some((
                 mount_root.components().count(),
-                RclonePath {
-                    remote_name: remote_name.clone(),
-                    relative_path: relative_path.to_path_buf(),
+                RcloneUploadContext {
+                    mount_root: mount_root.clone(),
+                    rclone_path: RclonePath {
+                        remote_name: remote_name.clone(),
+                        relative_path: relative_path.to_path_buf(),
+                    },
                 },
             ))
         })
         .max_by_key(|(component_count, _)| *component_count)
-        .map(|(_, rclone_path)| rclone_path)
+        .map(|(_, context)| context)
 }
 
 fn path_is_managed_mount_with_manifest(path: &Path, manifest: &RcloneMountManifest) -> bool {
@@ -676,6 +739,247 @@ fn move_managed_mounted_file_with_client_and_manifest(
         }),
     )?;
     Ok(true)
+}
+
+pub(super) fn upload_snapshot_for_directory(
+    path: &Path,
+    previous: &RcloneUploadSnapshot,
+    settings: &RcloneSettings,
+) -> Result<RcloneUploadSnapshot, String> {
+    prepare_librclone(settings)?;
+    upload_snapshot_for_directory_with_client_and_manifest(
+        &LibrcloneClient,
+        path,
+        previous,
+        &load_mount_manifest(),
+    )
+}
+
+fn upload_snapshot_for_directory_with_client_and_manifest(
+    client: &impl RcloneClient,
+    path: &Path,
+    previous: &RcloneUploadSnapshot,
+    manifest: &RcloneMountManifest,
+) -> Result<RcloneUploadSnapshot, String> {
+    let Some(context) = upload_context_with_manifest(path, manifest) else {
+        return Ok(RcloneUploadSnapshot::default());
+    };
+
+    let queue_response = vfs_queue_response_for_upload_context(client, &context)?;
+    let stats_response = client.rpc("core/stats", json!({}))?;
+    let transferred_response = client.rpc("core/transferred", json!({}))?;
+    Ok(upload_snapshot_from_responses(
+        &context,
+        previous,
+        &queue_response,
+        &stats_response,
+        &transferred_response,
+    ))
+}
+
+fn vfs_queue_response_for_upload_context(
+    client: &impl RcloneClient,
+    context: &RcloneUploadContext,
+) -> Result<Value, String> {
+    let mut fs_candidates = Vec::new();
+    push_unique(
+        &mut fs_candidates,
+        rclone_fs_for_remote(&context.rclone_path.remote_name),
+    );
+    if let Ok(response) = client.rpc("vfs/list", json!({}))
+        && let Some(vfses) = response.get("vfses").and_then(Value::as_array)
+    {
+        for fs in vfses.iter().filter_map(Value::as_str) {
+            push_unique(&mut fs_candidates, fs.to_owned());
+        }
+    }
+
+    let mut last_error = None;
+    for fs in fs_candidates {
+        match client.rpc("vfs/queue", json!({ "fs": fs })) {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    client
+        .rpc("vfs/queue", json!({}))
+        .map_err(|error| last_error.unwrap_or(error))
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn upload_snapshot_from_responses(
+    context: &RcloneUploadContext,
+    previous: &RcloneUploadSnapshot,
+    queue_response: &Value,
+    stats_response: &Value,
+    transferred_response: &Value,
+) -> RcloneUploadSnapshot {
+    let active_percentages = transferring_percentages_by_relative_path(context, stats_response);
+    let queue_items = upload_queue_items_from_response(context, queue_response);
+    let mut entries = BTreeMap::new();
+
+    for item in queue_items {
+        let active_percentage = active_percentages.get(&item.relative_path).copied();
+        let state = if item.uploading || active_percentage.is_some() {
+            RcloneUploadState::Uploading(active_percentage.unwrap_or(0))
+        } else {
+            RcloneUploadState::Queued
+        };
+        entries.insert(item.local_path, state);
+    }
+
+    let completed_paths = successful_transferred_relative_paths(context, transferred_response);
+    for (local_path, state) in previous.entries.iter() {
+        if !state.is_pending() || entries.contains_key(local_path) {
+            continue;
+        }
+        let Ok(relative_path) = local_path.strip_prefix(&context.mount_root) else {
+            continue;
+        };
+        if completed_paths.contains(relative_path) {
+            entries.insert(local_path.clone(), RcloneUploadState::Completed);
+        }
+    }
+
+    if entries.values().any(RcloneUploadState::is_pending) {
+        RcloneUploadSnapshot { entries }
+    } else {
+        RcloneUploadSnapshot::default()
+    }
+}
+
+fn upload_queue_items_from_response(
+    context: &RcloneUploadContext,
+    response: &Value,
+) -> Vec<RcloneUploadQueueItem> {
+    response
+        .get("queue")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?;
+            let relative_path = upload_relative_path_from_name(context, name)?;
+            upload_relative_path_is_current_directory_child(
+                &relative_path,
+                &context.rclone_path.relative_path,
+            )
+            .then_some(())?;
+            Some(RcloneUploadQueueItem {
+                local_path: context.mount_root.join(&relative_path),
+                relative_path,
+                uploading: item
+                    .get("uploading")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn transferring_percentages_by_relative_path(
+    context: &RcloneUploadContext,
+    response: &Value,
+) -> BTreeMap<PathBuf, u8> {
+    response
+        .get("transferring")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|transfer| {
+            let name = transfer.get("name").and_then(Value::as_str)?;
+            let relative_path = upload_relative_path_from_name(context, name)?;
+            upload_relative_path_is_current_directory_child(
+                &relative_path,
+                &context.rclone_path.relative_path,
+            )
+            .then_some(())?;
+            let percentage = upload_percentage_from_value(transfer.get("percentage")?)?;
+            Some((relative_path, percentage))
+        })
+        .collect()
+}
+
+fn successful_transferred_relative_paths(
+    context: &RcloneUploadContext,
+    response: &Value,
+) -> BTreeSet<PathBuf> {
+    response
+        .get("transferred")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|transfer| transfer_completed_successfully(transfer))
+        .filter_map(|transfer| {
+            let name = transfer.get("name").and_then(Value::as_str)?;
+            let relative_path = upload_relative_path_from_name(context, name)?;
+            upload_relative_path_is_current_directory_child(
+                &relative_path,
+                &context.rclone_path.relative_path,
+            )
+            .then_some(relative_path)
+        })
+        .collect()
+}
+
+fn upload_relative_path_from_name(context: &RcloneUploadContext, name: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    if let Ok(relative_path) = path.strip_prefix(&context.mount_root)
+        && !relative_path.as_os_str().is_empty()
+    {
+        return Some(relative_path.to_path_buf());
+    }
+
+    let mut name = name.trim().replace('\\', "/");
+    let fs = rclone_fs_for_remote(&context.rclone_path.remote_name);
+    if let Some(relative) = name.strip_prefix(&fs) {
+        name = relative.trim_start_matches('/').to_owned();
+    }
+    slash_relative_path(&name)
+}
+
+fn slash_relative_path(path: &str) -> Option<PathBuf> {
+    let mut relative_path = PathBuf::new();
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        if component == "." || component == ".." {
+            return None;
+        }
+        relative_path.push(component);
+    }
+
+    (!relative_path.as_os_str().is_empty()).then_some(relative_path)
+}
+
+fn upload_relative_path_is_current_directory_child(
+    relative_path: &Path,
+    current_directory: &Path,
+) -> bool {
+    relative_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+        .eq(current_directory.components())
+}
+
+fn upload_percentage_from_value(value: &Value) -> Option<u8> {
+    let percentage = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))?;
+    Some(percentage.round().clamp(0.0, 100.0) as u8)
+}
+
+fn transfer_completed_successfully(transfer: &Value) -> bool {
+    match transfer.get("error") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(error)) => error.is_empty(),
+        Some(_) => false,
+    }
 }
 
 fn mount_types(client: &impl RcloneClient) -> Result<Vec<String>, String> {
@@ -1724,6 +2028,163 @@ mod tests {
 
         assert_eq!(parsed.remote_name, "gdrive");
         assert_eq!(remote_path_string(&parsed.relative_path), "Folder/File.txt");
+    }
+
+    #[test]
+    fn rclone_upload_queue_normalizes_relative_and_full_paths() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\Explorer\Rclone\gdrive")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let current_directory = mount_root.join("Folder");
+        let uploading_path = current_directory.join("uploading.txt");
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "vfses": ["gdrive:"] })),
+            Ok(json!({
+                "queue": [
+                    { "name": "Folder/queued.txt", "uploading": false },
+                    { "name": uploading_path.to_string_lossy(), "uploading": true },
+                    { "name": "Folder/Sub/nested.txt", "uploading": false }
+                ]
+            })),
+            Ok(json!({
+                "transferring": [
+                    { "name": "Folder/uploading.txt", "percentage": 42.0 }
+                ]
+            })),
+            Ok(json!({ "transferred": [] })),
+        ]);
+
+        let snapshot = upload_snapshot_for_directory_with_client_and_manifest(
+            &client,
+            &current_directory,
+            &RcloneUploadSnapshot::default(),
+            &manifest,
+        )
+        .expect("upload snapshot");
+
+        assert_eq!(
+            snapshot
+                .state_for_path(&current_directory.join("queued.txt"))
+                .and_then(RcloneUploadState::display_percent),
+            Some(0)
+        );
+        assert_eq!(
+            snapshot.state_for_path(&uploading_path),
+            Some(&RcloneUploadState::Uploading(42))
+        );
+        assert!(
+            !snapshot
+                .entries
+                .contains_key(&current_directory.join("Sub").join("nested.txt"))
+        );
+        let calls = client.calls();
+        assert_eq!(calls[0], ("vfs/list".to_owned(), json!({})));
+        assert_eq!(
+            calls[1],
+            ("vfs/queue".to_owned(), json!({ "fs": "gdrive:" }))
+        );
+    }
+
+    #[test]
+    fn rclone_upload_snapshot_keeps_successful_completed_rows_while_pending() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\Explorer\Rclone\gdrive")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let current_directory = mount_root.join("Folder");
+        let done_path = current_directory.join("done.txt");
+        let failed_path = current_directory.join("failed.txt");
+        let mut previous = RcloneUploadSnapshot::default();
+        previous
+            .entries
+            .insert(done_path.clone(), RcloneUploadState::Queued);
+        previous
+            .entries
+            .insert(failed_path.clone(), RcloneUploadState::Queued);
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "vfses": ["gdrive:"] })),
+            Ok(json!({
+                "queue": [
+                    { "name": "Folder/pending.txt", "uploading": false }
+                ]
+            })),
+            Ok(json!({ "transferring": [] })),
+            Ok(json!({
+                "transferred": [
+                    { "name": "Folder/done.txt", "error": "" },
+                    { "name": "Folder/failed.txt", "error": "upload failed" }
+                ]
+            })),
+        ]);
+
+        let snapshot = upload_snapshot_for_directory_with_client_and_manifest(
+            &client,
+            &current_directory,
+            &previous,
+            &manifest,
+        )
+        .expect("upload snapshot");
+
+        assert_eq!(
+            snapshot.state_for_path(&done_path),
+            Some(&RcloneUploadState::Completed)
+        );
+        assert!(!snapshot.entries.contains_key(&failed_path));
+        assert_eq!(
+            snapshot.state_for_path(&current_directory.join("pending.txt")),
+            Some(&RcloneUploadState::Queued)
+        );
+        assert!(snapshot.has_pending());
+    }
+
+    #[test]
+    fn rclone_upload_snapshot_clears_completed_only_rows() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\Explorer\Rclone\gdrive")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let current_directory = mount_root.join("Folder");
+        let mut previous = RcloneUploadSnapshot::default();
+        previous.entries.insert(
+            current_directory.join("done.txt"),
+            RcloneUploadState::Uploading(99),
+        );
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "vfses": ["gdrive:"] })),
+            Ok(json!({ "queue": [] })),
+            Ok(json!({ "transferring": [] })),
+            Ok(json!({
+                "transferred": [
+                    { "name": "Folder/done.txt", "error": "" }
+                ]
+            })),
+        ]);
+
+        let snapshot = upload_snapshot_for_directory_with_client_and_manifest(
+            &client,
+            &current_directory,
+            &previous,
+            &manifest,
+        )
+        .expect("upload snapshot");
+
+        assert!(snapshot.entries.is_empty());
     }
 
     #[test]

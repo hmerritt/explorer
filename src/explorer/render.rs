@@ -19,6 +19,8 @@ use gpui::{
 #[cfg(test)]
 use crate::explorer::address_bar::format_address_path;
 #[cfg(feature = "rclone")]
+use crate::explorer::icons::SUCCESS_ICON;
+#[cfg(feature = "rclone")]
 use crate::explorer::icons::rclone_drive_icon;
 use crate::explorer::{
     DirectoryKind, OpenSettings,
@@ -34,26 +36,27 @@ use crate::explorer::{
     codebase_summary::{CodebaseSummary, language_segment_widths},
     columns::file_column_label,
     constants::{
-        COLUMN_NAME_MIN_WIDTH, DIRECTORY_BAR_COPY_BUTTON_GAP, DIRECTORY_BAR_COPY_BUTTON_SIZE,
-        DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT, DIRECTORY_BAR_HORIZONTAL_PADDING,
-        DIRECTORY_BAR_RADIUS, DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR,
-        DIRECTORY_BAR_TEXT_SIZE, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
-        EMPTY_FOLDER_TOP_MARGIN, FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH,
-        FOLDER_LOADING_MESSAGE, HEADER_HEIGHT, LARGE_ICON_SIZE, LARGE_ICON_TEXT_LINE_HEIGHT,
-        LARGE_ICON_TEXT_ROWS, LARGE_ICON_TEXT_SIZE, LARGE_ICON_TEXT_TOP_GAP,
-        LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, NAV_BUTTON_ACTIVE_OPACITY,
-        NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR, NAV_ICON_ENABLED_COLOR,
-        NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING, NAVBAR_ITEM_GAP,
-        OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING, RECURSIVE_SEARCH_ROW_HEIGHT,
-        ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
-        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
-        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG, SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH,
-        SEARCH_NO_MATCHES_MESSAGE, SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING,
-        SIDEBAR_ICON_TEXT_GAP, SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, STATUS_BAR_HEIGHT,
-        STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR,
-        STATUS_BAR_TEXT_SIZE, UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING,
-        UTILITY_BAR_ITEM_GAP, UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE,
-        UTILITY_MENU_ROW_HEIGHT, UTILITY_MENU_WIDTH,
+        COLUMN_NAME_MIN_WIDTH, COLUMN_UPLOAD_WIDTH, DIRECTORY_BAR_COPY_BUTTON_GAP,
+        DIRECTORY_BAR_COPY_BUTTON_SIZE, DIRECTORY_BAR_ELLIPSIS, DIRECTORY_BAR_HEIGHT,
+        DIRECTORY_BAR_HORIZONTAL_PADDING, DIRECTORY_BAR_RADIUS,
+        DIRECTORY_BAR_SEGMENT_HORIZONTAL_PADDING, DIRECTORY_BAR_SEPARATOR, DIRECTORY_BAR_TEXT_SIZE,
+        EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE, EMPTY_FOLDER_TOP_MARGIN,
+        FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, FOLDER_LOADING_MESSAGE, HEADER_HEIGHT,
+        LARGE_ICON_SIZE, LARGE_ICON_TEXT_LINE_HEIGHT, LARGE_ICON_TEXT_ROWS, LARGE_ICON_TEXT_SIZE,
+        LARGE_ICON_TEXT_TOP_GAP, LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH,
+        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_BUTTON_SIZE, NAV_ICON_DISABLED_COLOR,
+        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, NAVBAR_HEIGHT, NAVBAR_HORIZONTAL_PADDING,
+        NAVBAR_ITEM_GAP, OPEN_ERROR_HORIZONTAL_PADDING, OPEN_ERROR_VERTICAL_PADDING,
+        RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
+        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
+        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        SEARCH_BAR_MAX_WIDTH, SEARCH_BAR_MIN_WIDTH, SEARCH_NO_MATCHES_MESSAGE,
+        SEARCH_WORKING_MESSAGE, SIDEBAR_HORIZONTAL_PADDING, SIDEBAR_ICON_TEXT_GAP,
+        SIDEBAR_ROW_HEIGHT, SIDEBAR_TEXT_SIZE, STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING,
+        STATUS_BAR_SEPARATOR_COLOR, STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
+        UTILITY_BAR_HEIGHT, UTILITY_BAR_HORIZONTAL_PADDING, UTILITY_BAR_ITEM_GAP,
+        UTILITY_BUTTON_HEIGHT, UTILITY_ICON_BUTTON_SIZE, UTILITY_MENU_ROW_HEIGHT,
+        UTILITY_MENU_WIDTH,
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
@@ -1349,6 +1352,9 @@ impl ExplorerView {
             header_row =
                 header_row.child(self.render_file_column_header_cell(kind, active_sort, cx));
         }
+        if self.upload_column_is_visible() {
+            header_row = header_row.child(upload_header_cell());
+        }
 
         div()
             .flex()
@@ -1997,6 +2003,7 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
+        let upload_pending = self.entry_upload_is_pending(&entry.path);
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
             .then(|| self.dragged_entries_for_index(ix))
@@ -2031,7 +2038,9 @@ impl ExplorerView {
             .border_color(rgb(0xffffff))
             // .border_color(rgb(0x949494))
             .cursor_default()
-            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+            .when(is_cut || upload_pending, |this| {
+                this.opacity(CUT_ITEM_OPACITY)
+            });
         row = add_entry_hover_preview(row, entry.clone(), cx);
         row = add_entry_primary_click(row, entry.clone(), EntryClickTarget::Row, cx);
         row = add_entry_context_menu(row, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
@@ -2071,6 +2080,19 @@ impl ExplorerView {
                 }
             })
             .collect::<Vec<_>>();
+        #[cfg(feature = "rclone")]
+        let mut non_name_cells = non_name_cells;
+        #[cfg(feature = "rclone")]
+        if self.upload_column_is_visible() {
+            non_name_cells.push(
+                upload_column_cell(
+                    self.rclone_upload_state_for_path(&entry.path),
+                    &self.font,
+                    window,
+                )
+                .into_any_element(),
+            );
+        }
 
         let name_cell = if self.rename_is_active_for_path(&entry.path) {
             rename_name_cell(
@@ -2155,6 +2177,7 @@ impl ExplorerView {
         let is_selected = self.entry_is_selected(ix);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
+        let upload_pending = self.entry_upload_is_pending(&entry.path);
         let name_click_entry = entry.clone();
         let selected_drag_payload = self
             .can_start_item_drag_for_index(ix)
@@ -2207,7 +2230,9 @@ impl ExplorerView {
                 |this| this.hover(|style| style.bg(rgb(0xe5f3ff))),
             )
             .cursor_default()
-            .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
+            .when(is_cut || upload_pending, |this| {
+                this.opacity(CUT_ITEM_OPACITY)
+            });
         tile = add_entry_hover_preview(tile, entry.clone(), cx);
         tile = add_entry_primary_click(tile, entry.clone(), EntryClickTarget::Row, cx);
         tile = add_entry_context_menu(tile, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
@@ -5191,6 +5216,12 @@ fn file_column_header_element_id(kind: FileColumnKind) -> &'static str {
     }
 }
 
+fn upload_header_cell() -> gpui::Stateful<Div> {
+    header_cell("Upload", COLUMN_UPLOAD_WIDTH, None, None)
+        .id("explorer-header-upload")
+        .debug_selector(|| "explorer-header-upload".to_owned())
+}
+
 fn file_column_entry_drag_element_id(kind: FileColumnKind) -> &'static str {
     match kind {
         FileColumnKind::DateModified => "explorer-entry-date-drag",
@@ -5841,6 +5872,36 @@ fn file_column_cell(
     };
 
     text_cell(text, width, right, font, window)
+}
+
+#[cfg(feature = "rclone")]
+fn upload_column_cell(
+    state: Option<&crate::explorer::rclone::RcloneUploadState>,
+    font: &gpui::Font,
+    window: &Window,
+) -> Div {
+    match state {
+        Some(state) => match state.display_percent() {
+            Some(percent) => text_cell(
+                format!("{percent}%"),
+                COLUMN_UPLOAD_WIDTH,
+                true,
+                font,
+                window,
+            ),
+            None => div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h_full()
+                .w(px(COLUMN_UPLOAD_WIDTH))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .px(px(TEXT_CELL_HORIZONTAL_PADDING))
+                .child(image_icon(SUCCESS_ICON.clone(), 14.0, 14.0)),
+        },
+        None => text_cell(String::new(), COLUMN_UPLOAD_WIDTH, false, font, window),
+    }
 }
 
 fn selection_modifiers_for_click(event: &ClickEvent) -> SelectionModifiers {
