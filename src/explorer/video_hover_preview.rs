@@ -18,8 +18,8 @@ use gpui::{Context, RenderImage, Task};
 use crate::explorer::{
     entry::FileEntry,
     image_thumbnails::{
-        CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
-        entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
+        CachedThumbnailImage, dimensions_for_preview, entry_may_have_hover_image_preview,
+        entry_may_have_hover_video_preview,
     },
     video::path_may_have_video_metadata,
     view::ExplorerView,
@@ -80,9 +80,6 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<VideoHoverPreviewLookup> {
         if !entry_may_have_hover_video_preview(entry) {
-            return None;
-        }
-        if self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly {
             return None;
         }
 
@@ -425,9 +422,10 @@ pub(super) fn hover_preview_is_video(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::image_thumbnails::ThumbnailSourcePolicy;
 
     #[gpui::test]
-    fn cache_only_policy_prevents_video_hover_preview_source_playback(
+    fn cache_only_standard_policy_allows_video_hover_preview_source_playback(
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -446,8 +444,15 @@ mod tests {
             view.update(app, |view, cx| {
                 let entry = FileEntry::test("movie.mp4", false, Some(1), None);
 
-                assert!(view.hover_video_preview_for_entry(&entry, cx).is_none());
-                assert!(view.video_hover_preview.is_none());
+                assert!(matches!(
+                    view.hover_video_preview_for_entry(&entry, cx),
+                    Some(VideoHoverPreviewLookup::Loading {
+                        width: VIDEO_HOVER_PREVIEW_SIZE,
+                        height: VIDEO_HOVER_PREVIEW_SIZE,
+                        thumbnail: None,
+                    })
+                ));
+                assert!(view.video_hover_preview.is_some());
             });
         });
     }

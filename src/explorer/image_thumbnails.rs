@@ -226,7 +226,11 @@ impl ImageThumbnailCacheInner {
         standard_request: ImageThumbnailRequest,
     ) -> (HoverImagePreviewLookup, Option<u64>) {
         if let Some(state) = self.states.get(&request.key) {
-            return (state.hover_preview(), None);
+            if state.should_retry_for_request(&request) {
+                self.states.remove(&request.key);
+            } else {
+                return (state.hover_preview(), None);
+            }
         }
 
         let loading_thumbnail = self
@@ -358,20 +362,38 @@ impl ImageThumbnailCacheInner {
     }
 
     fn cancel_directory(&mut self, directory: &Path) -> Option<u64> {
+        self.cancel_directory_matching(directory, |_| true)
+    }
+
+    fn cancel_standard_thumbnail_requests(&mut self, directory: &Path) -> Option<u64> {
+        self.cancel_directory_matching(directory, |request| {
+            request.usage == ImageThumbnailUsage::Standard
+        })
+    }
+
+    fn cancel_directory_matching(
+        &mut self,
+        directory: &Path,
+        mut should_cancel: impl FnMut(&ImageThumbnailRequest) -> bool,
+    ) -> Option<u64> {
         self.pending.retain(|key| {
             !matches!(
                 self.states.get(key),
                 Some(ImageThumbnailState::Pending { request, .. })
-                    if request.directory == directory
+                    if request.directory == directory && should_cancel(request)
             )
         });
 
         let mut cancelled_loading = false;
         self.states.retain(|_, state| match state {
-            ImageThumbnailState::Pending { request, .. } if request.directory == directory => false,
+            ImageThumbnailState::Pending { request, .. }
+                if request.directory == directory && should_cancel(request) =>
+            {
+                false
+            }
             ImageThumbnailState::Loading {
                 request, cancel, ..
-            } if request.directory == directory => {
+            } if request.directory == directory && should_cancel(request) => {
                 cancel.store(true, Ordering::Relaxed);
                 cancelled_loading = true;
                 false
@@ -460,8 +482,11 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<HoverImagePreviewLookup> {
-        let request =
-            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
+        let request = hover_image_preview_request_for_entry(
+            entry,
+            &self.path,
+            ThumbnailSourcePolicy::ReadSource,
+        )?;
         let standard_request =
             image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         let (preview, loader_generation) = cx
@@ -515,15 +540,31 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn cancel_standard_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
+        let directory = self.path.clone();
+        let loader_generation = cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
+            cache
+                .inner
+                .borrow_mut()
+                .cancel_standard_thumbnail_requests(&directory)
+        });
+
+        if let Some(generation) = loader_generation {
+            start_image_thumbnail_loader(cx, generation);
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn hold_hover_image_preview_loading_for_test(
         &mut self,
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) {
-        let Some(request) =
-            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)
-        else {
+        let Some(request) = hover_image_preview_request_for_entry(
+            entry,
+            &self.path,
+            ThumbnailSourcePolicy::ReadSource,
+        ) else {
             return;
         };
         let Ok((width, height)) =
@@ -550,9 +591,11 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) {
-        let Some(request) =
-            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)
-        else {
+        let Some(request) = hover_image_preview_request_for_entry(
+            entry,
+            &self.path,
+            ThumbnailSourcePolicy::ReadSource,
+        ) else {
             return;
         };
         let Some(standard_request) =
@@ -2263,6 +2306,44 @@ mod tests {
     }
 
     #[test]
+    fn cache_only_failed_hover_preview_can_retry_as_read_source() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let cache_only = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            ..request("hover", "folder")
+        };
+        let read_source = ImageThumbnailRequest {
+            source_policy: ThumbnailSourcePolicy::ReadSource,
+            ..cache_only.clone()
+        };
+        let standard_request = ImageThumbnailRequest {
+            key: "standard".to_owned(),
+            usage: ImageThumbnailUsage::Standard,
+            ..cache_only.clone()
+        };
+        let (_, cache_only_generation) =
+            cache.hover_preview_for_request(cache_only.clone(), standard_request.clone());
+        let cache_only_generation = cache_only_generation.expect("cache-only generation");
+        let _job = cache
+            .next_load_job(cache_only_generation)
+            .expect("cache-only hover job");
+        assert!(cache.finish_request(cache_only, cache_only_generation, None));
+        assert!(cache.next_load_job(cache_only_generation).is_none());
+
+        let (_, read_source_generation) =
+            cache.hover_preview_for_request(read_source.clone(), standard_request);
+
+        assert!(read_source_generation.is_some());
+        assert!(matches!(
+            cache.states.get(&read_source.key),
+            Some(ImageThumbnailState::Pending { request, .. })
+                if request.source_policy == ThumbnailSourcePolicy::ReadSource
+                    && request.usage == ImageThumbnailUsage::HoverPreview
+        ));
+    }
+
+    #[test]
     fn hover_preview_thumbnail_preserves_aspect_ratio() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
@@ -2323,6 +2404,51 @@ mod tests {
                 thumbnail: None
             }
         ));
+    }
+
+    #[gpui::test]
+    fn hover_image_preview_request_reads_source_when_standard_policy_is_cache_only(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| initialize_for_test(app));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("remote"),
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            );
+            view.thumbnail_source_policy = ThumbnailSourcePolicy::CacheOnly;
+            view
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = FileEntry::test("image.png", false, Some(1), Some(UNIX_EPOCH));
+
+                assert!(matches!(
+                    view.hover_image_preview_for_entry(&entry, cx),
+                    Some(HoverImagePreviewLookup::Loading {
+                        width: HOVER_IMAGE_PREVIEW_SIZE,
+                        height: HOVER_IMAGE_PREVIEW_SIZE,
+                        thumbnail: None,
+                    })
+                ));
+
+                let hover_key = hover_image_preview_key(&entry);
+                let standard_key = image_thumbnail_key(&entry, ImageThumbnailKind::Image);
+                let cache = cx.global::<ImageThumbnailCache>();
+                let cache = cache.inner.borrow();
+                assert!(matches!(
+                    cache.states.get(&hover_key),
+                    Some(ImageThumbnailState::Pending { request, .. })
+                        if request.source_policy == ThumbnailSourcePolicy::ReadSource
+                            && request.usage == ImageThumbnailUsage::HoverPreview
+                ));
+                assert!(!cache.states.contains_key(&standard_key));
+            });
+        });
     }
 
     #[test]
@@ -2659,6 +2785,32 @@ mod tests {
         assert!(matches!(
             cache.states.get("ready"),
             Some(ImageThumbnailState::Ready(_))
+        ));
+    }
+
+    #[test]
+    fn cancel_standard_thumbnail_requests_preserves_hover_preview_requests() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let standard = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::Standard,
+            ..request("standard", "old")
+        };
+        let hover = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            ..request("hover", "old")
+        };
+        push_pending(&mut cache, standard.clone());
+        push_pending(&mut cache, hover.clone());
+
+        let generation = cache.cancel_standard_thumbnail_requests(Path::new("old"));
+
+        assert!(generation.is_some());
+        assert_eq!(cache.pending.iter().collect::<Vec<_>>(), vec![&hover.key]);
+        assert!(!cache.states.contains_key(&standard.key));
+        assert!(matches!(
+            cache.states.get(&hover.key),
+            Some(ImageThumbnailState::Pending { request, .. })
+                if request.usage == ImageThumbnailUsage::HoverPreview
         ));
     }
 

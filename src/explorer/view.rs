@@ -512,8 +512,7 @@ impl ExplorerView {
         if old_thumbnail_source_policy == ThumbnailSourcePolicy::ReadSource
             && self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly
         {
-            self.cancel_image_thumbnail_extraction(cx);
-            self.cancel_video_hover_preview(cx);
+            self.cancel_standard_image_thumbnail_extraction(cx);
         }
         if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
@@ -2623,7 +2622,12 @@ mod tests {
                 view.directory_is_remote = true;
                 view.remote_thumbnails = true;
                 view.thumbnail_source_policy = ThumbnailSourcePolicy::ReadSource;
+                let video = FileEntry::test("movie.mp4", false, Some(1), None);
+                assert!(view.hover_video_preview_for_entry(&video, cx).is_some());
+                assert!(view.video_hover_preview.is_some());
+
                 view.apply_settings(&ExplorerSettings::default(), cx);
+                assert!(view.video_hover_preview.is_some());
             });
         });
 
