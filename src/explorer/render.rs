@@ -7896,11 +7896,10 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
-        assert_eq!(thumbnail.origin.x, preview.origin.x + gpui::px(1.0));
-        assert_eq!(thumbnail.origin.y, preview.origin.y + gpui::px(1.0));
-        assert_eq!(thumbnail.size.width, preview.size.width - gpui::px(2.0));
-        assert_eq!(thumbnail.size.height, thumbnail.size.width / 2.0);
-        assert!(thumbnail.size.height <= preview.size.height - gpui::px(1.0));
+        assert_eq!(thumbnail.origin.x, preview.origin.x);
+        assert_eq!(thumbnail.origin.y, preview.origin.y);
+        assert_eq!(thumbnail.size.width, preview.size.width);
+        assert_eq!(thumbnail.size.height, preview.size.height);
         assert!(
             cx.debug_bounds("image-hover-preview-loading-label")
                 .is_none()
@@ -7940,10 +7939,10 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(200.0));
         assert_eq!(preview.size.height, gpui::px(400.0));
-        assert_eq!(thumbnail.origin.x, preview.origin.x + gpui::px(1.0));
-        assert_eq!(thumbnail.origin.y, preview.origin.y + gpui::px(1.0));
-        assert_eq!(thumbnail.size.width, preview.size.width - gpui::px(2.0));
-        assert_eq!(thumbnail.size.height, preview.size.height - gpui::px(2.0));
+        assert_eq!(thumbnail.origin.x, preview.origin.x);
+        assert_eq!(thumbnail.origin.y, preview.origin.y);
+        assert_eq!(thumbnail.size.width, preview.size.width);
+        assert_eq!(thumbnail.size.height, preview.size.height);
         assert!(
             cx.debug_bounds("image-hover-preview-loading-label")
                 .is_none()

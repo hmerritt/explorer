@@ -20,14 +20,26 @@ pub(crate) struct ExplorerHttpClient {
 
 impl ExplorerHttpClient {
     fn new() -> http_client::Result<Self> {
+        Self::new_with_system_proxy(true)
+    }
+
+    #[cfg(test)]
+    fn new_without_system_proxy_for_test() -> http_client::Result<Self> {
+        Self::new_with_system_proxy(false)
+    }
+
+    fn new_with_system_proxy(use_system_proxy: bool) -> http_client::Result<Self> {
         let user_agent = HeaderValue::from_str(&format!("Explorer/{}", env!("CARGO_PKG_VERSION")))?;
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::USER_AGENT, user_agent.clone());
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .use_rustls_tls()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
-            .default_headers(headers)
-            .build()?;
+            .default_headers(headers);
+        if !use_system_proxy {
+            client_builder = client_builder.no_proxy();
+        }
+        let client = client_builder.build()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -168,7 +180,8 @@ mod tests {
             "Content-Type: image/png\r\n",
             "icon",
         )]);
-        let client = ExplorerHttpClient::new().expect("Explorer HTTP client");
+        let client =
+            ExplorerHttpClient::new_without_system_proxy_for_test().expect("Explorer HTTP client");
         let mut response =
             futures::executor::block_on(client.get(&format!("{server}/icon.png"), ().into(), true))
                 .expect("successful GET");
@@ -203,7 +216,8 @@ mod tests {
             }
         });
 
-        let client = ExplorerHttpClient::new().expect("Explorer HTTP client");
+        let client =
+            ExplorerHttpClient::new_without_system_proxy_for_test().expect("Explorer HTTP client");
         let response = futures::executor::block_on(client.get(
             &format!("http://{address}/redirect"),
             ().into(),
@@ -219,7 +233,8 @@ mod tests {
         let address = listener.local_addr().expect("unused port address");
         drop(listener);
 
-        let client = ExplorerHttpClient::new().expect("Explorer HTTP client");
+        let client =
+            ExplorerHttpClient::new_without_system_proxy_for_test().expect("Explorer HTTP client");
         let result = futures::executor::block_on(client.get(
             &format!("http://{address}/missing"),
             ().into(),
