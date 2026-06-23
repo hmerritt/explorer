@@ -39,7 +39,7 @@ use crate::explorer::{
     navigation::EntryAction,
     recursive_search::{
         RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
-        RecursiveSearchProgressSnapshot, recursive_search_entries,
+        RecursiveSearchProgressSnapshot, recursive_search_entries_with_rclone_settings,
     },
     sorting::sort_entries,
     text_input::{
@@ -780,6 +780,7 @@ impl ExplorerView {
         self.search.recursive_cancel = Some(cancel.clone());
 
         let schedule_started = Instant::now();
+        let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let debounce_started = Instant::now();
             cx.background_executor()
@@ -799,10 +800,11 @@ impl ExplorerView {
             let output_task = cx.background_executor().spawn({
                 let finished = finished.clone();
                 let progress = progress.clone();
+                let rclone_settings = rclone_settings.clone();
                 {
                     let cancel = cancel.clone();
                     async move {
-                        let output = recursive_search_entries(
+                        let output = recursive_search_entries_with_rclone_settings(
                             generation,
                             root,
                             query,
@@ -810,6 +812,7 @@ impl ExplorerView {
                             cached_search,
                             cancel,
                             progress,
+                            &rclone_settings,
                         );
                         finished.store(true, Ordering::Relaxed);
                         output

@@ -26,6 +26,7 @@ use crate::explorer::{
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
+    explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
     file_commands::FileOperationUndo,
     filesystem::{
         EntryVisibility, FileConflictBatch, FileOperationProgress,
@@ -1415,11 +1416,18 @@ impl ExplorerView {
 
     pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) -> bool {
         let started = Instant::now();
-        self.directory_watcher = DirectoryWatcher::start(self.path.clone(), cx);
+        let refresh_driver = ExplorerFs::new(&self.rclone_settings).refresh_driver(&self.path);
+        self.directory_watcher = match refresh_driver {
+            ExplorerRefreshDriver::Notify => DirectoryWatcher::start(self.path.clone(), cx),
+            ExplorerRefreshDriver::Poll => DirectoryWatcher::start_polling(self.path.clone(), cx),
+        };
         let ok = self.directory_watcher.is_some();
         crate::debug_options::log_nav_timing(
             started.elapsed(),
-            format_args!("watcher.restart path={:?} ok={ok}", self.path),
+            format_args!(
+                "watcher.restart path={:?} driver={refresh_driver:?} ok={ok}",
+                self.path
+            ),
         );
         ok
     }

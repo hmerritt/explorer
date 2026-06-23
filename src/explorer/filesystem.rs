@@ -17,6 +17,8 @@ use rayon::prelude::*;
 use thousands::Separable;
 
 use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, CountingReader};
+#[cfg(feature = "rclone")]
+use crate::explorer::explorer_fs::{ExplorerFs, ExplorerLocation};
 use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
@@ -1180,8 +1182,14 @@ pub(super) fn load_entries_with_rclone_settings(
 ) -> std::io::Result<Vec<FileEntry>> {
     let visibility = visibility.into();
     #[cfg(feature = "rclone")]
-    if crate::explorer::rclone::is_transfer_path(path) {
-        return crate::explorer::rclone::load_transfer_entries(path, visibility, _rclone_settings);
+    {
+        let explorer_fs = ExplorerFs::new(_rclone_settings);
+        if matches!(
+            explorer_fs.classify(path),
+            ExplorerLocation::RcloneTransfer(_)
+        ) {
+            return explorer_fs.list_dir(path, visibility);
+        }
     }
 
     load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility))
@@ -1957,6 +1965,77 @@ pub(super) fn prepare_copy_paths_to_directory_for_paste(
     prepare_copy_paths_to_directory_with_copy_names(paths, destination)
 }
 
+#[cfg(feature = "rclone")]
+pub(super) fn prepare_rclone_transfer_paths_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+    operation: crate::explorer::rclone::RcloneTransferOperation,
+    rclone_settings: &RcloneSettings,
+) -> Result<PreparedFileOperation, String> {
+    let explorer_fs = ExplorerFs::new(rclone_settings);
+    if !rclone_settings.enabled {
+        return Err(crate::explorer::rclone::disabled_error());
+    }
+    if !explorer_fs.can_mutate(destination)
+        || paths.iter().any(|path| {
+            !explorer_fs.can_mutate(path) && crate::explorer::rclone::is_transfer_path(path)
+        })
+    {
+        return Err(explorer_fs.read_only_error());
+    }
+    if paths.is_empty() {
+        return Err("No items were selected.".to_owned());
+    }
+    if !crate::explorer::rclone::is_transfer_path(destination)
+        && !paths
+            .iter()
+            .any(|path| crate::explorer::rclone::is_transfer_path(path))
+    {
+        return Err("copy/move does not involve an rclone transfer path".to_owned());
+    }
+
+    let mut steps = Vec::new();
+    let mut roots = Vec::new();
+    let mut stats = FileOperationStats {
+        total_bytes: 0,
+        total_files: 0,
+    };
+
+    for source in paths {
+        let file_name = source
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{} does not have a file name", source.display()))?;
+        let planned_destination = destination.join(Path::new(file_name));
+        let conflict = explorer_fs.exists(&planned_destination)?;
+        let source_is_dir = explorer_fs.is_dir(source).unwrap_or(false);
+        stats.total_files = stats.total_files.saturating_add(1);
+        steps.push(FileOperationStep::RcloneTransfer {
+            source: source.clone(),
+            destination: planned_destination.clone(),
+            operation,
+            conflict,
+            source_is_dir,
+        });
+        roots.push(FileOperationRoot {
+            source: source.clone(),
+            destination: planned_destination,
+            source_is_dir,
+        });
+    }
+
+    Ok(prepared_or_conflicts(FileOperationJob {
+        kind: match operation {
+            crate::explorer::rclone::RcloneTransferOperation::Copy => FileOperationKind::Copy,
+            crate::explorer::rclone::RcloneTransferOperation::Move => FileOperationKind::Move,
+        },
+        stats,
+        steps,
+        roots,
+        archive_diagnostics: None,
+    }))
+}
+
 pub(super) fn archive_path_is_supported(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
@@ -2365,6 +2444,14 @@ enum FileOperationStep {
         destination: PathBuf,
         conflict: bool,
         copy_engine: CopyEngine,
+    },
+    #[cfg(feature = "rclone")]
+    RcloneTransfer {
+        source: PathBuf,
+        destination: PathBuf,
+        operation: crate::explorer::rclone::RcloneTransferOperation,
+        conflict: bool,
+        source_is_dir: bool,
     },
     CreateLink {
         source: PathBuf,
@@ -2909,6 +2996,16 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source: source.clone(),
                 destination: destination.clone(),
             }),
+            #[cfg(feature = "rclone")]
+            FileOperationStep::RcloneTransfer {
+                source,
+                destination,
+                conflict: true,
+                ..
+            } => file_conflicts.push(FileConflict {
+                source: source.clone(),
+                destination: destination.clone(),
+            }),
             FileOperationStep::ExtractArchive { archive, plan, .. } => {
                 file_conflicts.extend(plan.entries.iter().filter_map(|entry| {
                     entry.conflict.then(|| FileConflict {
@@ -3057,6 +3154,39 @@ fn execute_copy_move_operation_with_progress_impl(
         operated_destinations.insert(result.destination.clone());
         if job.kind == FileOperationKind::Copy {
             copy_undo.extend(result.into_copy_undo());
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    for step in &job.steps {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress);
+            return Err(FileOperationError::Cancelled);
+        }
+
+        if let FileOperationStep::RcloneTransfer {
+            source,
+            destination,
+            operation,
+            conflict,
+            ..
+        } = step
+        {
+            if *conflict && conflict_choice == ConflictChoice::Skip {
+                continue;
+            }
+            execute_rclone_transfer_step(
+                source,
+                destination,
+                *operation,
+                rclone_settings,
+                &cancel,
+                &mut progress,
+                &mut on_progress,
+            )?;
+            operated_destinations.insert(destination.clone());
         }
     }
 
@@ -3510,6 +3640,64 @@ fn file_operation_parallelism(task_count: usize) -> usize {
     task_count.max(1).min(available.max(1)).min(16)
 }
 
+#[cfg(feature = "rclone")]
+fn execute_rclone_transfer_step(
+    source: &Path,
+    destination: &Path,
+    operation: crate::explorer::rclone::RcloneTransferOperation,
+    rclone_settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    progress.phase = match operation {
+        crate::explorer::rclone::RcloneTransferOperation::Copy => FileOperationPhase::Copying,
+        crate::explorer::rclone::RcloneTransferOperation::Move => FileOperationPhase::Moving,
+    };
+    progress.current_item = Some(source.to_path_buf());
+    on_progress(progress.clone());
+
+    let destination_dir = destination.parent().ok_or_else(|| {
+        FileOperationError::Failed(format!(
+            "{} does not have a parent folder",
+            destination.display()
+        ))
+    })?;
+    crate::explorer::rclone::copy_or_move_paths_to_transfer_destination_with_progress(
+        &[source.to_path_buf()],
+        destination_dir,
+        operation,
+        rclone_settings,
+        cancel,
+        |rclone_progress| {
+            if let Some(total_bytes) = rclone_progress.total_bytes {
+                progress.total_bytes = progress.total_bytes.max(total_bytes);
+                progress.work_total_bytes = progress.work_total_bytes.max(total_bytes);
+            }
+            if let Some(bytes) = rclone_progress.bytes {
+                progress.copied_bytes = progress.copied_bytes.max(bytes);
+                progress.work_completed_bytes = progress.work_completed_bytes.max(bytes);
+            }
+            on_progress(progress.clone());
+        },
+    )
+    .map_err(|error| {
+        if error == "cancelled" || cancel.load(Ordering::Relaxed) {
+            FileOperationError::Cancelled
+        } else {
+            FileOperationError::Failed(error)
+        }
+    })?;
+
+    progress.completed_files = progress.completed_files.saturating_add(1);
+    if progress.work_total_bytes == 0 {
+        progress.work_total_bytes = progress.total_files.max(1) as u64;
+        progress.work_completed_bytes = progress.completed_files as u64;
+    }
+    on_progress(progress.clone());
+    Ok(())
+}
+
 fn finish_file_operation_summary(
     job: FileOperationJob,
     operated_destinations: HashSet<PathBuf>,
@@ -3522,15 +3710,22 @@ fn finish_file_operation_summary(
     summary.copy_undo = copy_undo;
     summary.archive_diagnostics = job.archive_diagnostics.clone();
     for root in &job.roots {
+        let destination_operated = operated_destinations.contains(&root.destination);
         if root.source_is_dir {
-            if root.destination.exists() {
+            if destination_operated || root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
-        } else if operated_destinations.contains(&root.destination) {
+        } else if destination_operated {
             summary.destination_paths.push(root.destination.clone());
         }
 
-        if job.kind == FileOperationKind::Move && !root.source.exists() {
+        if job.kind == FileOperationKind::Move && destination_operated {
+            summary.moved_source_paths.push(root.source.clone());
+            summary.moved_paths.push(FileOperationMove {
+                source: root.source.clone(),
+                destination: root.destination.clone(),
+            });
+        } else if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
             if root.destination.exists() {
                 summary.moved_paths.push(FileOperationMove {
@@ -3697,6 +3892,28 @@ pub(super) fn execute_file_operation_with_progress_and_rclone_settings(
                 }
                 operated_destinations.insert(destination.clone());
             }
+            #[cfg(feature = "rclone")]
+            FileOperationStep::RcloneTransfer {
+                source,
+                destination,
+                operation,
+                conflict,
+                ..
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    continue;
+                }
+                execute_rclone_transfer_step(
+                    source,
+                    destination,
+                    *operation,
+                    rclone_settings,
+                    &cancel,
+                    &mut progress,
+                    &mut on_progress,
+                )?;
+                operated_destinations.insert(destination.clone());
+            }
             FileOperationStep::CreateLink { .. } => {}
             FileOperationStep::ExtractArchive {
                 archive,
@@ -3819,19 +4036,26 @@ pub(super) fn execute_file_operation_with_progress_and_rclone_settings(
     summary.kind = job.kind;
     summary.archive_diagnostics = operation_diagnostics;
     for root in &job.roots {
+        let destination_operated = operated_destinations.contains(&root.destination);
         if job.kind == FileOperationKind::Extract {
             if root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
         } else if root.source_is_dir {
-            if root.destination.exists() {
+            if destination_operated || root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
-        } else if operated_destinations.contains(&root.destination) {
+        } else if destination_operated {
             summary.destination_paths.push(root.destination.clone());
         }
 
-        if job.kind == FileOperationKind::Move && !root.source.exists() {
+        if job.kind == FileOperationKind::Move && destination_operated {
+            summary.moved_source_paths.push(root.source.clone());
+            summary.moved_paths.push(FileOperationMove {
+                source: root.source.clone(),
+                destination: root.destination.clone(),
+            });
+        } else if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
             if root.destination.exists() {
                 summary.moved_paths.push(FileOperationMove {

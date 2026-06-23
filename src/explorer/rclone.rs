@@ -3,7 +3,10 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Component, Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -164,6 +167,8 @@ struct RcloneUploadQueueItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransferPathMetadata {
     is_dir: bool,
+    size: Option<u64>,
+    modified: Option<SystemTime>,
 }
 
 #[derive(Debug)]
@@ -661,6 +666,10 @@ pub(super) fn is_managed_mount_root(path: &Path) -> bool {
 
 pub(super) fn path_has_known_managed_mount(path: &Path) -> bool {
     upload_context_with_manifest(path, &load_mount_manifest()).is_some()
+}
+
+pub(super) fn managed_mounted_path(path: &Path) -> Option<RclonePath> {
+    managed_mounted_path_with_manifest(path, &load_mount_manifest())
 }
 
 fn managed_mounted_path_with_manifest(
@@ -1213,7 +1222,88 @@ fn transfer_path_metadata_with_client(
             .or_else(|| item.get("isDir"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        size: item
+            .get("Size")
+            .or_else(|| item.get("size"))
+            .and_then(Value::as_u64),
+        modified: item
+            .get("ModTime")
+            .or_else(|| item.get("modTime"))
+            .and_then(Value::as_str)
+            .and_then(parse_rclone_mod_time),
     }))
+}
+
+pub(super) fn transfer_path_is_dir(path: &Path, settings: &RcloneSettings) -> Result<bool, String> {
+    prepare_librclone(settings)?;
+    transfer_path_is_dir_with_client(&LibrcloneClient, path)
+}
+
+pub(super) fn transfer_path_is_dir_with_client(
+    client: &impl RcloneClient,
+    path: &Path,
+) -> Result<bool, String> {
+    Ok(transfer_path_metadata_with_client(client, path)?.is_some_and(|metadata| metadata.is_dir))
+}
+
+pub(super) fn create_transfer_file(
+    path: &Path,
+    bytes: &[u8],
+    settings: &RcloneSettings,
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
+    create_transfer_file_with_client(&LibrcloneClient, path, bytes)
+}
+
+pub(super) fn create_transfer_file_with_client(
+    client: &impl RcloneClient,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if transfer_path_exists_with_client(client, path)? {
+        return Err("an item with this name already exists".to_owned());
+    }
+    write_transfer_file_with_client(client, path, bytes)
+}
+
+pub(super) fn write_transfer_file_with_client(
+    client: &impl RcloneClient,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let rclone_path = parse_virtual_path(path)
+        .ok_or_else(|| format!("{} is not a rclone transfer path", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("{} does not have a file name", path.display()))?;
+    let temp_dir = unique_open_copy_dir(&rclone_path.remote_name).map_err(|error| {
+        format!(
+            "Could not prepare temporary file for {}: {error}",
+            path.display()
+        )
+    })?;
+    let temp_file = temp_dir.join(file_name);
+    if let Err(error) = fs::write(&temp_file, bytes) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(format!(
+            "Could not prepare temporary file for {}: {error}",
+            path.display()
+        ));
+    }
+    let result = run_transfer_job(
+        client,
+        "operations/copyfile",
+        json!({
+            "srcFs": temp_dir.to_string_lossy(),
+            "srcRemote": file_name,
+            "dstFs": rclone_fs_for_remote(&rclone_path.remote_name),
+            "dstRemote": remote_path_string(&rclone_path.relative_path),
+        }),
+    );
+    let _ = fs::remove_dir_all(&temp_dir);
+    result.map(drop)
 }
 
 pub(super) fn create_transfer_folder(path: &Path, settings: &RcloneSettings) -> Result<(), String> {
@@ -1325,21 +1415,8 @@ pub(super) fn delete_transfer_paths_with_client(
     Ok(())
 }
 
-pub(super) fn copy_or_move_paths_to_transfer_destination(
-    paths: &[PathBuf],
-    destination: &Path,
-    operation: RcloneTransferOperation,
-    settings: &RcloneSettings,
-) -> Result<Vec<PathBuf>, String> {
-    prepare_librclone(settings)?;
-    copy_or_move_paths_to_transfer_destination_with_client(
-        &LibrcloneClient,
-        paths,
-        destination,
-        operation,
-    )
-}
-
+#[cfg(test)]
+#[cfg(test)]
 pub(super) fn copy_or_move_paths_to_transfer_destination_with_client(
     client: &impl RcloneClient,
     paths: &[PathBuf],
@@ -1423,6 +1500,106 @@ fn path_is_directory_with_client(client: &impl RcloneClient, path: &Path) -> Res
     } else {
         Ok(path.is_dir())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RcloneTransferProgress {
+    pub(super) job_id: i64,
+    pub(super) done: bool,
+    pub(super) success: bool,
+    pub(super) error: Option<String>,
+    pub(super) bytes: Option<u64>,
+    pub(super) total_bytes: Option<u64>,
+}
+
+pub(super) fn copy_or_move_paths_to_transfer_destination_with_progress(
+    paths: &[PathBuf],
+    destination: &Path,
+    operation: RcloneTransferOperation,
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> Result<Vec<PathBuf>, String> {
+    prepare_librclone(settings)?;
+    copy_or_move_paths_to_transfer_destination_with_client_and_progress(
+        &LibrcloneClient,
+        paths,
+        destination,
+        operation,
+        cancel,
+        &mut on_progress,
+    )
+}
+
+pub(super) fn copy_or_move_paths_to_transfer_destination_with_client_and_progress(
+    client: &impl RcloneClient,
+    paths: &[PathBuf],
+    destination: &Path,
+    operation: RcloneTransferOperation,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
+) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !is_transfer_path(destination) && !paths.iter().any(|path| is_transfer_path(path)) {
+        return Err("copy/move does not involve an rclone transfer path".to_owned());
+    }
+
+    let mut destinations = Vec::new();
+    for source in paths {
+        let file_name = source
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{} does not have a file name", source.display()))?;
+        let target_path = destination.join(Path::new(file_name));
+        if path_exists_with_client(client, &target_path)? {
+            return Err(format!(
+                "{} already exists",
+                target_path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or("The destination item")
+            ));
+        }
+
+        if path_is_directory_with_client(client, source)? {
+            let method = match operation {
+                RcloneTransferOperation::Copy => "sync/copy",
+                RcloneTransferOperation::Move => "sync/move",
+            };
+            let mut input = json!({
+                "srcFs": rclone_fs_path_for_path(source)?,
+                "dstFs": rclone_fs_path_for_path(&target_path)?,
+                "createEmptySrcDirs": true,
+            });
+            if operation == RcloneTransferOperation::Move {
+                input["deleteEmptySrcDirs"] = Value::Bool(true);
+            }
+            run_transfer_job_with_progress(client, method, input, cancel, on_progress)?;
+        } else {
+            let method = match operation {
+                RcloneTransferOperation::Copy => "operations/copyfile",
+                RcloneTransferOperation::Move => "operations/movefile",
+            };
+            let source = rclone_file_endpoint_for_path(source)?;
+            let destination = rclone_file_endpoint_for_path(&target_path)?;
+            run_transfer_job_with_progress(
+                client,
+                method,
+                json!({
+                    "srcFs": source.fs,
+                    "srcRemote": source.remote,
+                    "dstFs": destination.fs,
+                    "dstRemote": destination.remote,
+                }),
+                cancel,
+                on_progress,
+            )?;
+        }
+        destinations.push(target_path);
+    }
+    Ok(destinations)
 }
 
 impl ExplorerView {
@@ -1894,6 +2071,80 @@ fn run_transfer_job(
     }
 
     Err(format!("{method} did not finish"))
+}
+
+fn run_transfer_job_with_progress(
+    client: &impl RcloneClient,
+    method: &str,
+    mut input: Value,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
+) -> Result<Value, String> {
+    if let Some(input) = input.as_object_mut() {
+        input.insert("_async".to_owned(), Value::Bool(true));
+        input.insert(
+            "_group".to_owned(),
+            Value::String(RCLONE_TRANSFER_GROUP.to_owned()),
+        );
+    }
+    let response = client.rpc(method, input)?;
+    let Some(job_id) = response.get("jobid").and_then(Value::as_i64) else {
+        return Ok(response);
+    };
+
+    for _ in 0..RCLONE_JOB_POLL_LIMIT {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = client.rpc("job/stop", json!({ "jobid": job_id }));
+            return Err("cancelled".to_owned());
+        }
+
+        let status = client.rpc("job/status", json!({ "jobid": job_id }))?;
+        let progress = transfer_progress_from_status(job_id, &status);
+        on_progress(progress.clone());
+        if !progress.done {
+            thread::sleep(RCLONE_JOB_POLL_INTERVAL);
+            continue;
+        }
+
+        if progress.success {
+            return Ok(status);
+        }
+
+        return Err(progress
+            .error
+            .unwrap_or_else(|| "rclone job failed".to_owned()));
+    }
+
+    Err(format!("{method} did not finish"))
+}
+
+fn transfer_progress_from_status(job_id: i64, status: &Value) -> RcloneTransferProgress {
+    RcloneTransferProgress {
+        job_id,
+        done: status
+            .get("finished")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        success: status
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        error: status
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.is_empty())
+            .map(str::to_owned),
+        bytes: status
+            .get("bytes")
+            .or_else(|| status.pointer("/progress/bytes"))
+            .or_else(|| status.pointer("/stats/bytes"))
+            .and_then(Value::as_u64),
+        total_bytes: status
+            .get("totalBytes")
+            .or_else(|| status.pointer("/progress/totalBytes"))
+            .or_else(|| status.pointer("/stats/totalBytes"))
+            .and_then(Value::as_u64),
+    }
 }
 
 #[cfg(test)]
@@ -2523,7 +2774,7 @@ mod tests {
         assert_eq!(calls[1].0, "mount/mount");
         assert_eq!(calls[1].1["fs"], "gdrive:");
         assert_eq!(calls[1].1["mountOpt"]["AllowOther"], true);
-        assert_eq!(calls[1].1["vfsOpt"]["ReadOnly"], true);
+        assert_eq!(calls[1].1["vfsOpt"]["ReadOnly"], false);
         assert_eq!(calls[1].1["vfsOpt"]["DirCacheTime"], "48h");
         assert_eq!(calls[1].1["vfsOpt"]["CacheMode"], "full");
         assert_eq!(calls[1].1["vfsOpt"]["CacheMaxSize"], "150G");
@@ -2712,6 +2963,27 @@ mod tests {
     }
 
     #[test]
+    fn transfer_empty_file_upload_uses_copyfile_from_temp_file() {
+        let path = virtual_root_for_remote("gdrive").join("empty.txt");
+        let mut responses = vec![Ok(json!({ "item": null })), Ok(json!({ "jobid": 8 }))];
+        responses.extend(queued_finished_job(8));
+        let client = FakeRcloneClient::with_responses(responses);
+
+        create_transfer_file_with_client(&client, &path, &[]).unwrap();
+
+        let calls = client.calls();
+        assert_eq!(calls[0].0, "operations/stat");
+        assert_eq!(calls[1].0, "operations/copyfile");
+        assert_eq!(calls[1].1["srcRemote"], "empty.txt");
+        assert_eq!(calls[1].1["dstFs"], "gdrive:");
+        assert_eq!(calls[1].1["dstRemote"], "empty.txt");
+        assert_eq!(calls[1].1["_async"], true);
+        assert_eq!(calls[1].1["_group"], RCLONE_TRANSFER_GROUP);
+        assert_eq!(calls[2].0, "job/status");
+        assert_eq!(calls[2].1["jobid"], 8);
+    }
+
+    #[test]
     fn transfer_rename_file_uses_async_movefile() {
         let source = virtual_root_for_remote("gdrive").join("old.txt");
         let target = virtual_root_for_remote("gdrive").join("new.txt");
@@ -2781,6 +3053,47 @@ mod tests {
         assert_eq!(calls[2].1["srcRemote"], "file.txt");
         assert_eq!(calls[2].1["dstRemote"], "Target/file.txt");
         assert_eq!(calls[2].1["_async"], true);
+    }
+
+    #[test]
+    fn transfer_copy_cancel_stops_rclone_job() {
+        let source = virtual_root_for_remote("gdrive").join("file.txt");
+        let destination = virtual_root_for_remote("gdrive").join("Target");
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "item": null })),
+            Ok(json!({ "item": { "IsDir": false } })),
+            Ok(json!({ "jobid": 9 })),
+            Ok(json!({})),
+        ]);
+        let cancel = AtomicBool::new(true);
+        let mut progress = Vec::new();
+
+        let error = copy_or_move_paths_to_transfer_destination_with_client_and_progress(
+            &client,
+            std::slice::from_ref(&source),
+            &destination,
+            RcloneTransferOperation::Copy,
+            &cancel,
+            &mut |snapshot| progress.push(snapshot),
+        )
+        .expect_err("cancelled transfer should stop the rclone job");
+
+        assert_eq!(error, "cancelled");
+        assert!(progress.is_empty());
+        let calls = client.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "operations/stat",
+                "operations/stat",
+                "operations/copyfile",
+                "job/stop"
+            ]
+        );
+        assert_eq!(calls[3].1["jobid"], 9);
     }
 
     #[test]

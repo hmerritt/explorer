@@ -456,7 +456,7 @@ impl Default for RcloneMountSettings {
             cache_dir: RcloneCacheDirSetting::Auto,
             dir_cache_time: "48h".to_owned(),
             fast_list: false,
-            read_only: true,
+            read_only: false,
             vfs_cache_max_age: "336h".to_owned(),
             vfs_cache_max_size: "150G".to_owned(),
             vfs_cache_mode: "full".to_owned(),
@@ -2201,7 +2201,7 @@ mod tests {
         assert_eq!(settings.cache_dir, RcloneCacheDirSetting::Auto);
         assert_eq!(settings.dir_cache_time, "48h");
         assert!(!settings.fast_list);
-        assert!(settings.read_only);
+        assert!(!settings.read_only);
         assert_eq!(settings.vfs_cache_max_age, "336h");
         assert_eq!(settings.vfs_cache_max_size, "150G");
         assert_eq!(settings.vfs_cache_mode, "full");
@@ -2627,7 +2627,7 @@ mod tests {
         assert_eq!(document["rclone"]["mount"]["cache_dir"], "auto");
         assert_eq!(document["rclone"]["mount"]["dir_cache_time"], "48h");
         assert_eq!(document["rclone"]["mount"]["fast_list"], false);
-        assert_eq!(document["rclone"]["mount"]["read_only"], true);
+        assert_eq!(document["rclone"]["mount"]["read_only"], false);
         assert_eq!(document["rclone"]["mount"]["vfs_cache_max_age"], "336h");
         assert_eq!(document["rclone"]["mount"]["vfs_cache_max_size"], "150G");
         assert_eq!(document["rclone"]["mount"]["vfs_cache_mode"], "full");

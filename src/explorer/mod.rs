@@ -12,6 +12,7 @@ mod dialog;
 mod directory_kind;
 mod drag_drop;
 mod entry;
+mod explorer_fs;
 mod file_commands;
 mod filesystem;
 mod folder_size;

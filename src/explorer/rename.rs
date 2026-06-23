@@ -485,7 +485,19 @@ impl ExplorerView {
     }
 
     pub(super) fn can_start_selected_rename(&self) -> bool {
-        self.selection.selected_indices.len() == 1
+        if self.selection.selected_indices.len() != 1 {
+            return false;
+        }
+        let Some(entry) = self
+            .selection
+            .selected_indices
+            .iter()
+            .next()
+            .and_then(|ix| self.entries.get(*ix))
+        else {
+            return false;
+        };
+        crate::explorer::explorer_fs::ExplorerFs::new(&self.rclone_settings).can_mutate(&entry.path)
     }
 
     pub(super) fn can_start_rename_from_name_click(
@@ -499,6 +511,10 @@ impl ExplorerView {
             && !modifiers.extend
             && self.selection.selected_indices.len() == 1
             && self.selection.selected_indices.contains(&ix)
+            && self.entries.get(ix).is_some_and(|entry| {
+                crate::explorer::explorer_fs::ExplorerFs::new(&self.rclone_settings)
+                    .can_mutate(&entry.path)
+            })
     }
 
     pub(super) fn cancel_pending_click_rename(&mut self) {
@@ -1269,6 +1285,10 @@ fn rename_path(
     if crate::explorer::rclone::is_transfer_path(original_path)
         || crate::explorer::rclone::is_transfer_path(target_path)
     {
+        let explorer_fs = crate::explorer::explorer_fs::ExplorerFs::new(_rclone_settings);
+        if !explorer_fs.can_mutate(original_path) || !explorer_fs.can_mutate(target_path) {
+            return Err(io::Error::other(explorer_fs.read_only_error()));
+        }
         if crate::explorer::rclone::is_transfer_path(original_path)
             && crate::explorer::rclone::is_transfer_path(target_path)
         {

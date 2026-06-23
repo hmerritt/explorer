@@ -60,6 +60,7 @@ pub(super) struct RecursiveSearchPath {
     file_name: OsString,
     normalized_name: String,
     depth: usize,
+    materialized_entry: Option<FileEntry>,
 }
 
 impl RecursiveSearchPath {
@@ -85,6 +86,7 @@ pub(super) struct RecursiveSearchOutput {
     pub(super) entries: Vec<FileEntry>,
 }
 
+#[cfg(any(test, feature = "benchmarks"))]
 pub(super) fn recursive_search_entries(
     generation: u64,
     root: PathBuf,
@@ -93,6 +95,28 @@ pub(super) fn recursive_search_entries(
     cached_search: Option<RecursiveSearchCache>,
     cancel: Arc<AtomicBool>,
     progress: Arc<RecursiveSearchProgress>,
+) -> RecursiveSearchOutput {
+    recursive_search_entries_with_rclone_settings(
+        generation,
+        root,
+        query,
+        visibility,
+        cached_search,
+        cancel,
+        progress,
+        &crate::settings::RcloneSettings::default(),
+    )
+}
+
+pub(super) fn recursive_search_entries_with_rclone_settings(
+    generation: u64,
+    root: PathBuf,
+    query: String,
+    visibility: impl Into<EntryVisibility>,
+    cached_search: Option<RecursiveSearchCache>,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<RecursiveSearchProgress>,
+    rclone_settings: &crate::settings::RcloneSettings,
 ) -> RecursiveSearchOutput {
     let visibility = visibility.into();
     let total_started = Instant::now();
@@ -109,11 +133,12 @@ pub(super) fn recursive_search_entries(
             let scan_started = Instant::now();
             progress.scanned_paths.store(0, Ordering::Relaxed);
             progress.scanning.store(true, Ordering::Relaxed);
-            let paths = scan_recursive_paths_with_progress(
+            let paths = scan_recursive_paths_with_progress_and_rclone_settings(
                 &root,
                 visibility,
                 cancel.clone(),
                 Some(&progress.scanned_paths),
+                rclone_settings,
             );
             progress.scanning.store(false, Ordering::Relaxed);
             recursive_search_timing!(
@@ -178,14 +203,42 @@ pub(super) fn scan_recursive_paths(
     scan_recursive_paths_with_progress(root, visibility.into(), cancel, None)
 }
 
+#[cfg(any(test, feature = "benchmarks"))]
 fn scan_recursive_paths_with_progress(
     root: &Path,
     visibility: EntryVisibility,
     cancel: Arc<AtomicBool>,
     progress: Option<&AtomicUsize>,
 ) -> Arc<Vec<RecursiveSearchPath>> {
+    scan_recursive_paths_with_progress_and_rclone_settings(
+        root,
+        visibility,
+        cancel,
+        progress,
+        &crate::settings::RcloneSettings::default(),
+    )
+}
+
+fn scan_recursive_paths_with_progress_and_rclone_settings(
+    root: &Path,
+    visibility: EntryVisibility,
+    cancel: Arc<AtomicBool>,
+    progress: Option<&AtomicUsize>,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> Arc<Vec<RecursiveSearchPath>> {
     if cancel.load(Ordering::Relaxed) {
         return Arc::new(Vec::new());
+    }
+
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(root) {
+        return scan_rclone_transfer_paths_with_progress(
+            root,
+            visibility,
+            cancel,
+            progress,
+            _rclone_settings,
+        );
     }
 
     let process_cancel = cancel.clone();
@@ -232,6 +285,7 @@ fn scan_recursive_paths_with_progress(
                 file_name: entry.file_name,
                 normalized_name: entry.client_state,
                 depth,
+                materialized_entry: None,
             });
             if let Some(progress) = progress {
                 progress.store(paths.len(), Ordering::Relaxed);
@@ -244,6 +298,85 @@ fn scan_recursive_paths_with_progress(
     }
 
     Arc::new(paths)
+}
+
+#[cfg(feature = "rclone")]
+fn scan_rclone_transfer_paths_with_progress(
+    root: &Path,
+    visibility: EntryVisibility,
+    cancel: Arc<AtomicBool>,
+    progress: Option<&AtomicUsize>,
+    rclone_settings: &crate::settings::RcloneSettings,
+) -> Arc<Vec<RecursiveSearchPath>> {
+    let mut paths = Vec::new();
+    scan_rclone_transfer_directory(
+        root,
+        visibility,
+        1,
+        &cancel,
+        progress,
+        rclone_settings,
+        &mut paths,
+    );
+    if cancel.load(Ordering::Relaxed) {
+        Arc::new(Vec::new())
+    } else {
+        Arc::new(paths)
+    }
+}
+
+#[cfg(feature = "rclone")]
+fn scan_rclone_transfer_directory(
+    directory: &Path,
+    visibility: EntryVisibility,
+    depth: usize,
+    cancel: &AtomicBool,
+    progress: Option<&AtomicUsize>,
+    rclone_settings: &crate::settings::RcloneSettings,
+    paths: &mut Vec<RecursiveSearchPath>,
+) {
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let Ok(entries) =
+        crate::explorer::rclone::load_transfer_entries(directory, visibility, rclone_settings)
+    else {
+        return;
+    };
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let file_name = entry
+            .path
+            .file_name()
+            .map(|name| name.to_owned())
+            .unwrap_or_default();
+        let normalized_name = file_name.to_string_lossy().to_lowercase();
+        let is_directory = entry.is_directory_like();
+        paths.push(RecursiveSearchPath {
+            parent_path: Arc::from(directory.to_path_buf().into_boxed_path()),
+            file_name,
+            normalized_name,
+            depth,
+            materialized_entry: Some(entry.clone()),
+        });
+        if let Some(progress) = progress {
+            progress.store(paths.len(), Ordering::Relaxed);
+        }
+        if is_directory {
+            scan_rclone_transfer_directory(
+                &entry.path,
+                visibility,
+                depth + 1,
+                cancel,
+                progress,
+                rclone_settings,
+                paths,
+            );
+        }
+    }
 }
 
 fn filter_recursive_paths(
@@ -319,6 +452,10 @@ fn materialize_recursive_entry(
 ) -> Option<FileEntry> {
     if cancel.load(Ordering::Relaxed) {
         return None;
+    }
+
+    if let Some(entry) = &recursive_path.materialized_entry {
+        return Some(entry.clone());
     }
 
     let path = recursive_path.path();
@@ -472,6 +609,7 @@ mod tests {
                         normalized_name: file_name.to_string_lossy().to_lowercase(),
                         file_name,
                         depth,
+                        materialized_entry: None,
                     }
                 })
                 .collect::<Vec<_>>(),

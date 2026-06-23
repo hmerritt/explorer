@@ -2,6 +2,7 @@
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 - UI for files that are uploading
+- When connecting/mounting rclone drive for the first time, the breadcrumb is the drive letter instead of the friendly name (if user presses drive again, it will update). It should always be the friendly name.
 
 ## 1
 
@@ -9,6 +10,7 @@
 - Support windows %% shortcuts, like %APPDATA%
 - Image + video hover popup box should have border-radius of 15px, overflow hidden
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
+- Settings for sidebar improvement: sidebar.items should not have "kind" and "path", it should only be an array of strings. kinds get matched based on the path. Path should also use view.address_slash
 
 ## 2
 

@@ -9,6 +9,7 @@ repository = "https://github.com/hmerritt/explorer"
 license = "MIT"
 
 [features]
+default = ["rclone"]
 benchmarks = []
 rclone = ["dep:librclone"]
 

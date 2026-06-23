@@ -12,12 +12,16 @@ use gpui::{
 
 use crate::explorer::{
     entry::FileEntry,
+    explorer_fs::ExplorerFs,
     filesystem::{
         paths_are_on_same_volume, prepare_copy_paths_to_directory_with_copy_names,
         prepare_create_links_to_directory, prepare_move_paths_to_directory,
     },
     view::ExplorerView,
 };
+
+#[cfg(feature = "rclone")]
+use crate::explorer::filesystem::prepare_rclone_transfer_paths_to_directory;
 
 #[cfg(test)]
 use crate::explorer::filesystem::{
@@ -327,6 +331,7 @@ impl ExplorerView {
             &destination_item,
             &resolved_destination,
             modifiers,
+            &self.rclone_settings,
         )
         .resolved
         .cursor_style()
@@ -347,6 +352,7 @@ impl ExplorerView {
             &destination_item,
             &resolved_destination,
             modifiers,
+            &self.rclone_settings,
         )
         .resolved
         .operation()
@@ -379,6 +385,7 @@ impl ExplorerView {
             &destination_item,
             &resolved_destination,
             modifiers,
+            &self.rclone_settings,
         );
         let operation = resolution.resolved.operation()?;
 
@@ -444,6 +451,7 @@ impl ExplorerView {
             &resolved_destination,
             dragged,
             modifiers,
+            &self.rclone_settings,
         );
         if !validity.valid {
             return;
@@ -468,6 +476,7 @@ impl ExplorerView {
             &resolved_destination,
             dragged,
             modifiers,
+            &self.rclone_settings,
         );
         if !validity.valid {
             return;
@@ -500,6 +509,7 @@ impl ExplorerView {
             &resolved_destination,
             &paths,
             modifiers,
+            &self.rclone_settings,
         );
         if !validity.valid {
             return;
@@ -527,6 +537,7 @@ impl ExplorerView {
             &resolved_destination,
             &paths,
             modifiers,
+            &self.rclone_settings,
         );
         if !validity.valid {
             return;
@@ -564,21 +575,68 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        match resolve_drop_operation_for_paths(modifiers, destination.is_dir(), paths, destination)
-        {
+        let valid_target = ExplorerFs::new(&self.rclone_settings)
+            .is_dir(destination)
+            .unwrap_or(false);
+        match resolve_drop_operation_for_paths(modifiers, valid_target, paths, destination) {
             ResolvedDrop::Move => {
+                #[cfg(feature = "rclone")]
+                if crate::explorer::rclone::is_transfer_path(destination)
+                    || paths
+                        .iter()
+                        .any(|path| crate::explorer::rclone::is_transfer_path(path))
+                {
+                    self.handle_prepared_file_command_result_and_open_dialog(
+                        prepare_rclone_transfer_paths_to_directory(
+                            paths,
+                            destination,
+                            crate::explorer::rclone::RcloneTransferOperation::Move,
+                            &self.rclone_settings,
+                        ),
+                        cx,
+                    );
+                    return;
+                }
                 self.handle_prepared_file_command_result_and_open_dialog(
                     prepare_move_paths_to_directory(paths, destination),
                     cx,
                 );
             }
             ResolvedDrop::Copy => {
+                #[cfg(feature = "rclone")]
+                if crate::explorer::rclone::is_transfer_path(destination)
+                    || paths
+                        .iter()
+                        .any(|path| crate::explorer::rclone::is_transfer_path(path))
+                {
+                    self.handle_prepared_file_command_result_and_open_dialog(
+                        prepare_rclone_transfer_paths_to_directory(
+                            paths,
+                            destination,
+                            crate::explorer::rclone::RcloneTransferOperation::Copy,
+                            &self.rclone_settings,
+                        ),
+                        cx,
+                    );
+                    return;
+                }
                 self.handle_prepared_file_command_result_and_open_dialog(
                     prepare_copy_paths_to_directory_with_copy_names(paths, destination),
                     cx,
                 );
             }
             ResolvedDrop::Link => {
+                #[cfg(feature = "rclone")]
+                if crate::explorer::rclone::is_transfer_path(destination)
+                    || paths
+                        .iter()
+                        .any(|path| crate::explorer::rclone::is_transfer_path(path))
+                {
+                    self.set_error_notice(
+                        "Cannot create shortcuts in rclone transfer mode.".to_owned(),
+                    );
+                    return;
+                }
                 self.handle_prepared_file_command_result_and_open_dialog(
                     prepare_create_links_to_directory(paths, destination),
                     cx,
@@ -627,6 +685,7 @@ fn resolve_dragged_value_drop(
     destination_item: &Path,
     destination: &Path,
     modifiers: Modifiers,
+    rclone_settings: &crate::settings::RcloneSettings,
 ) -> DraggedValueDropResolution {
     if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
         let validity = internal_drop_target_validity(
@@ -636,6 +695,7 @@ fn resolve_dragged_value_drop(
             destination,
             dragged,
             modifiers,
+            rclone_settings,
         );
         return DraggedValueDropResolution {
             resolved: resolve_drop_operation_for_paths(
@@ -656,6 +716,7 @@ fn resolve_dragged_value_drop(
             destination,
             &paths,
             modifiers,
+            rclone_settings,
         );
         return DraggedValueDropResolution {
             resolved: resolve_drop_operation_for_paths(
@@ -686,6 +747,15 @@ fn normalize_external_drop_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 fn drop_should_copy_by_default(source_paths: &[PathBuf], destination: &Path) -> bool {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(destination)
+        || source_paths
+            .iter()
+            .any(|path| crate::explorer::rclone::is_transfer_path(path))
+    {
+        return true;
+    }
+
     !source_paths.is_empty()
         && source_paths
             .iter()
@@ -699,8 +769,9 @@ fn internal_drop_target_validity(
     resolved_destination: &Path,
     dragged: &DraggedEntries,
     modifiers: Modifiers,
+    rclone_settings: &crate::settings::RcloneSettings,
 ) -> DropTargetValidity {
-    if !resolved_destination.is_dir()
+    if !drop_destination_is_dir(resolved_destination, rclone_settings)
         || dragged.paths.iter().any(|path| path == destination_item)
         || destination_is_dragged_directory_or_descendant(resolved_destination, &dragged.paths)
     {
@@ -725,8 +796,9 @@ fn external_drop_target_validity(
     resolved_destination: &Path,
     paths: &[PathBuf],
     modifiers: Modifiers,
+    rclone_settings: &crate::settings::RcloneSettings,
 ) -> DropTargetValidity {
-    if !resolved_destination.is_dir()
+    if !drop_destination_is_dir(resolved_destination, rclone_settings)
         || paths.is_empty()
         || destination_is_dragged_directory_or_descendant(resolved_destination, paths)
     {
@@ -743,6 +815,12 @@ fn external_drop_target_validity(
         paths,
     );
     drop_target_validity_for_same_source_destination(same_source_destination, modifiers)
+}
+
+fn drop_destination_is_dir(path: &Path, rclone_settings: &crate::settings::RcloneSettings) -> bool {
+    ExplorerFs::new(rclone_settings)
+        .is_dir(path)
+        .unwrap_or(false)
 }
 
 fn drop_target_validity_for_same_source_destination(

@@ -10,9 +10,10 @@ use notify::{RecursiveMode, Watcher};
 use crate::explorer::view::ExplorerView;
 
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_millis(150);
+const POLL_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(super) struct DirectoryWatcher {
-    _watcher: notify::RecommendedWatcher,
+    _watcher: Option<notify::RecommendedWatcher>,
     _task: Task<()>,
 }
 
@@ -31,7 +32,31 @@ impl DirectoryWatcher {
 
         let task = spawn_watcher_task(path.clone(), rx, cx);
         Some(Self {
-            _watcher: watcher,
+            _watcher: Some(watcher),
+            _task: task,
+        })
+    }
+
+    pub(super) fn start_polling(path: PathBuf, cx: &mut Context<ExplorerView>) -> Option<Self> {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL_REFRESH_INTERVAL).await;
+                let should_continue = this
+                    .update(cx, |explorer, cx| {
+                        if explorer.path() == path {
+                            explorer.reload_async_with_entry_metadata_resolution(cx);
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+
+                if !should_continue {
+                    break;
+                }
+            }
+        });
+        Some(Self {
+            _watcher: None,
             _task: task,
         })
     }
