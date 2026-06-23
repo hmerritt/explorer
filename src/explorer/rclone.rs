@@ -286,7 +286,7 @@ pub(super) fn connect_remote(
 ) -> Result<RcloneConnection, String> {
     prepare_librclone(settings)?;
     Ok(
-        connect_remote_with_client(&LibrcloneClient, remote).unwrap_or_else(|remote| {
+        connect_remote_with_client(&LibrcloneClient, remote, settings).unwrap_or_else(|remote| {
             RcloneConnection::TransferMode(TransferRemote {
                 remote: remote.identity(),
             })
@@ -311,6 +311,7 @@ pub(super) fn remote_for_virtual_path(
 pub(super) fn connect_remote_with_client(
     client: &impl RcloneClient,
     remote: RcloneRemote,
+    settings: &RcloneSettings,
 ) -> Result<RcloneConnection, RcloneRemote> {
     let mount_types = match mount_types(client) {
         Ok(types) if !types.is_empty() => types,
@@ -331,10 +332,36 @@ pub(super) fn connect_remote_with_client(
         }));
     }
 
+    let mut config = json!({
+        "BufferSize": settings.mount.buffer_size,
+    });
+    if let Some(cache_dir) = settings.mount.cache_dir.configured_path()
+        && let Some(config) = config.as_object_mut()
+    {
+        config.insert(
+            "CacheDir".to_owned(),
+            Value::String(cache_dir.to_string_lossy().into_owned()),
+        );
+    }
+
     let input = json!({
+        "_config": config,
         "fs": rclone_fs_for_remote(&remote.name),
+        "mountOpt": {
+            "AllowOther": settings.mount.allow_other,
+        },
         "mountPoint": requested_mount_root.to_string_lossy(),
         "mountType": preferred_mount_type(&mount_types),
+        "vfsOpt": {
+            "CacheMaxAge": settings.mount.vfs_cache_max_age,
+            "CacheMaxSize": settings.mount.vfs_cache_max_size,
+            "CacheMode": settings.mount.vfs_cache_mode,
+            "ChunkSize": settings.mount.vfs_read_chunk_size,
+            "ChunkSizeLimit": settings.mount.vfs_read_chunk_size_limit,
+            "DirCacheTime": settings.mount.dir_cache_time,
+            "ReadAhead": settings.mount.vfs_read_ahead,
+            "ReadOnly": settings.mount.read_only,
+        },
     });
     let mounted = client.rpc("mount/mount", input);
     let Ok(response) = mounted else {
@@ -1189,6 +1216,7 @@ fn run_transfer_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::RcloneCacheDirSetting;
     use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Default)]
@@ -1345,8 +1373,10 @@ mod tests {
             Ok(json!({ "mountPoint": "/tmp/mounted-gdrive" })),
         ]);
         let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        let settings = RcloneSettings::default();
 
-        let connection = connect_remote_with_client(&client, remote).expect("connect remote");
+        let connection =
+            connect_remote_with_client(&client, remote, &settings).expect("connect remote");
 
         assert!(matches!(
             connection,
@@ -1357,6 +1387,34 @@ mod tests {
         assert_eq!(calls[0].0, "mount/types");
         assert_eq!(calls[1].0, "mount/mount");
         assert_eq!(calls[1].1["fs"], "gdrive:");
+        assert_eq!(calls[1].1["mountOpt"]["AllowOther"], true);
+        assert_eq!(calls[1].1["vfsOpt"]["ReadOnly"], true);
+        assert_eq!(calls[1].1["vfsOpt"]["DirCacheTime"], "48h");
+        assert_eq!(calls[1].1["vfsOpt"]["CacheMode"], "full");
+        assert_eq!(calls[1].1["vfsOpt"]["CacheMaxSize"], "150G");
+        assert_eq!(calls[1].1["vfsOpt"]["CacheMaxAge"], "336h");
+        assert_eq!(calls[1].1["vfsOpt"]["ReadAhead"], "256M");
+        assert_eq!(calls[1].1["vfsOpt"]["ChunkSize"], "32M");
+        assert_eq!(calls[1].1["vfsOpt"]["ChunkSizeLimit"], "2G");
+        assert_eq!(calls[1].1["_config"]["BufferSize"], "128M");
+        assert!(calls[1].1["_config"].get("CacheDir").is_none());
+    }
+
+    #[test]
+    fn configured_mount_cache_dir_sets_config_override() {
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "mountTypes": ["mount"] })),
+            Ok(json!({ "mountPoint": "/tmp/mounted-gdrive" })),
+        ]);
+        let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        let mut settings = RcloneSettings::default();
+        settings.mount.cache_dir = RcloneCacheDirSetting::Path(PathBuf::from("~/rclone-cache"));
+
+        let _ = connect_remote_with_client(&client, remote, &settings).expect("connect remote");
+
+        let calls = client.calls();
+        assert_eq!(calls[1].0, "mount/mount");
+        assert_eq!(calls[1].1["_config"]["CacheDir"], "~/rclone-cache");
     }
 
     #[test]
@@ -1364,7 +1422,8 @@ mod tests {
         let client = FakeRcloneClient::with_responses(vec![Err("missing fuse".to_owned())]);
         let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
 
-        let connection = connect_remote_with_client(&client, remote).expect("connect remote");
+        let connection = connect_remote_with_client(&client, remote, &RcloneSettings::default())
+            .expect("connect remote");
 
         assert!(matches!(connection, RcloneConnection::TransferMode(_)));
     }
@@ -1377,7 +1436,8 @@ mod tests {
         ]);
         let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
 
-        let connection = connect_remote_with_client(&client, remote).expect("connect remote");
+        let connection = connect_remote_with_client(&client, remote, &RcloneSettings::default())
+            .expect("connect remote");
 
         assert!(matches!(connection, RcloneConnection::TransferMode(_)));
     }

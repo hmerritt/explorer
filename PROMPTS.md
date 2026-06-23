@@ -6,6 +6,7 @@
 
 - Network drives (rclone https://rclone.org/ builtin)
 - Image + video hover popup box should have border-radius of 15px, overflow hidden
+- Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 
 ## 2
 
