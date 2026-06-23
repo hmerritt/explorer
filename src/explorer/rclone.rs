@@ -92,6 +92,13 @@ pub(super) struct RclonePath {
     pub(super) relative_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RcloneMountedDisplayPath {
+    pub(super) display_name: String,
+    pub(super) mount_root: PathBuf,
+    pub(super) relative_path: PathBuf,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct RcloneUploadSnapshot {
     pub(super) entries: BTreeMap<PathBuf, RcloneUploadState>,
@@ -672,11 +679,28 @@ pub(super) fn managed_mounted_path(path: &Path) -> Option<RclonePath> {
     managed_mounted_path_with_manifest(path, &load_mount_manifest())
 }
 
+pub(super) fn mounted_display_path(path: &Path) -> Option<RcloneMountedDisplayPath> {
+    mounted_display_path_with_manifest(path, &load_mount_manifest())
+}
+
 fn managed_mounted_path_with_manifest(
     path: &Path,
     manifest: &RcloneMountManifest,
 ) -> Option<RclonePath> {
     upload_context_with_manifest(path, manifest).map(|context| context.rclone_path)
+}
+
+fn mounted_display_path_with_manifest(
+    path: &Path,
+    manifest: &RcloneMountManifest,
+) -> Option<RcloneMountedDisplayPath> {
+    let context = upload_context_with_manifest(path, manifest)?;
+    let remote_name = context.rclone_path.remote_name;
+    Some(RcloneMountedDisplayPath {
+        display_name: display_name_for_remote_name(&remote_name),
+        mount_root: context.mount_root,
+        relative_path: context.rclone_path.relative_path,
+    })
 }
 
 fn upload_context_with_manifest(
@@ -687,7 +711,7 @@ fn upload_context_with_manifest(
         .mounts
         .iter()
         .filter_map(|(remote_name, mount_root)| {
-            let relative_path = path.strip_prefix(mount_root).ok()?;
+            let relative_path = path_relative_to_mount_root(path, mount_root)?;
             Some((
                 mount_root.components().count(),
                 RcloneUploadContext {
@@ -701,6 +725,19 @@ fn upload_context_with_manifest(
         })
         .max_by_key(|(component_count, _)| *component_count)
         .map(|(_, context)| context)
+}
+
+fn path_relative_to_mount_root(path: &Path, mount_root: &Path) -> Option<PathBuf> {
+    if !path_is_same_or_descendant(path, mount_root) {
+        return None;
+    }
+
+    Some(
+        path.components()
+            .skip(mount_root.components().count())
+            .filter(|component| !matches!(component, Component::Prefix(_) | Component::RootDir))
+            .collect(),
+    )
 }
 
 fn path_is_managed_mount_with_manifest(path: &Path, manifest: &RcloneMountManifest) -> bool {
@@ -2279,6 +2316,51 @@ mod tests {
 
         assert_eq!(parsed.remote_name, "gdrive");
         assert_eq!(remote_path_string(&parsed.relative_path), "Folder/File.txt");
+    }
+
+    #[test]
+    fn mounted_display_path_uses_manifest_remote_name_and_mount_root() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\")
+        } else {
+            PathBuf::from("/tmp/explorer-rclone/gdrive")
+        };
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let path = mount_root.join("Folder").join("File.txt");
+
+        let display_path =
+            mounted_display_path_with_manifest(&path, &manifest).expect("mounted display path");
+
+        assert_eq!(display_path.display_name, "gdrive");
+        assert_eq!(display_path.mount_root, mount_root);
+        assert_eq!(
+            remote_path_string(&display_path.relative_path),
+            "Folder/File.txt"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mounted_display_path_matches_windows_mount_roots_case_insensitively() {
+        let mount_root = PathBuf::from(r"X:\Explorer\Rclone\gdrive");
+        let mut manifest = RcloneMountManifest::default();
+        manifest
+            .mounts
+            .insert("gdrive".to_owned(), mount_root.clone());
+        let path = PathBuf::from(r"x:\explorer\rclone\gdrive\Folder\File.txt");
+
+        let display_path =
+            mounted_display_path_with_manifest(&path, &manifest).expect("mounted display path");
+
+        assert_eq!(display_path.display_name, "gdrive");
+        assert_eq!(display_path.mount_root, mount_root);
+        assert_eq!(
+            remote_path_string(&display_path.relative_path),
+            "Folder/File.txt"
+        );
     }
 
     #[test]
