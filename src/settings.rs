@@ -292,6 +292,7 @@ pub struct RcloneMountSettings {
     pub buffer_size: String,
     pub cache_dir: RcloneCacheDirSetting,
     pub dir_cache_time: String,
+    pub fast_list: bool,
     pub read_only: bool,
     pub vfs_cache_max_age: String,
     pub vfs_cache_max_size: String,
@@ -450,6 +451,7 @@ impl Default for RcloneMountSettings {
             buffer_size: "128M".to_owned(),
             cache_dir: RcloneCacheDirSetting::Auto,
             dir_cache_time: "48h".to_owned(),
+            fast_list: false,
             read_only: true,
             vfs_cache_max_age: "336h".to_owned(),
             vfs_cache_max_size: "150G".to_owned(),
@@ -2192,6 +2194,7 @@ mod tests {
         assert_eq!(settings.buffer_size, "128M");
         assert_eq!(settings.cache_dir, RcloneCacheDirSetting::Auto);
         assert_eq!(settings.dir_cache_time, "48h");
+        assert!(!settings.fast_list);
         assert!(settings.read_only);
         assert_eq!(settings.vfs_cache_max_age, "336h");
         assert_eq!(settings.vfs_cache_max_size, "150G");
@@ -2598,6 +2601,7 @@ mod tests {
         assert_eq!(document["rclone"]["mount"]["buffer_size"], "128M");
         assert_eq!(document["rclone"]["mount"]["cache_dir"], "auto");
         assert_eq!(document["rclone"]["mount"]["dir_cache_time"], "48h");
+        assert_eq!(document["rclone"]["mount"]["fast_list"], false);
         assert_eq!(document["rclone"]["mount"]["read_only"], true);
         assert_eq!(document["rclone"]["mount"]["vfs_cache_max_age"], "336h");
         assert_eq!(document["rclone"]["mount"]["vfs_cache_max_size"], "150G");

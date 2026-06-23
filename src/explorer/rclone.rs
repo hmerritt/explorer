@@ -206,9 +206,9 @@ pub(super) fn try_begin_remote_connection(remote_name: &str) -> Option<RcloneCon
     let mut connecting = connecting_remotes()
         .lock()
         .expect("rclone connecting remotes mutex poisoned");
-    connecting.insert(remote_name.clone()).then_some(RcloneConnectPermit {
-        remote_name,
-    })
+    connecting
+        .insert(remote_name.clone())
+        .then_some(RcloneConnectPermit { remote_name })
 }
 
 pub(super) fn remote_is_connecting(remote_name: &str) -> bool {
@@ -439,6 +439,7 @@ fn connect_remote_with_client_and_mount_root(
 
     let mut config = json!({
         "BufferSize": settings.mount.buffer_size,
+        "UseListR": settings.mount.fast_list,
     });
     if let Some(cache_dir) = settings.mount.cache_dir.configured_path()
         && let Some(config) = config.as_object_mut()
@@ -2057,7 +2058,25 @@ mod tests {
         assert_eq!(calls[1].1["vfsOpt"]["ChunkSize"], "32M");
         assert_eq!(calls[1].1["vfsOpt"]["ChunkSizeLimit"], "2G");
         assert_eq!(calls[1].1["_config"]["BufferSize"], "128M");
+        assert_eq!(calls[1].1["_config"]["UseListR"], false);
         assert!(calls[1].1["_config"].get("CacheDir").is_none());
+    }
+
+    #[test]
+    fn configured_fast_list_sets_config_override() {
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "mountTypes": ["mount"] })),
+            Ok(json!({ "mountPoint": "/tmp/mounted-gdrive" })),
+        ]);
+        let remote = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
+        let mut settings = RcloneSettings::default();
+        settings.mount.fast_list = true;
+
+        let _ = connect_remote_with_client(&client, remote, &settings).expect("connect remote");
+
+        let calls = client.calls();
+        assert_eq!(calls[1].0, "mount/mount");
+        assert_eq!(calls[1].1["_config"]["UseListR"], true);
     }
 
     #[test]

@@ -2,9 +2,6 @@
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 - UI for files that are uploading
-- Change rclone drive icons to:
-    - Disconnected / unmounted: assets/icons/devices/drives/networkdelete.png
-    - Connected / mounted: assets/icons/devices/drives/network.png
 - Image + video hover popup box should have border-radius of 15px, overflow hidden
 
 ## 1

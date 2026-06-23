@@ -227,7 +227,8 @@ impl ExplorerView {
             self.set_info_notice(format!("Connecting to {}...", display_name));
             return;
         }
-        let Some(permit) = crate::explorer::rclone::try_begin_remote_connection(&parsed.remote_name)
+        let Some(permit) =
+            crate::explorer::rclone::try_begin_remote_connection(&parsed.remote_name)
         else {
             self.set_info_notice(format!("Connecting to {}...", display_name));
             return;
@@ -1441,9 +1442,7 @@ mod tests {
 
     #[cfg(feature = "rclone")]
     #[gpui::test]
-    fn duplicate_rclone_navigation_is_noop_across_tabs(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn duplicate_rclone_navigation_is_noop_across_tabs(cx: &mut gpui::TestAppContext) {
         crate::explorer::rclone::reset_connecting_remotes_for_test();
         let first = cx.update(|cx| cx.new(|_| rclone_disabled_view(PathBuf::from("first"))));
         let second = cx.update(|cx| cx.new(|_| rclone_disabled_view(PathBuf::from("second"))));

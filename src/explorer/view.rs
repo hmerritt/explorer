@@ -818,22 +818,22 @@ impl ExplorerView {
 
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
-            let result =
-                cx.background_executor()
-                    .spawn({
-                        let path = path.clone();
-                        async move {
-                            let entries =
-                                load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
-                            let sidebar_sections = rebuild_sidebar
-                                .then(|| sidebar_sections(&sidebar_settings, &rclone_settings));
-                            DirectoryLoadResult {
-                                entries,
-                                sidebar_sections,
-                            }
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let entries =
+                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
+                        let sidebar_sections = rebuild_sidebar
+                            .then(|| sidebar_sections(&sidebar_settings, &rclone_settings));
+                        DirectoryLoadResult {
+                            entries,
+                            sidebar_sections,
                         }
-                    })
-                    .await;
+                    }
+                })
+                .await;
             crate::debug_options::log_nav_timing(
                 load_started.elapsed(),
                 format_args!(
@@ -2798,9 +2798,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn async_directory_load_result_applies_rebuilt_sidebar_sections(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn async_directory_load_result_applies_rebuilt_sidebar_sections(cx: &mut gpui::TestAppContext) {
         let temp = crate::explorer::test_support::TempDir::new();
         let path = temp.path().to_path_buf();
         let (view, cx) = cx.add_window_view({
@@ -2817,12 +2815,14 @@ mod tests {
                 view.path = path.clone();
                 view.directory_load_generation = 3;
                 let mut rebuilt_sidebar = SidebarSections::default();
-                rebuilt_sidebar.drives.push(crate::explorer::sidebar::SidebarItem {
-                    label: "Drive".to_owned(),
-                    path: PathBuf::from("/drive"),
-                    kind: crate::explorer::sidebar::SidebarItemKind::Drive,
-                    configured_index: None,
-                });
+                rebuilt_sidebar
+                    .drives
+                    .push(crate::explorer::sidebar::SidebarItem {
+                        label: "Drive".to_owned(),
+                        path: PathBuf::from("/drive"),
+                        kind: crate::explorer::sidebar::SidebarItemKind::Drive,
+                        configured_index: None,
+                    });
                 let state = DirectoryLoadState {
                     path: path.clone(),
                     generation: 3,

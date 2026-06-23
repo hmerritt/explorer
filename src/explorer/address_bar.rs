@@ -1271,7 +1271,10 @@ mod tests {
     use std::fs;
 
     #[cfg(feature = "rclone")]
-    fn rclone_disabled_view(path: PathBuf, focus_handle: Option<gpui::FocusHandle>) -> ExplorerView {
+    fn rclone_disabled_view(
+        path: PathBuf,
+        focus_handle: Option<gpui::FocusHandle>,
+    ) -> ExplorerView {
         let mut settings = ExplorerSettings::default();
         settings.rclone.enabled = false;
         ExplorerView::new_with_settings_for_test(path, focus_handle, &settings)
@@ -1340,15 +1343,15 @@ mod tests {
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
 
         assert!(folder_suggestions_for_input("", &path, true).is_empty());
-        assert!(folder_suggestions_for_input(&path.display().to_string(), Path::new("/"), true)
-            .is_empty());
+        assert!(
+            folder_suggestions_for_input(&path.display().to_string(), Path::new("/"), true)
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "rclone")]
     #[gpui::test]
-    fn address_commit_to_connecting_rclone_remote_is_noop_with_notice(
-        cx: &mut TestAppContext,
-    ) {
+    fn address_commit_to_connecting_rclone_remote_is_noop_with_notice(cx: &mut TestAppContext) {
         crate::explorer::rclone::reset_connecting_remotes_for_test();
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
         let first_path = PathBuf::from("first");
@@ -1378,7 +1381,10 @@ mod tests {
                 assert!(view.rclone_connect_task.is_none());
                 assert_eq!(view.path, second_path);
                 let notice = view.operation_notice.as_ref().expect("connecting notice");
-                assert_eq!(notice.kind, crate::explorer::view::OperationNoticeKind::Info);
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Info
+                );
                 assert_eq!(notice.text, "Connecting to gdrive...");
             });
         });
