@@ -1267,7 +1267,7 @@ mod tests {
         view::ExplorerView,
     };
     use crate::settings::{AddressSlash, ExplorerSettings};
-    use gpui::{AppContext, ClipboardItem, Modifiers, MouseButton, TestAppContext};
+    use gpui::{ClipboardItem, Modifiers, MouseButton, TestAppContext};
     use std::fs;
 
     #[cfg(feature = "rclone")]
@@ -1277,7 +1277,7 @@ mod tests {
     ) -> ExplorerView {
         let mut settings = ExplorerSettings::default();
         settings.rclone.enabled = false;
-        ExplorerView::new_with_settings_for_test(path, focus_handle, &settings)
+        ExplorerView::new_unloaded_with_settings_for_test(path, focus_handle, &settings)
     }
 
     #[test]
@@ -1351,26 +1351,23 @@ mod tests {
 
     #[cfg(feature = "rclone")]
     #[gpui::test]
-    fn address_commit_to_connecting_rclone_remote_is_noop_with_notice(cx: &mut TestAppContext) {
+    fn address_commit_to_connecting_rclone_remote_is_silent_noop(cx: &mut TestAppContext) {
+        let _guard = crate::explorer::rclone::connecting_remotes_test_guard();
         crate::explorer::rclone::reset_connecting_remotes_for_test();
+        let permit =
+            crate::explorer::rclone::try_begin_remote_connection("gdrive").expect("permit");
         let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
-        let first_path = PathBuf::from("first");
         let second_path = PathBuf::from("second");
-        let (first, cx) = cx.add_window_view({
-            let first_path = first_path.clone();
+        let (second, cx) = cx.add_window_view({
+            let second_path = second_path.clone();
             move |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                rclone_disabled_view(first_path, Some(focus_handle))
+                rclone_disabled_view(second_path, Some(focus_handle))
             }
         });
-        let second =
-            cx.update(|_, app| app.new(|_| rclone_disabled_view(second_path.clone(), None)));
 
         cx.update(|window, app| {
-            first.update(app, |view, cx| {
-                view.navigate_to_directory_with_watcher(path.clone(), HistoryMode::Record, cx);
-            });
             second.update(app, |view, cx| {
                 view.active_address_bar = Some(AddressBarState::new(
                     path.display().to_string(),
@@ -1380,14 +1377,12 @@ mod tests {
                 assert!(view.commit_address_bar_edit(window, cx));
                 assert!(view.rclone_connect_task.is_none());
                 assert_eq!(view.path, second_path);
-                let notice = view.operation_notice.as_ref().expect("connecting notice");
-                assert_eq!(
-                    notice.kind,
-                    crate::explorer::view::OperationNoticeKind::Info
-                );
-                assert_eq!(notice.text, "Connecting to gdrive...");
+                assert!(view.back_stack.is_empty());
+                assert!(view.forward_stack.is_empty());
+                assert!(view.operation_notice.is_none());
             });
         });
+        drop(permit);
         crate::explorer::rclone::reset_connecting_remotes_for_test();
     }
 

@@ -16,7 +16,9 @@ use gpui::{
     UniformListScrollHandle, point, px,
 };
 
-use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
+use crate::explorer::sidebar::{
+    SidebarSections, sidebar_sections, sidebar_sections_without_rclone,
+};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -343,6 +345,15 @@ impl ExplorerView {
     }
 
     #[cfg(test)]
+    pub(super) fn new_unloaded_with_settings_for_test(
+        initial_path: PathBuf,
+        focus_handle: Option<FocusHandle>,
+        settings: &ExplorerSettings,
+    ) -> Self {
+        Self::new_unloaded_inner_with_settings(initial_path, focus_handle, settings)
+    }
+
+    #[cfg(test)]
     fn new_inner_with_settings(
         initial_path: PathBuf,
         focus_handle: Option<FocusHandle>,
@@ -438,7 +449,7 @@ impl ExplorerView {
             directory_watcher: None,
             rclone_settings: settings.rclone.clone(),
             sidebar_settings: settings.sidebar.clone(),
-            sidebar_sections: SidebarSections::default(),
+            sidebar_sections: sidebar_sections_without_rclone(&settings.sidebar),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
             folder_size_generation: 0,
@@ -796,6 +807,9 @@ impl ExplorerView {
             preserve_selection: mode.preserve_selection,
             rebuild_sidebar: false,
         });
+        if mode.rebuild_sidebar {
+            self.rebuild_fast_sidebar_sections();
+        }
         let state = DirectoryLoadState {
             path: self.path.clone(),
             generation,
@@ -851,6 +865,19 @@ impl ExplorerView {
             });
         });
         self.directory_load_task = Some(task);
+    }
+
+    fn rebuild_fast_sidebar_sections(&mut self) {
+        #[cfg(feature = "rclone")]
+        {
+            let mut sections = sidebar_sections_without_rclone(&self.sidebar_settings);
+            sections.rclone_remotes = self.sidebar_sections.rclone_remotes.clone();
+            self.sidebar_sections = sections;
+        }
+        #[cfg(not(feature = "rclone"))]
+        {
+            self.sidebar_sections = sidebar_sections_without_rclone(&self.sidebar_settings);
+        }
     }
 
     fn apply_directory_load_result(

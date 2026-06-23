@@ -35,17 +35,25 @@ pub(super) fn sidebar_sections(
     settings: &SidebarSettings,
     rclone_settings: &RcloneSettings,
 ) -> SidebarSections {
-    sidebar_sections_from_roots(
-        settings,
-        rclone_settings,
-        local_drive_roots(),
-        wsl_drive_roots(),
-    )
+    #[cfg(feature = "rclone")]
+    {
+        let mut sections = sidebar_sections_without_rclone(settings);
+        sections.rclone_remotes = rclone_remote_items(rclone_settings);
+        sections
+    }
+    #[cfg(not(feature = "rclone"))]
+    {
+        let _ = rclone_settings;
+        sidebar_sections_without_rclone(settings)
+    }
 }
 
-fn sidebar_sections_from_roots(
+pub(super) fn sidebar_sections_without_rclone(settings: &SidebarSettings) -> SidebarSections {
+    sidebar_sections_without_rclone_from_roots(settings, local_drive_roots(), wsl_drive_roots())
+}
+
+fn sidebar_sections_without_rclone_from_roots(
     settings: &SidebarSettings,
-    _rclone_settings: &RcloneSettings,
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
@@ -61,8 +69,27 @@ fn sidebar_sections_from_roots(
             wsl_drive_items_from_roots(wsl_roots)
         },
         #[cfg(feature = "rclone")]
-        rclone_remotes: rclone_remote_items(_rclone_settings),
+        rclone_remotes: Vec::new(),
     }
+}
+
+#[cfg(test)]
+fn sidebar_sections_from_roots(
+    settings: &SidebarSettings,
+    rclone_settings: &RcloneSettings,
+    drive_roots: Vec<PathBuf>,
+    wsl_roots: Vec<PathBuf>,
+) -> SidebarSections {
+    let mut sections = sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots);
+    #[cfg(feature = "rclone")]
+    {
+        sections.rclone_remotes = rclone_remote_items(rclone_settings);
+    }
+    #[cfg(not(feature = "rclone"))]
+    {
+        let _ = rclone_settings;
+    }
+    sections
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

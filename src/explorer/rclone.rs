@@ -206,9 +206,11 @@ pub(super) fn try_begin_remote_connection(remote_name: &str) -> Option<RcloneCon
     let mut connecting = connecting_remotes()
         .lock()
         .expect("rclone connecting remotes mutex poisoned");
-    connecting
-        .insert(remote_name.clone())
-        .then_some(RcloneConnectPermit { remote_name })
+    if connecting.insert(remote_name.clone()) {
+        Some(RcloneConnectPermit { remote_name })
+    } else {
+        None
+    }
 }
 
 pub(super) fn remote_is_connecting(remote_name: &str) -> bool {
@@ -234,6 +236,15 @@ pub(super) fn reset_connecting_remotes_for_test() {
         .lock()
         .expect("rclone connecting remotes mutex poisoned")
         .clear();
+}
+
+#[cfg(test)]
+pub(super) fn connecting_remotes_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static CONNECTING_REMOTES_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    CONNECTING_REMOTES_TEST_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("rclone connecting remotes test mutex poisoned")
 }
 
 impl RcloneRemote {
@@ -1852,6 +1863,7 @@ mod tests {
 
     #[test]
     fn remote_connection_permit_blocks_same_remote_until_drop() {
+        let _guard = connecting_remotes_test_guard();
         reset_connecting_remotes_for_test();
 
         let gdrive = try_begin_remote_connection("gdrive").expect("first permit");
@@ -1871,6 +1883,7 @@ mod tests {
 
     #[test]
     fn connecting_state_applies_without_overriding_mounted_remote() {
+        let _guard = connecting_remotes_test_guard();
         reset_connecting_remotes_for_test();
         let permit = try_begin_remote_connection("gdrive").expect("connect permit");
         let mut connecting = RcloneRemote::new("gdrive".to_owned(), Some("drive".to_owned()));
