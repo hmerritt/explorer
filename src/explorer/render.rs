@@ -150,6 +150,7 @@ const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
 const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 500.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 4.0;
+const IMAGE_HOVER_PREVIEW_RADIUS: f32 = 15.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -980,6 +981,7 @@ impl ExplorerView {
                     gpui::img(preview.image)
                         .size_full()
                         .object_fit(ObjectFit::Contain)
+                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                         .into_any_element(),
                 ),
                 VideoHoverPreviewLookup::Failed => return None,
@@ -1002,6 +1004,7 @@ impl ExplorerView {
                     gpui::img(preview.image)
                         .size_full()
                         .object_fit(ObjectFit::Contain)
+                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                         .into_any_element(),
                 ),
                 HoverImagePreviewLookup::Failed => return None,
@@ -1026,9 +1029,8 @@ impl ExplorerView {
                 .w(px(preview_size.0))
                 .h(px(preview_size.1))
                 .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0xd8d8d8))
                 .shadow_md()
+                .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                 .overflow_hidden()
                 .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                     if this.update_image_hover_preview_alt(event.modifiers.alt) {
@@ -3170,7 +3172,8 @@ fn image_hover_preview_loading_content(
                 gpui::img(thumbnail.image)
                     .debug_selector(|| "image-hover-preview-loading-thumbnail".to_owned())
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS)),
             )
             .child(
                 div()
@@ -3179,6 +3182,7 @@ fn image_hover_preview_loading_content(
                     .left(px(0.0))
                     .right(px(0.0))
                     .bottom(px(0.0))
+                    .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                     .child(image_hover_preview_loading_progress()),
             )
             .into_any_element();

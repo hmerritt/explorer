@@ -1,12 +1,12 @@
 ## Todo
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
-
-## 1
-
 - Debounce file view refreshes 1000ms
 - Support windows %% shortcuts, like %APPDATA%
 - Image + video hover popup box should have border-radius of 15px, overflow hidden
+
+## 1
+
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 - Settings for sidebar improvement: sidebar.items should not have "kind" and "path", it should only be an array of strings. kinds get matched based on the path. Path should also use view.address_slash
 - Refactor resumable copy file format name and sidecar JSON file. Instead of the current file name for the PARTIAL file, rename to "<filename>.partial". We do not need the key in the filename. Ideally I think we should also remove the JSON sidecar too, and simply continue writing the missing chunks of the file when the copy is restarted (same as rsync)
