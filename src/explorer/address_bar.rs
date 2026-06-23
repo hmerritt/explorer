@@ -1,4 +1,6 @@
 use std::{
+    env,
+    ffi::OsString,
     fs,
     ops::{Deref, DerefMut, Range},
     path::{Path, PathBuf},
@@ -871,12 +873,21 @@ pub(super) fn format_address_path(path: &Path, slash: AddressSlash) -> String {
 }
 
 pub(super) fn resolve_address_input(input: &str, current_path: &Path) -> Result<PathBuf, String> {
+    resolve_address_input_with_env(input, current_path, |name| env::var_os(name))
+}
+
+fn resolve_address_input_with_env(
+    input: &str,
+    current_path: &Path,
+    env_var: impl FnMut(&str) -> Option<OsString>,
+) -> Result<PathBuf, String> {
     let cleaned = cleaned_address_input(input);
     if cleaned.is_empty() {
         return Err("The address is empty.".to_owned());
     }
 
-    let typed_path = Path::new(&cleaned);
+    let expanded = expand_address_environment_variables_with(&cleaned, env_var);
+    let typed_path = Path::new(&expanded);
     let candidate = if typed_path.is_absolute() {
         typed_path.to_path_buf()
     } else {
@@ -941,9 +952,23 @@ pub(super) fn folder_suggestions_for_input(
     current_path: &Path,
     visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
 ) -> Vec<AddressBarSuggestion> {
+    folder_suggestions_for_input_with_env(input, current_path, visibility, |name| env::var_os(name))
+}
+
+fn folder_suggestions_for_input_with_env(
+    input: &str,
+    current_path: &Path,
+    visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
+    env_var: impl FnMut(&str) -> Option<OsString>,
+) -> Vec<AddressBarSuggestion> {
     let visibility = visibility.into();
     let cleaned = cleaned_address_input(input);
-    let (parent, prefix) = suggestion_parent_and_prefix(&cleaned, current_path);
+    let expanded = expand_address_environment_variables_with(&cleaned, env_var);
+    let (parent, prefix) = suggestion_parent_and_prefix(
+        Path::new(&expanded),
+        has_trailing_separator(&cleaned),
+        current_path,
+    );
     #[cfg(feature = "rclone")]
     if crate::explorer::rclone::is_virtual_namespace_path(current_path)
         || crate::explorer::rclone::is_virtual_namespace_path(&parent)
@@ -990,6 +1015,64 @@ pub(super) fn folder_suggestions_for_input(
     suggestions
 }
 
+fn expand_address_environment_variables_with(
+    input: &str,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
+) -> OsString {
+    let mut expanded = OsString::new();
+    let mut remainder = input;
+    let mut env_was_expanded = false;
+
+    loop {
+        let Some(start) = remainder.find('%') else {
+            push_address_literal_segment(&mut expanded, remainder, env_was_expanded);
+            return expanded;
+        };
+
+        push_address_literal_segment(&mut expanded, &remainder[..start], env_was_expanded);
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            push_address_literal_segment(&mut expanded, &remainder[start..], env_was_expanded);
+            return expanded;
+        };
+
+        let name = &after_start[..end];
+        let token_end = start + 1 + end + 1;
+        if !name.is_empty()
+            && let Some(value) = env_var(name)
+        {
+            expanded.push(value);
+            env_was_expanded = true;
+        } else {
+            push_address_literal_segment(
+                &mut expanded,
+                &remainder[start..token_end],
+                env_was_expanded,
+            );
+        }
+
+        remainder = &remainder[token_end..];
+    }
+}
+
+fn push_address_literal_segment(target: &mut OsString, segment: &str, normalize_backslashes: bool) {
+    #[cfg(windows)]
+    {
+        let _ = normalize_backslashes;
+        target.push(segment);
+    }
+
+    #[cfg(not(windows))]
+    {
+        if normalize_backslashes {
+            let separator = std::path::MAIN_SEPARATOR.to_string();
+            target.push(segment.replace('\\', &separator));
+        } else {
+            target.push(segment);
+        }
+    }
+}
+
 fn paths_match_for_address_suggestions(left: &Path, right: &Path) -> bool {
     match (fs::canonicalize(left), fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
@@ -997,12 +1080,15 @@ fn paths_match_for_address_suggestions(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn suggestion_parent_and_prefix(input: &str, current_path: &Path) -> (PathBuf, String) {
-    if input.is_empty() {
+fn suggestion_parent_and_prefix(
+    typed_path: &Path,
+    input_has_trailing_separator: bool,
+    current_path: &Path,
+) -> (PathBuf, String) {
+    if typed_path.as_os_str().is_empty() {
         return (current_path.to_path_buf(), String::new());
     }
 
-    let typed_path = Path::new(input);
     let candidate = if typed_path.is_absolute() {
         typed_path.to_path_buf()
     } else {
@@ -1012,7 +1098,7 @@ fn suggestion_parent_and_prefix(input: &str, current_path: &Path) -> (PathBuf, S
         return (current_path.to_path_buf(), String::new());
     }
 
-    let (parent, prefix) = if has_trailing_separator(input) {
+    let (parent, prefix) = if input_has_trailing_separator {
         (typed_path.to_path_buf(), String::new())
     } else {
         (
@@ -1266,9 +1352,11 @@ mod tests {
         test_support::{TempDir, test_view_entity_at_path},
         view::ExplorerView,
     };
-    use crate::settings::{AddressSlash, ExplorerSettings};
+    use crate::settings::AddressSlash;
+    #[cfg(feature = "rclone")]
+    use crate::settings::ExplorerSettings;
     use gpui::{ClipboardItem, Modifiers, MouseButton, TestAppContext};
-    use std::fs;
+    use std::{ffi::OsString, fs};
 
     #[cfg(feature = "rclone")]
     fn rclone_disabled_view(
@@ -1278,6 +1366,13 @@ mod tests {
         let mut settings = ExplorerSettings::default();
         settings.rclone.enabled = false;
         ExplorerView::new_unloaded_with_settings_for_test(path, focus_handle, &settings)
+    }
+
+    fn env_path<'a>(
+        name: &'static str,
+        path: &'a std::path::Path,
+    ) -> impl FnMut(&str) -> Option<OsString> + 'a {
+        move |requested| (requested == name).then(|| path.as_os_str().to_os_string())
     }
 
     #[test]
@@ -1313,6 +1408,95 @@ mod tests {
         assert_eq!(
             resolve_address_input(&format!(" \"{}\" ", child.display()), temp.path()).unwrap(),
             explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_address_expands_environment_variable_to_directory() {
+        let temp = TempDir::new();
+        let appdata = temp.path().join("AppData").join("Roaming");
+        fs::create_dir_all(&appdata).expect("create appdata");
+
+        assert_eq!(
+            resolve_address_input_with_env("%APPDATA%", temp.path(), env_path("APPDATA", &appdata))
+                .unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&appdata).unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_address_expands_environment_variable_suffixes() {
+        let temp = TempDir::new();
+        let appdata = temp.path().join("AppData").join("Roaming");
+        let child = appdata.join("Child");
+        fs::create_dir_all(&child).expect("create child");
+
+        assert_eq!(
+            resolve_address_input_with_env(
+                r"%APPDATA%\Child",
+                temp.path(),
+                env_path("APPDATA", &appdata),
+            )
+            .unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+        );
+        assert_eq!(
+            resolve_address_input_with_env(
+                "%APPDATA%/Child",
+                temp.path(),
+                env_path("APPDATA", &appdata),
+            )
+            .unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_address_expands_quoted_environment_variable() {
+        let temp = TempDir::new();
+        let appdata = temp.path().join("AppData").join("Roaming");
+        fs::create_dir_all(&appdata).expect("create appdata");
+
+        assert_eq!(
+            resolve_address_input_with_env(
+                "\"%APPDATA%\"",
+                temp.path(),
+                env_path("APPDATA", &appdata),
+            )
+            .unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&appdata).unwrap())
+        );
+    }
+
+    #[test]
+    fn address_environment_expansion_preserves_unresolved_tokens() {
+        assert_eq!(
+            expand_address_environment_variables_with("%MISSING%", |_| None),
+            OsString::from("%MISSING%")
+        );
+        assert_eq!(
+            expand_address_environment_variables_with("%%", |_| Some(OsString::from("ignored"))),
+            OsString::from("%%")
+        );
+        assert_eq!(
+            expand_address_environment_variables_with("%APPDATA", |name| {
+                (name == "APPDATA").then(|| OsString::from("expanded"))
+            }),
+            OsString::from("%APPDATA")
+        );
+    }
+
+    #[test]
+    fn resolve_address_unknown_environment_variable_stays_literal() {
+        let temp = TempDir::new();
+        let error = resolve_address_input_with_env("%MISSING%", temp.path(), |_| None).unwrap_err();
+
+        assert_eq!(
+            error,
+            format!(
+                "Could not find {}.",
+                temp.path().join("%MISSING%").display()
+            )
         );
     }
 
@@ -1420,6 +1604,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(labels, vec!["Alpha", "apricot"]);
+    }
+
+    #[test]
+    fn folder_suggestions_expand_environment_variable_parent() {
+        let temp = TempDir::new();
+        let appdata = temp.path().join("AppData").join("Roaming");
+        fs::create_dir_all(appdata.join("Microsoft")).expect("create microsoft");
+        fs::create_dir(appdata.join("Mozilla")).expect("create mozilla");
+        fs::create_dir(appdata.join("Other")).expect("create other");
+
+        let suggestions = folder_suggestions_for_input_with_env(
+            r"%APPDATA%\M",
+            temp.path(),
+            true,
+            env_path("APPDATA", &appdata),
+        );
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Microsoft", "Mozilla"]
+        );
+        assert_eq!(suggestions[0].path, appdata.join("Microsoft"));
+        assert_eq!(suggestions[1].path, appdata.join("Mozilla"));
     }
 
     #[test]
