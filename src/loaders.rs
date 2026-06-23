@@ -6,6 +6,8 @@ use crate::explorer::constants::EXPLORER_COPY_GREEN;
 
 const LINEAR_PROGRESS_HEIGHT: f32 = 4.0;
 const LINEAR_PROGRESS_TRACK_GREEN: u32 = 0xe1f3e4;
+const LINEAR_PROGRESS_NEUTRAL: u32 = 0x7a7a7a;
+const LINEAR_PROGRESS_TRACK_NEUTRAL: u32 = 0xe6e6e6;
 
 // MUI's standard indeterminate animation cycle is 2.1 seconds.
 const PROGRESS_ANIMATION_MS: u64 = 1_500;
@@ -22,6 +24,14 @@ impl LinearProgressStyle {
         Self {
             color: EXPLORER_COPY_GREEN,
             track_color: LINEAR_PROGRESS_TRACK_GREEN,
+            height: LINEAR_PROGRESS_HEIGHT,
+        }
+    }
+
+    pub(crate) fn neutral() -> Self {
+        Self {
+            color: LINEAR_PROGRESS_NEUTRAL,
+            track_color: LINEAR_PROGRESS_TRACK_NEUTRAL,
             height: LINEAR_PROGRESS_HEIGHT,
         }
     }

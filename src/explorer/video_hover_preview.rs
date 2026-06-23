@@ -422,6 +422,40 @@ pub(super) fn hover_preview_is_video(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::image_thumbnails::ThumbnailSourcePolicy;
+
+    #[gpui::test]
+    fn cache_only_standard_policy_allows_video_hover_preview_source_playback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("remote"),
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            );
+            view.thumbnail_source_policy = ThumbnailSourcePolicy::CacheOnly;
+            view
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = FileEntry::test("movie.mp4", false, Some(1), None);
+
+                assert!(matches!(
+                    view.hover_video_preview_for_entry(&entry, cx),
+                    Some(VideoHoverPreviewLookup::Loading {
+                        width: VIDEO_HOVER_PREVIEW_SIZE,
+                        height: VIDEO_HOVER_PREVIEW_SIZE,
+                        thumbnail: None,
+                    })
+                ));
+                assert!(view.video_hover_preview.is_some());
+            });
+        });
+    }
 
     #[test]
     fn video_hover_preview_filter_caps_size_and_corrects_sar() {

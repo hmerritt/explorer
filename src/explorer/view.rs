@@ -16,7 +16,9 @@ use gpui::{
     UniformListScrollHandle, point, px,
 };
 
-use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
+use crate::explorer::sidebar::{
+    SidebarSections, sidebar_sections, sidebar_sections_without_rclone,
+};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -24,13 +26,16 @@ use crate::explorer::{
     context_menu::ContextMenuState,
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
+    explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries,
-        path_is_filesystem_root, path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress,
+        load_entries_with_rclone_settings, path_is_filesystem_root, path_is_remote_drive,
+        path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
+    image_thumbnails::ThumbnailSourcePolicy,
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
     rename::{PendingClickRename, RenameState},
@@ -43,10 +48,12 @@ use crate::explorer::{
 };
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
-    FileViewMode, SidebarSettings, SortDirection,
+    FileViewMode, RcloneSettings, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(feature = "rclone")]
+const RCLONE_UPLOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ViewModeSelection {
@@ -64,11 +71,19 @@ pub struct ExplorerView {
     pub(super) loading_path: Option<PathBuf>,
     pub(super) selection: SelectionState,
     pub(super) read_error: Option<String>,
-    pub(super) open_error: Option<String>,
+    pub(super) operation_notice: Option<OperationNotice>,
     pub(super) open_with_task: Option<Task<()>>,
     pub(super) run_elevated_task: Option<Task<()>>,
     pub(super) volume_eject_task: Option<Task<()>>,
     pub(super) image_mount_task: Option<Task<()>>,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_connect_task: Option<Task<()>>,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_upload_snapshot: crate::explorer::rclone::RcloneUploadSnapshot,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_upload_task: Option<Task<()>>,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_upload_generation: u64,
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) forward_stack: Vec<PathBuf>,
     pub(super) scroll_handle: UniformListScrollHandle,
@@ -124,12 +139,17 @@ pub struct ExplorerView {
     pub(super) resolve_icons: bool,
     pub(super) base_view_mode: FileViewMode,
     pub(super) media_view_mode: FileViewMode,
+    pub(super) remote_media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
     pub(super) view_mode_selection: ViewModeSelection,
+    pub(super) directory_is_remote: bool,
+    pub(super) remote_thumbnails: bool,
+    pub(super) thumbnail_source_policy: ThumbnailSourcePolicy,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
+    pub(super) rclone_settings: RcloneSettings,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
@@ -151,6 +171,44 @@ pub(super) struct FileOperationState {
     pub(super) terminate: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct OperationNotice {
+    pub(super) kind: OperationNoticeKind,
+    pub(super) text: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OperationNoticeKind {
+    Error,
+    Info,
+    Success,
+}
+
+impl OperationNotice {
+    pub(super) fn error(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Error,
+            text: text.into(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn info(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Info,
+            text: text.into(),
+        }
+    }
+
+    pub(super) fn success(text: impl Into<String>) -> Self {
+        Self {
+            kind: OperationNoticeKind::Success,
+            text: text.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,6 +296,12 @@ struct DirectoryLoadState {
     restart_watcher: bool,
 }
 
+#[derive(Debug)]
+struct DirectoryLoadResult {
+    entries: io::Result<Vec<FileEntry>>,
+    sidebar_sections: Option<SidebarSections>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UtilityMenu {
     New,
@@ -296,6 +360,15 @@ impl ExplorerView {
     }
 
     #[cfg(test)]
+    pub(super) fn new_unloaded_with_settings_for_test(
+        initial_path: PathBuf,
+        focus_handle: Option<FocusHandle>,
+        settings: &ExplorerSettings,
+    ) -> Self {
+        Self::new_unloaded_inner_with_settings(initial_path, focus_handle, settings)
+    }
+
+    #[cfg(test)]
     fn new_inner_with_settings(
         initial_path: PathBuf,
         focus_handle: Option<FocusHandle>,
@@ -311,6 +384,11 @@ impl ExplorerView {
         focus_handle: Option<FocusHandle>,
         settings: &ExplorerSettings,
     ) -> Self {
+        let directory_is_remote = path_is_remote_drive(&initial_path);
+        let thumbnail_source_policy = thumbnail_source_policy_for_remote(
+            directory_is_remote,
+            settings.view.remote_thumbnails,
+        );
         Self {
             path: initial_path,
             entries: Vec::new(),
@@ -320,11 +398,19 @@ impl ExplorerView {
             loading_path: None,
             selection: SelectionState::default(),
             read_error: None,
-            open_error: None,
+            operation_notice: None,
             open_with_task: None,
             run_elevated_task: None,
             volume_eject_task: None,
             image_mount_task: None,
+            #[cfg(feature = "rclone")]
+            rclone_connect_task: None,
+            #[cfg(feature = "rclone")]
+            rclone_upload_snapshot: crate::explorer::rclone::RcloneUploadSnapshot::default(),
+            #[cfg(feature = "rclone")]
+            rclone_upload_task: None,
+            #[cfg(feature = "rclone")]
+            rclone_upload_generation: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -381,14 +467,19 @@ impl ExplorerView {
             resolve_icons: settings.view.native_icons,
             base_view_mode: settings.view.mode,
             media_view_mode: settings.view.mode_media,
+            remote_media_view_mode: settings.view.remote_mode_media,
             view_mode: settings.view.mode,
             view_mode_selection: ViewModeSelection::Pending,
+            directory_is_remote,
+            remote_thumbnails: settings.view.remote_thumbnails,
+            thumbnail_source_policy,
             open_utility_menu: None,
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
+            rclone_settings: settings.rclone.clone(),
             sidebar_settings: settings.sidebar.clone(),
-            sidebar_sections: SidebarSections::default(),
+            sidebar_sections: sidebar_sections_without_rclone(&settings.sidebar),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
             folder_size_generation: 0,
@@ -408,6 +499,7 @@ impl ExplorerView {
             || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
+        let rclone_changed = self.rclone_settings != settings.rclone;
         let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
@@ -423,12 +515,24 @@ impl ExplorerView {
         }
         let base_view_mode_changed = self.base_view_mode != settings.view.mode;
         let media_view_mode_changed = self.media_view_mode != settings.view.mode_media;
+        let remote_media_view_mode_changed =
+            self.remote_media_view_mode != settings.view.remote_mode_media;
+        let old_thumbnail_source_policy = self.thumbnail_source_policy;
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
+        self.remote_media_view_mode = settings.view.remote_mode_media;
+        self.remote_thumbnails = settings.view.remote_thumbnails;
+        self.thumbnail_source_policy =
+            thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
+        if old_thumbnail_source_policy == ThumbnailSourcePolicy::ReadSource
+            && self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly
+        {
+            self.cancel_standard_image_thumbnail_extraction(cx);
+        }
         if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
             self.set_active_view_mode(self.base_view_mode);
-        } else if media_view_mode_changed
+        } else if (media_view_mode_changed || remote_media_view_mode_changed)
             && self.view_mode_selection == ViewModeSelection::Automatic
         {
             self.apply_automatic_view_mode();
@@ -437,6 +541,7 @@ impl ExplorerView {
         }
 
         self.sidebar_settings = settings.sidebar.clone();
+        self.rclone_settings = settings.rclone.clone();
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
         }
@@ -463,7 +568,18 @@ impl ExplorerView {
             self.file_columns = settings.view.file_columns.clone();
         }
 
-        if visibility_changed {
+        let rclone_transfer_path_changed = {
+            #[cfg(feature = "rclone")]
+            {
+                rclone_changed && crate::explorer::rclone::parse_virtual_path(&self.path).is_some()
+            }
+            #[cfg(not(feature = "rclone"))]
+            {
+                false
+            }
+        };
+
+        if visibility_changed || rclone_transfer_path_changed {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
@@ -488,9 +604,14 @@ impl ExplorerView {
             if file_sort_changed {
                 self.apply_file_sort_preserving_selection();
             }
-            if sidebar_changed || !folder_size_changed {
-                self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            if sidebar_changed || rclone_changed || !folder_size_changed {
+                self.sidebar_sections =
+                    sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
             }
+        }
+        #[cfg(feature = "rclone")]
+        if rclone_changed {
+            self.restart_rclone_upload_polling(cx);
         }
         cx.notify();
     }
@@ -516,7 +637,11 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(mode);
 
         let load_started = Instant::now();
-        match load_entries(&self.path, self.entry_visibility()) {
+        match load_entries_with_rclone_settings(
+            &self.path,
+            self.entry_visibility(),
+            &self.rclone_settings,
+        ) {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
                     load_started.elapsed(),
@@ -554,8 +679,11 @@ impl ExplorerView {
 
     fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
+        self.directory_is_remote = path_is_remote_drive(&self.path);
+        self.thumbnail_source_policy =
+            thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
         self.context_menu = None;
-        self.open_error = None;
+        self.clear_operation_notice();
         self.read_error = None;
         let selected_paths_started = Instant::now();
         let selected_paths = if mode.preserve_selection {
@@ -574,7 +702,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -724,7 +852,13 @@ impl ExplorerView {
         self.directory_load_task = None;
         self.loading_path = Some(self.path.clone());
 
-        let selected_paths = self.prepare_directory_reload(mode);
+        let selected_paths = self.prepare_directory_reload(ReloadMode {
+            preserve_selection: mode.preserve_selection,
+            rebuild_sidebar: false,
+        });
+        if mode.rebuild_sidebar {
+            self.rebuild_fast_sidebar_sections();
+        }
         let state = DirectoryLoadState {
             path: self.path.clone(),
             generation,
@@ -737,6 +871,9 @@ impl ExplorerView {
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
+        let rclone_settings = self.rclone_settings.clone();
+        let sidebar_settings = self.sidebar_settings.clone();
+        let rebuild_sidebar = mode.rebuild_sidebar;
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -748,7 +885,16 @@ impl ExplorerView {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { load_entries(&path, visibility) }
+                    async move {
+                        let entries =
+                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
+                        let sidebar_sections = rebuild_sidebar
+                            .then(|| sidebar_sections(&sidebar_settings, &rclone_settings));
+                        DirectoryLoadResult {
+                            entries,
+                            sidebar_sections,
+                        }
+                    }
                 })
                 .await;
             crate::debug_options::log_nav_timing(
@@ -757,7 +903,7 @@ impl ExplorerView {
                     "reload.async_load path={:?} generation={} ok={}",
                     state.path,
                     state.generation,
-                    result.is_ok()
+                    result.entries.is_ok()
                 ),
             );
 
@@ -770,10 +916,23 @@ impl ExplorerView {
         self.directory_load_task = Some(task);
     }
 
+    fn rebuild_fast_sidebar_sections(&mut self) {
+        #[cfg(feature = "rclone")]
+        {
+            let mut sections = sidebar_sections_without_rclone(&self.sidebar_settings);
+            sections.rclone_remotes = self.sidebar_sections.rclone_remotes.clone();
+            self.sidebar_sections = sections;
+        }
+        #[cfg(not(feature = "rclone"))]
+        {
+            self.sidebar_sections = sidebar_sections_without_rclone(&self.sidebar_settings);
+        }
+    }
+
     fn apply_directory_load_result(
         &mut self,
         state: DirectoryLoadState,
-        result: io::Result<Vec<FileEntry>>,
+        result: DirectoryLoadResult,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.directory_load_generation != state.generation || self.path != state.path {
@@ -783,7 +942,11 @@ impl ExplorerView {
         self.directory_load_task = None;
         self.loading_path = None;
 
-        match result {
+        if let Some(sidebar_sections) = result.sidebar_sections {
+            self.sidebar_sections = sidebar_sections;
+        }
+
+        match result.entries {
             Ok(entries) => {
                 self.apply_loaded_entries(
                     state.mode,
@@ -795,6 +958,8 @@ impl ExplorerView {
             Err(error) => self.apply_directory_load_error(error),
         }
         self.finish_directory_reload_layout();
+        #[cfg(feature = "rclone")]
+        self.restart_rclone_upload_polling(cx);
 
         if state.refresh_search {
             self.refresh_search_after_external_change(cx);
@@ -807,6 +972,81 @@ impl ExplorerView {
         }
 
         true
+    }
+
+    #[cfg(feature = "rclone")]
+    fn restart_rclone_upload_polling(&mut self, cx: &mut Context<Self>) {
+        self.rclone_upload_generation = self.rclone_upload_generation.wrapping_add(1);
+        self.rclone_upload_task = None;
+
+        if !crate::explorer::rclone::path_has_known_managed_mount(&self.path) {
+            if self.rclone_upload_snapshot
+                != crate::explorer::rclone::RcloneUploadSnapshot::default()
+            {
+                self.rclone_upload_snapshot =
+                    crate::explorer::rclone::RcloneUploadSnapshot::default();
+                cx.notify();
+            }
+            return;
+        }
+
+        let generation = self.rclone_upload_generation;
+        let path = self.path.clone();
+        let settings = self.rclone_settings.clone();
+        let mut previous = self.rclone_upload_snapshot.clone();
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let snapshot_task = cx.background_executor().spawn({
+                    let path = path.clone();
+                    let settings = settings.clone();
+                    let previous = previous.clone();
+                    async move {
+                        crate::explorer::rclone::upload_snapshot_for_directory(
+                            &path, &previous, &settings,
+                        )
+                    }
+                });
+                let result = snapshot_task.await;
+                let mut should_continue = false;
+                let mut next_previous = previous.clone();
+                let _ = this.update(cx, |explorer, cx| {
+                    if explorer.rclone_upload_generation != generation || explorer.path != path {
+                        return;
+                    }
+
+                    should_continue = true;
+                    match result {
+                        Ok(snapshot) => {
+                            next_previous = snapshot.clone();
+                            if explorer.rclone_upload_snapshot != snapshot {
+                                explorer.rclone_upload_snapshot = snapshot;
+                                cx.notify();
+                            }
+                        }
+                        Err(_) => {
+                            if explorer.rclone_upload_snapshot
+                                != crate::explorer::rclone::RcloneUploadSnapshot::default()
+                            {
+                                explorer.rclone_upload_snapshot =
+                                    crate::explorer::rclone::RcloneUploadSnapshot::default();
+                                cx.notify();
+                            }
+                            explorer.rclone_upload_task = None;
+                            should_continue = false;
+                        }
+                    }
+                });
+
+                if !should_continue {
+                    break;
+                }
+                previous = next_previous;
+                cx.background_executor()
+                    .timer(RCLONE_UPLOAD_POLL_INTERVAL)
+                    .await;
+            }
+        });
+        self.rclone_upload_task = Some(task);
     }
 
     fn cancel_directory_load(&mut self) {
@@ -1176,11 +1416,18 @@ impl ExplorerView {
 
     pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) -> bool {
         let started = Instant::now();
-        self.directory_watcher = DirectoryWatcher::start(self.path.clone(), cx);
+        let refresh_driver = ExplorerFs::new(&self.rclone_settings).refresh_driver(&self.path);
+        self.directory_watcher = match refresh_driver {
+            ExplorerRefreshDriver::Notify => DirectoryWatcher::start(self.path.clone(), cx),
+            ExplorerRefreshDriver::Poll => DirectoryWatcher::start_polling(self.path.clone(), cx),
+        };
         let ok = self.directory_watcher.is_some();
         crate::debug_options::log_nav_timing(
             started.elapsed(),
-            format_args!("watcher.restart path={:?} ok={ok}", self.path),
+            format_args!(
+                "watcher.restart path={:?} driver={refresh_driver:?} ok={ok}",
+                self.path
+            ),
         );
         ok
     }
@@ -1191,6 +1438,10 @@ impl ExplorerView {
 
     pub(super) fn has_active_file_operation(&self) -> bool {
         self.active_file_operation.is_some()
+    }
+
+    pub(super) fn has_background_operation(&self) -> bool {
+        self.has_active_file_operation() || self.rclone_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -1234,11 +1485,56 @@ impl ExplorerView {
     }
 
     pub(super) fn minimum_file_columns_width(&self) -> f32 {
-        crate::explorer::columns::minimum_file_columns_width(&self.file_columns)
+        let mut width = crate::explorer::columns::minimum_file_columns_width(&self.file_columns);
+        if self.upload_column_is_visible() {
+            width += crate::explorer::constants::COLUMN_UPLOAD_WIDTH;
+        }
+        width
     }
 
     pub(super) fn effective_name_column_width(&self, viewport_width: f32) -> f32 {
-        crate::explorer::columns::effective_name_column_width(viewport_width, &self.file_columns)
+        let upload_width = if self.upload_column_is_visible() {
+            crate::explorer::constants::COLUMN_UPLOAD_WIDTH
+        } else {
+            0.0
+        };
+        crate::explorer::columns::effective_name_column_width(
+            viewport_width - upload_width,
+            &self.file_columns,
+        )
+    }
+
+    pub(super) fn upload_column_is_visible(&self) -> bool {
+        #[cfg(feature = "rclone")]
+        {
+            self.rclone_upload_snapshot.has_pending()
+        }
+        #[cfg(not(feature = "rclone"))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn entry_upload_is_pending(&self, path: &Path) -> bool {
+        #[cfg(feature = "rclone")]
+        {
+            self.rclone_upload_snapshot
+                .state_for_path(path)
+                .is_some_and(crate::explorer::rclone::RcloneUploadState::is_pending)
+        }
+        #[cfg(not(feature = "rclone"))]
+        {
+            let _ = path;
+            false
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    pub(super) fn rclone_upload_state_for_path(
+        &self,
+        path: &Path,
+    ) -> Option<&crate::explorer::rclone::RcloneUploadState> {
+        self.rclone_upload_snapshot.state_for_path(path)
     }
 
     pub(super) fn name_column_is_manual_width(&self) -> bool {
@@ -1474,6 +1770,22 @@ impl ExplorerView {
     }
 }
 
+#[cfg(test)]
+fn thumbnail_source_policy_for_path(path: &Path, remote_thumbnails: bool) -> ThumbnailSourcePolicy {
+    thumbnail_source_policy_for_remote(path_is_remote_drive(path), remote_thumbnails)
+}
+
+fn thumbnail_source_policy_for_remote(
+    directory_is_remote: bool,
+    remote_thumbnails: bool,
+) -> ThumbnailSourcePolicy {
+    if directory_is_remote && !remote_thumbnails {
+        ThumbnailSourcePolicy::CacheOnly
+    } else {
+        ThumbnailSourcePolicy::ReadSource
+    }
+}
+
 pub(super) fn normalized_sidebar_width_f32(width: f32) -> f32 {
     if width.is_finite() {
         width.max(crate::settings::SIDEBAR_MIN_WIDTH as f32)
@@ -1518,6 +1830,24 @@ pub(super) fn tab_label_for_path(path: &Path) -> String {
 }
 
 impl ExplorerView {
+    pub(super) fn clear_operation_notice(&mut self) {
+        self.operation_notice = None;
+    }
+
+    pub(super) fn set_error_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::error(text));
+    }
+
+    #[cfg(feature = "rclone")]
+    pub(super) fn set_info_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::info(text));
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn set_success_notice(&mut self, text: impl Into<String>) {
+        self.operation_notice = Some(OperationNotice::success(text));
+    }
+
     pub(super) fn is_directory_loading(&self) -> bool {
         self.loading_path.as_deref() == Some(self.path.as_path())
             && self.directory_load_task.is_some()
@@ -1525,6 +1855,18 @@ impl ExplorerView {
 
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
         self.all_entries.is_empty() && self.read_error.is_none() && !self.is_directory_loading()
+    }
+
+    pub(super) fn rclone_connection_is_working(&self) -> bool {
+        #[cfg(feature = "rclone")]
+        {
+            self.rclone_connect_task.is_some()
+        }
+
+        #[cfg(not(feature = "rclone"))]
+        {
+            false
+        }
     }
 
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {
@@ -1562,6 +1904,8 @@ impl ExplorerView {
             &self.all_entries,
             self.base_view_mode,
             self.media_view_mode,
+            self.remote_media_view_mode,
+            self.directory_is_remote,
         );
         self.set_active_view_mode(view_mode)
     }
@@ -1582,9 +1926,15 @@ fn effective_view_mode_for_entries(
     entries: &[FileEntry],
     base_view_mode: FileViewMode,
     media_view_mode: FileViewMode,
+    remote_media_view_mode: FileViewMode,
+    directory_is_remote: bool,
 ) -> FileViewMode {
     if directory_is_media_majority(entries) {
-        media_view_mode
+        if directory_is_remote {
+            remote_media_view_mode
+        } else {
+            media_view_mode
+        }
     } else {
         base_view_mode
     }
@@ -1699,8 +2049,14 @@ mod tests {
             view.media_view_mode,
             crate::settings::FileViewMode::LargeIcons
         );
+        assert_eq!(
+            view.remote_media_view_mode,
+            crate::settings::FileViewMode::Details
+        );
         assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        assert!(!view.directory_is_remote);
+        assert!(!view.remote_thumbnails);
         assert_eq!(
             view.sidebar_width,
             crate::settings::SIDEBAR_DEFAULT_WIDTH as f32
@@ -1914,6 +2270,8 @@ mod tests {
                 &entries,
                 crate::settings::FileViewMode::LargeIcons,
                 crate::settings::FileViewMode::Details,
+                crate::settings::FileViewMode::Details,
+                false,
             ),
             crate::settings::FileViewMode::LargeIcons
         );
@@ -1934,9 +2292,89 @@ mod tests {
                 &entries,
                 crate::settings::FileViewMode::Details,
                 crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::Details,
+                false,
             ),
             crate::settings::FileViewMode::LargeIcons
         );
+    }
+
+    #[test]
+    fn effective_view_mode_uses_remote_media_mode_for_remote_media_majority_directories() {
+        let entries = vec![
+            test_folder("folder"),
+            test_file("photo.jpg"),
+            test_file("clip.mov"),
+            test_file("scan.png"),
+            test_file("poster.webp"),
+        ];
+
+        assert_eq!(
+            effective_view_mode_for_entries(
+                &entries,
+                crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::LargeIcons,
+                crate::settings::FileViewMode::Details,
+                true,
+            ),
+            crate::settings::FileViewMode::Details
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn upload_column_is_visible_only_for_pending_uploads() {
+        let mut view = ExplorerView::new_unloaded_inner_with_settings(
+            PathBuf::from("uploads"),
+            None,
+            &ExplorerSettings::default(),
+        );
+        let file = PathBuf::from("uploads").join("file.txt");
+
+        assert!(!view.upload_column_is_visible());
+        assert!(!view.entry_upload_is_pending(&file));
+
+        view.rclone_upload_snapshot.entries.insert(
+            file.clone(),
+            crate::explorer::rclone::RcloneUploadState::Completed,
+        );
+        assert!(!view.upload_column_is_visible());
+        assert!(!view.entry_upload_is_pending(&file));
+
+        view.rclone_upload_snapshot.entries.insert(
+            file.clone(),
+            crate::explorer::rclone::RcloneUploadState::Queued,
+        );
+        assert!(view.upload_column_is_visible());
+        assert!(view.entry_upload_is_pending(&file));
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn upload_column_extends_details_width_only_while_visible() {
+        let mut view = ExplorerView::new_unloaded_inner_with_settings(
+            PathBuf::from("uploads"),
+            None,
+            &ExplorerSettings::default(),
+        );
+        let base_width = crate::explorer::columns::minimum_file_columns_width(&view.file_columns);
+        let file = PathBuf::from("uploads").join("file.txt");
+
+        assert_eq!(view.minimum_file_columns_width(), base_width);
+
+        view.rclone_upload_snapshot.entries.insert(
+            file.clone(),
+            crate::explorer::rclone::RcloneUploadState::Queued,
+        );
+        assert_eq!(
+            view.minimum_file_columns_width(),
+            base_width + crate::explorer::constants::COLUMN_UPLOAD_WIDTH
+        );
+
+        view.rclone_upload_snapshot
+            .entries
+            .insert(file, crate::explorer::rclone::RcloneUploadState::Completed);
+        assert_eq!(view.minimum_file_columns_width(), base_width);
     }
 
     #[test]
@@ -2033,6 +2471,52 @@ mod tests {
         );
 
         assert_eq!(view.font.family, "Inter");
+    }
+
+    #[test]
+    fn thumbnail_source_policy_defaults_to_read_source_for_local_paths() {
+        assert_eq!(
+            thumbnail_source_policy_for_path(Path::new("local-folder"), false),
+            ThumbnailSourcePolicy::ReadSource
+        );
+    }
+
+    #[test]
+    fn thumbnail_source_policy_uses_cache_only_for_remote_paths_by_default() {
+        assert_eq!(
+            thumbnail_source_policy_for_remote(true, false),
+            ThumbnailSourcePolicy::CacheOnly
+        );
+    }
+
+    #[test]
+    fn thumbnail_source_policy_reads_remote_source_when_setting_enabled() {
+        assert_eq!(
+            thumbnail_source_policy_for_remote(true, true),
+            ThumbnailSourcePolicy::ReadSource
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn thumbnail_source_policy_uses_cache_only_for_rclone_virtual_paths() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
+
+        assert_eq!(
+            thumbnail_source_policy_for_path(&path, false),
+            ThumbnailSourcePolicy::CacheOnly
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn thumbnail_source_policy_reads_rclone_virtual_source_when_setting_enabled() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
+
+        assert_eq!(
+            thumbnail_source_policy_for_path(&path, true),
+            ThumbnailSourcePolicy::ReadSource
+        );
     }
 
     #[gpui::test]
@@ -2224,6 +2708,139 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
             assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_recomputes_remote_media_view_mode_when_automatic(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote-media"),
+                Some(focus_handle),
+                &ExplorerSettings::default(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.all_entries = vec![
+                    test_folder("folder"),
+                    test_file("photo.jpg"),
+                    test_file("clip.mov"),
+                    test_file("scan.png"),
+                    test_file("poster.webp"),
+                ];
+                view.entries = view.all_entries.clone();
+                view.view_mode_selection = ViewModeSelection::Automatic;
+                view.set_active_view_mode(crate::settings::FileViewMode::Details);
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            remote_mode_media: crate::settings::FileViewMode::LargeIcons,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::LargeIcons);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_does_not_replace_manual_view_with_remote_media_mode(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote-media"),
+                Some(focus_handle),
+                &ExplorerSettings::default(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.all_entries = vec![
+                    test_folder("folder"),
+                    test_file("photo.jpg"),
+                    test_file("clip.mov"),
+                    test_file("scan.png"),
+                    test_file("poster.webp"),
+                ];
+                view.entries = view.all_entries.clone();
+                view.view_mode_selection = ViewModeSelection::Manual;
+                view.set_active_view_mode(crate::settings::FileViewMode::Details);
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            remote_mode_media: crate::settings::FileViewMode::LargeIcons,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
+            assert_eq!(view.view_mode_selection, ViewModeSelection::Manual);
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_disables_remote_thumbnail_source_reads(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_inner_with_settings(
+                PathBuf::from("remote"),
+                Some(focus_handle),
+                &ExplorerSettings {
+                    view: crate::settings::ViewSettings {
+                        remote_thumbnails: true,
+                        ..crate::settings::ViewSettings::default()
+                    },
+                    ..ExplorerSettings::default()
+                },
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.directory_is_remote = true;
+                view.remote_thumbnails = true;
+                view.thumbnail_source_policy = ThumbnailSourcePolicy::ReadSource;
+                let video = FileEntry::test("movie.mp4", false, Some(1), None);
+                assert!(view.hover_video_preview_for_entry(&video, cx).is_some());
+                assert!(view.video_hover_preview.is_some());
+
+                view.apply_settings(&ExplorerSettings::default(), cx);
+                assert!(view.video_hover_preview.is_some());
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.remote_thumbnails);
+            assert_eq!(
+                view.thumbnail_source_policy,
+                ThumbnailSourcePolicy::CacheOnly
+            );
         });
     }
 
@@ -2665,10 +3282,66 @@ mod tests {
 
                 assert!(!view.apply_directory_load_result(
                     state,
-                    Ok(vec![FileEntry::test("stale.txt", false, Some(1), None)]),
+                    DirectoryLoadResult {
+                        entries: Ok(vec![FileEntry::test("stale.txt", false, Some(1), None)]),
+                        sidebar_sections: None,
+                    },
                     cx,
                 ));
                 assert!(view.entries.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn async_directory_load_result_applies_rebuilt_sidebar_sections(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = path.clone();
+                view.directory_load_generation = 3;
+                let mut rebuilt_sidebar = SidebarSections::default();
+                rebuilt_sidebar
+                    .drives
+                    .push(crate::explorer::sidebar::SidebarItem {
+                        label: "Drive".to_owned(),
+                        path: PathBuf::from("/drive"),
+                        kind: crate::explorer::sidebar::SidebarItemKind::Drive,
+                        configured_index: None,
+                    });
+                let state = DirectoryLoadState {
+                    path: path.clone(),
+                    generation: 3,
+                    selected_paths: Vec::new(),
+                    select_after_load: Vec::new(),
+                    mode: ReloadMode {
+                        preserve_selection: false,
+                        rebuild_sidebar: true,
+                    },
+                    schedule_metadata: false,
+                    refresh_search: false,
+                    restart_watcher: false,
+                };
+
+                assert!(view.apply_directory_load_result(
+                    state,
+                    DirectoryLoadResult {
+                        entries: Ok(Vec::new()),
+                        sidebar_sections: Some(rebuilt_sidebar.clone()),
+                    },
+                    cx,
+                ));
+                assert_eq!(view.sidebar_sections, rebuilt_sidebar);
             });
         });
     }

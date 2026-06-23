@@ -148,6 +148,11 @@ pub(super) enum ContextMenuCommand {
     EjectMountedVolume {
         path: PathBuf,
     },
+    #[cfg(feature = "rclone")]
+    DownloadAndOpenRcloneCopies {
+        paths: Vec<PathBuf>,
+        read_only: bool,
+    },
     UnpinSidebar {
         configured_index: usize,
     },
@@ -397,12 +402,12 @@ impl ExplorerView {
             ContextMenuCommand::CopyPath { path } => {
                 cx.write_to_clipboard(ClipboardItem::new_string(self.address_text_for_path(&path)));
                 self.cut_paths.clear();
-                self.open_error = None;
+                self.clear_operation_notice();
             }
             ContextMenuCommand::CopyRepoRelativePath { relative_path } => {
                 cx.write_to_clipboard(ClipboardItem::new_string(relative_path));
                 self.cut_paths.clear();
-                self.open_error = None;
+                self.clear_operation_notice();
             }
             ContextMenuCommand::Paste => self.paste_clipboard(window, cx),
             ContextMenuCommand::ExtractSelectedArchives => self.extract_selected_archives(cx),
@@ -435,6 +440,10 @@ impl ExplorerView {
             ContextMenuCommand::EjectMountedVolume { path } => {
                 self.eject_mounted_volume(path, cx);
             }
+            #[cfg(feature = "rclone")]
+            ContextMenuCommand::DownloadAndOpenRcloneCopies { paths, read_only } => {
+                self.download_and_open_rclone_copies(paths, read_only, cx);
+            }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
             }
@@ -454,7 +463,7 @@ impl ExplorerView {
         #[cfg(target_os = "windows")]
         {
             let parent = crate::explorer::windows_shell::parent_hwnd(window);
-            self.open_error = None;
+            self.clear_operation_notice();
             let task = cx.spawn(async move |this, cx| {
                 let results = run_elevated_paths_until_not_launched(paths, |path| {
                     windows_run_elevated_path(path, parent)
@@ -479,10 +488,10 @@ impl ExplorerView {
     fn handle_run_elevated_results(&mut self, results: Vec<(PathBuf, io::Result<bool>)>) {
         for (path, result) in results {
             match result {
-                Ok(true) => self.open_error = None,
+                Ok(true) => self.clear_operation_notice(),
                 Ok(false) => break,
                 Err(error) => {
-                    self.open_error = Some(format_open_error(&path, &error));
+                    self.set_error_notice(format_open_error(&path, &error));
                     break;
                 }
             }
@@ -491,9 +500,9 @@ impl ExplorerView {
 
     fn handle_custom_command_result(&mut self, executable: &Path, result: std::io::Result<()>) {
         match result {
-            Ok(()) => self.open_error = None,
+            Ok(()) => self.clear_operation_notice(),
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not run {}: {error}",
                     executable
                         .file_name()
@@ -509,12 +518,13 @@ impl ExplorerView {
             return;
         }
 
-        self.open_error = None;
+        self.clear_operation_notice();
         let task_path = path.clone();
+        let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { eject_mounted_volume_path(&task_path) })
+                .spawn(async move { eject_mounted_volume_path(&task_path, &rclone_settings) })
                 .await;
 
             let _ = this.update(cx, |explorer, cx| {
@@ -537,7 +547,7 @@ impl ExplorerView {
                 cx.emit(ExplorerViewEvent::MountedVolumeEjected(path.to_path_buf()));
             }
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not eject {}: {error}",
                     mounted_volume_error_name(path)
                 ));
@@ -553,7 +563,7 @@ impl ExplorerView {
             return;
         }
 
-        self.open_error = None;
+        self.clear_operation_notice();
         let task_path = path.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
@@ -578,11 +588,11 @@ impl ExplorerView {
     ) {
         match result {
             Ok(()) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.refresh_with_entry_metadata_resolution(cx);
             }
             Err(error) => {
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not mount {}: {error}",
                     mounted_volume_error_name(path)
                 ));
@@ -815,7 +825,16 @@ struct PlatformCommand {
     args: Vec<OsString>,
 }
 
-fn eject_mounted_volume_path(path: &Path) -> io::Result<()> {
+fn eject_mounted_volume_path(
+    path: &Path,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> io::Result<()> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_managed_mount_root(path) {
+        return crate::explorer::rclone::disconnect_mounted_remote(path, _rclone_settings)
+            .map_err(io::Error::other);
+    }
+
     let Some(command) = mounted_volume_eject_command(path) else {
         return Err(io::Error::other("eject is not supported on this platform"));
     };
@@ -1197,26 +1216,65 @@ fn entry_context_menu_items_with_custom(
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     if selected_count == 1 {
-        let command = match single_directory_open_target {
-            Some(path) => ContextMenuCommand::OpenDirectory { path },
-            None => ContextMenuCommand::OpenSelectedFiles,
-        };
-        let icon = if selected_file_count > 0 {
-            if use_native_file_icon {
-                ContextMenuIcon::NativeFile
+        #[cfg(feature = "rclone")]
+        let mut handled_transfer_open = false;
+        #[cfg(not(feature = "rclone"))]
+        let handled_transfer_open = false;
+        #[cfg(feature = "rclone")]
+        if selected_file_count > 0
+            && targets
+                .first()
+                .is_some_and(|path| crate::explorer::rclone::is_transfer_path(path))
+        {
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open".to_owned(),
+                icon: Some(ContextMenuIcon::File),
+                label: crate::explorer::rclone::transfer_open_action_label(&targets[0], false)
+                    .unwrap_or("Download and open copy")
+                    .to_owned(),
+                command: ContextMenuCommand::DownloadAndOpenRcloneCopies {
+                    paths: targets.to_vec(),
+                    read_only: false,
+                },
+                enabled: true,
+            });
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open-read-only-copy".to_owned(),
+                icon: Some(ContextMenuIcon::File),
+                label: crate::explorer::rclone::transfer_open_action_label(&targets[0], true)
+                    .unwrap_or("Open read-only copy")
+                    .to_owned(),
+                command: ContextMenuCommand::DownloadAndOpenRcloneCopies {
+                    paths: targets.to_vec(),
+                    read_only: true,
+                },
+                enabled: true,
+            });
+            handled_transfer_open = true;
+        }
+
+        if !handled_transfer_open {
+            let command = match single_directory_open_target {
+                Some(path) => ContextMenuCommand::OpenDirectory { path },
+                None => ContextMenuCommand::OpenSelectedFiles,
+            };
+            let icon = if selected_file_count > 0 {
+                if use_native_file_icon {
+                    ContextMenuIcon::NativeFile
+                } else {
+                    ContextMenuIcon::File
+                }
             } else {
-                ContextMenuIcon::File
-            }
-        } else {
-            ContextMenuIcon::FolderKind(None)
-        };
-        items.push(ContextMenuItem::Action {
-            id: "context-menu-entry-open".to_owned(),
-            icon: Some(icon),
-            label: "Open".to_owned(),
-            command,
-            enabled: true,
-        });
+                ContextMenuIcon::FolderKind(None)
+            };
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-open".to_owned(),
+                icon: Some(icon),
+                label: "Open".to_owned(),
+                command,
+                enabled: true,
+            });
+        }
 
         if selected_entries_are_supported_mountable_images(selected_entries) {
             items.push(ContextMenuItem::Action {
@@ -1236,6 +1294,17 @@ fn entry_context_menu_items_with_custom(
         if let Some(entry) = selected_entries
             .first()
             .filter(|entry| entry_is_open_with_context_menu_target(entry))
+            .filter(|entry| {
+                #[cfg(feature = "rclone")]
+                {
+                    !crate::explorer::rclone::is_transfer_path(&entry.path)
+                }
+                #[cfg(not(feature = "rclone"))]
+                {
+                    let _ = entry;
+                    true
+                }
+            })
         {
             items.push(crate::explorer::open_with::context_menu_item(&entry.path));
         }
@@ -4017,12 +4086,14 @@ mod tests {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         );
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("Could not run missing-tool: missing")
         );
 
         view.handle_custom_command_result(&executable, Ok(()));
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]

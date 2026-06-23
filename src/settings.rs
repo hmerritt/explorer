@@ -82,6 +82,7 @@ pub enum AddressSlash {
 pub struct ExplorerSettings {
     pub app: AppSettings,
     pub contextmenu: ContextMenuSettings,
+    pub rclone: RcloneSettings,
     pub sidebar: SidebarSettings,
     pub tabs: TabSettings,
     pub view: ViewSettings,
@@ -278,6 +279,37 @@ pub struct AppSettings {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
+pub struct RcloneSettings {
+    pub conf_path: Option<PathBuf>,
+    pub enabled: bool,
+    pub mount: RcloneMountSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct RcloneMountSettings {
+    pub allow_other: bool,
+    pub buffer_size: String,
+    pub cache_dir: RcloneCacheDirSetting,
+    pub dir_cache_time: String,
+    pub fast_list: bool,
+    pub read_only: bool,
+    pub vfs_cache_max_age: String,
+    pub vfs_cache_max_size: String,
+    pub vfs_cache_mode: String,
+    pub vfs_read_ahead: String,
+    pub vfs_read_chunk_size: String,
+    pub vfs_read_chunk_size_limit: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RcloneCacheDirSetting {
+    Auto,
+    Path(PathBuf),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct SidebarSettings {
     #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
     pub hide: Vec<DriveHideKind>,
@@ -313,6 +345,10 @@ pub struct ViewSettings {
     pub mode: FileViewMode,
     #[serde(default = "default_media_view_mode")]
     pub mode_media: FileViewMode,
+    #[serde(default)]
+    pub remote_mode_media: FileViewMode,
+    #[serde(default)]
+    pub remote_thumbnails: bool,
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
@@ -379,6 +415,7 @@ impl Default for ExplorerSettings {
         Self {
             app: AppSettings::default(),
             contextmenu: ContextMenuSettings::default(),
+            rclone: RcloneSettings::default(),
             sidebar: SidebarSettings::default(),
             tabs: TabSettings::default(),
             view: ViewSettings::default(),
@@ -391,6 +428,83 @@ impl Default for AppSettings {
         Self {
             start: StartLocation::Downloads,
         }
+    }
+}
+
+impl Default for RcloneSettings {
+    fn default() -> Self {
+        Self {
+            conf_path: None,
+            enabled: true,
+            mount: RcloneMountSettings::default(),
+        }
+    }
+}
+
+impl RcloneSettings {
+    #[allow(dead_code)]
+    pub(crate) fn resolved_conf_path(&self) -> Option<PathBuf> {
+        self.conf_path.as_deref().and_then(expand_configured_path)
+    }
+}
+
+impl Default for RcloneMountSettings {
+    fn default() -> Self {
+        Self {
+            allow_other: true,
+            buffer_size: "128M".to_owned(),
+            cache_dir: RcloneCacheDirSetting::Auto,
+            dir_cache_time: "48h".to_owned(),
+            fast_list: false,
+            read_only: false,
+            vfs_cache_max_age: "336h".to_owned(),
+            vfs_cache_max_size: "150G".to_owned(),
+            vfs_cache_mode: "full".to_owned(),
+            vfs_read_ahead: "256M".to_owned(),
+            vfs_read_chunk_size: "32M".to_owned(),
+            vfs_read_chunk_size_limit: "2G".to_owned(),
+        }
+    }
+}
+
+impl Default for RcloneCacheDirSetting {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl RcloneCacheDirSetting {
+    pub(crate) fn configured_path(&self) -> Option<&Path> {
+        match self {
+            Self::Auto => None,
+            Self::Path(path) => Some(path),
+        }
+    }
+}
+
+impl Serialize for RcloneCacheDirSetting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Path(path) => path.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RcloneCacheDirSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<PathBuf>::deserialize(deserializer)?;
+        Ok(match value {
+            None => Self::Auto,
+            Some(path) if path == Path::new("auto") => Self::Auto,
+            Some(path) => Self::Path(path),
+        })
     }
 }
 
@@ -425,6 +539,8 @@ impl Default for ViewSettings {
             font: default_font(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
+            remote_mode_media: FileViewMode::Details,
+            remote_thumbnails: false,
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
@@ -1023,6 +1139,12 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
     if let StartLocation::Custom { path } = &settings.app.start {
         validate_configured_path(path)?;
     }
+    if let Some(path) = &settings.rclone.conf_path {
+        validate_configured_path(path)?;
+    }
+    if let Some(path) = settings.rclone.mount.cache_dir.configured_path() {
+        validate_configured_path(path)?;
+    }
     validate_custom_context_menu_items(&settings.contextmenu.items)?;
     Ok(())
 }
@@ -1174,7 +1296,7 @@ const CONTEXT_MENU_VIDEO_EXTENSIONS: &[&str] = &[
     "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
 ];
 
-fn expand_configured_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn expand_configured_path(path: &Path) -> Option<PathBuf> {
     if path.is_absolute() {
         return Some(path.to_path_buf());
     }
@@ -2073,6 +2195,21 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn assert_default_rclone_mount_settings(settings: &RcloneMountSettings) {
+        assert!(settings.allow_other);
+        assert_eq!(settings.buffer_size, "128M");
+        assert_eq!(settings.cache_dir, RcloneCacheDirSetting::Auto);
+        assert_eq!(settings.dir_cache_time, "48h");
+        assert!(!settings.fast_list);
+        assert!(!settings.read_only);
+        assert_eq!(settings.vfs_cache_max_age, "336h");
+        assert_eq!(settings.vfs_cache_max_size, "150G");
+        assert_eq!(settings.vfs_cache_mode, "full");
+        assert_eq!(settings.vfs_read_ahead, "256M");
+        assert_eq!(settings.vfs_read_chunk_size, "32M");
+        assert_eq!(settings.vfs_read_chunk_size_limit, "2G");
+    }
+
     #[test]
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
@@ -2088,6 +2225,8 @@ mod tests {
         assert!(!settings.tabs.focus_new);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
+        assert!(!settings.view.remote_thumbnails);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(
@@ -2104,6 +2243,9 @@ mod tests {
         );
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, StartLocation::Downloads);
+        assert!(settings.rclone.enabled);
+        assert_eq!(settings.rclone.conf_path, None);
+        assert_default_rclone_mount_settings(&settings.rclone.mount);
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
@@ -2145,14 +2287,55 @@ mod tests {
         assert!(!settings.tabs.focus_new);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
+        assert!(!settings.view.remote_thumbnails);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.view.sort, default_file_sort());
         assert!(settings.contextmenu.items.is_empty());
+        assert!(settings.rclone.enabled);
+        assert_eq!(settings.rclone.conf_path, None);
+        assert_default_rclone_mount_settings(&settings.rclone.mount);
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
+    }
+
+    #[test]
+    fn rclone_settings_deserialize_enabled_and_conf_path() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"rclone":{"enabled":false,"conf_path":"~/rclone.conf"}}"#)
+                .expect("deserialize rclone settings");
+
+        assert!(!settings.rclone.enabled);
+        assert_eq!(
+            settings.rclone.conf_path.as_deref(),
+            Some(Path::new("~/rclone.conf"))
+        );
+        assert!(validate_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn rclone_cache_dir_deserializes_auto_null_and_paths() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"rclone":{"mount":{"cache_dir":"auto"}}}"#)
+                .expect("deserialize auto cache dir");
+        assert_eq!(settings.rclone.mount.cache_dir, RcloneCacheDirSetting::Auto);
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"rclone":{"mount":{"cache_dir":null}}}"#)
+                .expect("deserialize null cache dir");
+        assert_eq!(settings.rclone.mount.cache_dir, RcloneCacheDirSetting::Auto);
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"rclone":{"mount":{"cache_dir":"~/rclone-cache"}}}"#)
+                .expect("deserialize configured cache dir");
+        assert_eq!(
+            settings.rclone.mount.cache_dir,
+            RcloneCacheDirSetting::Path(PathBuf::from("~/rclone-cache"))
+        );
+        assert!(validate_settings(&settings).is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -2200,6 +2383,21 @@ mod tests {
                 .expect("deserialize settings");
 
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
+    }
+
+    #[test]
+    fn remote_view_settings_deserialize_and_round_trip() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"view":{"remote_thumbnails":true,"remote_mode_media":"large_icons"}}"#,
+        )
+        .expect("deserialize settings");
+
+        assert!(settings.view.remote_thumbnails);
+        assert_eq!(settings.view.remote_mode_media, FileViewMode::LargeIcons);
+
+        let value = serde_json::to_value(settings).expect("serialize settings");
+        assert_eq!(value["view"]["remote_thumbnails"], true);
+        assert_eq!(value["view"]["remote_mode_media"], "large_icons");
     }
 
     #[test]
@@ -2421,6 +2619,24 @@ mod tests {
         assert!(json.starts_with("{\n  \"app\": {"));
         assert!(json.contains("\n    \"start\": {\"kind\": \"downloads\"}"));
         assert!(json.contains("\n  \"contextmenu\": [],"));
+        let document: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(document["rclone"]["conf_path"], Value::Null);
+        assert_eq!(document["rclone"]["enabled"], true);
+        assert_eq!(document["rclone"]["mount"]["allow_other"], true);
+        assert_eq!(document["rclone"]["mount"]["buffer_size"], "128M");
+        assert_eq!(document["rclone"]["mount"]["cache_dir"], "auto");
+        assert_eq!(document["rclone"]["mount"]["dir_cache_time"], "48h");
+        assert_eq!(document["rclone"]["mount"]["fast_list"], false);
+        assert_eq!(document["rclone"]["mount"]["read_only"], false);
+        assert_eq!(document["rclone"]["mount"]["vfs_cache_max_age"], "336h");
+        assert_eq!(document["rclone"]["mount"]["vfs_cache_max_size"], "150G");
+        assert_eq!(document["rclone"]["mount"]["vfs_cache_mode"], "full");
+        assert_eq!(document["rclone"]["mount"]["vfs_read_ahead"], "256M");
+        assert_eq!(document["rclone"]["mount"]["vfs_read_chunk_size"], "32M");
+        assert_eq!(
+            document["rclone"]["mount"]["vfs_read_chunk_size_limit"],
+            "2G"
+        );
         assert!(json.contains("\n    \"hide\": [],"));
         assert!(json.contains(
             "\n    \"items\": [{\"kind\": \"home\"}, {\"kind\": \"desktop\"}, {\"kind\": \"documents\"}, {\"kind\": \"downloads\"}],"
@@ -2433,6 +2649,8 @@ mod tests {
         assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
         assert!(json.contains("\n    \"native_icons\": true"));
+        assert!(json.contains("\n    \"remote_mode_media\": \"details\""));
+        assert!(json.contains("\n    \"remote_thumbnails\": false"));
         assert!(json.contains("\n    \"show_folder_sizes\": false"));
         assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
         assert!(
@@ -3150,17 +3368,43 @@ mod tests {
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
+        assert_eq!(object["view"]["remote_mode_media"], "details");
+        assert_eq!(object["view"]["remote_thumbnails"], false);
         assert_eq!(object["view"]["show_extensions"], true);
         assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");
         assert_eq!(object["view"]["sort"]["direction"], "ascending");
+        assert_eq!(object["rclone"]["conf_path"], Value::Null);
+        assert_eq!(object["rclone"]["enabled"], true);
+        assert_eq!(object["rclone"]["mount"]["cache_dir"], "auto");
         assert_eq!(object["show_hidden_files"], true);
         assert!(
             normalized.find("\"app\"").unwrap() < normalized.find("\"future_option\"").unwrap()
         );
         assert!(normalized.find("\"a\"").unwrap() < normalized.find("\"z\"").unwrap());
+        assert!(normalized.find("\"rclone\"").unwrap() < normalized.find("\"sidebar\"").unwrap());
         assert!(normalized.find("\"sidebar\"").unwrap() < normalized.find("\"tabs\"").unwrap());
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rclone_sync_preserves_unknown_fields() {
+        let mut document: Value =
+            serde_json::from_str(
+                r#"{"rclone":{"enabled":false,"mount":{"cache_dir":null,"future_mount":{"z":1,"a":2}},"future_rclone":{"z":1,"a":2}}}"#,
+            )
+            .unwrap();
+        let settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
+
+        sync_settings_document(&mut document, &settings);
+
+        assert_eq!(document["rclone"]["enabled"], false);
+        assert_eq!(document["rclone"]["conf_path"], Value::Null);
+        assert_eq!(document["rclone"]["mount"]["cache_dir"], "auto");
+        assert_eq!(document["rclone"]["mount"]["future_mount"]["a"], 2);
+        assert_eq!(document["rclone"]["mount"]["future_mount"]["z"], 1);
+        assert_eq!(document["rclone"]["future_rclone"]["a"], 2);
+        assert_eq!(document["rclone"]["future_rclone"]["z"], 1);
     }
 
     #[gpui::test]
@@ -3318,6 +3562,14 @@ mod tests {
         )
         .unwrap();
         assert!(load_settings_from_path(&relative).is_err());
+
+        let relative_rclone = dir.join("relative-rclone.json");
+        fs::write(
+            &relative_rclone,
+            r#"{"rclone":{"conf_path":"rclone.conf"}}"#,
+        )
+        .unwrap();
+        assert!(load_settings_from_path(&relative_rclone).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 

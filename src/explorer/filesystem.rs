@@ -17,6 +17,8 @@ use rayon::prelude::*;
 use thousands::Separable;
 
 use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, CountingReader};
+#[cfg(feature = "rclone")]
+use crate::explorer::explorer_fs::{ExplorerFs, ExplorerLocation};
 use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
@@ -25,6 +27,7 @@ use crate::explorer::{
         destination_content_matches_source_with_progress, destination_quick_matches_source,
     },
 };
+use crate::settings::RcloneSettings;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -340,6 +343,19 @@ fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
     left == right
 }
 
+pub(super) fn path_is_remote_drive(path: &Path) -> bool {
+    #[cfg(feature = "rclone")]
+    {
+        if crate::explorer::rclone::parse_virtual_path(path).is_some()
+            || crate::explorer::rclone::is_active_managed_mount_path(path)
+        {
+            return true;
+        }
+    }
+
+    platform_path_is_remote_drive(path)
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn path_is_wsl_unc(path: &Path) -> bool {
     windows_wsl_unc_distribution_name(path).is_some()
@@ -438,6 +454,16 @@ fn windows_drive_display_label(path_display: &str, volume_label: Option<&str>) -
 #[cfg(target_os = "windows")]
 fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
     matches!(drive_type, 2 | 3 | 5 | 6)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    path_is_wsl_unc(path) || windows_drive_type(path).is_some_and(windows_drive_type_is_remote)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_drive_type_is_remote(drive_type: u32) -> bool {
+    drive_type == 4
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -621,15 +647,59 @@ pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     macos_volume_drive_roots_from_dir(Path::new("/Volumes"))
 }
 
+#[cfg(target_os = "macos")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    use std::{
+        ffi::{CStr, CString},
+        mem::MaybeUninit,
+        os::unix::ffi::OsStrExt,
+    };
+
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+
+    let mut stat = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let fs_type = unsafe { CStr::from_ptr(stat.f_fstypename.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+
+    macos_filesystem_type_is_remote(&fs_type) || stat.f_flags & libc::MNT_LOCAL == 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_filesystem_type_is_remote(fs_type: &str) -> bool {
+    matches!(
+        fs_type.to_ascii_lowercase().as_str(),
+        "afpfs" | "cifs" | "nfs" | "smbfs" | "sshfs" | "webdav" | "webdavfs"
+    ) || fs_type.to_ascii_lowercase().contains("rclone")
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     linux_mountinfo_drive_roots_from_path(Path::new("/proc/self/mountinfo"))
         .unwrap_or_else(|_| vec![PathBuf::from("/")])
 }
 
+#[cfg(target_os = "linux")]
+fn platform_path_is_remote_drive(path: &Path) -> bool {
+    fs::read_to_string("/proc/self/mountinfo")
+        .ok()
+        .is_some_and(|mountinfo| linux_mountinfo_path_is_remote_drive(&mountinfo, path))
+}
+
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub(crate) fn local_drive_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_path_is_remote_drive(_: &Path) -> bool {
+    false
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -729,6 +799,53 @@ fn linux_mount_point_is_visible_drive(path: &Path) -> bool {
     path_has_components_below(path, Path::new("/media"), 2)
         || path_has_components_below(path, Path::new("/run/media"), 2)
         || path_has_components_below(path, Path::new("/mnt"), 1)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_path_is_remote_drive(mountinfo: &str, path: &Path) -> bool {
+    linux_mountinfo_deepest_entry_for_path(mountinfo, path)
+        .as_ref()
+        .is_some_and(linux_mountinfo_entry_is_remote)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_deepest_entry_for_path(
+    mountinfo: &str,
+    path: &Path,
+) -> Option<LinuxMountInfoEntry> {
+    mountinfo
+        .lines()
+        .filter_map(linux_mountinfo_entry)
+        .filter(|entry| path_is_same_or_descendant(path, &entry.mount_point))
+        .max_by_key(|entry| entry.mount_point.components().count())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_mountinfo_entry_is_remote(entry: &LinuxMountInfoEntry) -> bool {
+    linux_filesystem_type_is_remote(&entry.fs_type)
+        || entry.source.starts_with("//")
+        || entry.source.contains(':')
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_filesystem_type_is_remote(fs_type: &str) -> bool {
+    let fs_type = fs_type.to_ascii_lowercase();
+    matches!(
+        fs_type.as_str(),
+        "9p" | "afpfs"
+            | "cifs"
+            | "curlftpfs"
+            | "davfs"
+            | "davfs2"
+            | "fusedav"
+            | "nfs"
+            | "nfs4"
+            | "rclone"
+            | "smb3"
+            | "smbfs"
+            | "sshfs"
+    ) || fs_type.contains("rclone")
+        || fs_type.contains("sshfs")
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1046,11 +1163,36 @@ impl From<bool> for EntryVisibility {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn load_entries(
     path: &Path,
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
-    load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility.into()))
+    load_entries_with_rclone_settings(
+        path,
+        visibility,
+        &crate::settings::RcloneSettings::default(),
+    )
+}
+
+pub(super) fn load_entries_with_rclone_settings(
+    path: &Path,
+    visibility: impl Into<EntryVisibility>,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> std::io::Result<Vec<FileEntry>> {
+    let visibility = visibility.into();
+    #[cfg(feature = "rclone")]
+    {
+        let explorer_fs = ExplorerFs::new(_rclone_settings);
+        if matches!(
+            explorer_fs.classify(path),
+            ExplorerLocation::RcloneTransfer(_)
+        ) {
+            return explorer_fs.list_dir(path, visibility);
+        }
+    }
+
+    load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility))
 }
 
 #[derive(Clone, Copy)]
@@ -1823,6 +1965,77 @@ pub(super) fn prepare_copy_paths_to_directory_for_paste(
     prepare_copy_paths_to_directory_with_copy_names(paths, destination)
 }
 
+#[cfg(feature = "rclone")]
+pub(super) fn prepare_rclone_transfer_paths_to_directory(
+    paths: &[PathBuf],
+    destination: &Path,
+    operation: crate::explorer::rclone::RcloneTransferOperation,
+    rclone_settings: &RcloneSettings,
+) -> Result<PreparedFileOperation, String> {
+    let explorer_fs = ExplorerFs::new(rclone_settings);
+    if !rclone_settings.enabled {
+        return Err(crate::explorer::rclone::disabled_error());
+    }
+    if !explorer_fs.can_mutate(destination)
+        || paths.iter().any(|path| {
+            !explorer_fs.can_mutate(path) && crate::explorer::rclone::is_transfer_path(path)
+        })
+    {
+        return Err(explorer_fs.read_only_error());
+    }
+    if paths.is_empty() {
+        return Err("No items were selected.".to_owned());
+    }
+    if !crate::explorer::rclone::is_transfer_path(destination)
+        && !paths
+            .iter()
+            .any(|path| crate::explorer::rclone::is_transfer_path(path))
+    {
+        return Err("copy/move does not involve an rclone transfer path".to_owned());
+    }
+
+    let mut steps = Vec::new();
+    let mut roots = Vec::new();
+    let mut stats = FileOperationStats {
+        total_bytes: 0,
+        total_files: 0,
+    };
+
+    for source in paths {
+        let file_name = source
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("{} does not have a file name", source.display()))?;
+        let planned_destination = destination.join(Path::new(file_name));
+        let conflict = explorer_fs.exists(&planned_destination)?;
+        let source_is_dir = explorer_fs.is_dir(source).unwrap_or(false);
+        stats.total_files = stats.total_files.saturating_add(1);
+        steps.push(FileOperationStep::RcloneTransfer {
+            source: source.clone(),
+            destination: planned_destination.clone(),
+            operation,
+            conflict,
+            source_is_dir,
+        });
+        roots.push(FileOperationRoot {
+            source: source.clone(),
+            destination: planned_destination,
+            source_is_dir,
+        });
+    }
+
+    Ok(prepared_or_conflicts(FileOperationJob {
+        kind: match operation {
+            crate::explorer::rclone::RcloneTransferOperation::Copy => FileOperationKind::Copy,
+            crate::explorer::rclone::RcloneTransferOperation::Move => FileOperationKind::Move,
+        },
+        stats,
+        steps,
+        roots,
+        archive_diagnostics: None,
+    }))
+}
+
 pub(super) fn archive_path_is_supported(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
@@ -2231,6 +2444,14 @@ enum FileOperationStep {
         destination: PathBuf,
         conflict: bool,
         copy_engine: CopyEngine,
+    },
+    #[cfg(feature = "rclone")]
+    RcloneTransfer {
+        source: PathBuf,
+        destination: PathBuf,
+        operation: crate::explorer::rclone::RcloneTransferOperation,
+        conflict: bool,
+        source_is_dir: bool,
     },
     CreateLink {
         source: PathBuf,
@@ -2775,6 +2996,16 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source: source.clone(),
                 destination: destination.clone(),
             }),
+            #[cfg(feature = "rclone")]
+            FileOperationStep::RcloneTransfer {
+                source,
+                destination,
+                conflict: true,
+                ..
+            } => file_conflicts.push(FileConflict {
+                source: source.clone(),
+                destination: destination.clone(),
+            }),
             FileOperationStep::ExtractArchive { archive, plan, .. } => {
                 file_conflicts.extend(plan.entries.iter().filter_map(|entry| {
                     entry.conflict.then(|| FileConflict {
@@ -2811,11 +3042,17 @@ fn execute_copy_move_operation_with_progress(
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
     terminate: Arc<AtomicBool>,
+    rclone_settings: &RcloneSettings,
     on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     let cleanup_targets = resumable_copy_cleanup_targets(&job, conflict_choice);
-    let result =
-        execute_copy_move_operation_with_progress_impl(job, conflict_choice, cancel, on_progress);
+    let result = execute_copy_move_operation_with_progress_impl(
+        job,
+        conflict_choice,
+        cancel,
+        rclone_settings,
+        on_progress,
+    );
     if matches!(result, Err(FileOperationError::Cancelled)) && terminate.load(Ordering::Relaxed) {
         cleanup_resumable_copy_targets(&cleanup_targets);
     }
@@ -2826,6 +3063,7 @@ fn execute_copy_move_operation_with_progress_impl(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
+    rclone_settings: &RcloneSettings,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     let copy_options = copy_options_for_operation();
@@ -2907,6 +3145,7 @@ fn execute_copy_move_operation_with_progress_impl(
         &file_tasks,
         job.kind,
         copy_options,
+        rclone_settings,
         cancel.clone(),
         &mut progress,
         &mut on_progress,
@@ -2915,6 +3154,39 @@ fn execute_copy_move_operation_with_progress_impl(
         operated_destinations.insert(result.destination.clone());
         if job.kind == FileOperationKind::Copy {
             copy_undo.extend(result.into_copy_undo());
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    for step in &job.steps {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress);
+            return Err(FileOperationError::Cancelled);
+        }
+
+        if let FileOperationStep::RcloneTransfer {
+            source,
+            destination,
+            operation,
+            conflict,
+            ..
+        } = step
+        {
+            if *conflict && conflict_choice == ConflictChoice::Skip {
+                continue;
+            }
+            execute_rclone_transfer_step(
+                source,
+                destination,
+                *operation,
+                rclone_settings,
+                &cancel,
+                &mut progress,
+                &mut on_progress,
+            )?;
+            operated_destinations.insert(destination.clone());
         }
     }
 
@@ -2972,6 +3244,7 @@ fn run_parallel_file_tasks(
     tasks: &[ParallelFileTask],
     kind: FileOperationKind,
     copy_options: CopyOptions,
+    rclone_settings: &RcloneSettings,
     cancel: Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
@@ -2980,8 +3253,16 @@ fn run_parallel_file_tasks(
         return Ok(Vec::new());
     }
     if let [task] = tasks {
-        return run_single_file_task(task, kind, copy_options, cancel, progress, on_progress)
-            .map(|result| vec![result]);
+        return run_single_file_task(
+            task,
+            kind,
+            copy_options,
+            rclone_settings,
+            cancel,
+            progress,
+            on_progress,
+        )
+        .map(|result| vec![result]);
     }
 
     let parallelism = file_operation_parallelism(tasks.len());
@@ -3006,6 +3287,7 @@ fn run_parallel_file_tasks(
                             task,
                             kind,
                             copy_options,
+                            rclone_settings,
                             cancel_for_workers.clone(),
                             event_tx.clone(),
                         );
@@ -3076,6 +3358,7 @@ fn run_single_file_task(
     task: &ParallelFileTask,
     kind: FileOperationKind,
     copy_options: CopyOptions,
+    rclone_settings: &RcloneSettings,
     cancel: Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
@@ -3101,6 +3384,7 @@ fn run_single_file_task(
                 on_progress,
                 *engine,
                 copy_options,
+                rclone_settings,
             )
             .map_err(|error| operation_error("copy", source, error))?;
             Ok(ParallelFileTaskResult::with_copy_undo(
@@ -3127,6 +3411,7 @@ fn run_single_file_task(
                     on_progress,
                     *copy_engine,
                     copy_options,
+                    rclone_settings,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
                 remove_source(source).map_err(|error| operation_error("remove", source, error))?;
@@ -3146,6 +3431,7 @@ fn run_single_file_task(
                     on_progress,
                     *copy_engine,
                     copy_options,
+                    rclone_settings,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
             }
@@ -3158,6 +3444,7 @@ fn run_parallel_file_task(
     task: &ParallelFileTask,
     kind: FileOperationKind,
     copy_options: CopyOptions,
+    rclone_settings: &RcloneSettings,
     cancel: Arc<AtomicBool>,
     event_tx: mpsc::Sender<ParallelFileTaskEvent>,
 ) -> Result<ParallelFileTaskResult, FileOperationError> {
@@ -3258,6 +3545,7 @@ fn run_parallel_file_task(
                 &mut publish_worker_progress,
                 *engine,
                 copy_options,
+                rclone_settings,
             )
             .map_err(|error| operation_error("copy", source, error))?;
             task_copy_undo = copy_undo;
@@ -3278,6 +3566,7 @@ fn run_parallel_file_task(
                     &mut publish_worker_progress,
                     *copy_engine,
                     copy_options,
+                    rclone_settings,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
                 remove_source(source).map_err(|error| operation_error("remove", source, error))?;
@@ -3290,6 +3579,7 @@ fn run_parallel_file_task(
                     &mut publish_worker_progress,
                     *copy_engine,
                     copy_options,
+                    rclone_settings,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
             }
@@ -3350,6 +3640,64 @@ fn file_operation_parallelism(task_count: usize) -> usize {
     task_count.max(1).min(available.max(1)).min(16)
 }
 
+#[cfg(feature = "rclone")]
+fn execute_rclone_transfer_step(
+    source: &Path,
+    destination: &Path,
+    operation: crate::explorer::rclone::RcloneTransferOperation,
+    rclone_settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    progress.phase = match operation {
+        crate::explorer::rclone::RcloneTransferOperation::Copy => FileOperationPhase::Copying,
+        crate::explorer::rclone::RcloneTransferOperation::Move => FileOperationPhase::Moving,
+    };
+    progress.current_item = Some(source.to_path_buf());
+    on_progress(progress.clone());
+
+    let destination_dir = destination.parent().ok_or_else(|| {
+        FileOperationError::Failed(format!(
+            "{} does not have a parent folder",
+            destination.display()
+        ))
+    })?;
+    crate::explorer::rclone::copy_or_move_paths_to_transfer_destination_with_progress(
+        &[source.to_path_buf()],
+        destination_dir,
+        operation,
+        rclone_settings,
+        cancel,
+        |rclone_progress| {
+            if let Some(total_bytes) = rclone_progress.total_bytes {
+                progress.total_bytes = progress.total_bytes.max(total_bytes);
+                progress.work_total_bytes = progress.work_total_bytes.max(total_bytes);
+            }
+            if let Some(bytes) = rclone_progress.bytes {
+                progress.copied_bytes = progress.copied_bytes.max(bytes);
+                progress.work_completed_bytes = progress.work_completed_bytes.max(bytes);
+            }
+            on_progress(progress.clone());
+        },
+    )
+    .map_err(|error| {
+        if error == "cancelled" || cancel.load(Ordering::Relaxed) {
+            FileOperationError::Cancelled
+        } else {
+            FileOperationError::Failed(error)
+        }
+    })?;
+
+    progress.completed_files = progress.completed_files.saturating_add(1);
+    if progress.work_total_bytes == 0 {
+        progress.work_total_bytes = progress.total_files.max(1) as u64;
+        progress.work_completed_bytes = progress.completed_files as u64;
+    }
+    on_progress(progress.clone());
+    Ok(())
+}
+
 fn finish_file_operation_summary(
     job: FileOperationJob,
     operated_destinations: HashSet<PathBuf>,
@@ -3362,15 +3710,22 @@ fn finish_file_operation_summary(
     summary.copy_undo = copy_undo;
     summary.archive_diagnostics = job.archive_diagnostics.clone();
     for root in &job.roots {
+        let destination_operated = operated_destinations.contains(&root.destination);
         if root.source_is_dir {
-            if root.destination.exists() {
+            if destination_operated || root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
-        } else if operated_destinations.contains(&root.destination) {
+        } else if destination_operated {
             summary.destination_paths.push(root.destination.clone());
         }
 
-        if job.kind == FileOperationKind::Move && !root.source.exists() {
+        if job.kind == FileOperationKind::Move && destination_operated {
+            summary.moved_source_paths.push(root.source.clone());
+            summary.moved_paths.push(FileOperationMove {
+                source: root.source.clone(),
+                destination: root.destination.clone(),
+            });
+        } else if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
             if root.destination.exists() {
                 summary.moved_paths.push(FileOperationMove {
@@ -3395,6 +3750,24 @@ pub(super) fn execute_file_operation_with_progress(
     conflict_choice: ConflictChoice,
     cancel: Arc<AtomicBool>,
     terminate: Arc<AtomicBool>,
+    on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
+    execute_file_operation_with_progress_and_rclone_settings(
+        job,
+        conflict_choice,
+        cancel,
+        terminate,
+        &RcloneSettings::default(),
+        on_progress,
+    )
+}
+
+pub(super) fn execute_file_operation_with_progress_and_rclone_settings(
+    job: FileOperationJob,
+    conflict_choice: ConflictChoice,
+    cancel: Arc<AtomicBool>,
+    terminate: Arc<AtomicBool>,
+    rclone_settings: &RcloneSettings,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
     if job.kind != FileOperationKind::Extract {
@@ -3403,6 +3776,7 @@ pub(super) fn execute_file_operation_with_progress(
             conflict_choice,
             cancel,
             terminate,
+            rclone_settings,
             on_progress,
         );
     }
@@ -3469,6 +3843,7 @@ pub(super) fn execute_file_operation_with_progress(
                     &mut on_progress,
                     *engine,
                     copy_options,
+                    rclone_settings,
                 )
                 .map_err(|error| operation_error("copy", source, error))?;
                 operated_destinations.insert(destination.clone());
@@ -3494,6 +3869,7 @@ pub(super) fn execute_file_operation_with_progress(
                         &mut on_progress,
                         *copy_engine,
                         copy_options,
+                        rclone_settings,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                     remove_source(source)
@@ -3510,9 +3886,32 @@ pub(super) fn execute_file_operation_with_progress(
                         &mut on_progress,
                         *copy_engine,
                         copy_options,
+                        rclone_settings,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
                 }
+                operated_destinations.insert(destination.clone());
+            }
+            #[cfg(feature = "rclone")]
+            FileOperationStep::RcloneTransfer {
+                source,
+                destination,
+                operation,
+                conflict,
+                ..
+            } => {
+                if *conflict && conflict_choice == ConflictChoice::Skip {
+                    continue;
+                }
+                execute_rclone_transfer_step(
+                    source,
+                    destination,
+                    *operation,
+                    rclone_settings,
+                    &cancel,
+                    &mut progress,
+                    &mut on_progress,
+                )?;
                 operated_destinations.insert(destination.clone());
             }
             FileOperationStep::CreateLink { .. } => {}
@@ -3637,19 +4036,26 @@ pub(super) fn execute_file_operation_with_progress(
     summary.kind = job.kind;
     summary.archive_diagnostics = operation_diagnostics;
     for root in &job.roots {
+        let destination_operated = operated_destinations.contains(&root.destination);
         if job.kind == FileOperationKind::Extract {
             if root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
         } else if root.source_is_dir {
-            if root.destination.exists() {
+            if destination_operated || root.destination.exists() {
                 summary.destination_paths.push(root.destination.clone());
             }
-        } else if operated_destinations.contains(&root.destination) {
+        } else if destination_operated {
             summary.destination_paths.push(root.destination.clone());
         }
 
-        if job.kind == FileOperationKind::Move && !root.source.exists() {
+        if job.kind == FileOperationKind::Move && destination_operated {
+            summary.moved_source_paths.push(root.source.clone());
+            summary.moved_paths.push(FileOperationMove {
+                source: root.source.clone(),
+                destination: root.destination.clone(),
+            });
+        } else if job.kind == FileOperationKind::Move && !root.source.exists() {
             summary.moved_source_paths.push(root.source.clone());
             if root.destination.exists() {
                 summary.moved_paths.push(FileOperationMove {
@@ -4636,6 +5042,7 @@ fn move_source_file_with_progress(
     on_progress: &mut impl FnMut(FileOperationProgress),
     copy_engine: CopyEngine,
     copy_options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> std::io::Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => {
@@ -4658,6 +5065,7 @@ fn move_source_file_with_progress(
                 on_progress,
                 copy_engine,
                 copy_options,
+                rclone_settings,
             )?;
             remove_source(source)
         }
@@ -4673,6 +5081,7 @@ fn copy_source_file_with_progress(
     on_progress: &mut impl FnMut(FileOperationProgress),
     engine: CopyEngine,
     options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> std::io::Result<()> {
     match engine {
         CopyEngine::Standard => {
@@ -4683,6 +5092,7 @@ fn copy_source_file_with_progress(
                 progress,
                 on_progress,
                 options,
+                rclone_settings,
             )?;
         }
         CopyEngine::ResumableDelta => {
@@ -4693,6 +5103,7 @@ fn copy_source_file_with_progress(
                 progress,
                 on_progress,
                 options,
+                rclone_settings,
             )?;
         }
     }
@@ -4710,6 +5121,7 @@ fn copy_source_file_with_progress_and_undo(
     on_progress: &mut impl FnMut(FileOperationProgress),
     engine: CopyEngine,
     options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> std::io::Result<(FileOperationCopyUndo, CopyUndoBackupGuard)> {
     let destination_existed = destination.try_exists()?;
     let mut copy_undo = FileOperationCopyUndo::default();
@@ -4729,6 +5141,7 @@ fn copy_source_file_with_progress_and_undo(
         on_progress,
         engine,
         options,
+        rclone_settings,
     )?;
 
     if !destination_existed {
@@ -4745,6 +5158,7 @@ fn copy_source_file_standard_with_progress(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
+    rclone_settings: &RcloneSettings,
 ) -> std::io::Result<()> {
     let metadata = fs::metadata(source)?;
     let verified_before_existing_check = progress.verified_bytes;
@@ -4792,7 +5206,17 @@ fn copy_source_file_standard_with_progress(
     match copy_result {
         Ok(()) => {
             preserve_file_metadata(&metadata, &temp_destination)?;
-            replace_destination_with_temp(&temp_destination, destination)?;
+            finalize_copied_file(
+                source,
+                &temp_destination,
+                destination,
+                &metadata,
+                cancel,
+                progress,
+                on_progress,
+                options,
+                rclone_settings,
+            )?;
             if options.should_sync() {
                 sync_parent_directory_best_effort(destination);
             }
@@ -5000,6 +5424,99 @@ fn temp_extract_directory_for(destination: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+pub(super) fn finalize_copied_file(
+    source: &Path,
+    temp: &Path,
+    destination: &Path,
+    source_metadata: &fs::Metadata,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
+    _rclone_settings: &RcloneSettings,
+) -> std::io::Result<()> {
+    match replace_destination_with_temp(temp, destination) {
+        Ok(()) => return Ok(()),
+        Err(rename_error) => {
+            #[cfg(feature = "rclone")]
+            match crate::explorer::rclone::move_managed_mounted_file(
+                temp,
+                destination,
+                _rclone_settings,
+            ) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(_) => {}
+            }
+
+            copy_verified_temp_to_destination(
+                source,
+                temp,
+                destination,
+                source_metadata,
+                cancel,
+                progress,
+                on_progress,
+                options,
+            )
+            .map_err(|fallback_error| {
+                std::io::Error::new(
+                    fallback_error.kind(),
+                    format!(
+                        "rename failed ({rename_error}); fallback copy failed ({fallback_error})"
+                    ),
+                )
+            })
+        }
+    }
+}
+
+fn copy_verified_temp_to_destination(
+    source: &Path,
+    temp: &Path,
+    destination: &Path,
+    source_metadata: &fs::Metadata,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+    options: CopyOptions,
+) -> std::io::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "file operation cancelled",
+        ));
+    }
+
+    let destination_existed = destination.exists();
+    fs::copy(temp, destination)?;
+    preserve_file_metadata(source_metadata, destination)?;
+
+    if options.should_sync() {
+        sync_file_best_effort(destination);
+    }
+
+    if !destination_content_matches_source_with_progress(
+        source,
+        destination,
+        source_metadata.len(),
+        COPY_BUFFER_SIZE,
+        cancel,
+        progress,
+        on_progress,
+    )? {
+        if !destination_existed {
+            let _ = fs::remove_file(destination);
+        }
+        return Err(std::io::Error::other(
+            "copied file verification failed after rename fallback",
+        ));
+    }
+
+    fs::remove_file(temp)?;
+    Ok(())
+}
+
 fn merge_temp_extract_output(
     source: &Path,
     destination: &Path,
@@ -5043,6 +5560,11 @@ pub(super) fn replace_destination_with_temp(
     temp: &Path,
     destination: &Path,
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = test_replace_destination_error(destination) {
+        return Err(error);
+    }
+
     fs::rename(temp, destination)
 }
 
@@ -5051,6 +5573,11 @@ pub(super) fn replace_destination_with_temp(
     temp: &Path,
     destination: &Path,
 ) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = test_replace_destination_error(destination) {
+        return Err(error);
+    }
+
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -5209,7 +5736,16 @@ static TEST_VOLUME_KEYS: std::sync::Mutex<Vec<(PathBuf, Option<String>)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
+static TEST_REPLACE_DESTINATION_FAILURES: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
 pub(super) struct TestVolumeKeyGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+pub(super) struct TestReplaceDestinationFailureGuard {
     path: PathBuf,
 }
 
@@ -5224,6 +5760,16 @@ impl Drop for TestVolumeKeyGuard {
 }
 
 #[cfg(test)]
+impl Drop for TestReplaceDestinationFailureGuard {
+    fn drop(&mut self) {
+        TEST_REPLACE_DESTINATION_FAILURES
+            .lock()
+            .expect("test replace destination failures")
+            .retain(|path| path != &self.path);
+    }
+}
+
+#[cfg(test)]
 pub(super) fn set_test_path_volume_key(path: &Path, key: Option<&str>) -> TestVolumeKeyGuard {
     let path = path.to_path_buf();
     TEST_VOLUME_KEYS
@@ -5231,6 +5777,18 @@ pub(super) fn set_test_path_volume_key(path: &Path, key: Option<&str>) -> TestVo
         .expect("test volume keys")
         .push((path.clone(), key.map(str::to_owned)));
     TestVolumeKeyGuard { path }
+}
+
+#[cfg(test)]
+pub(super) fn set_test_replace_destination_failure(
+    path: &Path,
+) -> TestReplaceDestinationFailureGuard {
+    let path = path.to_path_buf();
+    TEST_REPLACE_DESTINATION_FAILURES
+        .lock()
+        .expect("test replace destination failures")
+        .push(path.clone());
+    TestReplaceDestinationFailureGuard { path }
 }
 
 #[cfg(test)]
@@ -5242,6 +5800,17 @@ fn test_path_volume_key(path: &Path) -> Option<Option<String>> {
         .rev()
         .find(|(prefix, _)| path.starts_with(prefix))
         .map(|(_, key)| key.clone())
+}
+
+#[cfg(test)]
+fn test_replace_destination_error(destination: &Path) -> Option<std::io::Error> {
+    TEST_REPLACE_DESTINATION_FAILURES
+        .lock()
+        .expect("test replace destination failures")
+        .iter()
+        .rev()
+        .any(|path| path == destination)
+        .then(|| std::io::Error::other("test replace destination failure"))
 }
 
 #[cfg(windows)]
@@ -5834,6 +6403,58 @@ mod tests {
             linux_mountinfo_drive_roots_from_path(&mountinfo).expect("parse mountinfo"),
             vec![PathBuf::from("/"), PathBuf::from("/media/alex/USB")]
         );
+    }
+
+    #[test]
+    fn linux_mountinfo_remote_detection_uses_deepest_mount() {
+        let mountinfo = "\
+36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+40 25 0:45 / /mnt/media rw,relatime - nfs nas:/media rw
+41 40 8:17 / /mnt/media/local rw,relatime - ext4 /dev/sdb1 rw
+42 25 0:46 / /mnt/rclone rw,relatime - fuse.rclone remote: rw
+43 25 0:47 / /mnt/smb rw,relatime - cifs //nas/share rw
+";
+
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/media/photos")
+        ));
+        assert!(!linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/media/local/photos")
+        ));
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/rclone/photos")
+        ));
+        assert!(linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/mnt/smb/photos")
+        ));
+        assert!(!linux_mountinfo_path_is_remote_drive(
+            mountinfo,
+            Path::new("/home/alex")
+        ));
+    }
+
+    #[test]
+    fn macos_remote_filesystem_type_detection_covers_common_network_mounts() {
+        for fs_type in ["smbfs", "nfs", "webdav", "sshfs", "fuse.rclone"] {
+            assert!(
+                macos_filesystem_type_is_remote(fs_type),
+                "{fs_type} should be remote"
+            );
+        }
+
+        assert!(!macos_filesystem_type_is_remote("apfs"));
+        assert!(!macos_filesystem_type_is_remote("hfs"));
+    }
+
+    #[test]
+    fn windows_drive_type_remote_detection_matches_network_drives() {
+        assert!(windows_drive_type_is_remote(4));
+        assert!(!windows_drive_type_is_remote(3));
+        assert!(!windows_drive_type_is_remote(2));
     }
 
     #[test]
@@ -6581,6 +7202,92 @@ mod tests {
             progress_events.last().map(|progress| progress.phase),
             Some(FileOperationPhase::Finished)
         );
+    }
+
+    #[test]
+    fn finalize_copied_file_falls_back_to_verified_copy_when_rename_fails() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.txt");
+        let partial = temp.path().join(".explorer-copy-partial");
+        let destination = temp.path().join("destination.txt");
+        fs::write(&source, b"finished data").expect("write source");
+        fs::write(&partial, b"finished data").expect("write partial");
+        let metadata = fs::metadata(&source).expect("source metadata");
+        let _replace_failure = set_test_replace_destination_failure(&destination);
+        let mut progress = FileOperationProgress {
+            kind: FileOperationKind::Copy,
+            phase: FileOperationPhase::Copying,
+            total_bytes: metadata.len(),
+            copied_bytes: metadata.len(),
+            verified_bytes: 0,
+            work_total_bytes: metadata.len(),
+            work_completed_bytes: metadata.len(),
+            total_files: 1,
+            completed_files: 0,
+            current_item: Some(source.clone()),
+            cancellable: true,
+        };
+
+        finalize_copied_file(
+            &source,
+            &partial,
+            &destination,
+            &metadata,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::explorer_safe(),
+            &RcloneSettings::default(),
+        )
+        .expect("fallback finalization");
+
+        assert_eq!(fs::read(&destination).unwrap(), b"finished data");
+        assert!(!partial.exists());
+    }
+
+    #[test]
+    fn finalize_copied_file_keeps_partial_when_fallback_verification_fails() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.txt");
+        let partial = temp.path().join(".explorer-copy-partial");
+        let destination = temp.path().join("destination.txt");
+        fs::write(&source, b"source data").expect("write source");
+        fs::write(&partial, b"wrong data").expect("write partial");
+        let metadata = fs::metadata(&source).expect("source metadata");
+        let _replace_failure = set_test_replace_destination_failure(&destination);
+        let mut progress = FileOperationProgress {
+            kind: FileOperationKind::Copy,
+            phase: FileOperationPhase::Copying,
+            total_bytes: metadata.len(),
+            copied_bytes: metadata.len(),
+            verified_bytes: 0,
+            work_total_bytes: metadata.len(),
+            work_completed_bytes: metadata.len(),
+            total_files: 1,
+            completed_files: 0,
+            current_item: Some(source.clone()),
+            cancellable: true,
+        };
+
+        let error = finalize_copied_file(
+            &source,
+            &partial,
+            &destination,
+            &metadata,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::explorer_safe(),
+            &RcloneSettings::default(),
+        )
+        .expect_err("verification should fail");
+
+        assert!(
+            error.to_string().contains("fallback copy failed"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&partial).unwrap(), b"wrong data");
+        assert!(!destination.exists());
     }
 
     #[test]

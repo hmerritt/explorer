@@ -229,6 +229,15 @@ impl ExplorerView {
             return;
         }
 
+        #[cfg(feature = "rclone")]
+        if let Some(message) = paths
+            .iter()
+            .find_map(|path| crate::explorer::rclone::normal_open_block_message(path))
+        {
+            self.set_error_notice(message);
+            return;
+        }
+
         #[cfg(target_os = "linux")]
         {
             use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -316,12 +325,12 @@ impl ExplorerView {
             Ok(OpenWithOutcome::Opened {
                 default_app_may_have_changed,
             }) => {
-                self.open_error = None;
+                self.clear_operation_notice();
                 default_app_may_have_changed
             }
             Ok(OpenWithOutcome::Cancelled) => false,
             Err(error) => {
-                self.open_error = Some(format_open_error(path, &error));
+                self.set_error_notice(format_open_error(path, &error));
                 false
             }
         }
@@ -1414,26 +1423,31 @@ mod tests {
     #[test]
     fn cancelled_open_does_not_replace_existing_error() {
         let mut view = ExplorerView::new(PathBuf::from("."));
-        view.open_error = Some("existing".to_owned());
+        view.set_error_notice("existing".to_owned());
 
         assert!(
             !view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::Cancelled))
         );
 
-        assert_eq!(view.open_error.as_deref(), Some("existing"));
+        assert_eq!(
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
+            Some("existing")
+        );
     }
 
     #[test]
     fn successful_open_clears_existing_error() {
         let mut view = ExplorerView::new(PathBuf::from("."));
-        view.open_error = Some("existing".to_owned());
+        view.set_error_notice("existing".to_owned());
 
         assert!(
             !view
                 .handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::opened(false)))
         );
 
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]
@@ -1444,7 +1458,7 @@ mod tests {
             view.handle_open_with_result(Path::new("file.txt"), Ok(OpenWithOutcome::opened(true)))
         );
 
-        assert_eq!(view.open_error, None);
+        assert_eq!(view.operation_notice, None);
     }
 
     #[test]
@@ -1457,7 +1471,9 @@ mod tests {
         ));
 
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("Could not open file.txt: missing")
         );
     }

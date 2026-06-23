@@ -485,7 +485,19 @@ impl ExplorerView {
     }
 
     pub(super) fn can_start_selected_rename(&self) -> bool {
-        self.selection.selected_indices.len() == 1
+        if self.selection.selected_indices.len() != 1 {
+            return false;
+        }
+        let Some(entry) = self
+            .selection
+            .selected_indices
+            .iter()
+            .next()
+            .and_then(|ix| self.entries.get(*ix))
+        else {
+            return false;
+        };
+        crate::explorer::explorer_fs::ExplorerFs::new(&self.rclone_settings).can_mutate(&entry.path)
     }
 
     pub(super) fn can_start_rename_from_name_click(
@@ -499,6 +511,10 @@ impl ExplorerView {
             && !modifiers.extend
             && self.selection.selected_indices.len() == 1
             && self.selection.selected_indices.contains(&ix)
+            && self.entries.get(ix).is_some_and(|entry| {
+                crate::explorer::explorer_fs::ExplorerFs::new(&self.rclone_settings)
+                    .can_mutate(&entry.path)
+            })
     }
 
     pub(super) fn cancel_pending_click_rename(&mut self) {
@@ -690,7 +706,7 @@ impl ExplorerView {
             self.show_file_name_extensions,
             None,
         ));
-        self.open_error = None;
+        self.clear_operation_notice();
     }
 
     fn start_rename_for_entry(
@@ -708,7 +724,7 @@ impl ExplorerView {
             self.show_file_name_extensions,
             focus_handle.clone(),
         ));
-        self.open_error = None;
+        self.clear_operation_notice();
 
         if let Some(focus_handle) = focus_handle {
             focus_handle.focus(window);
@@ -724,7 +740,7 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.rename_focus_out = None;
         self.active_rename = None;
-        self.open_error = None;
+        self.clear_operation_notice();
     }
 
     fn commit_active_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -769,25 +785,25 @@ impl ExplorerView {
 
         let target_name = rename.target_file_name();
         if let Err(error) = validate_rename_text(&rename.content) {
-            self.open_error = Some(error);
+            self.set_error_notice(error);
             return false;
         }
 
         if target_name == rename.original_name {
             self.rename_focus_out = None;
             self.active_rename = None;
-            self.open_error = None;
+            self.clear_operation_notice();
             return true;
         }
 
         let original_path = rename.original_path.clone();
         let target_path = original_path.with_file_name(&target_name);
 
-        match rename_path(&original_path, &target_path) {
+        match rename_path(&original_path, &target_path, &self.rclone_settings) {
             Ok(()) => {
                 self.rename_focus_out = None;
                 self.active_rename = None;
-                self.open_error = None;
+                self.clear_operation_notice();
                 self.remove_cut_paths(&[original_path]);
                 self.reload();
                 self.select_single_path(&target_path);
@@ -798,7 +814,7 @@ impl ExplorerView {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| original_path.display().to_string());
-                self.open_error = Some(format!(
+                self.set_error_notice(format!(
                     "Could not rename \"{source}\" to \"{target_name}\": {error}"
                 ));
                 false
@@ -1260,7 +1276,33 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
+fn rename_path(
+    original_path: &Path,
+    target_path: &Path,
+    _rclone_settings: &crate::settings::RcloneSettings,
+) -> io::Result<()> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(original_path)
+        || crate::explorer::rclone::is_transfer_path(target_path)
+    {
+        let explorer_fs = crate::explorer::explorer_fs::ExplorerFs::new(_rclone_settings);
+        if !explorer_fs.can_mutate(original_path) || !explorer_fs.can_mutate(target_path) {
+            return Err(io::Error::other(explorer_fs.read_only_error()));
+        }
+        if crate::explorer::rclone::is_transfer_path(original_path)
+            && crate::explorer::rclone::is_transfer_path(target_path)
+        {
+            return crate::explorer::rclone::rename_transfer_path(
+                original_path,
+                target_path,
+                _rclone_settings,
+            );
+        }
+        return Err(io::Error::other(
+            "rename must stay within the rclone transfer browser",
+        ));
+    }
+
     if destination_conflicts_with_existing_file(original_path, target_path) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -1722,9 +1764,9 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         assert!(view.active_rename.is_some());
         assert!(
-            view.open_error
+            view.operation_notice
                 .as_ref()
-                .is_some_and(|error| error.contains("Could not rename"))
+                .is_some_and(|notice| notice.text.contains("Could not rename"))
         );
     }
 
@@ -1743,7 +1785,9 @@ mod tests {
         assert!(temp.path().join("a.txt").exists());
         assert!(view.active_rename.is_some());
         assert_eq!(
-            view.open_error.as_deref(),
+            view.operation_notice
+                .as_ref()
+                .map(|notice| notice.text.as_str()),
             Some("The file name cannot be empty.")
         );
     }
@@ -1799,7 +1843,7 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         assert_eq!(selected_names(&view), vec!["c.txt"]);
         assert!(view.active_rename.is_none());
-        assert!(view.open_error.is_none());
+        assert!(view.operation_notice.is_none());
     }
 
     #[gpui::test]

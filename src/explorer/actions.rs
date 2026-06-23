@@ -271,11 +271,9 @@ impl ExplorerView {
             .map(Path::to_path_buf);
         match path {
             Some(path) => self.open_file_with_default_app(&path, window, cx),
-            None => {
-                self.open_error = Some(
-                    "Could not open settings.json: settings file path is unavailable".to_owned(),
-                )
-            }
+            None => self.set_error_notice(
+                "Could not open settings.json: settings file path is unavailable".to_owned(),
+            ),
         }
         cx.notify();
     }
@@ -534,7 +532,9 @@ mod tests {
             view.update(app, |view, cx| {
                 view.handle_open_settings(&OpenSettings, window, cx);
                 assert_eq!(
-                    view.open_error.as_deref(),
+                    view.operation_notice
+                        .as_ref()
+                        .map(|notice| notice.text.as_str()),
                     Some("Could not open settings.json: settings file path is unavailable")
                 );
             });
@@ -556,7 +556,7 @@ mod tests {
                         .map(|pending| pending.paths.as_slice()),
                     Some([selected.clone()].as_slice())
                 );
-                assert!(view.open_error.is_none());
+                assert!(view.operation_notice.is_none());
             });
         });
     }

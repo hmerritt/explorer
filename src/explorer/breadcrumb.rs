@@ -28,6 +28,11 @@ pub(super) struct BreadcrumbVisibility {
 }
 
 pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
+    #[cfg(feature = "rclone")]
+    if let Some(display_path) = crate::explorer::rclone::mounted_display_path(path) {
+        return rclone_mounted_breadcrumb_segments(display_path);
+    }
+
     let mut segments = Vec::new();
     let mut saw_prefix = false;
     let mut target = PathBuf::new();
@@ -38,14 +43,14 @@ pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
             Component::Prefix(prefix) => {
                 saw_prefix = true;
                 target.push(prefix.as_os_str());
-                let prefix = prefix.as_os_str().to_string_lossy().into_owned();
-                if !prefix.is_empty() {
+                let label = prefix_breadcrumb_label(prefix);
+                if !label.is_empty() {
                     let mut segment_target = target.clone();
                     if matches!(components.get(index + 1), Some(Component::RootDir)) {
                         segment_target.push(Component::RootDir.as_os_str());
                     }
                     segments.push(BreadcrumbSegment {
-                        label: prefix,
+                        label,
                         target: segment_target,
                     });
                 }
@@ -101,6 +106,65 @@ pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
     }
 
     segments
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_mounted_breadcrumb_segments(
+    display_path: crate::explorer::rclone::RcloneMountedDisplayPath,
+) -> Vec<BreadcrumbSegment> {
+    let mut target = display_path.mount_root;
+    let mut segments = vec![BreadcrumbSegment {
+        label: display_path.display_name,
+        target: target.clone(),
+    }];
+
+    for component in display_path.relative_path.components() {
+        let label = match component {
+            Component::Normal(component) => {
+                target.push(component);
+                component.to_string_lossy().into_owned()
+            }
+            Component::CurDir => {
+                target.push(component.as_os_str());
+                ".".to_owned()
+            }
+            Component::ParentDir => {
+                target.push(component.as_os_str());
+                "..".to_owned()
+            }
+            Component::Prefix(_) | Component::RootDir => continue,
+        };
+        segments.push(BreadcrumbSegment {
+            label,
+            target: target.clone(),
+        });
+    }
+
+    segments
+}
+
+fn prefix_breadcrumb_label(prefix: std::path::PrefixComponent<'_>) -> String {
+    rclone_prefix_breadcrumb_label(prefix)
+        .unwrap_or_else(|| prefix.as_os_str().to_string_lossy().into_owned())
+}
+
+#[cfg(all(feature = "rclone", target_os = "windows"))]
+fn rclone_prefix_breadcrumb_label(prefix: std::path::PrefixComponent<'_>) -> Option<String> {
+    use std::path::Prefix;
+
+    let (server, share) = match prefix.kind() {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => (server, share),
+        _ => return None,
+    };
+    server
+        .to_string_lossy()
+        .eq_ignore_ascii_case("rclone")
+        .then(|| share.to_string_lossy().into_owned())
+}
+
+#[cfg(not(all(feature = "rclone", target_os = "windows")))]
+fn rclone_prefix_breadcrumb_label(_: std::path::PrefixComponent<'_>) -> Option<String> {
+    None
 }
 
 fn root_breadcrumb_label() -> &'static str {
@@ -256,6 +320,62 @@ mod tests {
                 PathBuf::from(r"C:\Users\Ada\Documents"),
             ]
         );
+    }
+
+    #[cfg(all(target_os = "windows", feature = "rclone"))]
+    #[test]
+    fn windows_rclone_unc_paths_render_remote_as_first_breadcrumb_segment() {
+        let segments = path_breadcrumb_segments(Path::new(r"\\rclone\gdrive\Folder\File.txt"));
+
+        assert_eq!(
+            breadcrumb_labels(&segments),
+            vec!["gdrive", "Folder", "File.txt"]
+        );
+        assert_eq!(segments[0].target, PathBuf::from(r"\\rclone\gdrive\"));
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn rclone_mounted_paths_render_remote_label_with_local_targets() {
+        let mount_root = if cfg!(target_os = "windows") {
+            PathBuf::from(r"X:\")
+        } else {
+            PathBuf::from("/mnt/gdrive")
+        };
+        let segments =
+            rclone_mounted_breadcrumb_segments(crate::explorer::rclone::RcloneMountedDisplayPath {
+                display_name: "gdrive".to_owned(),
+                mount_root: mount_root.clone(),
+                relative_path: PathBuf::from("Folder").join("File.txt"),
+            });
+
+        assert_eq!(
+            breadcrumb_labels(&segments),
+            vec!["gdrive", "Folder", "File.txt"]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                mount_root.clone(),
+                mount_root.join("Folder"),
+                mount_root.join("Folder").join("File.txt"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_non_rclone_unc_paths_keep_full_prefix_label() {
+        let segments = path_breadcrumb_segments(Path::new(r"\\server\share\Folder"));
+
+        assert_eq!(
+            breadcrumb_labels(&segments),
+            vec![r"\\server\share", "Folder"]
+        );
+        assert_eq!(segments[0].target, PathBuf::from(r"\\server\share\"));
     }
 
     #[test]

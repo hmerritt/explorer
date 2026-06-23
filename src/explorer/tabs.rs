@@ -371,7 +371,7 @@ impl ExplorerTabs {
         };
 
         let closing = self.tabs.remove(index);
-        let has_active_operation = closing.view.read(cx).has_active_file_operation();
+        let has_active_operation = closing.view.read(cx).has_background_operation();
         let _ = closing.view.update(cx, |view, cx| {
             view.prepare_for_tab_close(cx);
             cx.notify();
@@ -497,7 +497,7 @@ impl ExplorerTabs {
         let mut still_running = Vec::new();
 
         for view in std::mem::take(&mut self.background_operation_tabs) {
-            if view.read(cx).has_active_file_operation() {
+            if view.read(cx).has_background_operation() {
                 still_running.push(view);
             }
         }
@@ -1960,6 +1960,50 @@ mod tests {
         assert_active_tab_focused(&tabs, cx);
     }
 
+    #[cfg(feature = "rclone")]
+    #[gpui::test]
+    fn new_tab_while_rclone_connecting_renders_local_sidebar(cx: &mut TestAppContext) {
+        let _guard = crate::explorer::rclone::connecting_remotes_test_guard();
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
+        let temp = TempDir::new();
+        let start_path = temp.path().join("start");
+        let sidebar_path = temp.path().join("sidebar");
+        fs::create_dir_all(&start_path).expect("create start directory");
+        fs::create_dir_all(&sidebar_path).expect("create sidebar directory");
+        let mut settings = ExplorerSettings::default();
+        settings.app.start = crate::settings::StartLocation::Custom {
+            path: start_path.clone(),
+        };
+        settings.rclone.enabled = false;
+        settings.sidebar.items = vec![SidebarLocation::Custom {
+            path: sidebar_path.clone(),
+            label: Some("Local".to_owned()),
+        }];
+        cx.set_global(SettingsState::for_test(settings));
+        let permit =
+            crate::explorer::rclone::try_begin_remote_connection("gdrive").expect("permit");
+        let (tabs, cx) = test_tabs_at_path(cx, start_path.clone());
+
+        let new_tab_view = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_new_tab(window, cx);
+                tabs.active_tab().expect("active tab").view.clone()
+            })
+        });
+
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert!(
+                view.sidebar_sections
+                    .user_directories
+                    .iter()
+                    .any(|item| { item.path == sidebar_path && item.label == "Local" })
+            );
+            assert!(view.sidebar_sections.rclone_remotes.is_empty());
+        });
+        drop(permit);
+        crate::explorer::rclone::reset_connecting_remotes_for_test();
+    }
+
     #[gpui::test]
     fn open_directory_in_new_tab_stays_in_background_by_default(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
@@ -2112,8 +2156,10 @@ mod tests {
                     path: sidebar_path.clone(),
                     label: Some("a".to_owned()),
                 }];
-                view.sidebar_sections =
-                    crate::explorer::sidebar::sidebar_sections(&view.sidebar_settings);
+                view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
+                    &view.sidebar_settings,
+                    &view.rclone_settings,
+                );
             });
         });
         cx.run_until_parked();
@@ -3272,7 +3318,7 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         cx.read_entity(&view, |view, _| {
             assert!(!view.has_active_text_input());
-            assert!(view.open_error.is_none());
+            assert!(view.operation_notice.is_none());
             assert_eq!(selected_names(view), vec!["b.txt"]);
         });
     }
@@ -3299,7 +3345,7 @@ mod tests {
         assert!(temp.path().join("a.txt").exists());
         cx.read_entity(&view, |view, _| {
             assert!(!view.has_active_text_input());
-            assert!(view.open_error.is_none());
+            assert!(view.operation_notice.is_none());
             assert_eq!(selected_names(view), vec!["b.txt"]);
         });
     }
@@ -3378,7 +3424,9 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(view.active_rename.is_some());
             assert_eq!(
-                view.open_error.as_deref(),
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
                 Some("The file name cannot be empty.")
             );
         });

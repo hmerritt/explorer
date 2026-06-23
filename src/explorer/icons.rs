@@ -143,6 +143,14 @@ png_icon!(
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(MOUNT_DISC_ICON, "devices/discs", "disc.png");
+#[cfg(feature = "rclone")]
+png_icon!(RCLONE_NETWORK_ICON, "devices/drives", "network.png");
+#[cfg(feature = "rclone")]
+png_icon!(
+    RCLONE_NETWORK_DISCONNECTED_ICON,
+    "devices/drives",
+    "networkdelete.png"
+);
 png_icon!(DRIVE_WINDOWS_ICON, "devices/drives", "windows.png");
 png_icon!(BLU_RAY_DISC_ICON, "devices/discs", "bd.png");
 png_icon!(DVD_DISC_ICON, "devices/discs", "dvd.png");
@@ -178,6 +186,8 @@ svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 svg_icon!(RUN_ELEVATED_ICON, "utility", "run_elevated.svg");
 svg_icon!(SETTINGS_ICON, "utility", "settings.svg");
+#[cfg(feature = "rclone")]
+svg_icon!(SUCCESS_ICON, "utility", "success.svg");
 png_icon!(WSL_ALPINE_ICON, "wsl", "alpine.png");
 png_icon!(WSL_DEBIAN_ICON, "wsl", "debian.png");
 png_icon!(WSL_GENERIC_ICON, "wsl", "generic.png");
@@ -461,6 +471,19 @@ pub(super) fn drive_wsl_icon_sized_for_path(path: &Path, size: f32) -> AnyElemen
     image_icon(wsl_distro_image(kind), size, size)
 }
 
+#[cfg(feature = "rclone")]
+pub(super) fn rclone_drive_icon(state: crate::explorer::rclone::RcloneSidebarState) -> AnyElement {
+    image_sidebar_icon(rclone_drive_image_for_state(state))
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_drive_image_for_state(state: crate::explorer::rclone::RcloneSidebarState) -> Arc<Image> {
+    match state {
+        crate::explorer::rclone::RcloneSidebarState::Mounted => RCLONE_NETWORK_ICON.clone(),
+        _ => RCLONE_NETWORK_DISCONNECTED_ICON.clone(),
+    }
+}
+
 fn wsl_distro_image(kind: WslDistroKind) -> Arc<Image> {
     match kind {
         WslDistroKind::Alpine => WSL_ALPINE_ICON.clone(),
@@ -556,6 +579,37 @@ mod tests {
         assert!(!DVD_DISC_ICON_BYTES.is_empty());
     }
 
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn rclone_network_drive_png_assets_load_as_png_images() {
+        assert_eq!(RCLONE_NETWORK_ICON.format, ImageFormat::Png);
+        assert_eq!(RCLONE_NETWORK_DISCONNECTED_ICON.format, ImageFormat::Png);
+        assert!(!RCLONE_NETWORK_ICON.bytes.is_empty());
+        assert!(!RCLONE_NETWORK_DISCONNECTED_ICON.bytes.is_empty());
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn rclone_drive_icons_use_connected_image_only_for_mounted_state() {
+        use crate::explorer::rclone::RcloneSidebarState;
+
+        assert_eq!(
+            rclone_drive_image_for_state(RcloneSidebarState::Mounted).id(),
+            RCLONE_NETWORK_ICON.clone().id()
+        );
+        for state in [
+            RcloneSidebarState::Disconnected,
+            RcloneSidebarState::Connecting,
+            RcloneSidebarState::TransferMode,
+            RcloneSidebarState::Error,
+        ] {
+            assert_eq!(
+                rclone_drive_image_for_state(state).id(),
+                RCLONE_NETWORK_DISCONNECTED_ICON.clone().id()
+            );
+        }
+    }
+
     #[test]
     fn optical_drive_png_assets_load_as_png_images() {
         assert_eq!(BLU_RAY_DISC_ICON.format, ImageFormat::Png);
@@ -580,6 +634,8 @@ mod tests {
     fn utility_icons_use_bundled_svg_assets() {
         assert!(!EJECT_ICON_BYTES.is_empty());
         assert!(!SETTINGS_ICON_BYTES.is_empty());
+        #[cfg(feature = "rclone")]
+        assert!(!SUCCESS_ICON_BYTES.is_empty());
     }
 
     #[test]
