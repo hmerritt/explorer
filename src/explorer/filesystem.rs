@@ -668,7 +668,7 @@ fn platform_path_is_remote_drive(path: &Path) -> bool {
         .to_string_lossy()
         .into_owned();
 
-    macos_filesystem_type_is_remote(&fs_type) || stat.f_flags & libc::MNT_LOCAL == 0
+    macos_filesystem_type_is_remote(&fs_type) || (stat.f_flags & libc::MNT_LOCAL as u32) == 0
 }
 
 #[cfg(any(target_os = "macos", test))]
