@@ -1695,25 +1695,7 @@ pub(super) fn is_transfer_path(path: &Path) -> bool {
     if parse_virtual_path(path).is_none() {
         return false;
     }
-    !is_active_managed_mount_path(path)
-}
-
-pub(super) fn is_active_managed_mount_path(path: &Path) -> bool {
-    if load_reconciled_mount_manifest_with_client(&LibrcloneClient)
-        .ok()
-        .is_some_and(|manifest| path_is_managed_mount_with_manifest(path, &manifest))
-    {
-        return true;
-    }
-
-    if let Some((remote_name, mount_root)) =
-        existing_accessible_mount_root_for_path(path, production_existing_mount_policy())
-    {
-        store_mount_manifest_entry(&remote_name, &mount_root);
-        return true;
-    }
-
-    false
+    !path_is_managed_mount_with_manifest(path, &load_mount_manifest())
 }
 
 #[cfg(test)]
@@ -1769,19 +1751,6 @@ fn is_unix_virtual_namespace_path(path: &Path) -> bool {
         return false;
     }
     matches!(components.next(), Some(Component::Normal(root)) if root == OsStr::new(RCLONE_VIRTUAL_ROOT))
-}
-
-fn existing_accessible_mount_root_for_path(
-    path: &Path,
-    existing_mount_policy: ExistingMountPolicy,
-) -> Option<(String, PathBuf)> {
-    let parsed = parse_virtual_path(path)?;
-    let mount_root = mount_root_for_remote(&parsed.remote_name);
-    if !path_is_same_or_descendant(path, &mount_root) {
-        return None;
-    }
-    existing_accessible_mount_root(&mount_root, existing_mount_policy)
-        .map(|mount_root| (parsed.remote_name, mount_root))
 }
 
 #[cfg(target_os = "windows")]

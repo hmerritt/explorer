@@ -674,7 +674,9 @@ mod tests {
         test_support::TempDir,
         view::{ExplorerView, ViewModeSelection},
     };
-    use crate::settings::{ExplorerSettings, FileViewMode};
+    #[cfg(feature = "rclone")]
+    use crate::settings::ExplorerSettings;
+    use crate::settings::FileViewMode;
     use std::{fs, path::PathBuf};
 
     #[cfg(feature = "rclone")]

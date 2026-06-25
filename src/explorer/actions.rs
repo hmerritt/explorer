@@ -467,10 +467,20 @@ mod tests {
             view.update(app, |view, cx| {
                 view.handle_create_new_folder(&CreateNewFolder, window, cx);
                 assert!(root.join("New folder").is_dir());
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
                 assert_eq!(selected_names(view), vec!["New folder"]);
 
                 view.handle_create_new_file(&CreateNewFile, window, cx);
                 assert!(root.join("New file").is_file());
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
                 assert_eq!(selected_names(view), vec!["New file"]);
             });
         });
@@ -573,6 +583,11 @@ mod tests {
             view.update(app, |view, cx| {
                 view.handle_paste_clipboard(&PasteClipboard, window, cx);
                 assert_eq!(fs::read(root.join("image.png")).unwrap(), vec![1, 2, 3, 4]);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
                 assert_eq!(selected_names(view), vec!["image.png"]);
             });
         });

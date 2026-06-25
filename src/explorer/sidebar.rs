@@ -37,15 +37,24 @@ pub(super) fn sidebar_sections(
 ) -> SidebarSections {
     #[cfg(feature = "rclone")]
     {
-        let mut sections = sidebar_sections_without_rclone(settings);
-        sections.rclone_remotes = rclone_remote_items(rclone_settings);
-        sections
+        let _ = rclone_settings;
+        sidebar_sections_without_rclone(settings)
     }
     #[cfg(not(feature = "rclone"))]
     {
         let _ = rclone_settings;
         sidebar_sections_without_rclone(settings)
     }
+}
+
+#[cfg(feature = "rclone")]
+pub(super) fn sidebar_sections_with_rclone_remotes(
+    settings: &SidebarSettings,
+    rclone_settings: &RcloneSettings,
+) -> SidebarSections {
+    let mut sections = sidebar_sections_without_rclone(settings);
+    sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Blocking);
+    sections
 }
 
 pub(super) fn sidebar_sections_without_rclone(settings: &SidebarSettings) -> SidebarSections {
@@ -84,7 +93,7 @@ fn sidebar_sections_from_roots(
     {
         let mut sections =
             sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots);
-        sections.rclone_remotes = rclone_remote_items(rclone_settings);
+        sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Cached);
         sections
     }
     #[cfg(not(feature = "rclone"))]
@@ -268,7 +277,19 @@ fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
 }
 
 #[cfg(feature = "rclone")]
-fn rclone_remote_items(settings: &RcloneSettings) -> Vec<SidebarItem> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RcloneRemoteLoad {
+    Cached,
+    Blocking,
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_remote_items(settings: &RcloneSettings, load: RcloneRemoteLoad) -> Vec<SidebarItem> {
+    if load == RcloneRemoteLoad::Cached {
+        let _ = settings;
+        return Vec::new();
+    }
+
     let mut remotes = discover_remotes(settings);
     apply_known_mount_states(&mut remotes);
     apply_connecting_remote_states(&mut remotes);

@@ -20,9 +20,6 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
-#[cfg(feature = "rclone")]
-use crate::explorer::filesystem::prepare_rclone_transfer_paths_to_directory;
-
 #[cfg(test)]
 use crate::explorer::filesystem::{
     copy_paths_to_directory_with_copy_names, create_links_to_directory, move_paths_to_directory,
@@ -575,9 +572,7 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let valid_target = ExplorerFs::new(&self.rclone_settings)
-            .is_dir(destination)
-            .unwrap_or(false);
+        let valid_target = drop_destination_is_dir(destination, &self.rclone_settings);
         match resolve_drop_operation_for_paths(modifiers, valid_target, paths, destination) {
             ResolvedDrop::Move => {
                 #[cfg(feature = "rclone")]
@@ -586,13 +581,10 @@ impl ExplorerView {
                         .iter()
                         .any(|path| crate::explorer::rclone::is_transfer_path(path))
                 {
-                    self.handle_prepared_file_command_result_and_open_dialog(
-                        prepare_rclone_transfer_paths_to_directory(
-                            paths,
-                            destination,
-                            crate::explorer::rclone::RcloneTransferOperation::Move,
-                            &self.rclone_settings,
-                        ),
+                    self.prepare_rclone_transfer_paths_to_directory_and_open_dialog(
+                        paths.to_vec(),
+                        destination.to_path_buf(),
+                        crate::explorer::rclone::RcloneTransferOperation::Move,
                         cx,
                     );
                     return;
@@ -609,13 +601,10 @@ impl ExplorerView {
                         .iter()
                         .any(|path| crate::explorer::rclone::is_transfer_path(path))
                 {
-                    self.handle_prepared_file_command_result_and_open_dialog(
-                        prepare_rclone_transfer_paths_to_directory(
-                            paths,
-                            destination,
-                            crate::explorer::rclone::RcloneTransferOperation::Copy,
-                            &self.rclone_settings,
-                        ),
+                    self.prepare_rclone_transfer_paths_to_directory_and_open_dialog(
+                        paths.to_vec(),
+                        destination.to_path_buf(),
+                        crate::explorer::rclone::RcloneTransferOperation::Copy,
                         cx,
                     );
                     return;
@@ -818,6 +807,11 @@ fn external_drop_target_validity(
 }
 
 fn drop_destination_is_dir(path: &Path, rclone_settings: &crate::settings::RcloneSettings) -> bool {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        return true;
+    }
+
     ExplorerFs::new(rclone_settings)
         .is_dir(path)
         .unwrap_or(false)

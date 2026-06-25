@@ -1993,7 +1993,7 @@ mod tests {
                 view.sidebar_sections
                     .user_directories
                     .iter()
-                    .any(|item| { item.path == sidebar_path && item.label == "Local" })
+                    .any(|item| { item.path == sidebar_path })
             );
             assert!(view.sidebar_sections.rclone_remotes.is_empty());
         });

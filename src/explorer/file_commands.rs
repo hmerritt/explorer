@@ -35,7 +35,9 @@ use crate::explorer::{
 };
 
 #[cfg(feature = "rclone")]
-use crate::explorer::filesystem::prepare_rclone_transfer_paths_to_directory;
+use crate::explorer::filesystem::{
+    FileOperationPhase, FileOperationProgress, prepare_rclone_transfer_paths_to_directory,
+};
 
 #[cfg(test)]
 use crate::explorer::filesystem::{
@@ -102,13 +104,28 @@ impl ExplorerView {
         self.create_new_item(NewItemKind::File, window, cx);
     }
 
-    fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
+    fn create_new_item(&mut self, kind: NewItemKind, _window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "rclone")]
+        if crate::explorer::rclone::is_transfer_path(&self.path) {
+            self.create_new_item_in_background(kind, cx);
+            return;
+        }
+
         match create_new_item_in_directory(&self.path, kind, &self.rclone_settings) {
             Ok(path) => {
                 self.clear_operation_notice();
-                self.reload_with_entry_metadata_resolution(cx);
-                self.select_single_path(&path);
-                self.start_rename_for_path(&path, window, cx);
+                self.reload_async_with_options_and_rename(
+                    crate::explorer::view::ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    vec![path.clone()],
+                    Some(path),
+                    true,
+                    false,
+                    false,
+                    cx,
+                );
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
@@ -179,13 +196,10 @@ impl ExplorerView {
                     crate::explorer::rclone::RcloneTransferOperation::Move
                 }
             };
-            self.handle_prepared_file_command_result_and_open_dialog(
-                prepare_rclone_transfer_paths_to_directory(
-                    &clipboard.paths,
-                    &self.path,
-                    operation,
-                    &self.rclone_settings,
-                ),
+            self.prepare_rclone_transfer_paths_to_directory_and_open_dialog(
+                clipboard.paths,
+                self.path.clone(),
+                operation,
                 cx,
             );
             return;
@@ -208,15 +222,184 @@ impl ExplorerView {
     fn paste_clipboard_image(
         &mut self,
         image: &Image,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "rclone")]
+        if crate::explorer::rclone::is_transfer_path(&self.path) {
+            match clipboard_image_file_payload(image) {
+                Ok((extension, bytes)) => {
+                    self.create_clipboard_image_file_in_background(extension, bytes.into_owned(), cx)
+                }
+                Err(error) => {
+                    self.reload_with_entry_metadata_resolution(cx);
+                    self.set_error_notice(error);
+                }
+            }
+            return;
+        }
+
         match create_clipboard_image_file_in_directory(&self.path, image, &self.rclone_settings) {
             Ok(path) => {
                 self.clear_operation_notice();
+                self.reload_async_with_options_and_rename(
+                    crate::explorer::view::ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    vec![path.clone()],
+                    Some(path),
+                    true,
+                    false,
+                    false,
+                    cx,
+                );
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
                 self.reload_with_entry_metadata_resolution(cx);
-                self.select_single_path(&path);
-                self.start_rename_for_path(&path, window, cx);
+                self.set_error_notice(error);
+            }
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn create_new_item_in_background(&mut self, kind: NewItemKind, cx: &mut Context<Self>) {
+        let parent = self.path.clone();
+        let settings = self.rclone_settings.clone();
+        let current_item = Some(parent.join(kind.base_name()));
+        self.run_rclone_create_in_background(
+            current_item,
+            move || create_new_item_in_directory(&parent, kind, &settings),
+            cx,
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    fn create_clipboard_image_file_in_background(
+        &mut self,
+        extension: &'static str,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = self.path.clone();
+        let settings = self.rclone_settings.clone();
+        let current_item = Some(parent.join(clipboard_image_file_name(extension, 1)));
+        self.run_rclone_create_in_background(
+            current_item,
+            move || {
+                create_clipboard_image_file_payload_in_directory(
+                    &parent, extension, &bytes, &settings,
+                )
+            },
+            cx,
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    fn run_rclone_create_in_background(
+        &mut self,
+        current_item: Option<PathBuf>,
+        operation: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = FileOperationProgress {
+            kind: FileOperationKind::Create,
+            phase: FileOperationPhase::Preparing,
+            total_bytes: 0,
+            copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 0,
+            work_completed_bytes: 0,
+            total_files: 1,
+            completed_files: 0,
+            current_item,
+            cancellable: true,
+        };
+        self.active_file_operation = Some(FileOperationState {
+            progress,
+            cancel: cancel.clone(),
+            terminate,
+            task: None,
+            archive_diagnostics: None,
+        });
+        self.clear_operation_notice();
+        self.open_file_operation_window(cx);
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            let finished = finished.clone();
+            async move |this, cx| {
+                let create_task = cx.background_executor().spawn({
+                    let finished = finished.clone();
+                    async move {
+                        let result = operation();
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.close_preparation_file_operation_window(cx);
+                            explorer.clear_operation_notice();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(FILE_OPERATION_PROGRESS_INTERVAL)
+                        .await;
+                }
+
+                let result = create_task.await;
+                let _ = this.update(cx, |explorer, cx| {
+                    if cancel.load(Ordering::Relaxed) {
+                        explorer.close_preparation_file_operation_window(cx);
+                        explorer.clear_operation_notice();
+                    } else {
+                        explorer.complete_rclone_created_path(result, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn complete_rclone_created_path(
+        &mut self,
+        result: Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_preparation_file_operation_window(cx);
+        match result {
+            Ok(path) => {
+                self.clear_operation_notice();
+                self.reload_async_with_options_and_rename(
+                    crate::explorer::view::ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    vec![path.clone()],
+                    Some(path),
+                    true,
+                    false,
+                    false,
+                    cx,
+                );
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
@@ -499,9 +682,106 @@ impl ExplorerView {
             return true;
         }
 
-        match crate::explorer::rclone::delete_transfer_paths(paths, &self.rclone_settings) {
+        self.delete_rclone_transfer_paths_in_background(paths.to_vec(), cx);
+        true
+    }
+
+    #[cfg(feature = "rclone")]
+    fn delete_rclone_transfer_paths_in_background(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = FileOperationProgress {
+            kind: FileOperationKind::Delete,
+            phase: FileOperationPhase::Removing,
+            total_bytes: 0,
+            copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 0,
+            work_completed_bytes: 0,
+            total_files: paths.len(),
+            completed_files: 0,
+            current_item: paths.first().cloned(),
+            cancellable: true,
+        };
+        self.active_file_operation = Some(FileOperationState {
+            progress,
+            cancel: cancel.clone(),
+            terminate,
+            task: None,
+            archive_diagnostics: None,
+        });
+        self.clear_operation_notice();
+        self.open_file_operation_window(cx);
+
+        let settings = self.rclone_settings.clone();
+        let completion_paths = paths.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            let finished = finished.clone();
+            async move |this, cx| {
+                let delete_task = cx.background_executor().spawn({
+                    let paths = paths.clone();
+                    let finished = finished.clone();
+                    async move {
+                        let result =
+                            crate::explorer::rclone::delete_transfer_paths(&paths, &settings);
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.close_preparation_file_operation_window(cx);
+                            explorer.clear_operation_notice();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(FILE_OPERATION_PROGRESS_INTERVAL)
+                        .await;
+                }
+
+                let result = delete_task.await;
+                let _ = this.update(cx, |explorer, cx| {
+                    if cancel.load(Ordering::Relaxed) {
+                        explorer.close_preparation_file_operation_window(cx);
+                        explorer.clear_operation_notice();
+                    } else {
+                        explorer.complete_rclone_transfer_delete(completion_paths, result, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn complete_rclone_transfer_delete(
+        &mut self,
+        paths: Vec<PathBuf>,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_preparation_file_operation_window(cx);
+        match result {
             Ok(()) => {
-                self.remove_cut_paths(paths);
+                self.remove_cut_paths(&paths);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.clear_selection();
                 self.clear_operation_notice();
@@ -512,7 +792,6 @@ impl ExplorerView {
                 self.reload_with_entry_metadata_resolution(cx);
             }
         }
-        true
     }
 
     pub(super) fn entry_is_cut(&self, path: &Path) -> bool {
@@ -526,7 +805,7 @@ impl ExplorerView {
     ) {
         match result {
             Ok(FileOperationOutcome::Finished(summary)) => {
-                self.finish_file_operation(summary);
+                self.finish_file_operation_for_test(summary);
             }
             Ok(FileOperationOutcome::Conflicts(conflicts)) => {
                 self.pending_file_conflict = Some(conflicts);
@@ -560,6 +839,110 @@ impl ExplorerView {
                 self.set_error_notice(error);
                 self.reload_with_entry_metadata_resolution(cx);
             }
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    pub(super) fn prepare_rclone_transfer_paths_to_directory_and_open_dialog(
+        &mut self,
+        paths: Vec<PathBuf>,
+        destination: PathBuf,
+        operation: crate::explorer::rclone::RcloneTransferOperation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+
+        let kind = rclone_transfer_operation_kind(operation);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = FileOperationProgress {
+            kind,
+            phase: FileOperationPhase::Preparing,
+            total_bytes: 0,
+            copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 0,
+            work_completed_bytes: 0,
+            total_files: paths.len(),
+            completed_files: 0,
+            current_item: None,
+            cancellable: true,
+        };
+        self.active_file_operation = Some(FileOperationState {
+            progress,
+            cancel: cancel.clone(),
+            terminate: terminate.clone(),
+            task: None,
+            archive_diagnostics: None,
+        });
+        self.clear_operation_notice();
+        self.open_file_operation_window(cx);
+
+        let settings = self.rclone_settings.clone();
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        prepare_rclone_transfer_paths_to_directory(
+                            &paths,
+                            &destination,
+                            operation,
+                            &settings,
+                        )
+                    })
+                    .await;
+
+                let _ = this.update(cx, |explorer, cx| {
+                    if cancel.load(Ordering::Relaxed) {
+                        explorer.close_preparation_file_operation_window(cx);
+                        explorer.clear_operation_notice();
+                    } else {
+                        explorer.complete_prepared_file_operation(result, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn complete_prepared_file_operation(
+        &mut self,
+        result: Result<PreparedFileOperation, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_file_operation = None;
+        match result {
+            Ok(PreparedFileOperation::Ready(job)) => {
+                self.start_file_operation(job, ConflictChoice::Replace, cx);
+            }
+            Ok(PreparedFileOperation::Conflicts(conflicts)) => {
+                self.close_preparation_file_operation_window(cx);
+                self.pending_file_conflict = Some(conflicts);
+                self.clear_operation_notice();
+                self.open_pending_dialog_window(cx);
+            }
+            Err(error) => {
+                self.close_preparation_file_operation_window(cx);
+                self.set_error_notice(error);
+                self.reload_with_entry_metadata_resolution(cx);
+            }
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn close_preparation_file_operation_window(&mut self, cx: &mut Context<Self>) {
+        self.active_file_operation = None;
+        if let Some(handle) = self.active_dialog_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
 
@@ -703,11 +1086,9 @@ impl ExplorerView {
         match result {
             Ok(summary) => {
                 let diagnostics = summary.archive_diagnostics.clone();
-                self.finish_file_operation(summary);
-                let metadata_started = Instant::now();
-                self.schedule_entry_metadata_resolution(cx);
+                self.finish_file_operation(summary, cx);
                 if let Some(diagnostics) = diagnostics {
-                    diagnostics.add_metadata_resolution(metadata_started.elapsed());
+                    diagnostics.add_metadata_resolution(Duration::ZERO);
                     diagnostics.finish("ok");
                 }
                 self.emit_filesystem_changed(cx);
@@ -723,16 +1104,35 @@ impl ExplorerView {
         }
     }
 
-    fn finish_file_operation(&mut self, summary: FileOperationSummary) {
+    fn finish_file_operation(&mut self, summary: FileOperationSummary, cx: &mut Context<Self>) {
         let reload_started = Instant::now();
+        let destination_paths = summary.destination_paths.clone();
+        self.clear_operation_notice();
+        self.record_file_operation_undo(&summary);
+        self.remove_cut_paths(&summary.moved_source_paths);
+        self.reload_async_with_options(
+            crate::explorer::view::ReloadMode {
+                preserve_selection: true,
+                rebuild_sidebar: true,
+            },
+            destination_paths,
+            true,
+            false,
+            false,
+            cx,
+        );
+        if let Some(diagnostics) = summary.archive_diagnostics {
+            diagnostics.add_reload(reload_started.elapsed());
+        }
+    }
+
+    #[cfg(test)]
+    fn finish_file_operation_for_test(&mut self, summary: FileOperationSummary) {
         self.clear_operation_notice();
         self.record_file_operation_undo(&summary);
         self.remove_cut_paths(&summary.moved_source_paths);
         self.reload();
         self.restore_selection_from_paths(&summary.destination_paths);
-        if let Some(diagnostics) = summary.archive_diagnostics {
-            diagnostics.add_reload(reload_started.elapsed());
-        }
     }
 
     fn record_file_operation_undo(&mut self, summary: &FileOperationSummary) {
@@ -756,7 +1156,7 @@ impl ExplorerView {
                     }));
                 }
             }
-            FileOperationKind::Extract => {}
+            FileOperationKind::Extract | FileOperationKind::Create | FileOperationKind::Delete => {}
         }
     }
 
@@ -825,6 +1225,16 @@ fn path_uses_rclone_transfer(path: &Path) -> bool {
     {
         let _ = path;
         false
+    }
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_transfer_operation_kind(
+    operation: crate::explorer::rclone::RcloneTransferOperation,
+) -> FileOperationKind {
+    match operation {
+        crate::explorer::rclone::RcloneTransferOperation::Copy => FileOperationKind::Copy,
+        crate::explorer::rclone::RcloneTransferOperation::Move => FileOperationKind::Move,
     }
 }
 
@@ -1197,6 +1607,20 @@ fn create_clipboard_image_file_in_directory(
     rclone_settings: &crate::settings::RcloneSettings,
 ) -> Result<PathBuf, String> {
     let (extension, bytes) = clipboard_image_file_payload(image)?;
+    create_clipboard_image_file_payload_in_directory(
+        parent,
+        extension,
+        bytes.as_ref(),
+        rclone_settings,
+    )
+}
+
+fn create_clipboard_image_file_payload_in_directory(
+    parent: &Path,
+    extension: &'static str,
+    bytes: &[u8],
+    rclone_settings: &crate::settings::RcloneSettings,
+) -> Result<PathBuf, String> {
     let explorer_fs = ExplorerFs::new(rclone_settings);
     let mut index = 1usize;
 
@@ -1356,7 +1780,7 @@ mod tests {
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_entity_at_path, test_view_with_entries},
     };
-    use gpui::{Image, ImageFormat, TestAppContext};
+    use gpui::{AppContext, Image, ImageFormat, TestAppContext};
     use std::{fs, io::Cursor};
 
     fn file_conflicts(result: Result<FileOperationOutcome, String>) -> FileConflictBatch {
@@ -1972,6 +2396,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn file_operation_success_completion_reloads_directory_async(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let destination = temp.path().join("created.txt");
+        fs::write(&destination, b"data").expect("create destination");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.finish_file_operation(
+                    FileOperationSummary {
+                        kind: FileOperationKind::Copy,
+                        destination_paths: vec![destination.clone()],
+                        copy_undo: FileOperationCopyUndo::default(),
+                        moved_source_paths: Vec::new(),
+                        moved_paths: Vec::new(),
+                        archive_diagnostics: None,
+                    },
+                    cx,
+                );
+
+                assert_eq!(view.loading_path.as_deref(), Some(temp.path()));
+                assert!(view.directory_load_task.is_some());
+                assert!(view.entries.is_empty());
+            });
+        });
+
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["created.txt"]);
+        });
+    }
+
     #[test]
     fn successful_cut_paste_moves_files_and_clears_cut_state() {
         let temp = TempDir::new();
@@ -2228,7 +2685,7 @@ mod tests {
         fs::create_dir(&extracted).expect("create extracted folder");
         let mut view = ExplorerView::new(temp.path().to_path_buf());
 
-        view.finish_file_operation(FileOperationSummary {
+        view.finish_file_operation_for_test(FileOperationSummary {
             kind: FileOperationKind::Extract,
             destination_paths: vec![extracted],
             copy_undo: FileOperationCopyUndo::default(),

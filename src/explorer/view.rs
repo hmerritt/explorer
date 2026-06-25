@@ -19,6 +19,8 @@ use gpui::{
 use crate::explorer::sidebar::{
     SidebarSections, sidebar_sections, sidebar_sections_without_rclone,
 };
+#[cfg(feature = "rclone")]
+use crate::explorer::sidebar::sidebar_sections_with_rclone_remotes;
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -84,6 +86,10 @@ pub struct ExplorerView {
     pub(super) rclone_upload_task: Option<Task<()>>,
     #[cfg(feature = "rclone")]
     pub(super) rclone_upload_generation: u64,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_sidebar_task: Option<Task<()>>,
+    #[cfg(feature = "rclone")]
+    pub(super) rclone_sidebar_generation: u64,
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) forward_stack: Vec<PathBuf>,
     pub(super) scroll_handle: UniformListScrollHandle,
@@ -290,6 +296,7 @@ struct DirectoryLoadState {
     generation: u64,
     selected_paths: Vec<PathBuf>,
     select_after_load: Vec<PathBuf>,
+    rename_after_load: Option<PathBuf>,
     mode: ReloadMode,
     schedule_metadata: bool,
     refresh_search: bool,
@@ -411,6 +418,10 @@ impl ExplorerView {
             rclone_upload_task: None,
             #[cfg(feature = "rclone")]
             rclone_upload_generation: 0,
+            #[cfg(feature = "rclone")]
+            rclone_sidebar_task: None,
+            #[cfg(feature = "rclone")]
+            rclone_sidebar_generation: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -605,8 +616,9 @@ impl ExplorerView {
                 self.apply_file_sort_preserving_selection();
             }
             if sidebar_changed || rclone_changed || !folder_size_changed {
-                self.sidebar_sections =
-                    sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
+                self.rebuild_fast_sidebar_sections();
+                #[cfg(feature = "rclone")]
+                self.refresh_rclone_sidebar_sections(cx);
             }
         }
         #[cfg(feature = "rclone")]
@@ -846,6 +858,27 @@ impl ExplorerView {
         restart_watcher: bool,
         cx: &mut Context<Self>,
     ) {
+        self.reload_async_with_options_and_rename(
+            mode,
+            select_after_load,
+            None,
+            schedule_metadata,
+            refresh_search,
+            restart_watcher,
+            cx,
+        );
+    }
+
+    pub(super) fn reload_async_with_options_and_rename(
+        &mut self,
+        mode: ReloadMode,
+        select_after_load: Vec<PathBuf>,
+        rename_after_load: Option<PathBuf>,
+        schedule_metadata: bool,
+        refresh_search: bool,
+        restart_watcher: bool,
+        cx: &mut Context<Self>,
+    ) {
         let total_started = Instant::now();
         self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
         let generation = self.directory_load_generation;
@@ -864,6 +897,7 @@ impl ExplorerView {
             generation,
             selected_paths,
             select_after_load,
+            rename_after_load,
             mode,
             schedule_metadata,
             refresh_search,
@@ -872,12 +906,14 @@ impl ExplorerView {
         let path = state.path.clone();
         let visibility = self.entry_visibility();
         let rclone_settings = self.rclone_settings.clone();
-        let sidebar_settings = self.sidebar_settings.clone();
-        let rebuild_sidebar = mode.rebuild_sidebar;
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
         );
+        #[cfg(feature = "rclone")]
+        if mode.rebuild_sidebar {
+            self.refresh_rclone_sidebar_sections(cx);
+        }
 
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
@@ -888,11 +924,9 @@ impl ExplorerView {
                     async move {
                         let entries =
                             load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
-                        let sidebar_sections = rebuild_sidebar
-                            .then(|| sidebar_sections(&sidebar_settings, &rclone_settings));
                         DirectoryLoadResult {
                             entries,
-                            sidebar_sections,
+                            sidebar_sections: None,
                         }
                     }
                 })
@@ -929,6 +963,42 @@ impl ExplorerView {
         }
     }
 
+    #[cfg(feature = "rclone")]
+    fn refresh_rclone_sidebar_sections(&mut self, cx: &mut Context<Self>) {
+        self.rclone_sidebar_generation = self.rclone_sidebar_generation.wrapping_add(1);
+        let generation = self.rclone_sidebar_generation;
+        self.rclone_sidebar_task = None;
+
+        if !self.rclone_settings.enabled {
+            if !self.sidebar_sections.rclone_remotes.is_empty() {
+                self.sidebar_sections.rclone_remotes.clear();
+                cx.notify();
+            }
+            return;
+        }
+
+        let sidebar_settings = self.sidebar_settings.clone();
+        let rclone_settings = self.rclone_settings.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let sections = cx
+                .background_executor()
+                .spawn(async move {
+                    sidebar_sections_with_rclone_remotes(&sidebar_settings, &rclone_settings)
+                })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.rclone_sidebar_generation != generation {
+                    return;
+                }
+                explorer.sidebar_sections = sections;
+                explorer.rclone_sidebar_task = None;
+                cx.notify();
+            });
+        });
+        self.rclone_sidebar_task = Some(task);
+    }
+
     fn apply_directory_load_result(
         &mut self,
         state: DirectoryLoadState,
@@ -958,6 +1028,9 @@ impl ExplorerView {
             Err(error) => self.apply_directory_load_error(error),
         }
         self.finish_directory_reload_layout();
+        if let Some(path) = state.rename_after_load {
+            self.start_rename_for_path_without_focus(&path);
+        }
         #[cfg(feature = "rclone")]
         self.restart_rclone_upload_polling(cx);
 
@@ -1056,8 +1129,17 @@ impl ExplorerView {
     }
 
     pub(super) fn reload_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
-        self.reload();
-        self.schedule_entry_metadata_resolution(cx);
+        self.reload_async_with_options(
+            ReloadMode {
+                preserve_selection: true,
+                rebuild_sidebar: true,
+            },
+            Vec::new(),
+            true,
+            false,
+            false,
+            cx,
+        );
     }
 
     pub(super) fn refresh_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
@@ -3199,6 +3281,53 @@ mod tests {
     }
 
     #[gpui::test]
+    fn reload_with_entry_metadata_resolution_starts_async_load(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("file.txt"), b"file").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerView::new_unloaded_with_settings_for_test(
+                    path,
+                    Some(focus_handle),
+                    &test_explorer_settings(),
+                )
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.reload_with_entry_metadata_resolution(cx);
+                assert_eq!(view.loading_path.as_deref(), Some(path.as_path()));
+                assert!(view.directory_load_task.is_some());
+                assert!(view.entries.is_empty());
+            });
+        });
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn fast_sidebar_rebuild_preserves_cached_rclone_remotes() {
+        let mut view = ExplorerView::new(PathBuf::from("sidebar"));
+        let remote = crate::explorer::sidebar::SidebarItem {
+            label: "gdrive".to_owned(),
+            path: crate::explorer::rclone::virtual_root_for_remote("gdrive"),
+            kind: crate::explorer::sidebar::SidebarItemKind::RcloneRemote(
+                crate::explorer::rclone::RcloneSidebarState::TransferMode,
+            ),
+            configured_index: None,
+        };
+        view.sidebar_sections.rclone_remotes = vec![remote.clone()];
+
+        view.rebuild_fast_sidebar_sections();
+
+        assert_eq!(view.sidebar_sections.rclone_remotes, vec![remote]);
+    }
+
+    #[gpui::test]
     fn async_directory_load_shows_loading_until_entries_apply(cx: &mut gpui::TestAppContext) {
         let temp = crate::explorer::test_support::TempDir::new();
         std::fs::write(temp.path().join("file.txt"), b"file").unwrap();
@@ -3271,6 +3400,7 @@ mod tests {
                     generation: 1,
                     selected_paths: Vec::new(),
                     select_after_load: Vec::new(),
+                    rename_after_load: None,
                     mode: ReloadMode {
                         preserve_selection: false,
                         rebuild_sidebar: false,
@@ -3324,6 +3454,7 @@ mod tests {
                     generation: 3,
                     selected_paths: Vec::new(),
                     select_after_load: Vec::new(),
+                    rename_after_load: None,
                     mode: ReloadMode {
                         preserve_selection: false,
                         rebuild_sidebar: true,

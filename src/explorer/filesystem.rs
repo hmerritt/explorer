@@ -347,7 +347,7 @@ pub(super) fn path_is_remote_drive(path: &Path) -> bool {
     #[cfg(feature = "rclone")]
     {
         if crate::explorer::rclone::parse_virtual_path(path).is_some()
-            || crate::explorer::rclone::is_active_managed_mount_path(path)
+            || crate::explorer::rclone::path_has_known_managed_mount(path)
         {
             return true;
         }
@@ -2248,6 +2248,10 @@ pub(super) enum FileOperationKind {
     Copy,
     Link,
     Extract,
+    #[cfg_attr(not(feature = "rclone"), allow(dead_code))]
+    Create,
+    #[cfg_attr(not(feature = "rclone"), allow(dead_code))]
+    Delete,
 }
 
 impl FileOperationKind {
@@ -2257,6 +2261,8 @@ impl FileOperationKind {
             FileOperationKind::Copy => "Copying",
             FileOperationKind::Link => "Creating links",
             FileOperationKind::Extract => "Extracting",
+            FileOperationKind::Create => "Creating",
+            FileOperationKind::Delete => "Deleting",
         }
     }
 }
@@ -2629,6 +2635,8 @@ fn prepare_file_operation(
                     FileOperationKind::Copy => "copy",
                     FileOperationKind::Link => "link",
                     FileOperationKind::Extract => "extract",
+                    FileOperationKind::Create => "create",
+                    FileOperationKind::Delete => "delete",
                 };
                 return Err(format!(
                     "Cannot {operation} {} into itself.",
@@ -2763,7 +2771,10 @@ fn plan_path_operation(
                 conflict,
                 copy_engine,
             }),
-            FileOperationKind::Link | FileOperationKind::Extract => {}
+            FileOperationKind::Link
+            | FileOperationKind::Extract
+            | FileOperationKind::Create
+            | FileOperationKind::Delete => {}
         }
     }
 

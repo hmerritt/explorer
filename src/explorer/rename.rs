@@ -4,6 +4,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+#[cfg(feature = "rclone")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
@@ -30,8 +35,14 @@ use crate::explorer::{
     },
     view::ExplorerView,
 };
+#[cfg(feature = "rclone")]
+use crate::explorer::filesystem::{FileOperationKind, FileOperationPhase, FileOperationProgress};
+#[cfg(feature = "rclone")]
+use crate::explorer::view::FileOperationState;
 
 const CLICK_RENAME_DELAY: Duration = Duration::from_millis(280);
+#[cfg(feature = "rclone")]
+const RCLONE_RENAME_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub(super) struct RenameState {
@@ -669,12 +680,16 @@ impl ExplorerView {
         true
     }
 
-    pub(super) fn start_rename_for_path(
-        &mut self,
-        path: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    #[cfg(test)]
+    pub(super) fn start_test_rename_for_index(&mut self, ix: usize) -> bool {
+        let Some(entry) = self.entries.get(ix).cloned() else {
+            return false;
+        };
+        self.start_rename_for_entry_without_focus(entry);
+        true
+    }
+
+    pub(super) fn start_rename_for_path_without_focus(&mut self, path: &Path) -> bool {
         self.cancel_pending_click_rename();
 
         let Some(entry) = self
@@ -685,20 +700,10 @@ impl ExplorerView {
             return false;
         };
 
-        self.start_rename_for_entry(entry, Some(cx.focus_handle()), window, cx);
-        true
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_test_rename_for_index(&mut self, ix: usize) -> bool {
-        let Some(entry) = self.entries.get(ix).cloned() else {
-            return false;
-        };
         self.start_rename_for_entry_without_focus(entry);
         true
     }
 
-    #[cfg(test)]
     fn start_rename_for_entry_without_focus(&mut self, entry: FileEntry) {
         self.rename_focus_out = None;
         self.active_rename = Some(RenameState::new(
@@ -748,8 +753,9 @@ impl ExplorerView {
             .active_rename
             .as_ref()
             .is_some_and(|rename| rename.target_file_name() != rename.original_name);
-        let committed = self.apply_active_rename_commit();
-        if committed && will_change_filesystem {
+        let async_rclone_rename = self.active_rename_targets_rclone_transfer();
+        let committed = self.apply_active_rename_commit_with_context(cx);
+        if committed && will_change_filesystem && !async_rclone_rename {
             self.emit_filesystem_changed(cx);
         }
         if !committed {
@@ -764,21 +770,43 @@ impl ExplorerView {
             .active_rename
             .as_ref()
             .is_some_and(|rename| rename.target_file_name() != rename.original_name);
-        let committed = self.apply_active_rename_commit_or_cancel();
-        if committed && will_change_filesystem {
+        let async_rclone_rename = self.active_rename_targets_rclone_transfer();
+        let committed = self.apply_active_rename_commit_or_cancel_with_context(cx);
+        if committed && will_change_filesystem && !async_rclone_rename {
             self.emit_filesystem_changed(cx);
         }
     }
 
+    #[cfg(test)]
     fn apply_active_rename_commit_or_cancel(&mut self) -> bool {
-        let committed = self.apply_active_rename_commit();
+        let committed = self.apply_active_rename_commit_inner(None);
         if !committed {
             self.cancel_active_rename();
         }
         committed
     }
 
+    fn apply_active_rename_commit_or_cancel_with_context(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let committed = self.apply_active_rename_commit_inner(Some(cx));
+        if !committed {
+            self.cancel_active_rename();
+        }
+        committed
+    }
+
+    #[cfg(test)]
     fn apply_active_rename_commit(&mut self) -> bool {
+        self.apply_active_rename_commit_inner(None)
+    }
+
+    fn apply_active_rename_commit_with_context(&mut self, cx: &mut Context<Self>) -> bool {
+        self.apply_active_rename_commit_inner(Some(cx))
+    }
+
+    fn apply_active_rename_commit_inner(&mut self, _cx: Option<&mut Context<Self>>) -> bool {
         let Some(rename) = self.active_rename.as_ref() else {
             return true;
         };
@@ -798,6 +826,33 @@ impl ExplorerView {
 
         let original_path = rename.original_path.clone();
         let target_path = original_path.with_file_name(&target_name);
+
+        #[cfg(feature = "rclone")]
+        if crate::explorer::rclone::is_transfer_path(&original_path)
+            || crate::explorer::rclone::is_transfer_path(&target_path)
+        {
+            if self.active_file_operation.is_some() {
+                self.set_error_notice("Another file operation is already running.".to_owned());
+                return false;
+            }
+            if let Some(cx) = _cx {
+                let source = original_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| original_path.display().to_string());
+                self.rename_focus_out = None;
+                self.active_rename = None;
+                self.clear_operation_notice();
+                self.rename_rclone_transfer_path_in_background(
+                    original_path,
+                    target_path,
+                    source,
+                    target_name,
+                    cx,
+                );
+                return true;
+            }
+        }
 
         match rename_path(&original_path, &target_path, &self.rclone_settings) {
             Ok(()) => {
@@ -819,6 +874,154 @@ impl ExplorerView {
                 ));
                 false
             }
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn active_rename_targets_rclone_transfer(&self) -> bool {
+        self.active_rename.as_ref().is_some_and(|rename| {
+            let target_path = rename.original_path.with_file_name(rename.target_file_name());
+            crate::explorer::rclone::is_transfer_path(&rename.original_path)
+                || crate::explorer::rclone::is_transfer_path(&target_path)
+        })
+    }
+
+    #[cfg(not(feature = "rclone"))]
+    fn active_rename_targets_rclone_transfer(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "rclone")]
+    fn rename_rclone_transfer_path_in_background(
+        &mut self,
+        original_path: PathBuf,
+        target_path: PathBuf,
+        source_name: String,
+        target_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = FileOperationProgress {
+            kind: FileOperationKind::Move,
+            phase: FileOperationPhase::Moving,
+            total_bytes: 0,
+            copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 0,
+            work_completed_bytes: 0,
+            total_files: 1,
+            completed_files: 0,
+            current_item: Some(original_path.clone()),
+            cancellable: true,
+        };
+        self.active_file_operation = Some(FileOperationState {
+            progress,
+            cancel: cancel.clone(),
+            terminate,
+            task: None,
+            archive_diagnostics: None,
+        });
+        self.open_file_operation_window(cx);
+
+        let settings = self.rclone_settings.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let completion_original_path = original_path.clone();
+        let completion_target_path = target_path.clone();
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            let finished = finished.clone();
+            async move |this, cx| {
+                let rename_task = cx.background_executor().spawn({
+                    let finished = finished.clone();
+                    async move {
+                        let result = rename_path(&original_path, &target_path, &settings)
+                            .map_err(|error| error.to_string());
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.close_rclone_rename_operation_window(cx);
+                            explorer.clear_operation_notice();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(RCLONE_RENAME_PROGRESS_INTERVAL)
+                        .await;
+                }
+
+                let result = rename_task.await;
+                let _ = this.update(cx, |explorer, cx| {
+                    if cancel.load(Ordering::Relaxed) {
+                        explorer.close_rclone_rename_operation_window(cx);
+                        explorer.clear_operation_notice();
+                    } else {
+                        explorer.complete_rclone_transfer_rename(
+                            completion_original_path,
+                            completion_target_path,
+                            source_name,
+                            target_name,
+                            result,
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn complete_rclone_transfer_rename(
+        &mut self,
+        original_path: PathBuf,
+        target_path: PathBuf,
+        source_name: String,
+        target_name: String,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_rclone_rename_operation_window(cx);
+        match result {
+            Ok(()) => {
+                self.clear_operation_notice();
+                self.remove_cut_paths(&[original_path]);
+                self.reload_async_with_options(
+                    crate::explorer::view::ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                    },
+                    vec![target_path],
+                    true,
+                    false,
+                    false,
+                    cx,
+                );
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.set_error_notice(format!(
+                    "Could not rename \"{source_name}\" to \"{target_name}\": {error}"
+                ));
+                self.reload_with_entry_metadata_resolution(cx);
+            }
+        }
+    }
+
+    #[cfg(feature = "rclone")]
+    fn close_rclone_rename_operation_window(&mut self, cx: &mut Context<Self>) {
+        self.active_file_operation = None;
+        if let Some(handle) = self.active_dialog_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
 
