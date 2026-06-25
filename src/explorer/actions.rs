@@ -473,15 +473,33 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |view, cx| {
                 assert_eq!(selected_names(view), vec!["New folder"]);
+                let folder_path = root.join("New folder");
+                assert!(view.rename_is_active_for_path(&folder_path));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("new folder rename focus");
+                assert!(rename_focus.is_focused(window));
+                view.cancel_active_rename();
+                cx.notify();
+            });
+        });
 
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
                 view.handle_create_new_file(&CreateNewFile, window, cx);
                 assert!(root.join("New file").is_file());
             });
         });
         cx.run_until_parked();
-        cx.update(|_, app| {
+        cx.update(|window, app| {
             view.update(app, |view, _| {
                 assert_eq!(selected_names(view), vec!["New file"]);
+                let file_path = root.join("New file");
+                assert!(view.rename_is_active_for_path(&file_path));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("new file rename focus");
+                assert!(rename_focus.is_focused(window));
             });
         });
     }

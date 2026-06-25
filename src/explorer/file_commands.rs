@@ -104,7 +104,7 @@ impl ExplorerView {
         self.create_new_item(NewItemKind::File, window, cx);
     }
 
-    fn create_new_item(&mut self, kind: NewItemKind, _window: &mut Window, cx: &mut Context<Self>) {
+    fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(feature = "rclone")]
         if crate::explorer::rclone::is_transfer_path(&self.path) {
             self.create_new_item_in_background(kind, cx);
@@ -114,16 +114,17 @@ impl ExplorerView {
         match create_new_item_in_directory(&self.path, kind, &self.rclone_settings) {
             Ok(path) => {
                 self.clear_operation_notice();
-                self.reload_async_with_options_and_rename(
+                self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
                         preserve_selection: true,
                         rebuild_sidebar: true,
                     },
                     vec![path.clone()],
-                    Some(path),
+                    path,
                     true,
                     false,
                     false,
+                    window,
                     cx,
                 );
                 self.emit_filesystem_changed(cx);
@@ -222,15 +223,17 @@ impl ExplorerView {
     fn paste_clipboard_image(
         &mut self,
         image: &Image,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         #[cfg(feature = "rclone")]
         if crate::explorer::rclone::is_transfer_path(&self.path) {
             match clipboard_image_file_payload(image) {
-                Ok((extension, bytes)) => {
-                    self.create_clipboard_image_file_in_background(extension, bytes.into_owned(), cx)
-                }
+                Ok((extension, bytes)) => self.create_clipboard_image_file_in_background(
+                    extension,
+                    bytes.into_owned(),
+                    cx,
+                ),
                 Err(error) => {
                     self.reload_with_entry_metadata_resolution(cx);
                     self.set_error_notice(error);
@@ -242,16 +245,17 @@ impl ExplorerView {
         match create_clipboard_image_file_in_directory(&self.path, image, &self.rclone_settings) {
             Ok(path) => {
                 self.clear_operation_notice();
-                self.reload_async_with_options_and_rename(
+                self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
                         preserve_selection: true,
                         rebuild_sidebar: true,
                     },
                     vec![path.clone()],
-                    Some(path),
+                    path,
                     true,
                     false,
                     false,
+                    window,
                     cx,
                 );
                 self.emit_filesystem_changed(cx);

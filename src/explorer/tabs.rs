@@ -1546,7 +1546,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         actions::{
-            EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab, PasteClipboard,
+            CreateNewFolder, EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab, PasteClipboard,
             RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
         },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
@@ -2729,6 +2729,14 @@ mod tests {
 
         let path = temp.path().join("image.png");
         assert_eq!(fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
+        cx.update(|window, app| {
+            view.update(app, |view, _| {
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("pasted image rename focus");
+                assert!(rename_focus.is_focused(window));
+            });
+        });
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["image.png"]);
             assert!(view.rename_is_active_for_path(&path));
@@ -2751,6 +2759,36 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["image (2).png"]);
             assert!(view.rename_is_active_for_path(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn new_folder_focused_rename_commits_on_click_away(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["z.txt"]);
+        let view = active_test_view(&tabs, cx);
+
+        cx.dispatch_action(CreateNewFolder);
+        cx.run_until_parked();
+
+        let folder_path = temp.path().join("New folder");
+        cx.update(|window, app| {
+            view.update(app, |view, _| {
+                assert_eq!(selected_names(view), vec!["New folder"]);
+                assert!(view.rename_is_active_for_path(&folder_path));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("new folder rename focus");
+                assert!(rename_focus.is_focused(window));
+                view.active_rename.as_mut().unwrap().content = "Renamed folder".to_owned();
+            });
+        });
+
+        click_selector(cx, "explorer-entry-1");
+
+        assert!(temp.path().join("Renamed folder").is_dir());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.has_active_text_input());
+            assert_eq!(selected_names(view), vec!["z.txt"]);
         });
     }
 

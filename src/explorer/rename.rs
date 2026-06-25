@@ -1,13 +1,13 @@
+#[cfg(feature = "rclone")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     fs, io,
     ops::{Deref, DerefMut, Range},
     path::{Path, PathBuf},
     time::Duration,
-};
-#[cfg(feature = "rclone")]
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
 };
 
 use gpui::{
@@ -17,8 +17,12 @@ use gpui::{
     UTF16Selection, Window, fill, point, px, relative, rgb, size,
 };
 
+#[cfg(feature = "rclone")]
+use crate::explorer::filesystem::{FileOperationKind, FileOperationPhase, FileOperationProgress};
 #[cfg(test)]
 use crate::explorer::text_input::text_x_for_mouse_x;
+#[cfg(feature = "rclone")]
+use crate::explorer::view::FileOperationState;
 use crate::explorer::{
     actions::{
         RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
@@ -35,10 +39,6 @@ use crate::explorer::{
     },
     view::ExplorerView,
 };
-#[cfg(feature = "rclone")]
-use crate::explorer::filesystem::{FileOperationKind, FileOperationPhase, FileOperationProgress};
-#[cfg(feature = "rclone")]
-use crate::explorer::view::FileOperationState;
 
 const CLICK_RENAME_DELAY: Duration = Duration::from_millis(280);
 #[cfg(feature = "rclone")]
@@ -704,6 +704,26 @@ impl ExplorerView {
         true
     }
 
+    pub(super) fn start_rename_for_path(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.cancel_pending_click_rename();
+
+        let Some(entry) = self
+            .entry_index_by_path(path)
+            .and_then(|ix| self.entries.get(ix))
+            .cloned()
+        else {
+            return false;
+        };
+
+        self.start_rename_for_entry(entry, Some(cx.focus_handle()), window, cx);
+        true
+    }
+
     fn start_rename_for_entry_without_focus(&mut self, entry: FileEntry) {
         self.rename_focus_out = None;
         self.active_rename = Some(RenameState::new(
@@ -880,7 +900,9 @@ impl ExplorerView {
     #[cfg(feature = "rclone")]
     fn active_rename_targets_rclone_transfer(&self) -> bool {
         self.active_rename.as_ref().is_some_and(|rename| {
-            let target_path = rename.original_path.with_file_name(rename.target_file_name());
+            let target_path = rename
+                .original_path
+                .with_file_name(rename.target_file_name());
             crate::explorer::rclone::is_transfer_path(&rename.original_path)
                 || crate::explorer::rclone::is_transfer_path(&target_path)
         })

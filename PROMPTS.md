@@ -1,6 +1,7 @@
 ## Todo
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
+- Opening a large file in rclone drive freezes the whole app (using dev build)
 
 ## 1
 
