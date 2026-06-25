@@ -16,11 +16,11 @@ use gpui::{
     UniformListScrollHandle, point, px,
 };
 
+#[cfg(feature = "rclone")]
+use crate::explorer::sidebar::sidebar_sections_with_rclone_remotes;
 use crate::explorer::sidebar::{
     SidebarSections, sidebar_sections, sidebar_sections_without_rclone,
 };
-#[cfg(feature = "rclone")]
-use crate::explorer::sidebar::sidebar_sections_with_rclone_remotes;
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -115,6 +115,7 @@ pub struct ExplorerView {
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) image_hover_preview: Option<ImageHoverPreview>,
     pub(super) image_hover_preview_alt: bool,
+    pub(super) animated_image_asset_evictions: BTreeSet<String>,
     pub(super) video_hover_preview: Option<VideoHoverPreviewSession>,
     pub(super) video_hover_preview_generation: u64,
     pub(super) file_columns: FileColumnSettings,
@@ -448,6 +449,7 @@ impl ExplorerView {
             sidebar_resize_drag: None,
             image_hover_preview: None,
             image_hover_preview_alt: false,
+            animated_image_asset_evictions: BTreeSet::new(),
             video_hover_preview: None,
             video_hover_preview_generation: 0,
             file_columns: settings.view.file_columns.clone(),

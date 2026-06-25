@@ -22,8 +22,8 @@ use crate::{
     explorer::{
         entry::FileEntry,
         image_preview::{
-            ImageThumbnailExtractionTimings, encode_rgba_png_bytes,
-            load_hover_image_preview_rgba_with_cancel_timed,
+            AnimatedImageSource, ImageThumbnailExtractionTimings, animated_gif_source_for_path,
+            encode_rgba_png_bytes, load_hover_image_preview_rgba_with_cancel_timed,
             load_image_thumbnail_rgba_with_cancel_timed, path_may_have_image_preview,
         },
         image_resize::dimensions_for_longest_side,
@@ -152,6 +152,7 @@ pub(super) struct CachedThumbnailImage {
     pub(super) image: Arc<RenderImage>,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) animated_source: Option<AnimatedImageSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -786,9 +787,12 @@ fn load_or_create_thumbnail_with_timings(
         let image = decode_png_rgba(&bytes);
         let cache_decode_elapsed = decode_started.map(|started| started.elapsed());
         return match image {
-            Some(image) => {
-                ImageThumbnailLoadResult::cache_hit(image, cache_read_elapsed, cache_decode_elapsed)
-            }
+            Some(image) => ImageThumbnailLoadResult::cache_hit(
+                image,
+                animated_source_for_request(request),
+                cache_read_elapsed,
+                cache_decode_elapsed,
+            ),
             None => ImageThumbnailLoadResult::failed(
                 cache_read_elapsed,
                 None,
@@ -868,10 +872,21 @@ fn load_or_create_thumbnail_with_timings(
 
     ImageThumbnailLoadResult::generated(
         image,
+        animated_source_for_request(request),
         cache_read_elapsed,
         extract_elapsed,
         extraction_timings,
     )
+}
+
+fn animated_source_for_request(request: &ImageThumbnailRequest) -> Option<AnimatedImageSource> {
+    if request.kind != ImageThumbnailKind::Image
+        || request.usage != ImageThumbnailUsage::HoverPreview
+    {
+        return None;
+    }
+
+    animated_gif_source_for_path(&request.path, request.key.clone())
 }
 
 fn load_video_thumbnail_png_with_cancel(
@@ -1096,11 +1111,12 @@ enum ImageThumbnailLoadOutcome {
 impl ImageThumbnailLoadResult {
     fn cache_hit(
         image: image::RgbaImage,
+        animated_source: Option<AnimatedImageSource>,
         cache_read_elapsed: Option<Duration>,
         cache_decode_elapsed: Option<Duration>,
     ) -> Self {
         let render_started = Instant::now();
-        let image = cached_thumbnail_image_from_rgba(image);
+        let image = cached_thumbnail_image_from_rgba_with_animated_source(image, animated_source);
         Self {
             image: Some(image),
             cache_image: None,
@@ -1116,13 +1132,14 @@ impl ImageThumbnailLoadResult {
 
     fn generated(
         image: image::RgbaImage,
+        animated_source: Option<AnimatedImageSource>,
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
         extraction_timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         let cache_image = image.clone();
         let render_started = Instant::now();
-        let image = cached_thumbnail_image_from_rgba(image);
+        let image = cached_thumbnail_image_from_rgba_with_animated_source(image, animated_source);
         Self {
             image: Some(image),
             cache_image: Some(cache_image),
@@ -1644,7 +1661,15 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
         .map(image::DynamicImage::into_rgba8)
 }
 
-fn cached_thumbnail_image_from_rgba(mut image: image::RgbaImage) -> CachedThumbnailImage {
+#[cfg(any(test, feature = "benchmarks"))]
+fn cached_thumbnail_image_from_rgba(image: image::RgbaImage) -> CachedThumbnailImage {
+    cached_thumbnail_image_from_rgba_with_animated_source(image, None)
+}
+
+fn cached_thumbnail_image_from_rgba_with_animated_source(
+    mut image: image::RgbaImage,
+    animated_source: Option<AnimatedImageSource>,
+) -> CachedThumbnailImage {
     let width = image.width();
     let height = image.height();
     for pixel in image.chunks_exact_mut(4) {
@@ -1654,6 +1679,7 @@ fn cached_thumbnail_image_from_rgba(mut image: image::RgbaImage) -> CachedThumbn
         image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
         width,
         height,
+        animated_source,
     }
 }
 
@@ -1994,6 +2020,7 @@ mod tests {
         let result = ImageThumbnailLoadResult::generated(
             image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
             None,
+            None,
             Some(Duration::from_millis(10)),
             ImageThumbnailExtractionTimings {
                 embedded_thumbnail_scan: Some(Duration::from_millis(11)),
@@ -2056,6 +2083,7 @@ mod tests {
         };
         let generated = ImageThumbnailLoadResult::generated(
             image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+            None,
             Some(Duration::from_millis(1)),
             Some(Duration::from_millis(2)),
             ImageThumbnailExtractionTimings::default(),
@@ -2551,6 +2579,69 @@ mod tests {
     }
 
     #[test]
+    fn generated_gif_hover_preview_keeps_animated_source_path() {
+        let temp = TempDir::new();
+        let source = temp.path().join("loop.gif");
+        fs::write(&source, animated_gif_bytes(8, 4)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
+            key: "0123456789abcdef".to_owned(),
+            path: source.clone(),
+            directory: temp.path().to_path_buf(),
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = load_or_create_thumbnail_with_timings(&request, None, &cancel, false);
+
+        let image = result.image.expect("generated hover preview");
+        assert_eq!(image.width, 400);
+        assert_eq!(image.height, 200);
+        assert_eq!(
+            image.animated_source.as_ref().map(|source| &source.path),
+            Some(&source)
+        );
+        assert_eq!(
+            image
+                .animated_source
+                .as_ref()
+                .map(|source| source.cache_key.as_str()),
+            Some(request.key.as_str())
+        );
+    }
+
+    #[test]
+    fn cached_gif_hover_preview_keeps_animated_source_path() {
+        let temp = TempDir::new();
+        let source = temp.path().join("loop.gif");
+        fs::write(&source, animated_gif_bytes(8, 4)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::HoverPreview,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
+            key: "0123456789abcdef".to_owned(),
+            path: source.clone(),
+            directory: temp.path().to_path_buf(),
+        };
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            &request.key,
+            &png_bytes(400, 200),
+        ));
+        let cancel = AtomicBool::new(false);
+
+        let result =
+            load_or_create_thumbnail_with_timings(&request, Some(temp.path()), &cancel, false);
+
+        let image = result.image.expect("cached hover preview");
+        assert_eq!(
+            image.animated_source.as_ref().map(|source| &source.path),
+            Some(&source)
+        );
+    }
+
+    #[test]
     fn hover_preview_does_not_read_standard_thumbnail_disk_cache_on_render_path() {
         let temp = TempDir::new();
         let source = temp.path().join("image.png");
@@ -2958,6 +3049,27 @@ mod tests {
         image
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
+        bytes
+    }
+
+    fn animated_gif_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            for rgba in [[220, 40, 80, 255], [40, 140, 220, 255]] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .unwrap();
+            }
+        }
         bytes
     }
 }

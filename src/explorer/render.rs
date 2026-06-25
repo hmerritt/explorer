@@ -84,7 +84,8 @@ use crate::explorer::{
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font,
     },
-    image_thumbnails::HoverImagePreviewLookup,
+    image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
+    image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
         large_icon_max_tile_height,
@@ -1001,11 +1002,7 @@ impl ExplorerView {
                 HoverImagePreviewLookup::Ready(preview) => (
                     preview.width,
                     preview.height,
-                    gpui::img(preview.image)
-                        .size_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
-                        .into_any_element(),
+                    self.image_hover_preview_ready_content(preview, cx),
                 ),
                 HoverImagePreviewLookup::Failed => return None,
             }
@@ -1043,6 +1040,41 @@ impl ExplorerView {
                 .child(content)
                 .into_any_element(),
         )
+    }
+
+    fn image_hover_preview_ready_content(
+        &mut self,
+        preview: CachedThumbnailImage,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(source) = preview.animated_source.clone() {
+            self.evict_animated_image_source_once(&source, cx);
+            return animated_gif_preview_content(
+                &source,
+                preview.image,
+                "image-hover-preview-animated-gif",
+                "image-hover-preview-animated-gif-image",
+            );
+        }
+
+        gpui::img(preview.image)
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
+            .into_any_element()
+    }
+
+    fn evict_animated_image_source_once(
+        &mut self,
+        source: &AnimatedImageSource,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .animated_image_asset_evictions
+            .insert(source.cache_key.clone())
+        {
+            evict_animated_image_source_asset(source, cx);
+        }
     }
 
     fn update_image_hover_preview(
@@ -3213,6 +3245,41 @@ fn image_hover_preview_loading_content(
                 .w_full()
                 .flex_shrink_0()
                 .child(image_hover_preview_loading_progress()),
+        )
+        .into_any_element()
+}
+
+fn animated_gif_preview_content(
+    source: &AnimatedImageSource,
+    fallback_image: Arc<gpui::RenderImage>,
+    wrapper_selector: &'static str,
+    image_id: &'static str,
+) -> AnyElement {
+    let loading_image = fallback_image.clone();
+    let fallback_image_for_error = fallback_image;
+    div()
+        .debug_selector(move || wrapper_selector.to_owned())
+        .size_full()
+        .child(
+            gpui::img(source.path.clone())
+                .id(image_id)
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
+                .with_loading(move || {
+                    gpui::img(loading_image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
+                        .into_any_element()
+                })
+                .with_fallback(move || {
+                    gpui::img(fallback_image_for_error.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
+                        .into_any_element()
+                }),
         )
         .into_any_element()
 }
@@ -6432,6 +6499,27 @@ mod tests {
         fs::write(path, bytes).expect("write test png");
     }
 
+    fn write_test_gif_with_dimensions(path: &Path, width: u32, height: u32) {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .expect("set gif repeat");
+            for rgba in [[220, 40, 80, 255], [40, 140, 220, 255]] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .expect("encode test gif frame");
+            }
+        }
+        fs::write(path, bytes).expect("write test gif");
+    }
+
     fn hover_selector(
         cx: &mut gpui::VisualTestContext,
         selector: &'static str,
@@ -6457,6 +6545,20 @@ mod tests {
         }
 
         panic!("image hover preview should be visible");
+    }
+
+    fn run_until_debug_bounds(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> Bounds<Pixels> {
+        for _ in 0..10 {
+            cx.run_until_parked();
+            if let Some(bounds) = cx.debug_bounds(selector) {
+                return bounds;
+            }
+        }
+
+        panic!("{selector} should be visible");
     }
 
     fn alt_modifiers() -> Modifiers {
@@ -7958,6 +8060,21 @@ mod tests {
 
         hover_selector(cx, "explorer-entry-0", alt_modifiers());
         let preview = run_until_image_hover_preview(cx);
+
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn alt_hover_gif_entry_uses_animated_preview_in_details(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_gif_with_dimensions(&temp.path().join("loop.gif"), 8, 4);
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview(cx);
+        run_until_debug_bounds(cx, "image-hover-preview-animated-gif");
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));

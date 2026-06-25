@@ -52,7 +52,8 @@ use crate::explorer::{
         file_icon_for_path_sized, folder_icon_sized, image_icon,
     },
     image_preview::{
-        PropertyImagePreview, load_property_image_preview, path_may_have_image_preview,
+        AnimatedImageSource, PropertyImagePreview, evict_animated_image_source_asset,
+        load_property_image_preview, path_may_have_image_preview,
     },
     open_with::{DefaultAppChangeOutcome, DefaultApplication, default_application_for_file},
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
@@ -467,6 +468,7 @@ pub(super) struct PropertiesDialog {
     details_scrollbar_drag: Option<ScrollbarDrag>,
     image_state: PropertyImageState,
     image_generation: u64,
+    animated_image_asset_evictions: BTreeSet<String>,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -581,6 +583,7 @@ impl PropertiesDialog {
             details_scrollbar_drag: None,
             image_state: PropertyImageState::NotStarted,
             image_generation: 0,
+            animated_image_asset_evictions: BTreeSet::new(),
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -692,6 +695,7 @@ impl PropertiesDialog {
         self.image_state = PropertyImageState::NotStarted;
         self.image_task = None;
         self.image_copy_context_menu = None;
+        self.animated_image_asset_evictions.clear();
     }
 
     fn reset_frames_state(&mut self) {
@@ -2699,7 +2703,7 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_image(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn render_image(&mut self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
         if single_file_image_path(&snapshot.target, snapshot.item_kind).is_none() {
             return centered_message("Image preview is not available for this item.");
         }
@@ -2738,9 +2742,27 @@ impl PropertiesDialog {
                 .text_color(rgb(PROPERTIES_MUTED_TEXT))
                 .child(SharedString::from(error.clone()))
                 .into_any_element(),
-            PropertyImageState::Ready(preview) => body
-                .child(property_image_preview(preview, cx))
-                .into_any_element(),
+            PropertyImageState::Ready(preview) => {
+                let preview = preview.clone();
+                if let Some(source) = &preview.animated_source {
+                    self.evict_animated_image_source_once(source, cx);
+                }
+                body.child(property_image_preview(&preview, cx))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn evict_animated_image_source_once(
+        &mut self,
+        source: &AnimatedImageSource,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .animated_image_asset_evictions
+            .insert(source.cache_key.clone())
+        {
+            evict_animated_image_source_asset(source, cx);
         }
     }
 
@@ -6844,10 +6866,40 @@ fn property_image_preview(
                 cx.stop_propagation();
             }),
         )
+        .child(property_image_preview_content(preview))
+        .into_any_element()
+}
+
+fn property_image_preview_content(preview: &PropertyImagePreview) -> AnyElement {
+    let Some(source) = &preview.animated_source else {
+        return gpui::img(preview.image.clone())
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    };
+
+    let loading_image = preview.image.clone();
+    let fallback_image = preview.image.clone();
+    div()
+        .debug_selector(|| "properties-image-animated-gif".to_owned())
+        .size_full()
         .child(
-            gpui::img(preview.image.clone())
+            gpui::img(source.path.clone())
+                .id("properties-image-animated-gif-image")
                 .size_full()
-                .object_fit(ObjectFit::Contain),
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || {
+                    gpui::img(loading_image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element()
+                })
+                .with_fallback(move || {
+                    gpui::img(fallback_image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element()
+                }),
         )
         .into_any_element()
 }

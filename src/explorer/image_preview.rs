@@ -2,15 +2,15 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::{BufReader, Read, Seek, SeekFrom},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use gpui::RenderImage;
+use gpui::{App, RenderImage};
 use image::ImageEncoder;
 
 use crate::explorer::image_resize::{
@@ -32,6 +32,13 @@ pub(super) struct PropertyImagePreview {
     pub(super) image: Arc<RenderImage>,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) animated_source: Option<AnimatedImageSource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct AnimatedImageSource {
+    pub(super) path: PathBuf,
+    pub(super) cache_key: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -85,7 +92,28 @@ pub(super) fn path_may_have_image_preview(path: &Path) -> bool {
 
 pub(super) fn load_property_image_preview(path: &Path) -> Result<PropertyImagePreview, String> {
     let image = load_image_rgba(path, SVG_IMAGE_RASTER_LONGEST_SIDE)?;
-    property_image_preview_from_rgba(image)
+    property_image_preview_from_rgba(image, property_animated_gif_source(path))
+}
+
+pub(super) fn path_may_have_animated_gif_preview(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"))
+}
+
+pub(super) fn animated_gif_source_for_path(
+    path: &Path,
+    cache_key: String,
+) -> Option<AnimatedImageSource> {
+    path_may_have_animated_gif_preview(path).then(|| AnimatedImageSource {
+        path: path.to_path_buf(),
+        cache_key,
+    })
+}
+
+pub(super) fn evict_animated_image_source_asset(source: &AnimatedImageSource, cx: &mut App) {
+    let resource: gpui::Resource = source.path.clone().into();
+    cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
 }
 
 #[cfg(test)]
@@ -1240,6 +1268,7 @@ fn check_image_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 
 fn property_image_preview_from_rgba(
     mut image: image::RgbaImage,
+    animated_source: Option<AnimatedImageSource>,
 ) -> Result<PropertyImagePreview, String> {
     let width = image.width();
     let height = image.height();
@@ -1255,7 +1284,42 @@ fn property_image_preview_from_rgba(
         image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
         width,
         height,
+        animated_source,
     })
+}
+
+fn property_animated_gif_source(path: &Path) -> Option<AnimatedImageSource> {
+    animated_gif_source_for_path(path, property_animated_gif_cache_key(path))
+}
+
+fn property_animated_gif_cache_key(path: &Path) -> String {
+    let mut key = String::from("property-gif:");
+    key.push_str(&path.to_string_lossy().replace('\\', "/"));
+
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            key.push(':');
+            key.push_str(&metadata.len().to_string());
+            key.push(':');
+            key.push_str(
+                &metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| {
+                        duration
+                            .as_secs()
+                            .saturating_mul(1_000_000_000)
+                            .saturating_add(u64::from(duration.subsec_nanos()))
+                    })
+                    .unwrap_or(0)
+                    .to_string(),
+            );
+        }
+        Err(_) => key.push_str(":missing:0"),
+    }
+
+    key
 }
 
 pub(super) fn svg_raster_dimensions(
@@ -1381,6 +1445,13 @@ mod tests {
     }
 
     #[test]
+    fn image_preview_detects_gif_animation_source_by_extension() {
+        assert!(path_may_have_animated_gif_preview(Path::new("loop.gif")));
+        assert!(path_may_have_animated_gif_preview(Path::new("loop.GIF")));
+        assert!(!path_may_have_animated_gif_preview(Path::new("loop.gifv")));
+    }
+
+    #[test]
     fn image_preview_accepts_tiff_extensions() {
         assert!(path_may_have_image_preview(Path::new("scan.tif")));
         assert!(path_may_have_image_preview(Path::new("scan.tiff")));
@@ -1463,6 +1534,24 @@ mod tests {
         assert_eq!(preview.height, 2);
         assert_render_image_size(&preview, 4, 2);
         assert!(!preview.image.as_bytes(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn image_preview_records_animated_gif_source_and_keeps_static_copy_frame() {
+        let temp = TempDir::new();
+        let path = temp.path().join("loop.GIF");
+        fs::write(&path, animated_gif_bytes(4, 2)).unwrap();
+
+        let preview = load_property_image_preview(&path).unwrap();
+
+        assert_eq!(preview.width, 4);
+        assert_eq!(preview.height, 2);
+        assert_render_image_size(&preview, 4, 2);
+        assert_eq!(preview.image.frame_count(), 1);
+        assert_eq!(
+            preview.animated_source.as_ref().map(|source| &source.path),
+            Some(&path)
+        );
     }
 
     #[test]
@@ -2035,5 +2124,26 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    fn animated_gif_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            for rgba in [[220, 40, 80, 255], [40, 140, 220, 255]] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        bytes
     }
 }
