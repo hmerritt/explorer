@@ -107,7 +107,7 @@ impl ExplorerView {
     fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(feature = "rclone")]
         if crate::explorer::rclone::is_transfer_path(&self.path) {
-            self.create_new_item_in_background(kind, cx);
+            self.create_new_item_in_background(kind, window, cx);
             return;
         }
 
@@ -232,6 +232,7 @@ impl ExplorerView {
                 Ok((extension, bytes)) => self.create_clipboard_image_file_in_background(
                     extension,
                     bytes.into_owned(),
+                    window,
                     cx,
                 ),
                 Err(error) => {
@@ -268,13 +269,19 @@ impl ExplorerView {
     }
 
     #[cfg(feature = "rclone")]
-    fn create_new_item_in_background(&mut self, kind: NewItemKind, cx: &mut Context<Self>) {
+    fn create_new_item_in_background(
+        &mut self,
+        kind: NewItemKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let parent = self.path.clone();
         let settings = self.rclone_settings.clone();
         let current_item = Some(parent.join(kind.base_name()));
         self.run_rclone_create_in_background(
             current_item,
             move || create_new_item_in_directory(&parent, kind, &settings),
+            window,
             cx,
         );
     }
@@ -284,6 +291,7 @@ impl ExplorerView {
         &mut self,
         extension: &'static str,
         bytes: Vec<u8>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let parent = self.path.clone();
@@ -296,6 +304,7 @@ impl ExplorerView {
                     &parent, extension, &bytes, &settings,
                 )
             },
+            window,
             cx,
         );
     }
@@ -305,6 +314,7 @@ impl ExplorerView {
         &mut self,
         current_item: Option<PathBuf>,
         operation: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.active_file_operation.is_some() {
@@ -338,7 +348,7 @@ impl ExplorerView {
         self.open_file_operation_window(cx);
 
         let finished = Arc::new(AtomicBool::new(false));
-        let task = cx.spawn({
+        let task = cx.spawn_in(window, {
             let cancel = cancel.clone();
             let finished = finished.clone();
             async move |this, cx| {
@@ -353,10 +363,12 @@ impl ExplorerView {
 
                 while !finished.load(Ordering::Relaxed) {
                     if cancel.load(Ordering::Relaxed) {
-                        let _ = this.update(cx, |explorer, cx| {
-                            explorer.close_preparation_file_operation_window(cx);
-                            explorer.clear_operation_notice();
-                            cx.notify();
+                        let _ = cx.update(|_, cx| {
+                            let _ = this.update(cx, |explorer, cx| {
+                                explorer.close_preparation_file_operation_window(cx);
+                                explorer.clear_operation_notice();
+                                cx.notify();
+                            });
                         });
                         return;
                     }
@@ -366,14 +378,16 @@ impl ExplorerView {
                 }
 
                 let result = create_task.await;
-                let _ = this.update(cx, |explorer, cx| {
-                    if cancel.load(Ordering::Relaxed) {
-                        explorer.close_preparation_file_operation_window(cx);
-                        explorer.clear_operation_notice();
-                    } else {
-                        explorer.complete_rclone_created_path(result, cx);
-                    }
-                    cx.notify();
+                let _ = cx.update(|window, cx| {
+                    let _ = this.update(cx, |explorer, cx| {
+                        if cancel.load(Ordering::Relaxed) {
+                            explorer.close_preparation_file_operation_window(cx);
+                            explorer.clear_operation_notice();
+                        } else {
+                            explorer.complete_rclone_created_path(result, window, cx);
+                        }
+                        cx.notify();
+                    });
                 });
             }
         });
@@ -386,22 +400,24 @@ impl ExplorerView {
     fn complete_rclone_created_path(
         &mut self,
         result: Result<PathBuf, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_preparation_file_operation_window(cx);
         match result {
             Ok(path) => {
                 self.clear_operation_notice();
-                self.reload_async_with_options_and_rename(
+                self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
                         preserve_selection: true,
                         rebuild_sidebar: true,
                     },
                     vec![path.clone()],
-                    Some(path),
+                    path,
                     true,
                     false,
                     false,
+                    window,
                     cx,
                 );
                 self.emit_filesystem_changed(cx);
@@ -2430,6 +2446,46 @@ mod tests {
         cx.run_until_parked();
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["created.txt"]);
+        });
+    }
+
+    #[cfg(feature = "rclone")]
+    #[gpui::test]
+    fn rclone_create_background_starts_focused_rename(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let created = temp.path().join("New folder");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                let created_for_operation = created.clone();
+                view.run_rclone_create_in_background(
+                    Some(created.clone()),
+                    move || {
+                        fs::create_dir(&created_for_operation)
+                            .map_err(|error| error.to_string())?;
+                        Ok(created_for_operation)
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(FILE_OPERATION_PROGRESS_INTERVAL);
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |view, _| {
+                assert_eq!(selected_names(view), vec!["New folder"]);
+                assert!(view.rename_is_active_for_path(&created));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("rclone create rename focus");
+                assert!(rename_focus.is_focused(window));
+            });
         });
     }
 

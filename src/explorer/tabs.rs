@@ -457,8 +457,12 @@ impl ExplorerTabs {
         }
     }
 
-    fn reload_all_tabs(&mut self, cx: &mut Context<Self>) {
+    fn reload_tabs_except(&mut self, source_view: &Entity<ExplorerView>, cx: &mut Context<Self>) {
+        let source_view_id = source_view.entity_id();
         for tab in &self.tabs {
+            if tab.view.entity_id() == source_view_id {
+                continue;
+            }
             let _ = tab.view.update(cx, |view, cx| {
                 view.reload_async_with_entry_metadata_resolution(cx);
                 cx.notify();
@@ -1065,21 +1069,25 @@ fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Conte
     })
     .detach();
 
-    cx.subscribe_in(view, window, |this, _, event, window, cx| match event {
-        ExplorerViewEvent::FilesystemChanged => {
-            this.reload_all_tabs(cx);
-            cx.notify();
-        }
-        ExplorerViewEvent::MountedVolumeEjected(path) => {
-            if this.redirect_tabs_after_mounted_volume_ejected(path, cx) {
+    cx.subscribe_in(
+        view,
+        window,
+        |this, source_view, event, window, cx| match event {
+            ExplorerViewEvent::FilesystemChanged => {
+                this.reload_tabs_except(source_view, cx);
                 cx.notify();
             }
-        }
-        ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
-            this.add_configured_tab(path.clone(), window, cx);
-            cx.notify();
-        }
-    })
+            ExplorerViewEvent::MountedVolumeEjected(path) => {
+                if this.redirect_tabs_after_mounted_volume_ejected(path, cx) {
+                    cx.notify();
+                }
+            }
+            ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
+                this.add_configured_tab(path.clone(), window, cx);
+                cx.notify();
+            }
+        },
+    )
     .detach();
 }
 
@@ -1546,8 +1554,8 @@ mod tests {
     use super::*;
     use crate::explorer::{
         actions::{
-            CreateNewFolder, EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab, PasteClipboard,
-            RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
+            CreateNewFile, CreateNewFolder, EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab,
+            PasteClipboard, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
         },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
@@ -1670,6 +1678,17 @@ mod tests {
         cx: &gpui::VisualTestContext,
     ) -> Entity<ExplorerView> {
         cx.read_entity(tabs, |tabs, _| tabs.active_tab().unwrap().view.clone())
+    }
+
+    fn observe_active_test_view(
+        tabs: &Entity<ExplorerTabs>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<ExplorerView> {
+        let view = active_test_view(tabs, cx);
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+        });
+        view
     }
 
     fn assert_active_tab_focused(tabs: &Entity<ExplorerTabs>, cx: &mut gpui::VisualTestContext) {
@@ -2720,7 +2739,7 @@ mod tests {
     #[gpui::test]
     fn paste_clipboard_image_saves_file_selects_it_and_starts_rename(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
-        let view = active_test_view(&tabs, cx);
+        let view = observe_active_test_view(&tabs, cx);
         let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3, 4]);
 
         cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_image(&image)));
@@ -2759,6 +2778,61 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["image (2).png"]);
             assert!(view.rename_is_active_for_path(&path));
+        });
+    }
+
+    #[gpui::test]
+    fn observed_new_folder_starts_focused_rename_and_refreshes_peer_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = observe_active_test_view(&tabs, cx);
+        let peer_view = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                tabs.tabs.last().unwrap().view.clone()
+            })
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(CreateNewFolder);
+        cx.run_until_parked();
+
+        let folder_path = temp.path().join("New folder");
+        assert!(folder_path.is_dir());
+        cx.update(|window, app| {
+            view.update(app, |view, _| {
+                assert_eq!(selected_names(view), vec!["New folder"]);
+                assert!(view.rename_is_active_for_path(&folder_path));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("new folder rename focus");
+                assert!(rename_focus.is_focused(window));
+            });
+        });
+        cx.read_entity(&peer_view, |view, _| {
+            assert!(view.entries.iter().any(|entry| entry.path == folder_path));
+        });
+    }
+
+    #[gpui::test]
+    fn observed_new_file_starts_focused_rename(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = observe_active_test_view(&tabs, cx);
+
+        cx.dispatch_action(CreateNewFile);
+        cx.run_until_parked();
+
+        let file_path = temp.path().join("New file");
+        assert!(file_path.is_file());
+        cx.update(|window, app| {
+            view.update(app, |view, _| {
+                assert_eq!(selected_names(view), vec!["New file"]);
+                assert!(view.rename_is_active_for_path(&file_path));
+                let rename_focus = view
+                    .active_rename_focus_handle()
+                    .expect("new file rename focus");
+                assert!(rename_focus.is_focused(window));
+            });
         });
     }
 
