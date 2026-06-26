@@ -14,6 +14,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{App, Context, Global, RenderImage};
+use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -43,6 +44,7 @@ use crate::explorer::image_preview::{
 };
 
 const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v7";
+const DISK_MANIFEST_FILE_NAME: &str = "manifest.json";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -178,6 +180,7 @@ struct ImageThumbnailLoadJob {
 struct ImageThumbnailCacheWriteJob {
     cache_dir: PathBuf,
     key: String,
+    source_path: PathBuf,
     image: image::RgbaImage,
 }
 
@@ -751,9 +754,10 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
                         cache_write.image.height(),
                     )
                     .is_some_and(|bytes| {
-                        write_cached_thumbnail(
+                        write_cached_thumbnail_with_source(
                             Some(&cache_write.cache_dir),
                             &cache_write.key,
+                            &cache_write.source_path,
                             &bytes,
                         )
                     })
@@ -1277,6 +1281,7 @@ impl ImageThumbnailLoadResult {
         Some(ImageThumbnailCacheWriteJob {
             cache_dir: job.cache_dir.clone()?,
             key: job.request.key.clone(),
+            source_path: job.request.path.clone(),
             image: self.cache_image.clone()?,
         })
     }
@@ -1682,7 +1687,25 @@ fn write_cached_thumbnail(cache_dir: Option<&Path>, key: &str, bytes: &[u8]) -> 
     let Some(path) = thumbnail_file_path(cache_dir, key) else {
         return false;
     };
-    let _ = write_atomic(&path, bytes);
+    write_atomic(&path, bytes).is_ok()
+}
+
+fn write_cached_thumbnail_with_source(
+    cache_dir: Option<&Path>,
+    key: &str,
+    source_path: &Path,
+    bytes: &[u8],
+) -> bool {
+    if !write_cached_thumbnail(cache_dir, key, bytes) {
+        return false;
+    }
+    if let Some(cache_dir) = cache_dir {
+        let mut manifest = load_disk_manifest(Some(cache_dir)).unwrap_or_default();
+        manifest
+            .mappings
+            .insert(key.to_owned(), source_path.to_path_buf());
+        let _ = save_disk_manifest(cache_dir, &manifest);
+    }
     true
 }
 
@@ -1696,6 +1719,82 @@ fn thumbnail_file_path(cache_dir: Option<&Path>, key: &str) -> Option<PathBuf> {
     }
 
     Some(cache_dir?.join(format!("{key}.png")))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct DiskThumbnailManifest {
+    version: String,
+    #[serde(default)]
+    mappings: HashMap<String, PathBuf>,
+}
+
+impl Default for DiskThumbnailManifest {
+    fn default() -> Self {
+        Self {
+            version: IMAGE_THUMBNAIL_CACHE_VERSION.to_owned(),
+            mappings: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ImageThumbnailCacheCleanupSummary {
+    removed_mappings: usize,
+    removed_files: usize,
+}
+
+pub(super) fn cleanup_stale_path_cache_entries() -> ImageThumbnailCacheCleanupSummary {
+    let Some(cache_dir) = image_thumbnail_cache_dir() else {
+        return ImageThumbnailCacheCleanupSummary::default();
+    };
+    cleanup_stale_path_cache_entries_in_dir(&cache_dir)
+}
+
+fn cleanup_stale_path_cache_entries_in_dir(cache_dir: &Path) -> ImageThumbnailCacheCleanupSummary {
+    let Some(mut manifest) = load_disk_manifest(Some(cache_dir)) else {
+        return ImageThumbnailCacheCleanupSummary::default();
+    };
+
+    let mut removed_keys = Vec::new();
+    manifest.mappings.retain(|key, source_path| {
+        if matches!(source_path.try_exists(), Ok(false)) {
+            removed_keys.push(key.clone());
+            false
+        } else {
+            true
+        }
+    });
+
+    if removed_keys.is_empty() {
+        return ImageThumbnailCacheCleanupSummary::default();
+    }
+
+    let mut summary = ImageThumbnailCacheCleanupSummary {
+        removed_mappings: removed_keys.len(),
+        removed_files: 0,
+    };
+    for key in &removed_keys {
+        if let Some(path) = thumbnail_file_path(Some(cache_dir), key)
+            && path.is_file()
+            && fs::remove_file(path).is_ok()
+        {
+            summary.removed_files += 1;
+        }
+    }
+    let _ = save_disk_manifest(cache_dir, &manifest);
+    summary
+}
+
+fn load_disk_manifest(cache_dir: Option<&Path>) -> Option<DiskThumbnailManifest> {
+    let path = cache_dir?.join(DISK_MANIFEST_FILE_NAME);
+    let manifest =
+        serde_json::from_str::<DiskThumbnailManifest>(&fs::read_to_string(path).ok()?).ok()?;
+    (manifest.version == IMAGE_THUMBNAIL_CACHE_VERSION).then_some(manifest)
+}
+
+fn save_disk_manifest(cache_dir: &Path, manifest: &DiskThumbnailManifest) -> io::Result<()> {
+    let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
+    write_atomic(&cache_dir.join(DISK_MANIFEST_FILE_NAME), &json)
 }
 
 pub(super) fn dimensions_for_preview(width: u32, height: u32, size: u32) -> Option<(u32, u32)> {
@@ -2144,6 +2243,10 @@ mod tests {
         let write = generated.cache_write_job(&job).expect("cache write job");
         assert_eq!(write.cache_dir, cache_dir);
         assert_eq!(write.key, "generated");
+        assert_eq!(
+            write.source_path,
+            PathBuf::from("folder").join("generated.png")
+        );
         assert_eq!(write.image.as_raw(), &[1, 2, 3, 255]);
 
         let uncached_job = ImageThumbnailLoadJob {
@@ -2839,6 +2942,78 @@ mod tests {
         assert!(thumbnail_file_path(Some(dir), "ABC").is_none());
         assert!(thumbnail_file_path(Some(dir), "").is_none());
         assert!(thumbnail_file_path(Some(dir), "0123456789abcdef").is_some());
+    }
+
+    #[test]
+    fn thumbnail_cleanup_deletes_manifest_entries_for_missing_sources() {
+        let temp = TempDir::new();
+        let source = temp.path().join("missing.png");
+        let key = "0123456789abcdef";
+        assert!(write_cached_thumbnail_with_source(
+            Some(temp.path()),
+            key,
+            &source,
+            &png_bytes(4, 2),
+        ));
+
+        let summary = cleanup_stale_path_cache_entries_in_dir(temp.path());
+
+        assert_eq!(
+            summary,
+            ImageThumbnailCacheCleanupSummary {
+                removed_mappings: 1,
+                removed_files: 1,
+            }
+        );
+        assert!(thumbnail_file_path(Some(temp.path()), key).is_some_and(|path| !path.exists()));
+        assert!(
+            load_disk_manifest(Some(temp.path()))
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn thumbnail_cleanup_keeps_manifest_entries_for_existing_sources() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(4, 2)).unwrap();
+        let key = "0123456789abcdef";
+        assert!(write_cached_thumbnail_with_source(
+            Some(temp.path()),
+            key,
+            &source,
+            &png_bytes(4, 2),
+        ));
+
+        let summary = cleanup_stale_path_cache_entries_in_dir(temp.path());
+
+        assert_eq!(summary, ImageThumbnailCacheCleanupSummary::default());
+        assert!(thumbnail_file_path(Some(temp.path()), key).is_some_and(|path| path.exists()));
+        assert_eq!(
+            load_disk_manifest(Some(temp.path()))
+                .unwrap()
+                .mappings
+                .get(key),
+            Some(&source)
+        );
+    }
+
+    #[test]
+    fn thumbnail_cleanup_leaves_unmapped_historical_files() {
+        let temp = TempDir::new();
+        let key = "0123456789abcdef";
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            key,
+            &png_bytes(4, 2),
+        ));
+
+        let summary = cleanup_stale_path_cache_entries_in_dir(temp.path());
+
+        assert_eq!(summary, ImageThumbnailCacheCleanupSummary::default());
+        assert!(thumbnail_file_path(Some(temp.path()), key).is_some_and(|path| path.exists()));
     }
 
     #[test]

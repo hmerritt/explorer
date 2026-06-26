@@ -16,6 +16,7 @@ use serde_json::Value;
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
 pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
 pub(crate) const DEFAULT_FONT: &str = "default";
+pub(crate) const DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS: u32 = 30;
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -349,6 +350,11 @@ fn deserialize_context_menu_args(value: Value) -> Result<Vec<String>, String> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
+    #[serde(
+        default = "default_cache_cleanup_interval_days",
+        deserialize_with = "deserialize_cache_cleanup_interval_days"
+    )]
+    pub cache_cleanup_interval_days: u32,
     pub start: StartLocation,
 }
 
@@ -505,6 +511,7 @@ impl Default for ExplorerSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            cache_cleanup_interval_days: DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS,
             start: StartLocation::Downloads,
         }
     }
@@ -898,6 +905,10 @@ pub(crate) fn normalized_file_column_width(value: u32) -> u32 {
 
 pub(crate) fn normalized_name_column_width(value: u32) -> u32 {
     value.max(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
+}
+
+pub(crate) fn normalized_cache_cleanup_interval_days(value: u32) -> u32 {
+    value.max(1)
 }
 
 pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> bool {
@@ -1981,6 +1992,10 @@ fn default_font() -> String {
     DEFAULT_FONT.to_owned()
 }
 
+fn default_cache_cleanup_interval_days() -> u32 {
+    DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
+}
+
 fn default_show_dotfiles() -> bool {
     true
 }
@@ -2229,6 +2244,13 @@ where
     u32::deserialize(deserializer).map(normalized_sidebar_width)
 }
 
+fn deserialize_cache_cleanup_interval_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(normalized_cache_cleanup_interval_days)
+}
+
 pub(crate) fn settings_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME))
 }
@@ -2330,6 +2352,10 @@ mod tests {
         );
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, StartLocation::Downloads);
+        assert_eq!(
+            settings.app.cache_cleanup_interval_days,
+            DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
+        );
         assert!(settings.rclone.enabled);
         assert_eq!(settings.rclone.conf_path, None);
         assert_default_rclone_mount_settings(&settings.rclone.mount);
@@ -2423,6 +2449,19 @@ mod tests {
             RcloneCacheDirSetting::Path(PathBuf::from("~/rclone-cache"))
         );
         assert!(validate_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn app_cache_cleanup_interval_deserializes_and_normalizes() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{"cache_cleanup_interval_days":0}}"#)
+                .expect("deserialize app settings");
+        assert_eq!(settings.app.cache_cleanup_interval_days, 1);
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{"cache_cleanup_interval_days":45}}"#)
+                .expect("deserialize app settings");
+        assert_eq!(settings.app.cache_cleanup_interval_days, 45);
     }
 
     #[cfg(target_os = "windows")]
@@ -3473,6 +3512,10 @@ mod tests {
         assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");
         assert_eq!(object["view"]["sort"]["direction"], "ascending");
+        assert_eq!(
+            object["app"]["cache_cleanup_interval_days"],
+            DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
+        );
         assert_eq!(object["rclone"]["conf_path"], Value::Null);
         assert_eq!(object["rclone"]["enabled"], true);
         assert_eq!(object["rclone"]["mount"]["cache_dir"], "auto");
@@ -3855,6 +3898,7 @@ mod tests {
         let state = SettingsState::for_test(ExplorerSettings {
             app: AppSettings {
                 start: StartLocation::Custom { path: dir.clone() },
+                ..AppSettings::default()
             },
             ..ExplorerSettings::default()
         });
@@ -3866,6 +3910,7 @@ mod tests {
                 start: StartLocation::Custom {
                     path: missing.clone(),
                 },
+                ..AppSettings::default()
             },
             ..ExplorerSettings::default()
         });

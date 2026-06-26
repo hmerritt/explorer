@@ -1175,6 +1175,25 @@ fn normalized_path_key(path: &Path) -> String {
     }
 }
 
+fn native_icon_cache_key_source_path(key: &str) -> Option<PathBuf> {
+    let mut parts = key.splitn(5, ':');
+    let version = parts.next()?;
+    let _size = parts.next()?;
+    let platform = parts.next()?;
+    let source_kind = parts.next()?;
+    let source_path = parts.next()?;
+    if version != NATIVE_ICON_CACHE_VERSION || source_path.is_empty() {
+        return None;
+    }
+
+    match (platform, source_kind) {
+        ("linux", "path") | ("windows", "path") | ("macos", "app" | "path") => {
+            Some(PathBuf::from(source_path))
+        }
+        _ => None,
+    }
+}
+
 fn load_platform_icon_png_bytes(request: &NativeIconRequest) -> Option<Vec<u8>> {
     match &request.source {
         #[cfg(target_os = "linux")]
@@ -2027,6 +2046,62 @@ impl DiskIconStore {
 
         changed
     }
+
+    fn cleanup_stale_path_mappings(&mut self) -> NativeIconCacheCleanupSummary {
+        let Some(cache_dir) = self.cache_dir.as_deref() else {
+            return NativeIconCacheCleanupSummary::default();
+        };
+
+        let mut removed = Vec::new();
+        self.manifest.mappings.retain(|key, hash| {
+            if let Some(source_path) = native_icon_cache_key_source_path(key)
+                && matches!(source_path.try_exists(), Ok(false))
+            {
+                removed.push((key.clone(), hash.clone()));
+                return false;
+            }
+            true
+        });
+
+        if removed.is_empty() {
+            return NativeIconCacheCleanupSummary::default();
+        }
+
+        let remaining_hashes = self
+            .manifest
+            .mappings
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut summary = NativeIconCacheCleanupSummary {
+            removed_mappings: removed.len(),
+            removed_files: 0,
+        };
+        let mut removed_hashes = HashSet::new();
+        for (_, hash) in removed {
+            if removed_hashes.insert(hash.clone())
+                && !remaining_hashes.contains(&hash)
+                && let Some(path) = icon_file_path_from_dir(Some(cache_dir), &hash)
+                && path.is_file()
+                && fs::remove_file(path).is_ok()
+            {
+                summary.removed_files += 1;
+            }
+        }
+        let _ = save_disk_manifest(cache_dir, &self.manifest);
+        summary
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct NativeIconCacheCleanupSummary {
+    removed_mappings: usize,
+    removed_files: usize,
+}
+
+pub(super) fn cleanup_stale_path_cache_entries() -> NativeIconCacheCleanupSummary {
+    let mut store = DiskIconStore::load(native_icon_cache_dir());
+    store.cleanup_stale_path_mappings()
 }
 
 fn load_disk_manifest(cache_dir: Option<&Path>) -> Option<DiskIconManifest> {
@@ -2917,6 +2992,137 @@ mod tests {
             fs::read_to_string(cache_dir.join(DISK_MANIFEST_FILE_NAME))
                 .expect("manifest")
                 .contains("\n  \"mappings\"")
+        );
+    }
+
+    #[test]
+    fn native_icon_cleanup_removes_missing_path_backed_mappings_and_orphaned_icons() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("cache");
+        let existing_source = temp.path().join("existing.exe");
+        let missing_source = temp.path().join("missing.exe");
+        fs::write(&existing_source, b"exe").unwrap();
+        let existing_key = linux_native_icon_request(
+            LinuxIconRequest::Path {
+                path: existing_source.clone(),
+            },
+            NativeIconSize::Details,
+        )
+        .key;
+        let missing_key = linux_native_icon_request(
+            LinuxIconRequest::Path {
+                path: missing_source,
+            },
+            NativeIconSize::Details,
+        )
+        .key;
+        let existing_hash = "abc123";
+        let missing_hash = "def456";
+        write_atomic(
+            &cache_dir
+                .join(DISK_ICON_DIR_NAME)
+                .join(format!("{existing_hash}.png")),
+            b"existing",
+        )
+        .unwrap();
+        write_atomic(
+            &cache_dir
+                .join(DISK_ICON_DIR_NAME)
+                .join(format!("{missing_hash}.png")),
+            b"missing",
+        )
+        .unwrap();
+        save_disk_manifest(
+            &cache_dir,
+            &DiskIconManifest {
+                version: NATIVE_ICON_CACHE_VERSION.to_owned(),
+                mappings: HashMap::from([
+                    (existing_key.clone(), existing_hash.to_owned()),
+                    (missing_key.clone(), missing_hash.to_owned()),
+                ]),
+            },
+        )
+        .unwrap();
+        let mut store = DiskIconStore::load(Some(cache_dir.clone()));
+
+        let summary = store.cleanup_stale_path_mappings();
+
+        assert_eq!(
+            summary,
+            NativeIconCacheCleanupSummary {
+                removed_mappings: 1,
+                removed_files: 1,
+            }
+        );
+        assert_eq!(store.icon_hash(&existing_key), Some(existing_hash));
+        assert_eq!(store.icon_hash(&missing_key), None);
+        assert!(
+            icon_file_path_from_dir(Some(&cache_dir), existing_hash)
+                .unwrap()
+                .exists()
+        );
+        assert!(
+            !icon_file_path_from_dir(Some(&cache_dir), missing_hash)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn native_icon_cleanup_keeps_file_type_mappings_and_shared_icon_blobs() {
+        let temp = TempDir::new();
+        let cache_dir = temp.path().join("cache");
+        let missing_source = temp.path().join("missing.exe");
+        let missing_key = linux_native_icon_request(
+            LinuxIconRequest::Path {
+                path: missing_source,
+            },
+            NativeIconSize::Details,
+        )
+        .key;
+        let file_type_key = mac_native_icon_request(
+            MacIconRequest::FileType {
+                extension: "txt".to_owned(),
+            },
+            NativeIconSize::Details,
+        )
+        .key;
+        let shared_hash = "abc123";
+        write_atomic(
+            &cache_dir
+                .join(DISK_ICON_DIR_NAME)
+                .join(format!("{shared_hash}.png")),
+            b"shared",
+        )
+        .unwrap();
+        save_disk_manifest(
+            &cache_dir,
+            &DiskIconManifest {
+                version: NATIVE_ICON_CACHE_VERSION.to_owned(),
+                mappings: HashMap::from([
+                    (missing_key.clone(), shared_hash.to_owned()),
+                    (file_type_key.clone(), shared_hash.to_owned()),
+                ]),
+            },
+        )
+        .unwrap();
+        let mut store = DiskIconStore::load(Some(cache_dir.clone()));
+
+        let summary = store.cleanup_stale_path_mappings();
+
+        assert_eq!(
+            summary,
+            NativeIconCacheCleanupSummary {
+                removed_mappings: 1,
+                removed_files: 0,
+            }
+        );
+        assert_eq!(store.icon_hash(&missing_key), None);
+        assert_eq!(store.icon_hash(&file_type_key), Some(shared_hash));
+        assert!(
+            icon_file_path_from_dir(Some(&cache_dir), shared_hash)
+                .unwrap()
+                .exists()
         );
     }
 

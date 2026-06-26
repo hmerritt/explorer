@@ -3,6 +3,7 @@ mod address_bar;
 mod app_icons;
 mod archive_diagnostics;
 mod breadcrumb;
+mod cache_cleanup;
 mod clipboard;
 mod codebase_summary;
 mod columns;
@@ -71,6 +72,7 @@ pub use actions::{
     SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
+pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;
 pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
 pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]
