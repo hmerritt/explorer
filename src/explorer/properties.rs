@@ -65,7 +65,7 @@ use crate::explorer::{
     view::ExplorerView,
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
-use crate::settings::SettingsState;
+use crate::settings::{RcloneSettings, SettingsState};
 
 const PROPERTIES_WIDTH: f32 = 408.0;
 const PROPERTIES_HEIGHT: f32 = 520.0;
@@ -449,6 +449,8 @@ pub(super) struct PropertiesDialog {
     target: PropertyTarget,
     explorer: WeakEntity<ExplorerView>,
     date_format: String,
+    rclone_settings: RcloneSettings,
+    remote_thumbnails: bool,
     font: gpui::Font,
     focus_handle: FocusHandle,
     active_tab: PropertyTab,
@@ -560,10 +562,13 @@ impl PropertiesDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let font = crate::settings::current_app_font(cx);
+        let settings = cx.global::<SettingsState>().value.clone();
         let mut dialog = Self {
             target,
             explorer,
             date_format,
+            rclone_settings: settings.rclone,
+            remote_thumbnails: settings.view.remote_thumbnails,
             font,
             focus_handle,
             active_tab: PropertyTab::General,
@@ -627,14 +632,18 @@ impl PropertiesDialog {
         self.reset_frames_state();
         let target = self.target.clone();
         let date_format = self.date_format.clone();
+        let rclone_settings = self.rclone_settings.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let path_count = target.paths.len();
                     let started = Instant::now();
-                    let result =
-                        collect_property_snapshot_fast_with_date_format(target, &date_format);
+                    let result = collect_property_snapshot_fast_with_date_format_and_rclone(
+                        target,
+                        &date_format,
+                        &rclone_settings,
+                    );
                     match &result {
                         Ok(snapshot) => crate::debug_options::log_property_timing(
                             started.elapsed(),
@@ -746,6 +755,7 @@ impl PropertiesDialog {
         let generation = self.tree_summary_generation;
         let target = snapshot.target.clone();
         let date_format = self.date_format.clone();
+        let rclone_settings = self.rclone_settings.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.tree_summary_cancel = Some(cancel.clone());
         let task = cx.spawn(async move |this, cx| {
@@ -756,10 +766,11 @@ impl PropertiesDialog {
                     async move {
                         let path_count = target.paths.len();
                         let started = Instant::now();
-                        let result = collect_property_snapshot_full_with_date_format(
+                        let result = collect_property_snapshot_full_with_date_format_and_rclone(
                             target,
                             &date_format,
                             &cancel,
+                            &rclone_settings,
                         );
                         match &result {
                             Ok(snapshot) => crate::debug_options::log_property_timing(
@@ -1073,13 +1084,21 @@ impl PropertiesDialog {
 
         self.image_state = PropertyImageState::Loading;
         let generation = self.image_generation;
+        let rclone_settings = self.rclone_settings.clone();
+        let remote_thumbnails = self.remote_thumbnails;
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let result = cx
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { load_property_image_preview(&path) }
+                    async move {
+                        load_property_image_preview_for_path(
+                            &path,
+                            remote_thumbnails,
+                            &rclone_settings,
+                        )
+                    }
                 })
                 .await;
 
@@ -1146,6 +1165,8 @@ impl PropertiesDialog {
 
         self.frames_state = PropertyFramesState::Loading(Vec::new());
         let generation = self.frames_generation;
+        let rclone_settings = self.rclone_settings.clone();
+        let remote_thumbnails = self.remote_thumbnails;
         crate::debug_options::log_property_marker(format_args!(
             "video frames task started path={} generation={}",
             path.display(),
@@ -1153,6 +1174,36 @@ impl PropertiesDialog {
         ));
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
+            let media_path = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        property_media_local_path(path, remote_thumbnails, &rclone_settings)
+                    }
+                })
+                .await;
+            let path = match media_path {
+                Ok(path) => path,
+                Err(error) => {
+                    crate::debug_options::log_property_timing(
+                        started.elapsed(),
+                        format_args!(
+                            "video frames failed path={} error={}",
+                            path.display(),
+                            error
+                        ),
+                    );
+                    let _ = this.update(cx, |dialog, cx| {
+                        if dialog.frames_generation == generation {
+                            dialog.frames_task = None;
+                            dialog.frames_state = PropertyFramesState::Failed(error);
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
             let requests = cx
                 .background_executor()
                 .spawn({
@@ -3298,15 +3349,52 @@ fn collect_property_snapshot_fast_with_date_format(
     target: PropertyTarget,
     date_format: &str,
 ) -> Result<PropertySnapshot, String> {
-    collect_property_snapshot_with_date_format(target, date_format, PropertyTreeMode::Fast)
+    collect_property_snapshot_fast_with_date_format_and_rclone(
+        target,
+        date_format,
+        &RcloneSettings::default(),
+    )
 }
 
+fn collect_property_snapshot_fast_with_date_format_and_rclone(
+    target: PropertyTarget,
+    date_format: &str,
+    rclone_settings: &RcloneSettings,
+) -> Result<PropertySnapshot, String> {
+    collect_property_snapshot_with_date_format(
+        target,
+        date_format,
+        PropertyTreeMode::Fast,
+        rclone_settings,
+    )
+}
+
+#[cfg(test)]
 fn collect_property_snapshot_full_with_date_format(
     target: PropertyTarget,
     date_format: &str,
     cancel: &AtomicBool,
 ) -> Result<PropertySnapshot, String> {
-    collect_property_snapshot_with_date_format(target, date_format, PropertyTreeMode::Full(cancel))
+    collect_property_snapshot_full_with_date_format_and_rclone(
+        target,
+        date_format,
+        cancel,
+        &RcloneSettings::default(),
+    )
+}
+
+fn collect_property_snapshot_full_with_date_format_and_rclone(
+    target: PropertyTarget,
+    date_format: &str,
+    cancel: &AtomicBool,
+    rclone_settings: &RcloneSettings,
+) -> Result<PropertySnapshot, String> {
+    collect_property_snapshot_with_date_format(
+        target,
+        date_format,
+        PropertyTreeMode::Full(cancel),
+        rclone_settings,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -3319,6 +3407,7 @@ fn collect_property_snapshot_with_date_format(
     target: PropertyTarget,
     date_format: &str,
     tree_mode: PropertyTreeMode<'_>,
+    rclone_settings: &RcloneSettings,
 ) -> Result<PropertySnapshot, String> {
     if target.paths.is_empty() {
         return Err("No items selected.".to_owned());
@@ -3326,7 +3415,12 @@ fn collect_property_snapshot_with_date_format(
 
     let mut items = Vec::new();
     for path in &target.paths {
-        items.push(collect_property_item(path, date_format, tree_mode)?);
+        items.push(collect_property_item(
+            path,
+            date_format,
+            tree_mode,
+            rclone_settings,
+        )?);
     }
 
     let title = property_title(&target.paths);
@@ -3432,7 +3526,19 @@ fn collect_property_item(
     path: &Path,
     date_format: &str,
     tree_mode: PropertyTreeMode<'_>,
+    rclone_settings: &RcloneSettings,
 ) -> Result<PropertyItem, String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        return collect_rclone_transfer_property_item(
+            path,
+            date_format,
+            tree_mode,
+            rclone_settings,
+        );
+    }
+
+    let _ = rclone_settings;
     let link_metadata = fs::symlink_metadata(path).ok();
     let metadata = property_target_metadata(path, link_metadata.as_ref());
     let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
@@ -3549,6 +3655,193 @@ fn collect_property_item(
         shortcut,
         details,
     })
+}
+
+#[cfg(feature = "rclone")]
+fn collect_rclone_transfer_property_item(
+    path: &Path,
+    date_format: &str,
+    tree_mode: PropertyTreeMode<'_>,
+    rclone_settings: &RcloneSettings,
+) -> Result<PropertyItem, String> {
+    let metadata = crate::explorer::rclone::transfer_path_metadata(path, rclone_settings)?;
+    Ok(collect_rclone_transfer_property_item_from_metadata(
+        path,
+        date_format,
+        tree_mode,
+        rclone_settings,
+        metadata,
+    ))
+}
+
+#[cfg(feature = "rclone")]
+fn collect_rclone_transfer_property_item_from_metadata(
+    path: &Path,
+    date_format: &str,
+    tree_mode: PropertyTreeMode<'_>,
+    rclone_settings: &RcloneSettings,
+    metadata: Option<crate::explorer::rclone::RcloneTransferMetadata>,
+) -> PropertyItem {
+    let Some(metadata) = metadata else {
+        return PropertyItem {
+            path: path.to_path_buf(),
+            exists: false,
+            is_dir: false,
+            type_label: None,
+            location: path.parent().map(|parent| parent.display().to_string()),
+            size: None,
+            size_on_disk: None,
+            contains: None,
+            selection_counts: None,
+            created: None,
+            modified: None,
+            accessed: None,
+            readonly: None,
+            hidden: Some(rclone_path_name_is_hidden(path)),
+            owner: None,
+            group: None,
+            unix_mode: None,
+            permission_summary: None,
+            run_as_admin: None,
+            shortcut: None,
+            details: Vec::new(),
+        };
+    };
+
+    let is_dir = metadata.is_dir;
+    let entry = FileEntry {
+        path: path.to_path_buf(),
+        name: path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+        kind: if is_dir {
+            EntryKind::Directory
+        } else {
+            EntryKind::File
+        },
+        modified: metadata.modified,
+        size: (!is_dir).then_some(metadata.size.unwrap_or(0)),
+    };
+    let recursive_summary_is_pending = is_dir && matches!(tree_mode, PropertyTreeMode::Fast);
+    let size_value = metadata.size.unwrap_or(0);
+    let size = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else {
+        Some(PropertyValue::ready(size_value))
+    };
+    let size_on_disk = size.clone();
+    let contains = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else if is_dir {
+        Some(PropertyValue::ready(PropertyContains {
+            files: 0,
+            folders: 0,
+        }))
+    } else {
+        None
+    };
+    let selection_counts = if recursive_summary_is_pending {
+        Some(PropertyValue::Loading)
+    } else if is_dir {
+        Some(PropertyValue::ready(PropertyContains {
+            files: 0,
+            folders: 1,
+        }))
+    } else {
+        None
+    };
+
+    PropertyItem {
+        path: path.to_path_buf(),
+        exists: true,
+        is_dir,
+        type_label: Some(entry.type_label()),
+        location: path.parent().map(|parent| parent.display().to_string()),
+        size,
+        size_on_disk,
+        contains,
+        selection_counts,
+        created: None,
+        modified: metadata.modified,
+        accessed: None,
+        readonly: Some(!rclone_settings.enabled || rclone_settings.mount.read_only),
+        hidden: Some(rclone_path_name_is_hidden(path)),
+        owner: None,
+        group: None,
+        unix_mode: None,
+        permission_summary: None,
+        run_as_admin: None,
+        shortcut: None,
+        details: rclone_transfer_metadata_details(path, &entry, &metadata, size_value, date_format),
+    }
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_transfer_metadata_details(
+    path: &Path,
+    entry: &FileEntry,
+    metadata: &crate::explorer::rclone::RcloneTransferMetadata,
+    size: u64,
+    date_format: &str,
+) -> Vec<PropertyDetailGroup> {
+    let mut details = Vec::new();
+    details.push(PropertyDetail {
+        name: "Name".to_owned(),
+        value: path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+    });
+    if !metadata.is_dir {
+        details.push(PropertyDetail {
+            name: "Size".to_owned(),
+            value: property_size_label(size),
+        });
+        details.push(PropertyDetail {
+            name: "MIME Type".to_owned(),
+            value: mime_type_label(path),
+        });
+    }
+    details.push(PropertyDetail {
+        name: "Item type".to_owned(),
+        value: entry.type_label(),
+    });
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        details.push(PropertyDetail {
+            name: "Extension".to_owned(),
+            value: extension.to_owned(),
+        });
+    }
+    if let Some(parent) = path.parent() {
+        details.push(PropertyDetail {
+            name: "Directory".to_owned(),
+            value: parent.display().to_string(),
+        });
+    }
+    if let Some(modified) = metadata.modified {
+        if let Some(value) = non_empty_property_value(format_timestamp(Some(modified), date_format))
+        {
+            details.push(PropertyDetail {
+                name: "Modified".to_owned(),
+                value,
+            });
+        }
+    }
+
+    vec![property_detail_group(
+        PropertyDetailGroupKind::File,
+        details,
+    )]
+}
+
+#[cfg(feature = "rclone")]
+fn rclone_path_name_is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
 }
 
 fn property_title(paths: &[PathBuf]) -> String {
@@ -3951,6 +4244,55 @@ fn path_may_have_exif(path: &Path) -> bool {
 
 fn path_may_have_media_details(path: &Path) -> bool {
     path_may_have_exif(path) || path_may_have_video_metadata(path)
+}
+
+fn load_property_image_preview_for_path(
+    path: &Path,
+    remote_thumbnails: bool,
+    rclone_settings: &RcloneSettings,
+) -> Result<PropertyImagePreview, String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        let local_path =
+            property_media_local_path(path.to_path_buf(), remote_thumbnails, rclone_settings)?;
+        return load_property_image_preview(&local_path);
+    }
+
+    #[cfg(not(feature = "rclone"))]
+    let _ = (remote_thumbnails, rclone_settings);
+
+    load_property_image_preview(path)
+}
+
+fn property_media_local_path(
+    path: PathBuf,
+    remote_thumbnails: bool,
+    rclone_settings: &RcloneSettings,
+) -> Result<PathBuf, String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(&path) {
+        if !remote_thumbnails {
+            return Err("Remote media previews are disabled.".to_owned());
+        }
+        let cancel = AtomicBool::new(false);
+        let mut on_progress = |_| {};
+        return crate::explorer::rclone::download_transfer_files_to_temp_with_progress(
+            std::slice::from_ref(&path),
+            true,
+            rclone_settings,
+            &cancel,
+            &mut on_progress,
+        )
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Remote media preview did not produce a local copy.".to_owned());
+    }
+
+    #[cfg(not(feature = "rclone"))]
+    let _ = (remote_thumbnails, rclone_settings);
+
+    Ok(path)
 }
 
 const VIDEO_FRAME_COUNT: usize = 20;
@@ -7741,6 +8083,65 @@ mod tests {
         assert!(snapshot.size_on_disk.as_ready().unwrap() >= snapshot.size.as_ready().unwrap());
         assert!(matches!(snapshot.type_label, MixedValue::Single(_)));
         assert!(snapshot.contains.is_none());
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn transfer_mode_property_item_uses_rclone_file_metadata() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("photo.jpg");
+        let modified = std::time::UNIX_EPOCH + Duration::from_secs(123);
+        let mut settings = RcloneSettings::default();
+        settings.enabled = true;
+
+        let item = collect_rclone_transfer_property_item_from_metadata(
+            &path,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            PropertyTreeMode::Fast,
+            &settings,
+            Some(crate::explorer::rclone::RcloneTransferMetadata {
+                is_dir: false,
+                size: Some(987),
+                modified: Some(modified),
+            }),
+        );
+
+        assert!(item.exists);
+        assert!(!item.is_dir);
+        assert_eq!(item.size, Some(PropertyValue::Ready(987)));
+        assert_eq!(item.size_on_disk, Some(PropertyValue::Ready(987)));
+        assert_eq!(item.modified, Some(modified));
+        assert_eq!(item.type_label, Some("JPG File".to_owned()));
+        let expected_size = property_size_label(987);
+        assert_eq!(
+            detail_value(&item.details, PropertyDetailGroupKind::File, "Size"),
+            Some(expected_size.as_str())
+        );
+    }
+
+    #[cfg(feature = "rclone")]
+    #[test]
+    fn transfer_mode_property_item_marks_fast_folder_summary_loading() {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Folder");
+        let settings = RcloneSettings::default();
+
+        let item = collect_rclone_transfer_property_item_from_metadata(
+            &path,
+            crate::settings::DEFAULT_DATE_FORMAT,
+            PropertyTreeMode::Fast,
+            &settings,
+            Some(crate::explorer::rclone::RcloneTransferMetadata {
+                is_dir: true,
+                size: None,
+                modified: None,
+            }),
+        );
+
+        assert!(item.exists);
+        assert!(item.is_dir);
+        assert_eq!(item.type_label, Some("File folder".to_owned()));
+        assert_eq!(item.size, Some(PropertyValue::Loading));
+        assert_eq!(item.contains, Some(PropertyValue::Loading));
+        assert_eq!(item.selection_counts, Some(PropertyValue::Loading));
     }
 
     #[test]

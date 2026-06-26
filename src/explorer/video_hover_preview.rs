@@ -18,8 +18,8 @@ use gpui::{Context, RenderImage, Task};
 use crate::explorer::{
     entry::FileEntry,
     image_thumbnails::{
-        CachedThumbnailImage, dimensions_for_preview, entry_may_have_hover_image_preview,
-        entry_may_have_hover_video_preview,
+        CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
+        entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
     },
     video::path_may_have_video_metadata,
     view::ExplorerView,
@@ -81,6 +81,9 @@ impl ExplorerView {
     ) -> Option<VideoHoverPreviewLookup> {
         if !entry_may_have_hover_video_preview(entry) {
             return None;
+        }
+        if self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly {
+            return Some(VideoHoverPreviewLookup::Failed);
         }
 
         let loading_thumbnail = self.ready_standard_video_thumbnail_for_entry(entry, cx);
@@ -425,7 +428,7 @@ mod tests {
     use crate::explorer::image_thumbnails::ThumbnailSourcePolicy;
 
     #[gpui::test]
-    fn cache_only_standard_policy_allows_video_hover_preview_source_playback(
+    fn cache_only_standard_policy_blocks_video_hover_preview_source_playback(
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -446,13 +449,9 @@ mod tests {
 
                 assert!(matches!(
                     view.hover_video_preview_for_entry(&entry, cx),
-                    Some(VideoHoverPreviewLookup::Loading {
-                        width: VIDEO_HOVER_PREVIEW_SIZE,
-                        height: VIDEO_HOVER_PREVIEW_SIZE,
-                        thumbnail: None,
-                    })
+                    Some(VideoHoverPreviewLookup::Failed)
                 ));
-                assert!(view.video_hover_preview.is_some());
+                assert!(view.video_hover_preview.is_none());
             });
         });
     }

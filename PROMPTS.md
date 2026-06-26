@@ -2,9 +2,11 @@
 
 - rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
 - Opening a large file in rclone drive freezes the whole app (using dev build)
+- Auto clear caches every so often (30 days?) - run through cached items and check their item path to see if it still exists, if it does not then delete the cached item
 
 ## 1
 
+- rclone support in general currently feels very fragile. There are freezes and blocks that need fixing. Broaden the plan to all rclone flows, including properties, thumbnails, context menu commands, and progress/cancel polish.
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 
 ## 2
@@ -17,7 +19,6 @@
 
 ## 3
 
-- Auto clear caches every so often (30 days?) - run through cached items and check their item path to see if it still exists, if it does not then delete the cached item
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu

@@ -4,7 +4,7 @@ use std::{
     fs, io,
     path::{Component, Path, PathBuf},
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -20,8 +20,11 @@ use crate::explorer::filesystem::user_home_dir;
 use crate::{
     explorer::{
         entry::{EntryKind, FileEntry},
-        filesystem::{EntryVisibility, path_is_same_or_descendant},
-        view::ExplorerView,
+        filesystem::{
+            EntryVisibility, FileOperationKind, FileOperationPhase, FileOperationProgress,
+            path_is_same_or_descendant,
+        },
+        view::{ExplorerView, FileOperationState},
     },
     settings::{RcloneSettings, config_dir},
 };
@@ -172,10 +175,10 @@ struct RcloneUploadQueueItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TransferPathMetadata {
-    is_dir: bool,
-    size: Option<u64>,
-    modified: Option<SystemTime>,
+pub(super) struct RcloneTransferMetadata {
+    pub(super) is_dir: bool,
+    pub(super) size: Option<u64>,
+    pub(super) modified: Option<SystemTime>,
 }
 
 #[derive(Debug)]
@@ -1173,6 +1176,7 @@ pub(super) fn normal_open_block_message(path: &Path) -> Option<String> {
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn download_transfer_files_to_temp(
     paths: &[PathBuf],
     read_only: bool,
@@ -1180,13 +1184,58 @@ pub(super) fn download_transfer_files_to_temp(
 ) -> io::Result<Vec<PathBuf>> {
     prepare_librclone(settings).map_err(io::Error::other)?;
     let client = LibrcloneClient;
-    download_transfer_files_to_temp_with_client(&client, paths, read_only)
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    download_transfer_files_to_temp_with_client_and_progress(
+        &client,
+        paths,
+        read_only,
+        &cancel,
+        &mut on_progress,
+    )
 }
 
+pub(super) fn download_transfer_files_to_temp_with_progress(
+    paths: &[PathBuf],
+    read_only: bool,
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> io::Result<Vec<PathBuf>> {
+    prepare_librclone(settings).map_err(io::Error::other)?;
+    let client = LibrcloneClient;
+    download_transfer_files_to_temp_with_client_and_progress(
+        &client,
+        paths,
+        read_only,
+        cancel,
+        &mut on_progress,
+    )
+}
+
+#[allow(dead_code)]
 pub(super) fn download_transfer_files_to_temp_with_client(
     client: &impl RcloneClient,
     paths: &[PathBuf],
     read_only: bool,
+) -> io::Result<Vec<PathBuf>> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    download_transfer_files_to_temp_with_client_and_progress(
+        client,
+        paths,
+        read_only,
+        &cancel,
+        &mut on_progress,
+    )
+}
+
+pub(super) fn download_transfer_files_to_temp_with_client_and_progress(
+    client: &impl RcloneClient,
+    paths: &[PathBuf],
+    read_only: bool,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
 ) -> io::Result<Vec<PathBuf>> {
     let mut downloaded = Vec::new();
     for path in paths {
@@ -1202,18 +1251,20 @@ pub(super) fn download_transfer_files_to_temp_with_client(
             .filter(|name| !name.is_empty())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
         let destination_dir = unique_open_copy_dir(&rclone_path.remote_name)?;
-        client
-            .rpc(
-                "operations/copyfile",
-                json!({
-                    "srcFs": rclone_fs_for_remote(&rclone_path.remote_name),
-                    "srcRemote": remote_path_string(&rclone_path.relative_path),
-                    "dstFs": destination_dir.to_string_lossy(),
-                    "dstRemote": file_name,
-                    "_group": "explorer-rclone-open",
-                }),
-            )
-            .map_err(io::Error::other)?;
+        run_transfer_job_with_progress(
+            client,
+            "operations/copyfile",
+            json!({
+                "srcFs": rclone_fs_for_remote(&rclone_path.remote_name),
+                "srcRemote": remote_path_string(&rclone_path.relative_path),
+                "dstFs": destination_dir.to_string_lossy(),
+                "dstRemote": file_name,
+                "_group": "explorer-rclone-open",
+            }),
+            cancel,
+            on_progress,
+        )
+        .map_err(io::Error::other)?;
         let destination = destination_dir.join(file_name);
         if read_only {
             let mut permissions = fs::metadata(&destination)?.permissions();
@@ -1237,10 +1288,18 @@ pub(super) fn transfer_path_exists_with_client(
     Ok(transfer_path_metadata_with_client(client, path)?.is_some())
 }
 
-fn transfer_path_metadata_with_client(
+pub(super) fn transfer_path_metadata(
+    path: &Path,
+    settings: &RcloneSettings,
+) -> Result<Option<RcloneTransferMetadata>, String> {
+    prepare_librclone(settings)?;
+    transfer_path_metadata_with_client(&LibrcloneClient, path)
+}
+
+pub(super) fn transfer_path_metadata_with_client(
     client: &impl RcloneClient,
     path: &Path,
-) -> Result<Option<TransferPathMetadata>, String> {
+) -> Result<Option<RcloneTransferMetadata>, String> {
     let rclone_path = parse_virtual_path(path)
         .ok_or_else(|| format!("{} is not a rclone transfer path", path.display()))?;
     let response = client.rpc(
@@ -1253,7 +1312,7 @@ fn transfer_path_metadata_with_client(
     let Some(item) = response.get("item").filter(|item| !item.is_null()) else {
         return Ok(None);
     };
-    Ok(Some(TransferPathMetadata {
+    Ok(Some(RcloneTransferMetadata {
         is_dir: item
             .get("IsDir")
             .or_else(|| item.get("isDir"))
@@ -1289,24 +1348,75 @@ pub(super) fn create_transfer_file(
     settings: &RcloneSettings,
 ) -> Result<(), String> {
     prepare_librclone(settings)?;
-    create_transfer_file_with_client(&LibrcloneClient, path, bytes)
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    create_transfer_file_with_client_and_progress(
+        &LibrcloneClient,
+        path,
+        bytes,
+        &cancel,
+        &mut on_progress,
+    )
 }
 
+pub(super) fn create_transfer_file_with_progress(
+    path: &Path,
+    bytes: &[u8],
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
+    create_transfer_file_with_client_and_progress(
+        &LibrcloneClient,
+        path,
+        bytes,
+        cancel,
+        &mut on_progress,
+    )
+}
+
+#[allow(dead_code)]
 pub(super) fn create_transfer_file_with_client(
     client: &impl RcloneClient,
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    create_transfer_file_with_client_and_progress(client, path, bytes, &cancel, &mut on_progress)
+}
+
+pub(super) fn create_transfer_file_with_client_and_progress(
+    client: &impl RcloneClient,
+    path: &Path,
+    bytes: &[u8],
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
+) -> Result<(), String> {
     if transfer_path_exists_with_client(client, path)? {
         return Err("an item with this name already exists".to_owned());
     }
-    write_transfer_file_with_client(client, path, bytes)
+    write_transfer_file_with_client_and_progress(client, path, bytes, cancel, on_progress)
 }
 
+#[allow(dead_code)]
 pub(super) fn write_transfer_file_with_client(
     client: &impl RcloneClient,
     path: &Path,
     bytes: &[u8],
+) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    write_transfer_file_with_client_and_progress(client, path, bytes, &cancel, &mut on_progress)
+}
+
+pub(super) fn write_transfer_file_with_client_and_progress(
+    client: &impl RcloneClient,
+    path: &Path,
+    bytes: &[u8],
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
 ) -> Result<(), String> {
     let rclone_path = parse_virtual_path(path)
         .ok_or_else(|| format!("{} is not a rclone transfer path", path.display()))?;
@@ -1329,7 +1439,7 @@ pub(super) fn write_transfer_file_with_client(
             path.display()
         ));
     }
-    let result = run_transfer_job(
+    let result = run_transfer_job_with_progress(
         client,
         "operations/copyfile",
         json!({
@@ -1338,6 +1448,8 @@ pub(super) fn write_transfer_file_with_client(
             "dstFs": rclone_fs_for_remote(&rclone_path.remote_name),
             "dstRemote": remote_path_string(&rclone_path.relative_path),
         }),
+        cancel,
+        on_progress,
     );
     let _ = fs::remove_dir_all(&temp_dir);
     result.map(drop)
@@ -1345,39 +1457,122 @@ pub(super) fn write_transfer_file_with_client(
 
 pub(super) fn create_transfer_folder(path: &Path, settings: &RcloneSettings) -> Result<(), String> {
     prepare_librclone(settings)?;
-    create_transfer_folder_with_client(&LibrcloneClient, path)
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    create_transfer_folder_with_client_and_progress(
+        &LibrcloneClient,
+        path,
+        &cancel,
+        &mut on_progress,
+    )
 }
 
+pub(super) fn create_transfer_folder_with_progress(
+    path: &Path,
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
+    create_transfer_folder_with_client_and_progress(
+        &LibrcloneClient,
+        path,
+        cancel,
+        &mut on_progress,
+    )
+}
+
+#[allow(dead_code)]
 pub(super) fn create_transfer_folder_with_client(
     client: &impl RcloneClient,
     path: &Path,
 ) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    create_transfer_folder_with_client_and_progress(client, path, &cancel, &mut on_progress)
+}
+
+pub(super) fn create_transfer_folder_with_client_and_progress(
+    client: &impl RcloneClient,
+    path: &Path,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
+) -> Result<(), String> {
     let rclone_path = parse_virtual_path(path)
         .ok_or_else(|| format!("{} is not a rclone transfer path", path.display()))?;
-    client.rpc(
+    run_transfer_job_with_progress(
+        client,
         "operations/mkdir",
         json!({
             "fs": rclone_fs_for_remote(&rclone_path.remote_name),
             "remote": remote_path_string(&rclone_path.relative_path),
         }),
+        cancel,
+        on_progress,
     )?;
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(super) fn rename_transfer_path(
     original_path: &Path,
     target_path: &Path,
     settings: &RcloneSettings,
 ) -> io::Result<()> {
     prepare_librclone(settings).map_err(io::Error::other)?;
-    rename_transfer_path_with_client(&LibrcloneClient, original_path, target_path)
-        .map_err(io::Error::other)
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    rename_transfer_path_with_client_and_progress(
+        &LibrcloneClient,
+        original_path,
+        target_path,
+        &cancel,
+        &mut on_progress,
+    )
+    .map_err(io::Error::other)
 }
 
+pub(super) fn rename_transfer_path_with_progress(
+    original_path: &Path,
+    target_path: &Path,
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> io::Result<()> {
+    prepare_librclone(settings).map_err(io::Error::other)?;
+    rename_transfer_path_with_client_and_progress(
+        &LibrcloneClient,
+        original_path,
+        target_path,
+        cancel,
+        &mut on_progress,
+    )
+    .map_err(io::Error::other)
+}
+
+#[allow(dead_code)]
 pub(super) fn rename_transfer_path_with_client(
     client: &impl RcloneClient,
     original_path: &Path,
     target_path: &Path,
+) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    rename_transfer_path_with_client_and_progress(
+        client,
+        original_path,
+        target_path,
+        &cancel,
+        &mut on_progress,
+    )
+}
+
+pub(super) fn rename_transfer_path_with_client_and_progress(
+    client: &impl RcloneClient,
+    original_path: &Path,
+    target_path: &Path,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
 ) -> Result<(), String> {
     if transfer_path_exists_with_client(client, target_path)? {
         return Err("an item with this name already exists".to_owned());
@@ -1385,7 +1580,7 @@ pub(super) fn rename_transfer_path_with_client(
 
     let source_is_dir = path_is_directory_with_client(client, original_path)?;
     if source_is_dir {
-        run_transfer_job(
+        run_transfer_job_with_progress(
             client,
             "sync/move",
             json!({
@@ -1394,11 +1589,13 @@ pub(super) fn rename_transfer_path_with_client(
                 "createEmptySrcDirs": true,
                 "deleteEmptySrcDirs": true,
             }),
+            cancel,
+            on_progress,
         )?;
     } else {
         let source = rclone_file_endpoint_for_path(original_path)?;
         let destination = rclone_file_endpoint_for_path(target_path)?;
-        run_transfer_job(
+        run_transfer_job_with_progress(
             client,
             "operations/movefile",
             json!({
@@ -1407,22 +1604,59 @@ pub(super) fn rename_transfer_path_with_client(
                 "dstFs": destination.fs,
                 "dstRemote": destination.remote,
             }),
+            cancel,
+            on_progress,
         )?;
     }
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(super) fn delete_transfer_paths(
     paths: &[PathBuf],
     settings: &RcloneSettings,
 ) -> Result<(), String> {
     prepare_librclone(settings)?;
-    delete_transfer_paths_with_client(&LibrcloneClient, paths)
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    delete_transfer_paths_with_client_and_progress(
+        &LibrcloneClient,
+        paths,
+        &cancel,
+        &mut on_progress,
+    )
 }
 
+pub(super) fn delete_transfer_paths_with_progress(
+    paths: &[PathBuf],
+    settings: &RcloneSettings,
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RcloneTransferProgress),
+) -> Result<(), String> {
+    prepare_librclone(settings)?;
+    delete_transfer_paths_with_client_and_progress(
+        &LibrcloneClient,
+        paths,
+        cancel,
+        &mut on_progress,
+    )
+}
+
+#[allow(dead_code)]
 pub(super) fn delete_transfer_paths_with_client(
     client: &impl RcloneClient,
     paths: &[PathBuf],
+) -> Result<(), String> {
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    delete_transfer_paths_with_client_and_progress(client, paths, &cancel, &mut on_progress)
+}
+
+pub(super) fn delete_transfer_paths_with_client_and_progress(
+    client: &impl RcloneClient,
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
 ) -> Result<(), String> {
     for path in paths {
         let rclone_path = parse_virtual_path(path)
@@ -1447,7 +1681,7 @@ pub(super) fn delete_transfer_paths_with_client(
                 }),
             )
         };
-        run_transfer_job(client, method, input)?;
+        run_transfer_job_with_progress(client, method, input, cancel, on_progress)?;
     }
     Ok(())
 }
@@ -1646,33 +1880,139 @@ impl ExplorerView {
         read_only: bool,
         cx: &mut gpui::Context<Self>,
     ) {
-        if paths.is_empty() || self.open_with_task.is_some() {
+        if paths.is_empty() {
+            return;
+        }
+        if self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
 
+        let cancel = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let progress = FileOperationProgress {
+            kind: FileOperationKind::Copy,
+            phase: FileOperationPhase::Copying,
+            total_bytes: 0,
+            copied_bytes: 0,
+            verified_bytes: 0,
+            work_total_bytes: 0,
+            work_completed_bytes: 0,
+            total_files: paths.len(),
+            completed_files: 0,
+            current_item: paths.first().cloned(),
+            cancellable: true,
+        };
+        self.active_file_operation = Some(FileOperationState {
+            progress,
+            cancel: cancel.clone(),
+            terminate,
+            task: None,
+            archive_diagnostics: None,
+        });
         self.clear_operation_notice();
+        self.open_file_operation_window(cx);
+
         let settings = self.rclone_settings.clone();
+        let completion_paths = paths.clone();
         let task = cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let copies = download_transfer_files_to_temp(&paths, read_only, &settings)?;
-                    for copy in &copies {
-                        open::that_detached(copy)?;
-                    }
-                    Ok::<(), io::Error>(())
-                })
-                .await;
+            let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+            let finished = Arc::new(AtomicBool::new(false));
+            let result = cx.background_executor().spawn({
+                let cancel = cancel.clone();
+                let finished = finished.clone();
+                async move {
+                    let result = (|| {
+                        let mut progress = FileOperationProgress {
+                            kind: FileOperationKind::Copy,
+                            phase: FileOperationPhase::Copying,
+                            total_bytes: 0,
+                            copied_bytes: 0,
+                            verified_bytes: 0,
+                            work_total_bytes: 0,
+                            work_completed_bytes: 0,
+                            total_files: completion_paths.len(),
+                            completed_files: 0,
+                            current_item: completion_paths.first().cloned(),
+                            cancellable: true,
+                        };
+                        let mut completed_jobs = BTreeSet::new();
+                        let copies = download_transfer_files_to_temp_with_progress(
+                            &completion_paths,
+                            read_only,
+                            &settings,
+                            &cancel,
+                            |rclone_progress| {
+                                if let Some(total_bytes) = rclone_progress.total_bytes {
+                                    progress.total_bytes = progress.total_bytes.max(total_bytes);
+                                    progress.work_total_bytes =
+                                        progress.work_total_bytes.max(total_bytes);
+                                }
+                                if let Some(bytes) = rclone_progress.bytes {
+                                    progress.copied_bytes = progress.copied_bytes.max(bytes);
+                                    progress.work_completed_bytes =
+                                        progress.work_completed_bytes.max(bytes);
+                                }
+                                if rclone_progress.done
+                                    && completed_jobs.insert(rclone_progress.job_id)
+                                {
+                                    progress.completed_files =
+                                        progress.completed_files.saturating_add(1);
+                                }
+                                let _ = progress_tx.send(progress.clone());
+                            },
+                        )?;
+                        for copy in &copies {
+                            open::that_detached(copy)?;
+                        }
+                        Ok::<(), io::Error>(())
+                    })();
+                    finished.store(true, Ordering::Relaxed);
+                    result
+                }
+            });
+
+            while !finished.load(Ordering::Relaxed) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let mut latest = None;
+                while let Ok(progress) = progress_rx.try_recv() {
+                    latest = Some(progress);
+                }
+                if let Some(progress) = latest {
+                    let _ = this.update(cx, |explorer, cx| {
+                        if let Some(operation) = explorer.active_file_operation.as_mut() {
+                            operation.progress = progress;
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+
+            let result = result.await;
 
             let _ = this.update(cx, |explorer, cx| {
-                explorer.open_with_task = None;
+                if let Some(handle) = explorer.active_dialog_window.take() {
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                }
+                explorer.active_file_operation = None;
                 if let Err(error) = result {
-                    explorer.set_error_notice(format!("Could not open rclone copy: {error}"));
+                    if error.to_string() == "cancelled" {
+                        explorer.clear_operation_notice();
+                    } else {
+                        explorer.set_error_notice(format!("Could not open rclone copy: {error}"));
+                    }
+                    explorer.reload_with_entry_metadata_resolution(cx);
+                } else {
+                    explorer.clear_operation_notice();
                 }
                 cx.notify();
             });
         });
-        self.open_with_task = Some(task);
+        if let Some(operation) = self.active_file_operation.as_mut() {
+            operation.task = Some(task);
+        }
     }
 }
 
@@ -2035,51 +2375,24 @@ fn remote_path_string(path: &Path) -> String {
 fn run_transfer_job(
     client: &impl RcloneClient,
     method: &str,
-    mut input: Value,
+    input: Value,
 ) -> Result<Value, String> {
-    if let Some(input) = input.as_object_mut() {
-        input.insert("_async".to_owned(), Value::Bool(true));
-        input.insert(
-            "_group".to_owned(),
-            Value::String(RCLONE_TRANSFER_GROUP.to_owned()),
-        );
-    }
-    let response = client.rpc(method, input)?;
-    let Some(job_id) = response.get("jobid").and_then(Value::as_i64) else {
-        return Ok(response);
-    };
-
-    for _ in 0..RCLONE_JOB_POLL_LIMIT {
-        let status = client.rpc("job/status", json!({ "jobid": job_id }))?;
-        if !status
-            .get("finished")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            thread::sleep(RCLONE_JOB_POLL_INTERVAL);
-            continue;
-        }
-
-        if status
-            .get("success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok(status);
-        }
-
-        let error = status
-            .get("error")
-            .and_then(Value::as_str)
-            .filter(|error| !error.is_empty())
-            .unwrap_or("rclone job failed");
-        return Err(error.to_owned());
-    }
-
-    Err(format!("{method} did not finish"))
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_| {};
+    run_transfer_job_with_progress(client, method, input, &cancel, &mut on_progress)
 }
 
 fn run_transfer_job_with_progress(
+    client: &impl RcloneClient,
+    method: &str,
+    input: Value,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(RcloneTransferProgress),
+) -> Result<Value, String> {
+    run_transfer_job_inner(client, method, input, cancel, on_progress)
+}
+
+fn run_transfer_job_inner(
     client: &impl RcloneClient,
     method: &str,
     mut input: Value,
@@ -2088,10 +2401,9 @@ fn run_transfer_job_with_progress(
 ) -> Result<Value, String> {
     if let Some(input) = input.as_object_mut() {
         input.insert("_async".to_owned(), Value::Bool(true));
-        input.insert(
-            "_group".to_owned(),
-            Value::String(RCLONE_TRANSFER_GROUP.to_owned()),
-        );
+        input
+            .entry("_group".to_owned())
+            .or_insert_with(|| Value::String(RCLONE_TRANSFER_GROUP.to_owned()));
     }
     let response = client.rpc(method, input)?;
     let Some(job_id) = response.get("jobid").and_then(Value::as_i64) else {
@@ -3145,6 +3457,218 @@ mod tests {
             ]
         );
         assert_eq!(calls[3].1["jobid"], 9);
+    }
+
+    #[test]
+    fn transfer_create_file_cancel_stops_rclone_job() {
+        let path = virtual_root_for_remote("gdrive").join("new.txt");
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "item": null })),
+            Ok(json!({ "jobid": 11 })),
+            Ok(json!({})),
+        ]);
+        let cancel = AtomicBool::new(true);
+
+        let error = create_transfer_file_with_client_and_progress(
+            &client,
+            &path,
+            b"contents",
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("cancelled create should stop the rclone job");
+
+        assert_eq!(error, "cancelled");
+        let calls = client.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["operations/stat", "operations/copyfile", "job/stop"]
+        );
+        assert_eq!(calls[2].1["jobid"], 11);
+    }
+
+    #[test]
+    fn transfer_create_folder_cancel_stops_rclone_job() {
+        let path = virtual_root_for_remote("gdrive").join("New folder");
+        let client =
+            FakeRcloneClient::with_responses(vec![Ok(json!({ "jobid": 12 })), Ok(json!({}))]);
+        let cancel = AtomicBool::new(true);
+
+        let error =
+            create_transfer_folder_with_client_and_progress(&client, &path, &cancel, &mut |_| {})
+                .expect_err("cancelled mkdir should stop the rclone job");
+
+        assert_eq!(error, "cancelled");
+        let calls = client.calls();
+        assert_eq!(calls[0].0, "operations/mkdir");
+        assert_eq!(calls[1].0, "job/stop");
+        assert_eq!(calls[1].1["jobid"], 12);
+    }
+
+    #[test]
+    fn transfer_rename_cancel_stops_rclone_job() {
+        let source = virtual_root_for_remote("gdrive").join("old.txt");
+        let target = virtual_root_for_remote("gdrive").join("new.txt");
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "item": null })),
+            Ok(json!({ "item": { "IsDir": false } })),
+            Ok(json!({ "jobid": 13 })),
+            Ok(json!({})),
+        ]);
+        let cancel = AtomicBool::new(true);
+
+        let error = rename_transfer_path_with_client_and_progress(
+            &client,
+            &source,
+            &target,
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("cancelled rename should stop the rclone job");
+
+        assert_eq!(error, "cancelled");
+        let calls = client.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "operations/stat",
+                "operations/stat",
+                "operations/movefile",
+                "job/stop"
+            ]
+        );
+        assert_eq!(calls[3].1["jobid"], 13);
+    }
+
+    #[test]
+    fn transfer_delete_cancel_stops_rclone_job() {
+        let path = virtual_root_for_remote("gdrive").join("old.txt");
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "item": { "IsDir": false } })),
+            Ok(json!({ "jobid": 14 })),
+            Ok(json!({})),
+        ]);
+        let cancel = AtomicBool::new(true);
+
+        let error = delete_transfer_paths_with_client_and_progress(
+            &client,
+            std::slice::from_ref(&path),
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("cancelled delete should stop the rclone job");
+
+        assert_eq!(error, "cancelled");
+        let calls = client.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["operations/stat", "operations/deletefile", "job/stop"]
+        );
+        assert_eq!(calls[2].1["jobid"], 14);
+    }
+
+    #[test]
+    fn transfer_open_copy_cancel_stops_rclone_job() {
+        let path = virtual_root_for_remote("gdrive").join("file.txt");
+        let client =
+            FakeRcloneClient::with_responses(vec![Ok(json!({ "jobid": 15 })), Ok(json!({}))]);
+        let cancel = AtomicBool::new(true);
+
+        let error = download_transfer_files_to_temp_with_client_and_progress(
+            &client,
+            std::slice::from_ref(&path),
+            true,
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("cancelled open-copy should stop the rclone job");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "cancelled");
+        let calls = client.calls();
+        assert_eq!(calls[0].0, "operations/copyfile");
+        assert_eq!(calls[0].1["_group"], "explorer-rclone-open");
+        assert_eq!(calls[1].0, "job/stop");
+        assert_eq!(calls[1].1["jobid"], 15);
+    }
+
+    #[test]
+    fn transfer_job_maps_progress_and_preserves_non_job_responses() {
+        let progress_client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "jobid": 16 })),
+            Ok(json!({
+                "finished": false,
+                "success": false,
+                "progress": { "bytes": 5, "totalBytes": 20 }
+            })),
+            Ok(json!({
+                "finished": true,
+                "success": true,
+                "stats": { "bytes": 20, "totalBytes": 20 }
+            })),
+        ]);
+        let cancel = AtomicBool::new(false);
+        let mut progress = Vec::new();
+
+        run_transfer_job_with_progress(
+            &progress_client,
+            "operations/copyfile",
+            json!({ "srcFs": "local", "srcRemote": "a", "dstFs": "gdrive:", "dstRemote": "a" }),
+            &cancel,
+            &mut |snapshot| progress.push(snapshot),
+        )
+        .expect("job should finish");
+
+        assert_eq!(progress.len(), 2);
+        assert_eq!(progress[0].job_id, 16);
+        assert!(!progress[0].done);
+        assert_eq!(progress[0].bytes, Some(5));
+        assert_eq!(progress[0].total_bytes, Some(20));
+        assert!(progress[1].done);
+        assert!(progress[1].success);
+        assert_eq!(progress[1].bytes, Some(20));
+
+        let non_job_client = FakeRcloneClient::with_responses(vec![Ok(json!({ "ok": true }))]);
+        let response = run_transfer_job(&non_job_client, "operations/noop", json!({ "value": 1 }))
+            .expect("non-job response should pass through");
+        assert_eq!(response["ok"], true);
+        let calls = non_job_client.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1["_async"], true);
+        assert_eq!(calls[0].1["_group"], RCLONE_TRANSFER_GROUP);
+    }
+
+    #[test]
+    fn transfer_job_failure_uses_status_error() {
+        let client = FakeRcloneClient::with_responses(vec![
+            Ok(json!({ "jobid": 17 })),
+            Ok(json!({
+                "finished": true,
+                "success": false,
+                "error": "remote rejected request"
+            })),
+        ]);
+        let cancel = AtomicBool::new(false);
+
+        let error = run_transfer_job_with_progress(
+            &client,
+            "operations/deletefile",
+            json!({ "fs": "gdrive:", "remote": "file.txt" }),
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("failed job should surface rclone status error");
+
+        assert_eq!(error, "remote rejected request");
     }
 
     #[test]

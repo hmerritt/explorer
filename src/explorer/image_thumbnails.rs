@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -21,6 +21,7 @@ use std::os::windows::process::CommandExt;
 use crate::{
     explorer::{
         entry::FileEntry,
+        filesystem::path_is_remote_drive,
         image_preview::{
             AnimatedImageSource, ImageThumbnailExtractionTimings, animated_gif_source_for_path,
             encode_rgba_png_bytes, load_hover_image_preview_rgba_with_cancel_timed,
@@ -275,12 +276,30 @@ impl ImageThumbnailCacheInner {
         Some(self.loader_generation)
     }
 
+    #[cfg(test)]
     fn next_load_job(&mut self, generation: u64) -> Option<ImageThumbnailLoadJob> {
+        self.next_load_job_matching(generation, |_| true)
+    }
+
+    fn next_load_job_matching(
+        &mut self,
+        generation: u64,
+        mut should_start: impl FnMut(&ImageThumbnailRequest) -> bool,
+    ) -> Option<ImageThumbnailLoadJob> {
         if !self.loader_running || self.loader_generation != generation {
             return None;
         }
 
-        while let Some(key) = self.pending.pop_front() {
+        let pending_count = self.pending.len();
+        if pending_count == 0 {
+            self.loader_running = false;
+            return None;
+        }
+
+        for _ in 0..pending_count {
+            let Some(key) = self.pending.pop_front() else {
+                break;
+            };
             let Some(ImageThumbnailState::Pending {
                 request,
                 queued_at,
@@ -290,6 +309,20 @@ impl ImageThumbnailCacheInner {
             else {
                 continue;
             };
+
+            if !should_start(&request) {
+                self.states.insert(
+                    key.clone(),
+                    ImageThumbnailState::Pending {
+                        request,
+                        queued_at,
+                        preview_dimensions,
+                        loading_thumbnail,
+                    },
+                );
+                self.pending.push_back(key);
+                continue;
+            }
 
             let cancel = Arc::new(AtomicBool::new(false));
             self.states.insert(
@@ -312,7 +345,9 @@ impl ImageThumbnailCacheInner {
             });
         }
 
-        self.loader_running = false;
+        if self.pending.is_empty() {
+            self.loader_running = false;
+        }
         None
     }
 
@@ -483,11 +518,8 @@ impl ExplorerView {
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<HoverImagePreviewLookup> {
-        let request = hover_image_preview_request_for_entry(
-            entry,
-            &self.path,
-            ThumbnailSourcePolicy::ReadSource,
-        )?;
+        let request =
+            hover_image_preview_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         let standard_request =
             image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
         let (preview, loader_generation) = cx
@@ -642,20 +674,32 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
     cx.spawn(async move |_, cx| {
         let mut timings = ImageThumbnailTimingBatch::start();
         let concurrency = image_thumbnail_loader_concurrency();
+        let mut remote_directories_in_flight = HashSet::new();
         let mut in_flight = FuturesUnordered::new();
 
         loop {
             while in_flight.len() < concurrency {
                 let job = cx
                     .update(|cx| {
-                        cx.try_global::<ImageThumbnailCache>()
-                            .and_then(|cache| cache.inner.borrow_mut().next_load_job(generation))
+                        cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
+                            cache
+                                .inner
+                                .borrow_mut()
+                                .next_load_job_matching(generation, |request| {
+                                    !thumbnail_request_reads_remote_source(request)
+                                        || !remote_directories_in_flight
+                                            .contains(&request.directory)
+                                })
+                        })
                     })
                     .ok()
                     .flatten();
                 let Some(job) = job else {
                     break;
                 };
+                if thumbnail_request_reads_remote_source(&job.request) {
+                    remote_directories_in_flight.insert(job.request.directory.clone());
+                }
 
                 let request_started = timings.now();
                 timings.record_request();
@@ -677,6 +721,9 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
             let Some((job, request_started, thumbnail)) = in_flight.next().await else {
                 break;
             };
+            if thumbnail_request_reads_remote_source(&job.request) {
+                remote_directories_in_flight.remove(&job.request.directory);
+            }
             timings.record_load_result(&thumbnail);
             let cache_write = thumbnail.cache_write_job(&job);
 
@@ -726,6 +773,11 @@ fn image_thumbnail_loader_concurrency() -> usize {
         .map(usize::from)
         .unwrap_or(4)
         .clamp(2, 4)
+}
+
+fn thumbnail_request_reads_remote_source(request: &ImageThumbnailRequest) -> bool {
+    request.source_policy == ThumbnailSourcePolicy::ReadSource
+        && path_is_remote_drive(&request.directory)
 }
 
 #[cfg(test)]
@@ -2435,7 +2487,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hover_image_preview_request_reads_source_when_standard_policy_is_cache_only(
+    fn hover_image_preview_request_uses_cache_only_when_standard_policy_is_cache_only(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|app| initialize_for_test(app));
@@ -2471,7 +2523,7 @@ mod tests {
                 assert!(matches!(
                     cache.states.get(&hover_key),
                     Some(ImageThumbnailState::Pending { request, .. })
-                        if request.source_policy == ThumbnailSourcePolicy::ReadSource
+                        if request.source_policy == ThumbnailSourcePolicy::CacheOnly
                             && request.usage == ImageThumbnailUsage::HoverPreview
                 ));
                 assert!(!cache.states.contains_key(&standard_key));

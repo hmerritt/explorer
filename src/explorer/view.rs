@@ -302,6 +302,7 @@ struct DirectoryLoadState {
     schedule_metadata: bool,
     refresh_search: bool,
     restart_watcher: bool,
+    preserve_live_selection: bool,
 }
 
 #[derive(Debug)]
@@ -692,6 +693,21 @@ impl ExplorerView {
     }
 
     fn prepare_directory_reload(&mut self, mode: ReloadMode) -> Vec<PathBuf> {
+        self.prepare_directory_reload_inner(mode, true)
+    }
+
+    fn prepare_directory_reload_preserving_live_entries(
+        &mut self,
+        mode: ReloadMode,
+    ) -> Vec<PathBuf> {
+        self.prepare_directory_reload_inner(mode, false)
+    }
+
+    fn prepare_directory_reload_inner(
+        &mut self,
+        mode: ReloadMode,
+        clear_entries: bool,
+    ) -> Vec<PathBuf> {
         self.cancel_folder_size_task();
         self.directory_is_remote = path_is_remote_drive(&self.path);
         self.thumbnail_source_policy =
@@ -723,11 +739,13 @@ impl ExplorerView {
             );
         }
 
-        self.entries.clear();
-        self.all_entries.clear();
-        self.clear_selection();
-        self.set_horizontal_scroll_offset(0.0);
-        self.horizontal_scrollbar_drag = None;
+        if clear_entries {
+            self.entries.clear();
+            self.all_entries.clear();
+            self.clear_selection();
+            self.set_horizontal_scroll_offset(0.0);
+            self.horizontal_scrollbar_drag = None;
+        }
         selected_paths
     }
 
@@ -867,6 +885,28 @@ impl ExplorerView {
             schedule_metadata,
             refresh_search,
             restart_watcher,
+            false,
+            cx,
+        );
+    }
+
+    pub(super) fn reload_async_with_options_preserving_live_selection(
+        &mut self,
+        mode: ReloadMode,
+        select_after_load: Vec<PathBuf>,
+        schedule_metadata: bool,
+        refresh_search: bool,
+        restart_watcher: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_async_with_options_and_rename(
+            mode,
+            select_after_load,
+            None,
+            schedule_metadata,
+            refresh_search,
+            restart_watcher,
+            true,
             cx,
         );
     }
@@ -879,6 +919,7 @@ impl ExplorerView {
         schedule_metadata: bool,
         refresh_search: bool,
         restart_watcher: bool,
+        preserve_live_selection: bool,
         cx: &mut Context<Self>,
     ) {
         let total_started = Instant::now();
@@ -887,10 +928,17 @@ impl ExplorerView {
         self.directory_load_task = None;
         self.loading_path = Some(self.path.clone());
 
-        let selected_paths = self.prepare_directory_reload(ReloadMode {
-            preserve_selection: mode.preserve_selection,
-            rebuild_sidebar: false,
-        });
+        let selected_paths = if preserve_live_selection {
+            self.prepare_directory_reload_preserving_live_entries(ReloadMode {
+                preserve_selection: mode.preserve_selection,
+                rebuild_sidebar: false,
+            })
+        } else {
+            self.prepare_directory_reload(ReloadMode {
+                preserve_selection: mode.preserve_selection,
+                rebuild_sidebar: false,
+            })
+        };
         if mode.rebuild_sidebar {
             self.rebuild_fast_sidebar_sections();
         }
@@ -904,6 +952,7 @@ impl ExplorerView {
             schedule_metadata,
             refresh_search,
             restart_watcher,
+            preserve_live_selection,
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
@@ -986,6 +1035,7 @@ impl ExplorerView {
             schedule_metadata,
             refresh_search,
             restart_watcher,
+            preserve_live_selection: false,
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
@@ -1105,9 +1155,15 @@ impl ExplorerView {
 
         match result.entries {
             Ok(entries) => {
+                let selected_paths =
+                    if state.preserve_live_selection && state.mode.preserve_selection {
+                        self.selected_paths()
+                    } else {
+                        state.selected_paths
+                    };
                 self.apply_loaded_entries(
                     state.mode,
-                    state.selected_paths,
+                    selected_paths,
                     state.select_after_load,
                     entries,
                 );
@@ -3499,6 +3555,7 @@ mod tests {
                     schedule_metadata: true,
                     refresh_search: true,
                     restart_watcher: true,
+                    preserve_live_selection: false,
                 };
 
                 assert!(!view.apply_directory_load_result(
@@ -3554,6 +3611,7 @@ mod tests {
                     schedule_metadata: false,
                     refresh_search: false,
                     restart_watcher: false,
+                    preserve_live_selection: false,
                 };
 
                 assert!(view.apply_directory_load_result(

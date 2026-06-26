@@ -280,7 +280,9 @@ impl ExplorerView {
         let current_item = Some(parent.join(kind.base_name()));
         self.run_rclone_create_in_background(
             current_item,
-            move || create_new_item_in_directory(&parent, kind, &settings),
+            move |cancel| {
+                create_new_item_in_directory_with_cancel(&parent, kind, &settings, &cancel)
+            },
             window,
             cx,
         );
@@ -299,9 +301,9 @@ impl ExplorerView {
         let current_item = Some(parent.join(clipboard_image_file_name(extension, 1)));
         self.run_rclone_create_in_background(
             current_item,
-            move || {
-                create_clipboard_image_file_payload_in_directory(
-                    &parent, extension, &bytes, &settings,
+            move |cancel| {
+                create_clipboard_image_file_payload_in_directory_with_cancel(
+                    &parent, extension, &bytes, &settings, &cancel,
                 )
             },
             window,
@@ -313,7 +315,7 @@ impl ExplorerView {
     fn run_rclone_create_in_background(
         &mut self,
         current_item: Option<PathBuf>,
-        operation: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        operation: impl FnOnce(Arc<AtomicBool>) -> Result<PathBuf, String> + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -354,24 +356,15 @@ impl ExplorerView {
             async move |this, cx| {
                 let create_task = cx.background_executor().spawn({
                     let finished = finished.clone();
+                    let cancel = cancel.clone();
                     async move {
-                        let result = operation();
+                        let result = operation(cancel);
                         finished.store(true, Ordering::Relaxed);
                         result
                     }
                 });
 
                 while !finished.load(Ordering::Relaxed) {
-                    if cancel.load(Ordering::Relaxed) {
-                        let _ = cx.update(|_, cx| {
-                            let _ = this.update(cx, |explorer, cx| {
-                                explorer.close_preparation_file_operation_window(cx);
-                                explorer.clear_operation_notice();
-                                cx.notify();
-                            });
-                        });
-                        return;
-                    }
                     cx.background_executor()
                         .timer(FILE_OPERATION_PROGRESS_INTERVAL)
                         .await;
@@ -380,9 +373,12 @@ impl ExplorerView {
                 let result = create_task.await;
                 let _ = cx.update(|window, cx| {
                     let _ = this.update(cx, |explorer, cx| {
-                        if cancel.load(Ordering::Relaxed) {
+                        if cancel.load(Ordering::Relaxed)
+                            || matches!(result.as_ref(), Err(error) if error == "cancelled")
+                        {
                             explorer.close_preparation_file_operation_window(cx);
                             explorer.clear_operation_notice();
+                            explorer.reload_with_entry_metadata_resolution(cx);
                         } else {
                             explorer.complete_rclone_created_path(result, window, cx);
                         }
@@ -745,40 +741,76 @@ impl ExplorerView {
         let settings = self.rclone_settings.clone();
         let completion_paths = paths.clone();
         let finished = Arc::new(AtomicBool::new(false));
+        let (progress_tx, progress_rx) = mpsc::channel();
         let task = cx.spawn({
             let cancel = cancel.clone();
             let finished = finished.clone();
             async move |this, cx| {
                 let delete_task = cx.background_executor().spawn({
                     let paths = paths.clone();
+                    let cancel = cancel.clone();
                     let finished = finished.clone();
+                    let progress_tx = progress_tx.clone();
                     async move {
-                        let result =
-                            crate::explorer::rclone::delete_transfer_paths(&paths, &settings);
+                        let mut progress = FileOperationProgress {
+                            kind: FileOperationKind::Delete,
+                            phase: FileOperationPhase::Removing,
+                            total_bytes: 0,
+                            copied_bytes: 0,
+                            verified_bytes: 0,
+                            work_total_bytes: 0,
+                            work_completed_bytes: 0,
+                            total_files: paths.len(),
+                            completed_files: 0,
+                            current_item: paths.first().cloned(),
+                            cancellable: true,
+                        };
+                        let mut completed_jobs = BTreeSet::new();
+                        let result = crate::explorer::rclone::delete_transfer_paths_with_progress(
+                            &paths,
+                            &settings,
+                            &cancel,
+                            |rclone_progress| {
+                                if let Some(total_bytes) = rclone_progress.total_bytes {
+                                    progress.total_bytes = progress.total_bytes.max(total_bytes);
+                                    progress.work_total_bytes =
+                                        progress.work_total_bytes.max(total_bytes);
+                                }
+                                if let Some(bytes) = rclone_progress.bytes {
+                                    progress.copied_bytes = progress.copied_bytes.max(bytes);
+                                    progress.work_completed_bytes =
+                                        progress.work_completed_bytes.max(bytes);
+                                }
+                                if rclone_progress.done
+                                    && completed_jobs.insert(rclone_progress.job_id)
+                                {
+                                    progress.completed_files =
+                                        progress.completed_files.saturating_add(1);
+                                }
+                                let _ = progress_tx.send(progress.clone());
+                            },
+                        );
                         finished.store(true, Ordering::Relaxed);
                         result
                     }
                 });
 
                 while !finished.load(Ordering::Relaxed) {
-                    if cancel.load(Ordering::Relaxed) {
-                        let _ = this.update(cx, |explorer, cx| {
-                            explorer.close_preparation_file_operation_window(cx);
-                            explorer.clear_operation_notice();
-                            cx.notify();
-                        });
-                        return;
-                    }
                     cx.background_executor()
                         .timer(FILE_OPERATION_PROGRESS_INTERVAL)
                         .await;
+                    Self::drain_file_operation_progress(&this, cx, &progress_rx);
                 }
 
                 let result = delete_task.await;
+                Self::drain_file_operation_progress(&this, cx, &progress_rx);
                 let _ = this.update(cx, |explorer, cx| {
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed)
+                        || matches!(result.as_ref(), Err(error) if error == "cancelled")
+                    {
                         explorer.close_preparation_file_operation_window(cx);
                         explorer.clear_operation_notice();
+                        explorer.reload_with_entry_metadata_resolution(cx);
                     } else {
                         explorer.complete_rclone_transfer_delete(completion_paths, result, cx);
                     }
@@ -1588,11 +1620,25 @@ fn create_new_item_in_directory(
     kind: NewItemKind,
     _rclone_settings: &crate::settings::RcloneSettings,
 ) -> Result<PathBuf, String> {
+    let cancel = AtomicBool::new(false);
+    create_new_item_in_directory_with_cancel(parent, kind, _rclone_settings, &cancel)
+}
+
+fn create_new_item_in_directory_with_cancel(
+    parent: &Path,
+    kind: NewItemKind,
+    _rclone_settings: &crate::settings::RcloneSettings,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
     let explorer_fs = ExplorerFs::new(_rclone_settings);
 
     let mut index = 1usize;
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_owned());
+        }
+
         let name = new_item_name(kind.base_name(), index);
         let path = parent.join(&name);
 
@@ -1602,8 +1648,12 @@ fn create_new_item_in_directory(
         }
 
         let result = match kind {
-            NewItemKind::Folder => explorer_fs.create_dir(&path),
-            NewItemKind::File => explorer_fs.create_empty_file(&path),
+            NewItemKind::Folder => {
+                create_folder_path_with_cancel(&path, _rclone_settings, cancel, &explorer_fs)
+            }
+            NewItemKind::File => {
+                write_file_path_with_cancel(&path, &[], _rclone_settings, cancel, &explorer_fs)
+            }
         };
         match result {
             Ok(()) => return Ok(path),
@@ -1641,10 +1691,31 @@ fn create_clipboard_image_file_payload_in_directory(
     bytes: &[u8],
     rclone_settings: &crate::settings::RcloneSettings,
 ) -> Result<PathBuf, String> {
+    let cancel = AtomicBool::new(false);
+    create_clipboard_image_file_payload_in_directory_with_cancel(
+        parent,
+        extension,
+        bytes,
+        rclone_settings,
+        &cancel,
+    )
+}
+
+fn create_clipboard_image_file_payload_in_directory_with_cancel(
+    parent: &Path,
+    extension: &'static str,
+    bytes: &[u8],
+    rclone_settings: &crate::settings::RcloneSettings,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
     let explorer_fs = ExplorerFs::new(rclone_settings);
     let mut index = 1usize;
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_owned());
+        }
+
         let name = clipboard_image_file_name(extension, index);
         let path = parent.join(&name);
 
@@ -1653,7 +1724,7 @@ fn create_clipboard_image_file_payload_in_directory(
             continue;
         }
 
-        match explorer_fs.write_file(&path, bytes.as_ref()) {
+        match write_file_path_with_cancel(&path, bytes, rclone_settings, cancel, &explorer_fs) {
             Ok(()) => return Ok(path),
             Err(error) if error.to_ascii_lowercase().contains("already exist") => {
                 index = next_new_item_index(index, &name)?;
@@ -1662,6 +1733,58 @@ fn create_clipboard_image_file_payload_in_directory(
                 return Err(format!("Could not create image \"{name}\": {error}"));
             }
         }
+    }
+}
+
+fn create_folder_path_with_cancel(
+    path: &Path,
+    rclone_settings: &crate::settings::RcloneSettings,
+    cancel: &AtomicBool,
+    explorer_fs: &ExplorerFs<'_>,
+) -> Result<(), String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        let mut on_progress = |_| {};
+        return crate::explorer::rclone::create_transfer_folder_with_progress(
+            path,
+            rclone_settings,
+            cancel,
+            &mut on_progress,
+        );
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".to_owned());
+    }
+    explorer_fs.create_dir(path)
+}
+
+fn write_file_path_with_cancel(
+    path: &Path,
+    bytes: &[u8],
+    rclone_settings: &crate::settings::RcloneSettings,
+    cancel: &AtomicBool,
+    explorer_fs: &ExplorerFs<'_>,
+) -> Result<(), String> {
+    #[cfg(feature = "rclone")]
+    if crate::explorer::rclone::is_transfer_path(path) {
+        let mut on_progress = |_| {};
+        return crate::explorer::rclone::create_transfer_file_with_progress(
+            path,
+            bytes,
+            rclone_settings,
+            cancel,
+            &mut on_progress,
+        );
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".to_owned());
+    }
+    if bytes.is_empty() {
+        explorer_fs.create_empty_file(path)
+    } else {
+        explorer_fs.write_file(path, bytes)
     }
 }
 
@@ -2461,7 +2584,7 @@ mod tests {
                 let created_for_operation = created.clone();
                 view.run_rclone_create_in_background(
                     Some(created.clone()),
-                    move || {
+                    move |_| {
                         fs::create_dir(&created_for_operation)
                             .map_err(|error| error.to_string())?;
                         Ok(created_for_operation)

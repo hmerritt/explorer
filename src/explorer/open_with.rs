@@ -37,6 +37,24 @@ impl OpenWithOutcome {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DefaultOpenStep {
+    Opened(OpenWithOutcome),
+    ChooseApplication,
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[derive(Debug)]
+enum DefaultOpenDispatch {
+    Completed(Vec<(PathBuf, io::Result<OpenWithOutcome>)>),
+    ChooseApplication {
+        path: PathBuf,
+        completed: Vec<(PathBuf, io::Result<OpenWithOutcome>)>,
+        remaining: Vec<PathBuf>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DefaultAppChangeOutcome {
     Changed,
@@ -243,15 +261,16 @@ impl ExplorerView {
             let task = cx.spawn(async move |this, cx| {
                 let mut result = Ok(OpenWithOutcome::opened(false));
                 let mut result_path = paths.first().cloned();
-                for path in &paths {
+                for path in paths {
                     result_path = Some(path.clone());
-                    result = linux_open_file(
-                        path,
-                        &intent,
-                        window_handle.as_ref(),
-                        display_handle.as_ref(),
-                    )
-                    .await;
+                    let identifier =
+                        linux_window_identifier(window_handle.as_ref(), display_handle.as_ref())
+                            .await;
+                    let intent = intent.clone();
+                    result = cx
+                        .background_executor()
+                        .spawn(async move { linux_open_file(&path, &intent, identifier).await })
+                        .await;
                     if !result.as_ref().is_ok_and(|outcome| outcome.is_opened()) {
                         break;
                     }
@@ -274,35 +293,128 @@ impl ExplorerView {
         #[cfg(target_os = "windows")]
         {
             let parent = crate::explorer::windows_shell::parent_hwnd(window);
-            let task = cx.spawn(async move |this, cx| {
-                let results = open_paths_until_not_opened(paths, |path| {
-                    windows_open_file(path, &intent, parent)
-                });
+            match intent {
+                OpenFileIntent::Default => {
+                    let task = cx.spawn(async move |this, cx| {
+                        let mut pending_paths = paths;
+                        let mut results = Vec::new();
+                        loop {
+                            let dispatch = cx
+                                .background_executor()
+                                .spawn(async move { windows_default_open_dispatch(pending_paths) })
+                                .await;
+                            match dispatch {
+                                DefaultOpenDispatch::Completed(batch) => {
+                                    results.extend(batch);
+                                    break;
+                                }
+                                DefaultOpenDispatch::ChooseApplication {
+                                    path,
+                                    completed,
+                                    remaining,
+                                } => {
+                                    results.extend(completed);
+                                    let result = windows_choose_application(&path, parent);
+                                    let completed =
+                                        result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                                    results.push((path, result));
+                                    if !completed || remaining.is_empty() {
+                                        break;
+                                    }
+                                    pending_paths = remaining;
+                                }
+                            }
+                        }
 
-                let _ = this.update(cx, |explorer, cx| {
-                    explorer.open_with_task = None;
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.open_with_task = None;
+                            for (path, result) in results {
+                                if explorer.handle_open_with_result(&path, result) {
+                                    refresh_file_type_icons_after_default_app_may_have_changed(
+                                        &path, cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
+                    });
+                    self.open_with_task = Some(task);
+                }
+                OpenFileIntent::ChooseApplication => {
+                    let results = open_paths_until_not_opened(paths, |path| {
+                        windows_choose_application(path, parent)
+                    });
                     for (path, result) in results {
-                        if explorer.handle_open_with_result(&path, result) {
+                        if self.handle_open_with_result(&path, result) {
                             refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
                         }
                     }
                     cx.notify();
-                });
-            });
-            self.open_with_task = Some(task);
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
         {
-            let _ = window;
-            for path in paths {
-                let result = mac_open_file(&path, &intent);
-                let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
-                if self.handle_open_with_result(&path, result) {
-                    refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+            match &intent {
+                OpenFileIntent::Default => {
+                    let task = cx.spawn(async move |this, cx| {
+                        let mut pending_paths = paths;
+                        let mut results = Vec::new();
+                        loop {
+                            let dispatch = cx
+                                .background_executor()
+                                .spawn(async move { mac_default_open_dispatch(pending_paths) })
+                                .await;
+                            match dispatch {
+                                DefaultOpenDispatch::Completed(batch) => {
+                                    results.extend(batch);
+                                    break;
+                                }
+                                DefaultOpenDispatch::ChooseApplication {
+                                    path,
+                                    completed,
+                                    remaining,
+                                } => {
+                                    results.extend(completed);
+                                    let result = mac_choose_application_and_open(&path);
+                                    let completed =
+                                        result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                                    results.push((path, result));
+                                    if !completed || remaining.is_empty() {
+                                        break;
+                                    }
+                                    pending_paths = remaining;
+                                }
+                            }
+                        }
+
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.open_with_task = None;
+                            for (path, result) in results {
+                                if explorer.handle_open_with_result(&path, result) {
+                                    refresh_file_type_icons_after_default_app_may_have_changed(
+                                        &path, cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
+                    });
+                    self.open_with_task = Some(task);
                 }
-                if !completed {
-                    break;
+                OpenFileIntent::ChooseApplication | OpenFileIntent::SpecificApplication(_) => {
+                    let _ = window;
+                    for path in paths {
+                        let result = mac_open_file(&path, &intent);
+                        let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                        if self.handle_open_with_result(&path, result) {
+                            refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                        }
+                        if !completed {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -356,21 +468,51 @@ fn open_paths_until_not_opened(
     results
 }
 
-#[cfg(target_os = "windows")]
-fn windows_open_file(
-    path: &Path,
-    intent: &OpenFileIntent,
-    parent: Option<windows::Win32::Foundation::HWND>,
-) -> io::Result<OpenWithOutcome> {
-    match intent {
-        OpenFileIntent::Default => match open::that_detached(path) {
-            Ok(()) => Ok(OpenWithOutcome::opened(false)),
-            Err(error) if windows_error_is_no_association(&error) => {
-                windows_choose_application(path, parent)
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn default_open_dispatch_until_picker(
+    paths: Vec<PathBuf>,
+    mut open_path: impl FnMut(&Path) -> io::Result<DefaultOpenStep>,
+) -> DefaultOpenDispatch {
+    let mut completed = Vec::new();
+    let mut paths = paths.into_iter();
+    while let Some(path) = paths.next() {
+        match open_path(&path) {
+            Ok(DefaultOpenStep::Opened(outcome)) => {
+                let opened = outcome.is_opened();
+                completed.push((path, Ok(outcome)));
+                if !opened {
+                    break;
+                }
             }
-            Err(error) => Err(error),
-        },
-        OpenFileIntent::ChooseApplication => windows_choose_application(path, parent),
+            Ok(DefaultOpenStep::ChooseApplication) => {
+                return DefaultOpenDispatch::ChooseApplication {
+                    path,
+                    completed,
+                    remaining: paths.collect(),
+                };
+            }
+            Err(error) => {
+                completed.push((path, Err(error)));
+                break;
+            }
+        }
+    }
+    DefaultOpenDispatch::Completed(completed)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_default_open_dispatch(paths: Vec<PathBuf>) -> DefaultOpenDispatch {
+    default_open_dispatch_until_picker(paths, windows_open_default_file)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open_default_file(path: &Path) -> io::Result<DefaultOpenStep> {
+    match open::that_detached(path) {
+        Ok(()) => Ok(DefaultOpenStep::Opened(OpenWithOutcome::opened(false))),
+        Err(error) if windows_error_is_no_association(&error) => {
+            Ok(DefaultOpenStep::ChooseApplication)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -561,14 +703,26 @@ fn windows_executable_display_name(path: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+async fn linux_window_identifier(
+    window_handle: Option<&raw_window_handle::RawWindowHandle>,
+    display_handle: Option<&raw_window_handle::RawDisplayHandle>,
+) -> Option<ashpd::WindowIdentifier> {
+    match window_handle {
+        Some(window_handle) => {
+            ashpd::WindowIdentifier::from_raw_handle(window_handle, display_handle).await
+        }
+        None => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn linux_open_file(
     path: &Path,
     intent: &OpenFileIntent,
-    window_handle: Option<&raw_window_handle::RawWindowHandle>,
-    display_handle: Option<&raw_window_handle::RawDisplayHandle>,
+    identifier: Option<ashpd::WindowIdentifier>,
 ) -> io::Result<OpenWithOutcome> {
     use ashpd::{
-        Error, WindowIdentifier,
+        Error,
         desktop::{ResponseError, open_uri::OpenFileRequest},
     };
     use std::fs::File;
@@ -578,12 +732,6 @@ async fn linux_open_file(
         OpenFileIntent::Default => {
             linux_should_ask_for_default(linux_has_default_application(path))
         }
-    };
-    let identifier = match window_handle {
-        Some(window_handle) => {
-            WindowIdentifier::from_raw_handle(window_handle, display_handle).await
-        }
-        None => None,
     };
     let file = File::open(path)?;
     let result = OpenFileRequest::default()
@@ -913,26 +1061,41 @@ fn mac_change_default_application_for_file(
 #[cfg(target_os = "macos")]
 fn mac_open_file(path: &Path, intent: &OpenFileIntent) -> io::Result<OpenWithOutcome> {
     match intent {
-        OpenFileIntent::Default
-            if mac_is_application_bundle(path) || mac_has_default_application(path) =>
-        {
-            open::that_detached(path).map(|_| OpenWithOutcome::opened(false))
-        }
-        OpenFileIntent::Default | OpenFileIntent::ChooseApplication => {
-            let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with())?
-            else {
-                return Ok(OpenWithOutcome::Cancelled);
-            };
-            if selection.always_open_with {
-                mac_set_default_application_for_file_type(path, &selection.application)?;
-            }
-            mac_open_with_application(path, &selection.application)?;
-            Ok(OpenWithOutcome::opened(selection.always_open_with))
-        }
+        OpenFileIntent::Default => match mac_open_default_file(path)? {
+            DefaultOpenStep::Opened(outcome) => Ok(outcome),
+            DefaultOpenStep::ChooseApplication => mac_choose_application_and_open(path),
+        },
+        OpenFileIntent::ChooseApplication => mac_choose_application_and_open(path),
         OpenFileIntent::SpecificApplication(application) => {
             mac_open_with_application(path, application)
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_default_open_dispatch(paths: Vec<PathBuf>) -> DefaultOpenDispatch {
+    default_open_dispatch_until_picker(paths, mac_open_default_file)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_open_default_file(path: &Path) -> io::Result<DefaultOpenStep> {
+    if mac_is_application_bundle(path) || mac_has_default_application(path) {
+        open::that_detached(path).map(|_| DefaultOpenStep::Opened(OpenWithOutcome::opened(false)))
+    } else {
+        Ok(DefaultOpenStep::ChooseApplication)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_choose_application_and_open(path: &Path) -> io::Result<OpenWithOutcome> {
+    let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with())? else {
+        return Ok(OpenWithOutcome::Cancelled);
+    };
+    if selection.always_open_with {
+        mac_set_default_application_for_file_type(path, &selection.application)?;
+    }
+    mac_open_with_application(path, &selection.application)?;
+    Ok(OpenWithOutcome::opened(selection.always_open_with))
 }
 
 #[cfg(target_os = "macos")]
@@ -1303,6 +1466,40 @@ unsafe fn mac_path_from_url(url: cocoa::base::id) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext;
+
+    impl ExplorerView {
+        fn open_files_with_default_app_using_launcher_for_test(
+            &mut self,
+            paths: Vec<PathBuf>,
+            mut open_path: impl FnMut(&Path) -> io::Result<OpenWithOutcome> + Send + 'static,
+            cx: &mut Context<Self>,
+        ) {
+            if paths.is_empty() || self.open_with_task.is_some() {
+                return;
+            }
+
+            let task = cx.spawn(async move |this, cx| {
+                let results = cx
+                    .background_executor()
+                    .spawn(async move {
+                        open_paths_until_not_opened(paths, move |path| open_path(path))
+                    })
+                    .await;
+
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.open_with_task = None;
+                    for (path, result) in results {
+                        if explorer.handle_open_with_result(&path, result) {
+                            refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+            self.open_with_task = Some(task);
+        }
+    }
 
     fn open_result_name(result: &io::Result<OpenWithOutcome>) -> &'static str {
         match result {
@@ -1324,6 +1521,17 @@ mod tests {
             .iter()
             .map(|(_, result)| open_result_name(result))
             .collect()
+    }
+
+    fn completed_dispatch_results(
+        dispatch: DefaultOpenDispatch,
+    ) -> Vec<(PathBuf, io::Result<OpenWithOutcome>)> {
+        match dispatch {
+            DefaultOpenDispatch::Completed(results) => results,
+            DefaultOpenDispatch::ChooseApplication { .. } => {
+                panic!("expected completed default open dispatch")
+            }
+        }
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -1409,6 +1617,148 @@ mod tests {
 
         assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
         assert_eq!(open_result_names(&results), vec!["opened", "cancelled"]);
+    }
+
+    #[test]
+    fn default_open_dispatch_records_successes_until_picker_continuation() {
+        let dispatch = default_open_dispatch_until_picker(
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.unknown"),
+                PathBuf::from("c.txt"),
+            ],
+            |path| {
+                if path == Path::new("b.unknown") {
+                    Ok(DefaultOpenStep::ChooseApplication)
+                } else {
+                    Ok(DefaultOpenStep::Opened(OpenWithOutcome::opened(false)))
+                }
+            },
+        );
+
+        match dispatch {
+            DefaultOpenDispatch::ChooseApplication {
+                path,
+                completed,
+                remaining,
+            } => {
+                assert_eq!(path, PathBuf::from("b.unknown"));
+                assert_eq!(attempted_path_names(&completed), vec!["a.txt"]);
+                assert_eq!(open_result_names(&completed), vec!["opened"]);
+                assert_eq!(remaining, vec![PathBuf::from("c.txt")]);
+            }
+            DefaultOpenDispatch::Completed(_) => panic!("expected picker continuation"),
+        }
+    }
+
+    #[test]
+    fn default_open_dispatch_stops_after_first_error() {
+        let results = completed_dispatch_results(default_open_dispatch_until_picker(
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt"),
+            ],
+            |path| {
+                if path == Path::new("b.txt") {
+                    Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+                } else {
+                    Ok(DefaultOpenStep::Opened(OpenWithOutcome::opened(false)))
+                }
+            },
+        ));
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
+        assert_eq!(open_result_names(&results), vec!["opened", "error"]);
+    }
+
+    #[test]
+    fn default_open_dispatch_stops_after_cancelled_result() {
+        let results = completed_dispatch_results(default_open_dispatch_until_picker(
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt"),
+            ],
+            |path| {
+                if path == Path::new("b.txt") {
+                    Ok(DefaultOpenStep::Opened(OpenWithOutcome::Cancelled))
+                } else {
+                    Ok(DefaultOpenStep::Opened(OpenWithOutcome::opened(false)))
+                }
+            },
+        ));
+
+        assert_eq!(attempted_path_names(&results), vec!["a.txt", "b.txt"]);
+        assert_eq!(open_result_names(&results), vec!["opened", "cancelled"]);
+    }
+
+    #[gpui::test]
+    fn default_open_sets_task_before_blocking_launcher_runs(cx: &mut gpui::TestAppContext) {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), focus_handle)
+        });
+        let launcher_started = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = mpsc::channel();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let launcher_started_for_task = launcher_started.clone();
+                view.open_files_with_default_app_using_launcher_for_test(
+                    vec![PathBuf::from("large.bin")],
+                    move |_| {
+                        launcher_started_for_task.store(true, Ordering::SeqCst);
+                        release_rx.recv().expect("release launcher");
+                        Ok(OpenWithOutcome::opened(false))
+                    },
+                    cx,
+                );
+
+                assert!(view.open_with_task.is_some());
+                assert!(!launcher_started.load(Ordering::SeqCst));
+            });
+        });
+
+        release_tx.send(()).expect("send launcher release");
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(launcher_started.load(Ordering::SeqCst));
+            assert!(view.open_with_task.is_none());
+            assert_eq!(view.operation_notice, None);
+        });
+    }
+
+    #[cfg(feature = "rclone")]
+    #[gpui::test]
+    fn normal_open_blocks_rclone_transfer_paths_without_task(cx: &mut gpui::TestAppContext) {
+        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("large.bin");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), focus_handle)
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_file_with_default_app(&path, window, cx);
+
+                assert!(view.open_with_task.is_none());
+                assert!(
+                    view.operation_notice
+                        .as_ref()
+                        .is_some_and(|notice| notice.text.contains("rclone transfer mode"))
+                );
+            });
+        });
     }
 
     #[test]

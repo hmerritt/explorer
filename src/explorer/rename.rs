@@ -799,7 +799,7 @@ impl ExplorerView {
 
     #[cfg(test)]
     fn apply_active_rename_commit_or_cancel(&mut self) -> bool {
-        let committed = self.apply_active_rename_commit_inner(None);
+        let committed = self.apply_active_rename_commit_inner(None, true);
         if !committed {
             self.cancel_active_rename();
         }
@@ -810,7 +810,7 @@ impl ExplorerView {
         &mut self,
         cx: &mut Context<Self>,
     ) -> bool {
-        let committed = self.apply_active_rename_commit_inner(Some(cx));
+        let committed = self.apply_active_rename_commit_inner(Some(cx), false);
         if !committed {
             self.cancel_active_rename();
         }
@@ -819,14 +819,18 @@ impl ExplorerView {
 
     #[cfg(test)]
     fn apply_active_rename_commit(&mut self) -> bool {
-        self.apply_active_rename_commit_inner(None)
+        self.apply_active_rename_commit_inner(None, true)
     }
 
     fn apply_active_rename_commit_with_context(&mut self, cx: &mut Context<Self>) -> bool {
-        self.apply_active_rename_commit_inner(Some(cx))
+        self.apply_active_rename_commit_inner(Some(cx), true)
     }
 
-    fn apply_active_rename_commit_inner(&mut self, _cx: Option<&mut Context<Self>>) -> bool {
+    fn apply_active_rename_commit_inner(
+        &mut self,
+        #[cfg_attr(not(feature = "rclone"), allow(unused_mut))] mut cx: Option<&mut Context<Self>>,
+        select_target_after_reload: bool,
+    ) -> bool {
         let Some(rename) = self.active_rename.as_ref() else {
             return true;
         };
@@ -855,7 +859,7 @@ impl ExplorerView {
                 self.set_error_notice("Another file operation is already running.".to_owned());
                 return false;
             }
-            if let Some(cx) = _cx {
+            if let Some(cx) = cx.as_deref_mut() {
                 let source = original_path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -880,8 +884,36 @@ impl ExplorerView {
                 self.active_rename = None;
                 self.clear_operation_notice();
                 self.remove_cut_paths(&[original_path]);
-                self.reload();
-                self.select_single_path(&target_path);
+                if let Some(cx) = cx {
+                    if select_target_after_reload {
+                        self.reload_async_with_options(
+                            crate::explorer::view::ReloadMode {
+                                preserve_selection: true,
+                                rebuild_sidebar: true,
+                            },
+                            vec![target_path],
+                            true,
+                            false,
+                            false,
+                            cx,
+                        );
+                    } else {
+                        self.reload_async_with_options_preserving_live_selection(
+                            crate::explorer::view::ReloadMode {
+                                preserve_selection: true,
+                                rebuild_sidebar: true,
+                            },
+                            Vec::new(),
+                            true,
+                            false,
+                            false,
+                            cx,
+                        );
+                    }
+                } else {
+                    self.reload();
+                    self.select_single_path(&target_path);
+                }
                 true
             }
             Err(error) => {
@@ -955,24 +987,22 @@ impl ExplorerView {
             let finished = finished.clone();
             async move |this, cx| {
                 let rename_task = cx.background_executor().spawn({
+                    let cancel = cancel.clone();
                     let finished = finished.clone();
                     async move {
-                        let result = rename_path(&original_path, &target_path, &settings)
-                            .map_err(|error| error.to_string());
+                        let result = rename_path_with_cancel(
+                            &original_path,
+                            &target_path,
+                            &settings,
+                            &cancel,
+                        )
+                        .map_err(|error| error.to_string());
                         finished.store(true, Ordering::Relaxed);
                         result
                     }
                 });
 
                 while !finished.load(Ordering::Relaxed) {
-                    if cancel.load(Ordering::Relaxed) {
-                        let _ = this.update(cx, |explorer, cx| {
-                            explorer.close_rclone_rename_operation_window(cx);
-                            explorer.clear_operation_notice();
-                            cx.notify();
-                        });
-                        return;
-                    }
                     cx.background_executor()
                         .timer(RCLONE_RENAME_PROGRESS_INTERVAL)
                         .await;
@@ -980,9 +1010,12 @@ impl ExplorerView {
 
                 let result = rename_task.await;
                 let _ = this.update(cx, |explorer, cx| {
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed)
+                        || matches!(result.as_ref(), Err(error) if error == "cancelled")
+                    {
                         explorer.close_rclone_rename_operation_window(cx);
                         explorer.clear_operation_notice();
+                        explorer.reload_with_entry_metadata_resolution(cx);
                     } else {
                         explorer.complete_rclone_transfer_rename(
                             completion_original_path,
@@ -1507,6 +1540,25 @@ fn rename_path(
     _rclone_settings: &crate::settings::RcloneSettings,
 ) -> io::Result<()> {
     #[cfg(feature = "rclone")]
+    {
+        let cancel = AtomicBool::new(false);
+        return rename_path_with_cancel(original_path, target_path, _rclone_settings, &cancel);
+    }
+
+    #[cfg(not(feature = "rclone"))]
+    {
+        rename_local_path(original_path, target_path)
+    }
+}
+
+#[cfg(feature = "rclone")]
+fn rename_path_with_cancel(
+    original_path: &Path,
+    target_path: &Path,
+    _rclone_settings: &crate::settings::RcloneSettings,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    #[cfg(feature = "rclone")]
     if crate::explorer::rclone::is_transfer_path(original_path)
         || crate::explorer::rclone::is_transfer_path(target_path)
     {
@@ -1517,10 +1569,12 @@ fn rename_path(
         if crate::explorer::rclone::is_transfer_path(original_path)
             && crate::explorer::rclone::is_transfer_path(target_path)
         {
-            return crate::explorer::rclone::rename_transfer_path(
+            return crate::explorer::rclone::rename_transfer_path_with_progress(
                 original_path,
                 target_path,
                 _rclone_settings,
+                cancel,
+                |_| {},
             );
         }
         return Err(io::Error::other(
@@ -1528,6 +1582,10 @@ fn rename_path(
         ));
     }
 
+    rename_local_path(original_path, target_path)
+}
+
+fn rename_local_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
     if destination_conflicts_with_existing_file(original_path, target_path) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -1557,7 +1615,7 @@ mod tests {
         entry::FileEntry,
         test_support::{TempDir, selected_names, test_view_entity, test_view_with_entries},
     };
-    use gpui::{ClipboardItem, MouseButton, TestAppContext};
+    use gpui::{AppContext, ClipboardItem, MouseButton, TestAppContext};
     use std::fs;
 
     #[test]
@@ -1967,6 +2025,44 @@ mod tests {
         assert!(temp.path().join("b.txt").exists());
         assert_eq!(selected_names(&view), vec!["b.txt"]);
         assert!(view.active_rename.is_none());
+    }
+
+    #[gpui::test]
+    fn context_backed_rename_uses_async_reload_and_selects_new_path(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("a.txt"), b"data").expect("write file");
+        let root = temp.path().to_path_buf();
+        let original = root.join("a.txt");
+        let target = root.join("b.txt");
+        let (view, cx) = cx.add_window_view({
+            let root = root.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerView::new_with_focus_handle_for_test(root, focus_handle)
+            }
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_rename_for_path(&original, window, cx));
+                view.active_rename.as_mut().unwrap().content = "b.txt".to_owned();
+
+                assert!(view.apply_active_rename_commit_with_context(cx));
+
+                assert!(target.exists());
+                assert!(view.active_rename.is_none());
+                assert_eq!(view.loading_path.as_deref(), Some(root.as_path()));
+                assert!(view.directory_load_task.is_some());
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.directory_load_task.is_none());
+            assert!(view.loading_path.is_none());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
     }
 
     #[test]
