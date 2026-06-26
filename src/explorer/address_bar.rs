@@ -1126,16 +1126,98 @@ fn suggestion_parent_and_prefix(
 
 fn cleaned_address_input(input: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.len() >= 2 {
-        let bytes = trimmed.as_bytes();
+    let cleaned = strip_address_outer_quotes(trimmed)
+        .unwrap_or(trimmed)
+        .trim();
+
+    normalize_windows_address_separators(cleaned)
+}
+
+fn strip_address_outer_quotes(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    if input.len() >= 2 {
         let first = bytes[0];
         let last = bytes[bytes.len() - 1];
         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return trimmed[1..trimmed.len() - 1].trim().to_owned();
+            return Some(&input[1..input.len() - 1]);
         }
     }
 
-    trimmed.to_owned()
+    if input.len() >= 4 {
+        let first = bytes[0];
+        let second = bytes[1];
+        let penultimate = bytes[bytes.len() - 2];
+        let last = bytes[bytes.len() - 1];
+        if first == b'\\'
+            && penultimate == b'\\'
+            && ((second == b'"' && last == b'"') || (second == b'\'' && last == b'\''))
+        {
+            return Some(&input[2..input.len() - 2]);
+        }
+    }
+
+    None
+}
+
+fn normalize_windows_address_separators(input: &str) -> String {
+    if !looks_like_windows_address_path(input) {
+        return input.to_owned();
+    }
+
+    let mut normalized = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    if starts_with_address_separator_pair(input) {
+        let separator = chars.next().expect("separator pair has first separator");
+        normalized.push(separator);
+        normalized.push(separator);
+        while chars
+            .peek()
+            .is_some_and(|character| is_address_separator(*character))
+        {
+            chars.next();
+        }
+    }
+
+    while let Some(character) = chars.next() {
+        normalized.push(character);
+        if is_address_separator(character) {
+            while chars
+                .peek()
+                .is_some_and(|character| is_address_separator(*character))
+            {
+                chars.next();
+            }
+        }
+    }
+
+    normalized
+}
+
+fn looks_like_windows_address_path(input: &str) -> bool {
+    let mut chars = input.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), Some(':')) if first.is_ascii_alphabetic() => true,
+        (Some(first), Some(second))
+            if is_address_separator(first) && is_address_separator(second) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn starts_with_address_separator_pair(input: &str) -> bool {
+    let mut chars = input.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(first), Some(second))
+            if is_address_separator(first) && is_address_separator(second)
+    )
+}
+
+fn is_address_separator(character: char) -> bool {
+    character == '\\' || character == '/'
 }
 
 fn has_trailing_separator(input: &str) -> bool {
@@ -1376,6 +1458,24 @@ mod tests {
     }
 
     #[test]
+    fn cleaned_address_input_normalizes_quotes_and_windows_separators() {
+        assert_eq!(
+            cleaned_address_input(r#" "C:\Users\Ada" "#),
+            r"C:\Users\Ada"
+        );
+        assert_eq!(
+            cleaned_address_input(r#" \"C:\Users\Ada\" "#),
+            r"C:\Users\Ada"
+        );
+        assert_eq!(cleaned_address_input(r"C:\\Users\\Ada"), r"C:\Users\Ada");
+        assert_eq!(
+            cleaned_address_input(r"\\\\server\\share\\folder"),
+            r"\\server\share\folder"
+        );
+        assert_eq!(cleaned_address_input(r#"C:\Users"Ada"#), r#"C:\Users"Ada"#);
+    }
+
+    #[test]
     fn resolve_address_accepts_absolute_and_relative_directories() {
         let temp = TempDir::new();
         let child = temp.path().join("child");
@@ -1408,6 +1508,35 @@ mod tests {
         assert_eq!(
             resolve_address_input(&format!(" \"{}\" ", child.display()), temp.path()).unwrap(),
             explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_accepts_windows_escaped_path_forms() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child");
+
+        let expected = explorer_visible_address_path(fs::canonicalize(&child).unwrap());
+        let doubled = child.display().to_string().replace('\\', r"\\");
+        let forward = child.display().to_string().replace('\\', "/");
+
+        assert_eq!(
+            resolve_address_input(&doubled, temp.path()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_address_input(&format!("\"{forward}\""), temp.path()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_address_input(&format!("\"{doubled}\""), temp.path()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_address_input(&format!(r#"\"{doubled}\""#), temp.path()).unwrap(),
+            expected
         );
     }
 
@@ -1630,6 +1759,31 @@ mod tests {
         );
         assert_eq!(suggestions[0].path, appdata.join("Microsoft"));
         assert_eq!(suggestions[1].path, appdata.join("Mozilla"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_suggestions_normalize_escaped_windows_parent_path() {
+        let temp = TempDir::new();
+        let parent = temp.path().join("parent");
+        fs::create_dir(&parent).expect("create parent");
+        fs::create_dir(parent.join("child-a")).expect("create child a");
+        fs::create_dir(parent.join("child-b")).expect("create child b");
+
+        let doubled_parent = parent.display().to_string().replace('\\', r"\\");
+        let suggestions = folder_suggestions_for_input(
+            &format!(r#"\"{doubled_parent}\\child\""#),
+            temp.path(),
+            true,
+        );
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child-a", "child-b"]
+        );
     }
 
     #[test]
