@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::explorer::filesystem::windows_local_os_drive_root;
+use crate::explorer::filesystem::{
+    SshfsMount, SshfsMountState, sshfs_mounts, windows_local_os_drive_root,
+};
 #[cfg(feature = "rclone")]
 use crate::explorer::rclone::{
     RcloneSidebarState, apply_connecting_remote_states, apply_known_mount_states, discover_remotes,
@@ -26,6 +28,7 @@ pub(super) enum SidebarItemKind {
     CustomDirectory,
     Drive,
     DriveWindows,
+    DriveSshfs(SshfsMountState),
     DriveWsl,
     #[cfg(feature = "rclone")]
     RcloneRemote(RcloneSidebarState),
@@ -58,20 +61,28 @@ pub(super) fn sidebar_sections_with_rclone_remotes(
 }
 
 pub(super) fn sidebar_sections_without_rclone(settings: &SidebarSettings) -> SidebarSections {
-    sidebar_sections_without_rclone_from_roots(settings, local_drive_roots(), wsl_drive_roots())
+    sidebar_sections_without_rclone_from_roots(
+        settings,
+        local_drive_roots(),
+        sshfs_mounts(),
+        wsl_drive_roots(),
+    )
 }
 
 fn sidebar_sections_without_rclone_from_roots(
     settings: &SidebarSettings,
     drive_roots: Vec<PathBuf>,
+    sshfs_mounts: Vec<SshfsMount>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     let home_dir = user_home_dir();
     let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
+    let mut drives = drive_items_from_roots(drive_roots);
+    drives.extend(sshfs_drive_items(sshfs_mounts));
     SidebarSections {
         user_directories: configured_sidebar_items(&settings.items),
         macos_system_locations: macos_system_location_items(home_dir.as_deref()),
-        drives: drive_items_from_roots(drive_roots),
+        drives,
         wsl_drives: if hide_wsl_drives {
             Vec::new()
         } else {
@@ -91,15 +102,45 @@ fn sidebar_sections_from_roots(
 ) -> SidebarSections {
     #[cfg(feature = "rclone")]
     {
-        let mut sections =
-            sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots);
+        let mut sections = sidebar_sections_without_rclone_from_roots(
+            settings,
+            drive_roots,
+            Vec::new(),
+            wsl_roots,
+        );
         sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Cached);
         sections
     }
     #[cfg(not(feature = "rclone"))]
     {
         let _ = rclone_settings;
-        sidebar_sections_without_rclone_from_roots(settings, drive_roots, wsl_roots)
+        sidebar_sections_without_rclone_from_roots(settings, drive_roots, Vec::new(), wsl_roots)
+    }
+}
+
+#[cfg(test)]
+fn sidebar_sections_from_sources(
+    settings: &SidebarSettings,
+    rclone_settings: &RcloneSettings,
+    drive_roots: Vec<PathBuf>,
+    sshfs_mounts: Vec<SshfsMount>,
+    wsl_roots: Vec<PathBuf>,
+) -> SidebarSections {
+    #[cfg(feature = "rclone")]
+    {
+        let mut sections = sidebar_sections_without_rclone_from_roots(
+            settings,
+            drive_roots,
+            sshfs_mounts,
+            wsl_roots,
+        );
+        sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Cached);
+        sections
+    }
+    #[cfg(not(feature = "rclone"))]
+    {
+        let _ = rclone_settings;
+        sidebar_sections_without_rclone_from_roots(settings, drive_roots, sshfs_mounts, wsl_roots)
     }
 }
 
@@ -191,6 +232,7 @@ fn sidebar_item_label_for_path(path: &Path, kind: SidebarItemKind) -> String {
         }
         SidebarItemKind::Directory(DirectoryKind::DriveWsl) => sidebar_wsl_drive_label(path),
         SidebarItemKind::Drive | SidebarItemKind::DriveWindows => sidebar_drive_label(path),
+        SidebarItemKind::DriveSshfs(_) => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
         #[cfg(feature = "rclone")]
@@ -260,6 +302,18 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
                 kind,
                 configured_index: None,
             }
+        })
+        .collect()
+}
+
+fn sshfs_drive_items(mounts: Vec<SshfsMount>) -> Vec<SidebarItem> {
+    mounts
+        .into_iter()
+        .map(|mount| SidebarItem {
+            label: mount.label,
+            path: mount.path,
+            kind: SidebarItemKind::DriveSshfs(mount.state),
+            configured_index: None,
         })
         .collect()
 }
@@ -573,6 +627,41 @@ mod tests {
         assert_eq!(sections.drives.len(), 1);
         assert_eq!(sections.wsl_drives.len(), 1);
         assert_eq!(sections.wsl_drives[0].label, "Ubuntu-24.04");
+        assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
+    }
+
+    #[test]
+    fn sidebar_sections_append_sshfs_mounts_after_local_drives_before_wsl() {
+        let sshfs_path = PathBuf::from(r"\\sshfs\ada@example.com");
+        let sections = sidebar_sections_from_sources(
+            &SidebarSettings {
+                items: Vec::new(),
+                ..SidebarSettings::default()
+            },
+            &RcloneSettings::default(),
+            vec![PathBuf::from("X:\\")],
+            vec![SshfsMount {
+                label: "hbox".to_owned(),
+                path: sshfs_path.clone(),
+                state: SshfsMountState::Connected,
+                local_name: Some("S:".to_owned()),
+            }],
+            vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
+        );
+
+        assert_eq!(sections.drives.len(), 2);
+        assert_eq!(sections.drives[0].path, PathBuf::from("X:\\"));
+        assert_eq!(sections.drives[0].kind, SidebarItemKind::Drive);
+        assert_eq!(
+            sections.drives[1],
+            SidebarItem {
+                label: "hbox".to_owned(),
+                path: sshfs_path,
+                kind: SidebarItemKind::DriveSshfs(SshfsMountState::Connected),
+                configured_index: None,
+            }
+        );
+        assert_eq!(sections.wsl_drives.len(), 1);
         assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
     }
 

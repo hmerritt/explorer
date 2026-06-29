@@ -8,8 +8,8 @@ use std::{
 use crate::explorer::{
     directory_kind::DirectoryKind,
     filesystem::{
-        DriveDiscKind, WslDistroKind, archive_path_is_supported, drive_root_disc_kind,
-        wsl_distro_kind_for_path,
+        DriveDiscKind, SshfsMountState, WslDistroKind, archive_path_is_supported,
+        drive_root_disc_kind, wsl_distro_kind_for_path,
     },
 };
 use gpui::{
@@ -143,11 +143,9 @@ png_icon!(
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(MOUNT_DISC_ICON, "devices/discs", "disc.png");
-#[cfg(feature = "rclone")]
-png_icon!(RCLONE_NETWORK_ICON, "devices/drives", "network.png");
-#[cfg(feature = "rclone")]
+png_icon!(NETWORK_DRIVE_ICON, "devices/drives", "network.png");
 png_icon!(
-    RCLONE_NETWORK_DISCONNECTED_ICON,
+    NETWORK_DRIVE_DISCONNECTED_ICON,
     "devices/drives",
     "networkdelete.png"
 );
@@ -471,6 +469,17 @@ pub(super) fn drive_wsl_icon_sized_for_path(path: &Path, size: f32) -> AnyElemen
     image_icon(wsl_distro_image(kind), size, size)
 }
 
+pub(super) fn sshfs_drive_icon(state: SshfsMountState) -> AnyElement {
+    image_sidebar_icon(sshfs_drive_image_for_state(state))
+}
+
+fn sshfs_drive_image_for_state(state: SshfsMountState) -> Arc<Image> {
+    match state {
+        SshfsMountState::Connected => NETWORK_DRIVE_ICON.clone(),
+        SshfsMountState::Disconnected => NETWORK_DRIVE_DISCONNECTED_ICON.clone(),
+    }
+}
+
 #[cfg(feature = "rclone")]
 pub(super) fn rclone_drive_icon(state: crate::explorer::rclone::RcloneSidebarState) -> AnyElement {
     image_sidebar_icon(rclone_drive_image_for_state(state))
@@ -479,8 +488,8 @@ pub(super) fn rclone_drive_icon(state: crate::explorer::rclone::RcloneSidebarSta
 #[cfg(feature = "rclone")]
 fn rclone_drive_image_for_state(state: crate::explorer::rclone::RcloneSidebarState) -> Arc<Image> {
     match state {
-        crate::explorer::rclone::RcloneSidebarState::Mounted => RCLONE_NETWORK_ICON.clone(),
-        _ => RCLONE_NETWORK_DISCONNECTED_ICON.clone(),
+        crate::explorer::rclone::RcloneSidebarState::Mounted => NETWORK_DRIVE_ICON.clone(),
+        _ => NETWORK_DRIVE_DISCONNECTED_ICON.clone(),
     }
 }
 
@@ -579,13 +588,24 @@ mod tests {
         assert!(!DVD_DISC_ICON_BYTES.is_empty());
     }
 
-    #[cfg(feature = "rclone")]
     #[test]
-    fn rclone_network_drive_png_assets_load_as_png_images() {
-        assert_eq!(RCLONE_NETWORK_ICON.format, ImageFormat::Png);
-        assert_eq!(RCLONE_NETWORK_DISCONNECTED_ICON.format, ImageFormat::Png);
-        assert!(!RCLONE_NETWORK_ICON.bytes.is_empty());
-        assert!(!RCLONE_NETWORK_DISCONNECTED_ICON.bytes.is_empty());
+    fn network_drive_png_assets_load_as_png_images() {
+        assert_eq!(NETWORK_DRIVE_ICON.format, ImageFormat::Png);
+        assert_eq!(NETWORK_DRIVE_DISCONNECTED_ICON.format, ImageFormat::Png);
+        assert!(!NETWORK_DRIVE_ICON.bytes.is_empty());
+        assert!(!NETWORK_DRIVE_DISCONNECTED_ICON.bytes.is_empty());
+    }
+
+    #[test]
+    fn sshfs_drive_icons_use_connected_image_only_for_connected_state() {
+        assert_eq!(
+            sshfs_drive_image_for_state(SshfsMountState::Connected).id(),
+            NETWORK_DRIVE_ICON.clone().id()
+        );
+        assert_eq!(
+            sshfs_drive_image_for_state(SshfsMountState::Disconnected).id(),
+            NETWORK_DRIVE_DISCONNECTED_ICON.clone().id()
+        );
     }
 
     #[cfg(feature = "rclone")]
@@ -595,7 +615,7 @@ mod tests {
 
         assert_eq!(
             rclone_drive_image_for_state(RcloneSidebarState::Mounted).id(),
-            RCLONE_NETWORK_ICON.clone().id()
+            NETWORK_DRIVE_ICON.clone().id()
         );
         for state in [
             RcloneSidebarState::Disconnected,
@@ -605,7 +625,7 @@ mod tests {
         ] {
             assert_eq!(
                 rclone_drive_image_for_state(state).id(),
-                RCLONE_NETWORK_DISCONNECTED_ICON.clone().id()
+                NETWORK_DRIVE_DISCONNECTED_ICON.clone().id()
             );
         }
     }

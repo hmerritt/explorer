@@ -69,7 +69,7 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
-    filesystem::{drive_root_is_ejectable, wsl_distro_kind_for_path},
+    filesystem::{SshfsMountState, drive_root_is_ejectable, wsl_distro_kind_for_path},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
@@ -82,7 +82,7 @@ use crate::explorer::{
         drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, executable_icon_sized, file_icon,
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font,
+        large_file_icon_for_path_sized, nav_icon_font, sshfs_drive_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -1783,6 +1783,7 @@ impl ExplorerView {
                 | SidebarItemKind::CustomDirectory
                 | SidebarItemKind::Drive
                 | SidebarItemKind::DriveWindows
+                | SidebarItemKind::DriveSshfs(SshfsMountState::Connected)
                 | SidebarItemKind::DriveWsl
         );
         let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
@@ -3061,6 +3062,7 @@ fn sidebar_context_menu_target(
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
+        SidebarItemKind::DriveSshfs(_) => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
         #[cfg(feature = "rclone")]
         SidebarItemKind::RcloneRemote(_) => Some(DirectoryKind::Drive),
@@ -3114,6 +3116,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::Drive if drive_root_is_ejectable(path) => drive_disc_icon_for_path(path),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
+        SidebarItemKind::DriveSshfs(state) => sshfs_drive_icon(state).into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
         #[cfg(feature = "rclone")]
         SidebarItemKind::RcloneRemote(state) => rclone_drive_icon(state).into_any_element(),
@@ -6415,6 +6418,7 @@ mod tests {
             NAV_BUTTON_ACTIVE_OPACITY,
         },
         entry::FileEntry,
+        filesystem::SshfsMountState,
         git_status::{GitDivergence, GitRepositoryStatus},
         navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
@@ -6920,6 +6924,12 @@ mod tests {
             kind: SidebarItemKind::DriveWindows,
             configured_index: None,
         };
+        let sshfs_drive = SidebarItem {
+            label: "hbox".to_owned(),
+            path: PathBuf::from(r"\\sshfs\ada@example.com"),
+            kind: SidebarItemKind::DriveSshfs(SshfsMountState::Disconnected),
+            configured_index: None,
+        };
         let wsl_drive = SidebarItem {
             label: "Ubuntu".to_owned(),
             path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
@@ -6963,6 +6973,15 @@ mod tests {
                 PathBuf::from("C:\\"),
                 None,
                 Some(DirectoryKind::DriveWindows),
+                false
+            )
+        );
+        assert_eq!(
+            sidebar_context_menu_target(&sshfs_drive),
+            (
+                PathBuf::from(r"\\sshfs\ada@example.com"),
+                None,
+                Some(DirectoryKind::Drive),
                 false
             )
         );

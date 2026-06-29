@@ -50,6 +50,20 @@ pub(crate) enum DriveDiscKind {
     Dvd,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SshfsMountState {
+    Connected,
+    Disconnected,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SshfsMount {
+    pub(super) label: String,
+    pub(super) path: PathBuf,
+    pub(super) state: SshfsMountState,
+    pub(super) local_name: Option<String>,
+}
+
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
     let downloads_dir = user_downloads_dir(home_dir.as_deref());
@@ -249,6 +263,18 @@ pub(crate) fn wsl_drive_roots() -> Vec<PathBuf> {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn wsl_drive_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn sshfs_mounts() -> Vec<SshfsMount> {
+    windows_sshfs_network_resources()
+        .map(sshfs_mounts_from_network_resources)
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn sshfs_mounts() -> Vec<SshfsMount> {
     Vec::new()
 }
 
@@ -458,12 +484,297 @@ fn windows_drive_type_is_explorer_local(drive_type: u32) -> bool {
 
 #[cfg(target_os = "windows")]
 fn platform_path_is_remote_drive(path: &Path) -> bool {
-    path_is_wsl_unc(path) || windows_drive_type(path).is_some_and(windows_drive_type_is_remote)
+    path_is_wsl_unc(path)
+        || path_is_sshfs_unc(path)
+        || windows_drive_type(path).is_some_and(windows_drive_type_is_remote)
 }
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_drive_type_is_remote(drive_type: u32) -> bool {
     drive_type == 4
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SshfsNetworkResource {
+    local_name: Option<String>,
+    remote_name: String,
+    state: SshfsMountState,
+}
+
+fn sshfs_mounts_from_network_resources(
+    resources: impl IntoIterator<Item = SshfsNetworkResource>,
+) -> Vec<SshfsMount> {
+    sshfs_mounts_from_network_resources_with_explorer_labels(resources, sshfs_mount_explorer_label)
+}
+
+fn sshfs_mounts_from_network_resources_with_explorer_labels(
+    resources: impl IntoIterator<Item = SshfsNetworkResource>,
+    explorer_label_for_remote_name: impl Fn(&str) -> Option<String>,
+) -> Vec<SshfsMount> {
+    let mut mounts_by_key = HashMap::<String, SshfsMount>::new();
+
+    for resource in resources {
+        let Some(remote_tail) = sshfs_unc_tail(&resource.remote_name) else {
+            continue;
+        };
+        let local_name = resource
+            .local_name
+            .as_deref()
+            .and_then(normalized_network_local_name);
+        let explorer_label = explorer_label_for_remote_name(&resource.remote_name);
+        let label = sshfs_mount_label(
+            &remote_tail,
+            local_name.as_deref(),
+            explorer_label.as_deref(),
+        );
+        let key = local_name
+            .as_deref()
+            .map(|local_name| format!("local:{}", local_name.to_ascii_uppercase()))
+            .unwrap_or_else(|| format!("remote:{}", normalized_unc_key(&resource.remote_name)));
+        let mount = SshfsMount {
+            label,
+            path: PathBuf::from(resource.remote_name),
+            state: resource.state,
+            local_name,
+        };
+
+        match mounts_by_key.get_mut(&key) {
+            Some(existing)
+                if existing.state == SshfsMountState::Disconnected
+                    && mount.state == SshfsMountState::Connected =>
+            {
+                *existing = mount;
+            }
+            Some(_) => {}
+            None => {
+                mounts_by_key.insert(key, mount);
+            }
+        }
+    }
+
+    let mut mounts = mounts_by_key.into_values().collect::<Vec<_>>();
+    mounts.sort_by(|left, right| {
+        sshfs_mount_local_sort_key(left)
+            .cmp(&sshfs_mount_local_sort_key(right))
+            .then_with(|| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+            })
+            .then_with(|| {
+                left.path
+                    .display()
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .cmp(&right.path.display().to_string().to_ascii_lowercase())
+            })
+    });
+    mounts
+}
+
+fn sshfs_mount_local_sort_key(mount: &SshfsMount) -> (u8, String) {
+    mount
+        .local_name
+        .as_deref()
+        .map(|local_name| (0, local_name.to_ascii_uppercase()))
+        .unwrap_or_else(|| (1, String::new()))
+}
+
+fn sshfs_mount_explorer_label(remote_name: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+
+        const MOUNT_POINTS2_REGISTRY_PATH: &str =
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2";
+        const LABEL_FROM_REG_VALUE: &str = "_LabelFromReg";
+
+        let key_name = sshfs_mount_points2_key(remote_name)?;
+        let subkey = format!(r"{MOUNT_POINTS2_REGISTRY_PATH}\{key_name}");
+        return windows_registry_string_value(HKEY_CURRENT_USER, &subkey, LABEL_FROM_REG_VALUE);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = remote_name;
+        None
+    }
+}
+
+fn sshfs_mount_label(
+    remote_tail: &str,
+    local_name: Option<&str>,
+    explorer_label: Option<&str>,
+) -> String {
+    let explorer_label = explorer_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+
+    match (explorer_label, local_name) {
+        (Some(explorer_label), _) => explorer_label.to_owned(),
+        (None, Some(local_name)) => format!("{remote_tail} ({local_name})"),
+        (None, None) => remote_tail.to_owned(),
+    }
+}
+
+fn sshfs_mount_points2_key(remote_name: &str) -> Option<String> {
+    let remote_tail = sshfs_unc_tail(remote_name)?;
+    Some(format!("##sshfs#{}", remote_tail.replace('\\', "#")))
+}
+
+fn normalized_network_local_name(local_name: &str) -> Option<String> {
+    let trimmed = local_name.trim().trim_end_matches(['\\', '/']);
+    (!trimmed.is_empty()).then(|| trimmed.to_ascii_uppercase())
+}
+
+fn normalized_unc_key(remote_name: &str) -> String {
+    remote_name
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+fn sshfs_unc_tail(remote_name: &str) -> Option<String> {
+    let mut parts = remote_name
+        .trim()
+        .trim_start_matches(['\\', '/'])
+        .split(['\\', '/']);
+    let server = parts.next()?;
+    if !server.eq_ignore_ascii_case("sshfs") {
+        return None;
+    }
+
+    let tail = parts
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\\");
+    (!tail.is_empty()).then_some(tail)
+}
+
+#[cfg(target_os = "windows")]
+fn path_is_sshfs_unc(path: &Path) -> bool {
+    sshfs_unc_tail(&path.display().to_string()).is_some()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_sshfs_network_resources() -> Option<Vec<SshfsNetworkResource>> {
+    use windows::Win32::NetworkManagement::WNet::{RESOURCE_CONNECTED, RESOURCE_REMEMBERED};
+
+    let mut resources = Vec::new();
+    resources.extend(windows_network_resources_for_scope(
+        RESOURCE_CONNECTED,
+        SshfsMountState::Connected,
+    )?);
+    resources.extend(windows_network_resources_for_scope(
+        RESOURCE_REMEMBERED,
+        SshfsMountState::Disconnected,
+    )?);
+    Some(resources)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_network_resources_for_scope(
+    scope: windows::Win32::NetworkManagement::WNet::NET_RESOURCE_SCOPE,
+    state: SshfsMountState,
+) -> Option<Vec<SshfsNetworkResource>> {
+    use std::{mem::size_of, slice};
+    use windows::Win32::{
+        Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, HANDLE, NO_ERROR},
+        NetworkManagement::WNet::{
+            NETRESOURCEW, RESOURCETYPE_DISK, RESOURCEUSAGE_ALL, WNetCloseEnum, WNetEnumResourceW,
+            WNetOpenEnumW,
+        },
+    };
+
+    struct WnetEnumHandle(HANDLE);
+
+    impl Drop for WnetEnumHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = WNetCloseEnum(self.0);
+            }
+        }
+    }
+
+    let mut raw_handle = HANDLE::default();
+    let open_status = unsafe {
+        WNetOpenEnumW(
+            scope,
+            RESOURCETYPE_DISK,
+            RESOURCEUSAGE_ALL,
+            None,
+            &mut raw_handle,
+        )
+    };
+    if open_status != NO_ERROR {
+        return None;
+    }
+    let handle = WnetEnumHandle(raw_handle);
+    let mut buffer = vec![NETRESOURCEW::default(); 32];
+    let mut resources = Vec::new();
+
+    loop {
+        let mut count = u32::MAX;
+        let mut byte_len = (buffer.len() * size_of::<NETRESOURCEW>()) as u32;
+        let status = unsafe {
+            WNetEnumResourceW(
+                handle.0,
+                &mut count,
+                buffer.as_mut_ptr().cast(),
+                &mut byte_len,
+            )
+        };
+
+        if status == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if status == ERROR_MORE_DATA {
+            let required_items = (byte_len as usize).div_ceil(size_of::<NETRESOURCEW>());
+            buffer.resize(
+                required_items.max(buffer.len() * 2),
+                NETRESOURCEW::default(),
+            );
+            continue;
+        }
+        if status != NO_ERROR {
+            return None;
+        }
+
+        let resources_in_buffer = unsafe { slice::from_raw_parts(buffer.as_ptr(), count as usize) };
+        for resource in resources_in_buffer {
+            let Some(remote_name) = pwstr_to_string(resource.lpRemoteName) else {
+                continue;
+            };
+            if sshfs_unc_tail(&remote_name).is_none() {
+                continue;
+            }
+            resources.push(SshfsNetworkResource {
+                local_name: pwstr_to_string(resource.lpLocalName),
+                remote_name,
+                state,
+            });
+        }
+    }
+
+    Some(resources)
+}
+
+#[cfg(target_os = "windows")]
+fn pwstr_to_string(value: windows::core::PWSTR) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    let mut len = 0;
+    unsafe {
+        while *value.0.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16(std::slice::from_raw_parts(value.0, len))
+            .ok()
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -6466,6 +6777,155 @@ mod tests {
         assert!(windows_drive_type_is_remote(4));
         assert!(!windows_drive_type_is_remote(3));
         assert!(!windows_drive_type_is_remote(2));
+    }
+
+    #[test]
+    fn sshfs_unc_tail_detects_sshfs_unc_paths() {
+        assert_eq!(
+            sshfs_unc_tail(r"\\sshfs\ada@example.com"),
+            Some("ada@example.com".to_owned())
+        );
+        assert_eq!(
+            sshfs_unc_tail("//sshfs/ada@example.com/photos"),
+            Some(r"ada@example.com\photos".to_owned())
+        );
+        assert_eq!(sshfs_unc_tail(r"\\server\share"), None);
+        assert_eq!(sshfs_unc_tail(r"\\sshfs\"), None);
+    }
+
+    #[test]
+    fn sshfs_mount_points2_key_matches_explorer_unc_keys() {
+        assert_eq!(
+            sshfs_mount_points2_key(r"\\sshfs\ada@example.com"),
+            Some("##sshfs#ada@example.com".to_owned())
+        );
+        assert_eq!(
+            sshfs_mount_points2_key("//sshfs/ada@example.com/photos"),
+            Some("##sshfs#ada@example.com#photos".to_owned())
+        );
+        assert_eq!(
+            sshfs_mount_points2_key(r"\\sshfs\ada@example.com\"),
+            Some("##sshfs#ada@example.com".to_owned())
+        );
+        assert_eq!(sshfs_mount_points2_key(r"\\server\share"), None);
+    }
+
+    #[test]
+    fn sshfs_mount_label_prefers_explorer_label_when_available() {
+        let mounts = sshfs_mounts_from_network_resources_with_explorer_labels(
+            [SshfsNetworkResource {
+                local_name: Some("s:\\".to_owned()),
+                remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                state: SshfsMountState::Connected,
+            }],
+            |remote_name| {
+                (remote_name == r"\\sshfs\ada@example.com").then(|| "Team Share".to_owned())
+            },
+        );
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].label, "Team Share");
+    }
+
+    #[test]
+    fn sshfs_mount_label_falls_back_to_remote_tail_without_explorer_label() {
+        let mounts = sshfs_mounts_from_network_resources_with_explorer_labels(
+            [
+                SshfsNetworkResource {
+                    local_name: Some("T:".to_owned()),
+                    remote_name: r"\\sshfs\grace@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("U:".to_owned()),
+                    remote_name: r"\\sshfs\blank@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+            ],
+            |remote_name| (remote_name.contains("blank")).then(|| "   ".to_owned()),
+        );
+
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].label, "grace@example.com (T:)");
+        assert_eq!(mounts[1].label, "blank@example.com (U:)");
+    }
+
+    #[test]
+    fn sshfs_mounts_merge_duplicates_and_connected_wins() {
+        let mounts = sshfs_mounts_from_network_resources_with_explorer_labels(
+            [
+                SshfsNetworkResource {
+                    local_name: Some("S:".to_owned()),
+                    remote_name: r"\\sshfs\old@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("s:\\".to_owned()),
+                    remote_name: r"\\sshfs\new@example.com".to_owned(),
+                    state: SshfsMountState::Connected,
+                },
+                SshfsNetworkResource {
+                    local_name: None,
+                    remote_name: r"\\sshfs\orphan@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+                SshfsNetworkResource {
+                    local_name: None,
+                    remote_name: r"\\sshfs\orphan@example.com\".to_owned(),
+                    state: SshfsMountState::Connected,
+                },
+            ],
+            |_| None,
+        );
+
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].label, "new@example.com (S:)");
+        assert_eq!(mounts[0].path, PathBuf::from(r"\\sshfs\new@example.com"));
+        assert_eq!(mounts[0].state, SshfsMountState::Connected);
+        assert_eq!(mounts[1].label, "orphan@example.com");
+        assert_eq!(mounts[1].state, SshfsMountState::Connected);
+    }
+
+    #[test]
+    fn sshfs_mounts_sort_by_drive_letter_then_label_and_path() {
+        let mounts = sshfs_mounts_from_network_resources_with_explorer_labels(
+            [
+                SshfsNetworkResource {
+                    local_name: None,
+                    remote_name: r"\\sshfs\zulu@example.com".to_owned(),
+                    state: SshfsMountState::Connected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("B:".to_owned()),
+                    remote_name: r"\\sshfs\bravo@example.com".to_owned(),
+                    state: SshfsMountState::Connected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("A:".to_owned()),
+                    remote_name: r"\\sshfs\alpha@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+            ],
+            |_| None,
+        );
+
+        assert_eq!(
+            mounts
+                .iter()
+                .map(|mount| mount.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "alpha@example.com (A:)",
+                "bravo@example.com (B:)",
+                "zulu@example.com"
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sshfs_unc_paths_are_remote_drives_on_windows() {
+        assert!(path_is_remote_drive(Path::new(r"\\sshfs\ada@example.com")));
     }
 
     #[test]
