@@ -169,8 +169,14 @@ impl ExplorerTabs {
         cx: &mut Context<Self>,
     ) -> Self {
         let first_id = TabId(1);
-        let view = cx
-            .new(|cx| ExplorerView::new_watched_with_focus_handle(initial_path, focus_handle, cx));
+        let view = cx.new(|cx| {
+            ExplorerView::new_watched_with_focus_handle(
+                initial_path,
+                focus_handle,
+                Some(window),
+                cx,
+            )
+        });
         observe_tab_view(&view, window, cx);
         observe_settings(cx);
 
@@ -237,7 +243,9 @@ impl ExplorerTabs {
 
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
-        let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
+        let view = cx.new(|cx| {
+            ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx)
+        });
         observe_tab_view(&view, window, cx);
 
         self.tabs.push(ExplorerTab { id, view });
@@ -251,7 +259,9 @@ impl ExplorerTabs {
         self.next_tab_id += 1;
 
         let focus_handle = cx.focus_handle();
-        let view = cx.new(|cx| ExplorerView::new_watched_with_focus_handle(path, focus_handle, cx));
+        let view = cx.new(|cx| {
+            ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx)
+        });
         observe_tab_view(&view, window, cx);
 
         self.tabs.push(ExplorerTab { id, view });

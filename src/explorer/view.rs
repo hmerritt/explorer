@@ -78,6 +78,8 @@ pub struct ExplorerView {
     pub(super) run_elevated_task: Option<Task<()>>,
     pub(super) volume_eject_task: Option<Task<()>>,
     pub(super) image_mount_task: Option<Task<()>>,
+    #[cfg(target_os = "windows")]
+    pub(super) sshfs_connect_task: Option<Task<()>>,
     #[cfg(feature = "rclone")]
     pub(super) rclone_connect_task: Option<Task<()>>,
     #[cfg(feature = "rclone")]
@@ -330,11 +332,37 @@ impl ExplorerView {
     pub fn new_watched_with_focus_handle(
         initial_path: PathBuf,
         focus_handle: FocusHandle,
+        parent_window: Option<&Window>,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
         let mut view =
             Self::new_unloaded_inner_with_settings(initial_path, Some(focus_handle), &settings);
+        #[cfg(target_os = "windows")]
+        {
+            #[cfg(not(test))]
+            let parent = parent_window.and_then(crate::explorer::windows_shell::parent_hwnd);
+            #[cfg(test)]
+            let parent = {
+                let _ = parent_window;
+                None
+            };
+            if view.connect_sshfs_remote_path_with_watcher(
+                view.path.clone(),
+                crate::explorer::navigation::HistoryMode::Preserve,
+                parent,
+                true,
+                cx,
+            ) {
+                view.observe_icon_caches(cx);
+                view.observe_image_thumbnail_cache(cx);
+                return view;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = parent_window;
+        }
         view.reload_async_with_options(
             ReloadMode {
                 preserve_selection: false,
@@ -412,6 +440,8 @@ impl ExplorerView {
             run_elevated_task: None,
             volume_eject_task: None,
             image_mount_task: None,
+            #[cfg(target_os = "windows")]
+            sshfs_connect_task: None,
             #[cfg(feature = "rclone")]
             rclone_connect_task: None,
             #[cfg(feature = "rclone")]
@@ -1670,7 +1700,9 @@ impl ExplorerView {
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
-        self.has_active_file_operation() || self.rclone_connection_is_working()
+        self.has_active_file_operation()
+            || self.sshfs_connection_is_working()
+            || self.rclone_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -2067,7 +2099,6 @@ impl ExplorerView {
         self.operation_notice = Some(OperationNotice::error(text));
     }
 
-    #[cfg(feature = "rclone")]
     pub(super) fn set_info_notice(&mut self, text: impl Into<String>) {
         self.operation_notice = Some(OperationNotice::info(text));
     }
@@ -2079,7 +2110,7 @@ impl ExplorerView {
 
     pub(super) fn is_directory_loading(&self) -> bool {
         self.loading_path.as_deref() == Some(self.path.as_path())
-            && self.directory_load_task.is_some()
+            && (self.directory_load_task.is_some() || self.sshfs_connection_is_working())
     }
 
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
@@ -2093,6 +2124,18 @@ impl ExplorerView {
         }
 
         #[cfg(not(feature = "rclone"))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn sshfs_connection_is_working(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.sshfs_connect_task.is_some()
+        }
+
+        #[cfg(not(target_os = "windows"))]
         {
             false
         }

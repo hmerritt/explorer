@@ -44,6 +44,43 @@ impl ExplorerView {
         history_mode: HistoryMode,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "windows")]
+        {
+            self.navigate_to_directory_with_watcher_and_parent(path, history_mode, None, cx);
+            return;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        self.navigate_to_directory_with_watcher_after_platform_connect(path, history_mode, cx);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn navigate_to_directory_with_watcher_and_parent(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        parent: Option<windows::Win32::Foundation::HWND>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connect_sshfs_remote_path_with_watcher(
+            path.clone(),
+            history_mode,
+            parent,
+            false,
+            cx,
+        ) {
+            return;
+        }
+
+        self.navigate_to_directory_with_watcher_after_platform_connect(path, history_mode, cx);
+    }
+
+    fn navigate_to_directory_with_watcher_after_platform_connect(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(feature = "rclone")]
         {
             if crate::explorer::rclone::parse_virtual_path(&path).is_some() {
@@ -200,12 +237,86 @@ impl ExplorerView {
         self.navigate_to_directory(path, HistoryMode::Record);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub(super) fn navigate_to_sidebar_path_with_watcher(
         &mut self,
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
         self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn navigate_to_sidebar_path_with_watcher_and_parent(
+        &mut self,
+        path: PathBuf,
+        parent: Option<windows::Win32::Foundation::HWND>,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_to_directory_with_watcher_and_parent(path, HistoryMode::Record, parent, cx);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn connect_sshfs_remote_path_with_watcher(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        parent: Option<windows::Win32::Foundation::HWND>,
+        initial_load: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = crate::explorer::filesystem::sshfs_connection_target_for_path(&path)
+        else {
+            return false;
+        };
+        if self.sshfs_connect_task.is_some() {
+            return true;
+        }
+
+        let label = target.label.clone();
+        if initial_load {
+            self.loading_path = Some(path.clone());
+            self.read_error = None;
+        }
+        self.set_info_notice(format!("Connecting to {}...", label));
+        let parent = parent.map(|parent| parent.0 as isize);
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let parent =
+                        parent.map(|parent| windows::Win32::Foundation::HWND(parent as *mut _));
+                    crate::explorer::filesystem::connect_sshfs_target(&target, parent)
+                })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.sshfs_connect_task = None;
+                if initial_load && explorer.loading_path.as_deref() == Some(path.as_path()) {
+                    explorer.loading_path = None;
+                }
+                match result {
+                    Ok(()) => {
+                        explorer.navigate_to_directory_inner_with_options(
+                            path,
+                            history_mode,
+                            Some(cx),
+                            true,
+                        );
+                    }
+                    Err(error) => {
+                        let error_message = format!("Could not connect to {label}: {error}");
+                        if initial_load && explorer.path == path {
+                            explorer.read_error = Some(error_message.clone());
+                        }
+                        explorer.set_error_notice(error_message);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.sshfs_connect_task = Some(task);
+        true
     }
 
     #[cfg(feature = "rclone")]
@@ -687,6 +798,35 @@ mod tests {
         let mut settings = ExplorerSettings::default();
         settings.rclone.enabled = false;
         ExplorerView::new_unloaded_with_settings_for_test(path, focus_handle, &settings)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn sshfs_test_target() -> crate::explorer::filesystem::SshfsConnectionTarget {
+        crate::explorer::filesystem::SshfsConnectionTarget {
+            label: "ada@example.com (S:)".to_owned(),
+            remote_name: r"\\sshfs\ada@example.com".to_owned(),
+            local_name: Some("S:".to_owned()),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn sshfs_test_connector_failure(
+        _: &crate::explorer::filesystem::SshfsConnectionTarget,
+        _: Option<windows::Win32::Foundation::HWND>,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "network path missing",
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn sshfs_test_connector_slow_failure(
+        target: &crate::explorer::filesystem::SshfsConnectionTarget,
+        parent: Option<windows::Win32::Foundation::HWND>,
+    ) -> std::io::Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        sshfs_test_connector_failure(target, parent)
     }
 
     #[test]
@@ -1474,6 +1614,158 @@ mod tests {
         });
         drop(permit);
         crate::explorer::rclone::reset_connecting_remotes_for_test();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn sshfs_sidebar_navigation_sets_info_notice_before_background_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
+        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
+            sshfs_test_target(),
+        ]));
+        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
+            sshfs_test_connector_failure,
+        ));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("root"),
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        let path = PathBuf::from(r"\\sshfs\ada@example.com");
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate_to_sidebar_path_with_watcher(path, cx);
+
+                assert!(view.sshfs_connect_task.is_some());
+                let notice = view.operation_notice.as_ref().expect("connecting notice");
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Info
+                );
+                assert_eq!(notice.text, "Connecting to ada@example.com (S:)...");
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn failed_sshfs_sidebar_navigation_keeps_current_path_and_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
+        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
+            sshfs_test_target(),
+        ]));
+        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
+            sshfs_test_connector_failure,
+        ));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("root"),
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        let path = PathBuf::from(r"\\sshfs\ada@example.com\photos");
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate_to_sidebar_path_with_watcher(path, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.read_with(app, |view, _| {
+                assert_eq!(view.path, PathBuf::from("root"));
+                assert!(view.back_stack.is_empty());
+                assert!(view.forward_stack.is_empty());
+                let notice = view.operation_notice.as_ref().expect("failure notice");
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Error
+                );
+                assert!(
+                    notice
+                        .text
+                        .contains("Could not connect to ada@example.com (S:)")
+                );
+                assert!(notice.text.contains("network path missing"));
+                assert!(view.read_error.is_none());
+            });
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn initial_sshfs_load_starts_connection_before_directory_load(cx: &mut gpui::TestAppContext) {
+        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
+        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
+            sshfs_test_target(),
+        ]));
+        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
+            sshfs_test_connector_slow_failure,
+        ));
+        let path = PathBuf::from(r"\\sshfs\ada@example.com");
+        let (view, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                ExplorerView::new_unloaded_with_settings_for_test(
+                    path,
+                    Some(focus_handle),
+                    &crate::settings::ExplorerSettings::default(),
+                )
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert!(view.connect_sshfs_remote_path_with_watcher(
+                    path.clone(),
+                    HistoryMode::Preserve,
+                    None,
+                    true,
+                    cx,
+                ));
+                assert!(view.sshfs_connect_task.is_some());
+                assert!(view.directory_load_task.is_none());
+                assert_eq!(view.loading_path.as_deref(), Some(path.as_path()));
+                assert_eq!(
+                    view.content_branch(),
+                    crate::explorer::view::ExplorerContentBranch::Loading
+                );
+            });
+        });
+
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.read_with(app, |view, _| {
+                assert_eq!(view.path, path);
+                assert!(view.sshfs_connect_task.is_none());
+                assert!(view.directory_load_task.is_none());
+                assert!(view.read_error.as_deref().is_some_and(|error| {
+                    error.contains("Could not connect to ada@example.com (S:)")
+                        && error.contains("network path missing")
+                }));
+                assert_eq!(
+                    view.content_branch(),
+                    crate::explorer::view::ExplorerContentBranch::Error
+                );
+            });
+        });
     }
 
     #[test]

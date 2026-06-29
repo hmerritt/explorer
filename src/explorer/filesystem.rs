@@ -64,6 +64,13 @@ pub(super) struct SshfsMount {
     pub(super) local_name: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SshfsConnectionTarget {
+    pub(super) label: String,
+    pub(super) remote_name: String,
+    pub(super) local_name: Option<String>,
+}
+
 pub fn default_start_path() -> PathBuf {
     let home_dir = user_home_dir();
     let downloads_dir = user_downloads_dir(home_dir.as_deref());
@@ -276,6 +283,95 @@ pub(super) fn sshfs_mounts() -> Vec<SshfsMount> {
 #[cfg(not(target_os = "windows"))]
 pub(super) fn sshfs_mounts() -> Vec<SshfsMount> {
     Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn sshfs_connection_target_for_path(path: &Path) -> Option<SshfsConnectionTarget> {
+    #[cfg(test)]
+    {
+        let targets = SSHFS_CONNECTION_TARGETS_FOR_TEST.lock().ok()?;
+        if let Some(targets) = targets.as_ref() {
+            return sshfs_connection_target_for_path_from_targets(path, targets);
+        }
+    }
+
+    windows_sshfs_network_resources().and_then(|resources| {
+        sshfs_connection_target_for_path_from_network_resources(
+            path,
+            resources,
+            sshfs_mount_explorer_label,
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn connect_sshfs_target(
+    target: &SshfsConnectionTarget,
+    parent: Option<windows::Win32::Foundation::HWND>,
+) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Ok(connector) = SSHFS_CONNECTOR_FOR_TEST.lock()
+            && let Some(connector) = *connector
+        {
+            return connector(target, parent);
+        }
+    }
+
+    let mut request = sshfs_connection_request(target, parent);
+    execute_sshfs_connection_request(&mut request)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+type SshfsConnectorForTest =
+    fn(&SshfsConnectionTarget, Option<windows::Win32::Foundation::HWND>) -> io::Result<()>;
+
+#[cfg(all(test, target_os = "windows"))]
+static SSHFS_CONNECTION_TARGETS_FOR_TEST: std::sync::Mutex<Option<Vec<SshfsConnectionTarget>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "windows"))]
+static SSHFS_CONNECTOR_FOR_TEST: std::sync::Mutex<Option<SshfsConnectorForTest>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "windows"))]
+static SSHFS_CONNECTION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) struct SshfsConnectionTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(all(test, target_os = "windows"))]
+impl Drop for SshfsConnectionTestGuard {
+    fn drop(&mut self) {
+        set_sshfs_connection_targets_for_test(None);
+        set_sshfs_connector_for_test(None);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) fn sshfs_connection_test_guard() -> SshfsConnectionTestGuard {
+    let lock = SSHFS_CONNECTION_TEST_LOCK
+        .lock()
+        .expect("sshfs connection test lock");
+    set_sshfs_connection_targets_for_test(None);
+    set_sshfs_connector_for_test(None);
+    SshfsConnectionTestGuard { _lock: lock }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) fn set_sshfs_connection_targets_for_test(targets: Option<Vec<SshfsConnectionTarget>>) {
+    *SSHFS_CONNECTION_TARGETS_FOR_TEST
+        .lock()
+        .expect("sshfs test targets lock") = targets;
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(super) fn set_sshfs_connector_for_test(connector: Option<SshfsConnectorForTest>) {
+    *SSHFS_CONNECTOR_FOR_TEST
+        .lock()
+        .expect("sshfs test connector lock") = connector;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -572,6 +668,51 @@ fn sshfs_mounts_from_network_resources_with_explorer_labels(
     mounts
 }
 
+fn sshfs_connection_target_for_path_from_network_resources(
+    path: &Path,
+    resources: impl IntoIterator<Item = SshfsNetworkResource>,
+    explorer_label_for_remote_name: impl Fn(&str) -> Option<String>,
+) -> Option<SshfsConnectionTarget> {
+    let disconnected_targets = sshfs_mounts_from_network_resources_with_explorer_labels(
+        resources,
+        explorer_label_for_remote_name,
+    )
+    .into_iter()
+    .filter(|mount| mount.state == SshfsMountState::Disconnected)
+    .map(|mount| SshfsConnectionTarget {
+        label: mount.label,
+        remote_name: mount.path.display().to_string(),
+        local_name: mount.local_name,
+    })
+    .collect::<Vec<_>>();
+
+    sshfs_connection_target_for_path_from_targets(path, &disconnected_targets)
+}
+
+fn sshfs_connection_target_for_path_from_targets(
+    path: &Path,
+    targets: &[SshfsConnectionTarget],
+) -> Option<SshfsConnectionTarget> {
+    let target_key = normalized_unc_key(&path.display().to_string());
+
+    targets
+        .iter()
+        .filter_map(|target| {
+            let remote_key = normalized_unc_key(&target.remote_name);
+            unc_key_is_same_or_descendant(&target_key, &remote_key)
+                .then_some((remote_key.len(), target))
+        })
+        .max_by_key(|(remote_len, _)| *remote_len)
+        .map(|(_, target)| target.clone())
+}
+
+fn unc_key_is_same_or_descendant(path_key: &str, root_key: &str) -> bool {
+    path_key == root_key
+        || path_key
+            .strip_prefix(root_key)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
 fn sshfs_mount_local_sort_key(mount: &SshfsMount) -> (u8, String) {
     mount
         .local_name
@@ -655,6 +796,95 @@ fn sshfs_unc_tail(remote_name: &str) -> Option<String> {
 #[cfg(target_os = "windows")]
 fn path_is_sshfs_unc(path: &Path) -> bool {
     sshfs_unc_tail(&path.display().to_string()).is_some()
+}
+
+#[cfg(target_os = "windows")]
+struct SshfsConnectionRequest {
+    parent: Option<windows::Win32::Foundation::HWND>,
+    _local_name: Option<Vec<u16>>,
+    _remote_name: Vec<u16>,
+    resource: windows::Win32::NetworkManagement::WNet::NETRESOURCEW,
+    flags: windows::Win32::NetworkManagement::WNet::NET_CONNECT_FLAGS,
+}
+
+#[cfg(target_os = "windows")]
+impl SshfsConnectionRequest {
+    #[cfg(test)]
+    fn parent(&self) -> Option<windows::Win32::Foundation::HWND> {
+        self.parent
+    }
+
+    #[cfg(test)]
+    fn resource(&self) -> &windows::Win32::NetworkManagement::WNet::NETRESOURCEW {
+        &self.resource
+    }
+
+    #[cfg(test)]
+    fn flags(&self) -> windows::Win32::NetworkManagement::WNet::NET_CONNECT_FLAGS {
+        self.flags
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn sshfs_connection_request(
+    target: &SshfsConnectionTarget,
+    parent: Option<windows::Win32::Foundation::HWND>,
+) -> SshfsConnectionRequest {
+    use windows::{
+        Win32::NetworkManagement::WNet::{
+            CONNECT_INTERACTIVE, CONNECT_PROMPT, CONNECT_UPDATE_PROFILE, NETRESOURCEW,
+            RESOURCETYPE_DISK,
+        },
+        core::PWSTR,
+    };
+
+    let local_name = target
+        .local_name
+        .as_deref()
+        .map(OsStr::new)
+        .map(crate::explorer::windows_shell::null_terminated_wide);
+    let remote_name =
+        crate::explorer::windows_shell::null_terminated_wide(OsStr::new(&target.remote_name));
+
+    let mut resource = NETRESOURCEW {
+        dwType: RESOURCETYPE_DISK,
+        ..Default::default()
+    };
+    if let Some(local_name) = local_name.as_ref() {
+        resource.lpLocalName = PWSTR(local_name.as_ptr() as *mut _);
+    }
+    resource.lpRemoteName = PWSTR(remote_name.as_ptr() as *mut _);
+
+    SshfsConnectionRequest {
+        parent,
+        _local_name: local_name,
+        _remote_name: remote_name,
+        resource,
+        flags: CONNECT_INTERACTIVE | CONNECT_PROMPT | CONNECT_UPDATE_PROFILE,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn execute_sshfs_connection_request(request: &mut SshfsConnectionRequest) -> io::Result<()> {
+    use windows::{
+        Win32::{Foundation::NO_ERROR, NetworkManagement::WNet::WNetAddConnection3W},
+        core::PCWSTR,
+    };
+
+    let status = unsafe {
+        WNetAddConnection3W(
+            request.parent,
+            &request.resource,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            request.flags,
+        )
+    };
+    if status == NO_ERROR {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status.0 as i32))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -6919,6 +7149,142 @@ mod tests {
                 "bravo@example.com (B:)",
                 "zulu@example.com"
             ]
+        );
+    }
+
+    #[test]
+    fn sshfs_connection_target_uses_remembered_root_for_child_path() {
+        let target = sshfs_connection_target_for_path_from_network_resources(
+            Path::new(r"\\sshfs\ada@example.com\photos\2026"),
+            [SshfsNetworkResource {
+                local_name: Some("S:\\".to_owned()),
+                remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                state: SshfsMountState::Disconnected,
+            }],
+            |_| None,
+        )
+        .expect("remembered sshfs target");
+
+        assert_eq!(target.label, "ada@example.com (S:)");
+        assert_eq!(
+            normalized_unc_key(&target.remote_name),
+            normalized_unc_key(r"\\sshfs\ada@example.com")
+        );
+        assert_eq!(target.local_name.as_deref(), Some("S:"));
+    }
+
+    #[test]
+    fn sshfs_connection_target_prefers_most_specific_remembered_prefix() {
+        let target = sshfs_connection_target_for_path_from_network_resources(
+            Path::new(r"\\sshfs\ada@example.com\project\src"),
+            [
+                SshfsNetworkResource {
+                    local_name: Some("S:".to_owned()),
+                    remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("P:".to_owned()),
+                    remote_name: r"\\sshfs\ada@example.com\project".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+            ],
+            |remote_name| {
+                (remote_name == r"\\sshfs\ada@example.com\project")
+                    .then(|| "Project Share".to_owned())
+            },
+        )
+        .expect("most specific sshfs target");
+
+        assert_eq!(target.label, "Project Share");
+        assert_eq!(
+            normalized_unc_key(&target.remote_name),
+            normalized_unc_key(r"\\sshfs\ada@example.com\project")
+        );
+        assert_eq!(target.local_name.as_deref(), Some("P:"));
+    }
+
+    #[test]
+    fn sshfs_connection_target_ignores_connected_and_non_sshfs_resources() {
+        let resources = [
+            SshfsNetworkResource {
+                local_name: Some("S:".to_owned()),
+                remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                state: SshfsMountState::Connected,
+            },
+            SshfsNetworkResource {
+                local_name: Some("T:".to_owned()),
+                remote_name: r"\\server\share".to_owned(),
+                state: SshfsMountState::Disconnected,
+            },
+        ];
+
+        assert_eq!(
+            sshfs_connection_target_for_path_from_network_resources(
+                Path::new(r"\\sshfs\ada@example.com"),
+                resources,
+                |_| None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sshfs_connection_target_treats_connected_duplicate_as_noop() {
+        let target = sshfs_connection_target_for_path_from_network_resources(
+            Path::new(r"\\sshfs\ada@example.com"),
+            [
+                SshfsNetworkResource {
+                    local_name: Some("S:".to_owned()),
+                    remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                    state: SshfsMountState::Disconnected,
+                },
+                SshfsNetworkResource {
+                    local_name: Some("s:\\".to_owned()),
+                    remote_name: r"\\sshfs\ada@example.com".to_owned(),
+                    state: SshfsMountState::Connected,
+                },
+            ],
+            |_| None,
+        );
+
+        assert_eq!(target, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sshfs_connection_request_uses_remembered_target_and_prompt_flags() {
+        use windows::{
+            Win32::{
+                Foundation::HWND,
+                NetworkManagement::WNet::{
+                    CONNECT_INTERACTIVE, CONNECT_PROMPT, CONNECT_UPDATE_PROFILE, RESOURCETYPE_DISK,
+                },
+            },
+            core::PWSTR,
+        };
+
+        let parent = Some(HWND(0x1234usize as *mut _));
+        let target = SshfsConnectionTarget {
+            label: "Team Share".to_owned(),
+            remote_name: r"\\sshfs\ada@example.com".to_owned(),
+            local_name: Some("S:".to_owned()),
+        };
+        let request = sshfs_connection_request(&target, parent);
+
+        assert_eq!(request.parent(), parent);
+        assert_eq!(request.resource().dwType, RESOURCETYPE_DISK);
+        assert_eq!(
+            pwstr_to_string(PWSTR(request.resource().lpRemoteName.0)),
+            Some(r"\\sshfs\ada@example.com".to_owned())
+        );
+        assert_eq!(
+            pwstr_to_string(PWSTR(request.resource().lpLocalName.0)),
+            Some("S:".to_owned())
+        );
+        assert_eq!(
+            request.flags(),
+            CONNECT_INTERACTIVE | CONNECT_PROMPT | CONNECT_UPDATE_PROFILE
         );
     }
 

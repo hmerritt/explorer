@@ -1817,12 +1817,31 @@ impl ExplorerView {
                 this.hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
             })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.close_context_menu();
                 if event.modifiers().control {
                     cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(click_path.clone()));
                 } else {
-                    this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
+                    #[cfg(target_os = "windows")]
+                    {
+                        #[cfg(not(test))]
+                        let parent = crate::explorer::windows_shell::parent_hwnd(window);
+                        #[cfg(test)]
+                        let parent = {
+                            let _ = window;
+                            None
+                        };
+                        this.navigate_to_sidebar_path_with_watcher_and_parent(
+                            click_path.clone(),
+                            parent,
+                            cx,
+                        );
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = window;
+                        this.navigate_to_sidebar_path_with_watcher(click_path.clone(), cx);
+                    }
                 }
                 cx.stop_propagation();
                 cx.notify();
