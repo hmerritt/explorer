@@ -1,16 +1,10 @@
 ## 1
 
-- Additional binary feature of viewing images. I want to create an embeded image viewer, as an alternative UI to the explorer (still with GPUI). So if a user (or the program itself) calls the binary along with an image path, it will open this image UI - "explorer.exe <path-to-image>" if the path exists, open the image UI, if it does NOT exist, ignore and open existing explorer UI.
-- Use an alternate render path high-up in the program, add this new UI into src/image/*
-- A window with the image rendered in the centre. Fit within the window size (same as Image properties tab behaviour)
 - Scaling should be high-quality (Lanczos or equivalent)
-- Colour profile (if exists) should be read and applied
-- Window should use inline OS controls for minimise, maximise, close (as main explorer app does). Image filename should also be rendered at the left-top (inline with controls)
 
 ---
 
-- A bottom status bar with resolution, current scaling (as a percentage), size, decompressed size
-- Refactor image scaling so that the image 
+- Refactor image scaling so that the image
 
 ## 2
 

@@ -15,8 +15,8 @@ use crate::{
         explorer_tooltip, format_size,
     },
     image_viewer::{
-        decode::{DecodedImage, decode_image_source},
-        resize::{ImageFitTarget, fitted_image_target, render_image_for_target},
+        decode::{DecodedImage, DecodedImageSource, decode_image_source},
+        resize::{ImageFitTarget, fitted_image_target, svg_image_target},
     },
     settings::APP_ID,
     window_chrome::{
@@ -78,10 +78,11 @@ struct ImageViewer {
     state: ImageViewerState,
     decode_generation: u64,
     decode_task: Option<Task<()>>,
-    resize_generation: u64,
-    resize_task: Option<Task<()>>,
-    resize_pending: Option<ImageFitTarget>,
-    scaled_image: Option<ScaledImage>,
+    svg_render_generation: u64,
+    svg_render_task: Option<Task<()>>,
+    svg_render_pending: Option<ImageFitTarget>,
+    svg_render_failed: Option<ImageFitTarget>,
+    svg_rendered_image: Option<SvgRenderedImage>,
     should_move_window: bool,
 }
 
@@ -91,7 +92,7 @@ enum ImageViewerState {
     Failed(String),
 }
 
-struct ScaledImage {
+struct SvgRenderedImage {
     target: ImageFitTarget,
     image: Arc<RenderImage>,
 }
@@ -106,10 +107,11 @@ impl ImageViewer {
             state: ImageViewerState::Loading,
             decode_generation: 0,
             decode_task: None,
-            resize_generation: 0,
-            resize_task: None,
-            resize_pending: None,
-            scaled_image: None,
+            svg_render_generation: 0,
+            svg_render_task: None,
+            svg_render_pending: None,
+            svg_render_failed: None,
+            svg_rendered_image: None,
             should_move_window: false,
         };
         viewer.start_decode(cx);
@@ -131,9 +133,12 @@ impl ImageViewer {
                 }
 
                 viewer.decode_task = None;
-                viewer.resize_pending = None;
-                viewer.resize_task = None;
-                viewer.drop_scaled_image(cx);
+                viewer.drop_decoded_image(cx);
+                viewer.drop_svg_rendered_image(cx);
+                viewer.svg_render_generation = viewer.svg_render_generation.wrapping_add(1);
+                viewer.svg_render_task = None;
+                viewer.svg_render_pending = None;
+                viewer.svg_render_failed = None;
                 viewer.state = match result {
                     Ok(decoded) => ImageViewerState::Ready(decoded),
                     Err(error) => ImageViewerState::Failed(error),
@@ -143,49 +148,68 @@ impl ImageViewer {
         }));
     }
 
-    fn ensure_scaled_image(
+    fn drop_decoded_image(&mut self, cx: &mut Context<Self>) {
+        if let ImageViewerState::Ready(decoded) = &self.state
+            && let DecodedImageSource::Raster(image) = &decoded.source
+        {
+            cx.drop_image(image.clone(), None);
+        }
+    }
+
+    fn ensure_svg_rendered_image(
         &mut self,
-        decoded: DecodedImage,
+        bytes: Arc<Vec<u8>>,
         target: ImageFitTarget,
         cx: &mut Context<Self>,
     ) {
         if self
-            .scaled_image
+            .svg_rendered_image
             .as_ref()
-            .is_some_and(|scaled| scaled.target == target)
+            .is_some_and(|rendered| rendered.target == target)
         {
+            self.cancel_pending_svg_render();
+            self.svg_render_failed = None;
             return;
         }
-        if self.resize_pending == Some(target) {
+        if self.svg_render_pending == Some(target) {
+            return;
+        }
+        if self.svg_render_failed == Some(target) {
             return;
         }
 
-        self.resize_generation = self.resize_generation.wrapping_add(1);
-        let generation = self.resize_generation;
-        self.resize_pending = Some(target);
-        self.resize_task = Some(cx.spawn(async move |viewer, cx| {
+        self.svg_render_generation = self.svg_render_generation.wrapping_add(1);
+        let generation = self.svg_render_generation;
+        self.svg_render_pending = Some(target);
+        self.svg_render_failed = None;
+        self.svg_render_task = Some(cx.spawn(async move |viewer, cx| {
             let worker = cx
                 .background_executor()
-                .spawn(async move { render_image_for_target(&decoded, target) });
+                .spawn(async move { render_svg_for_target(&bytes, target) });
             let result = worker.await;
             let _ = viewer.update(cx, |viewer, cx| {
-                if viewer.resize_generation != generation || viewer.resize_pending != Some(target) {
+                if viewer.svg_render_generation != generation
+                    || viewer.svg_render_pending != Some(target)
+                {
                     if let Ok(image) = result {
                         cx.drop_image(image, None);
                     }
                     return;
                 }
 
-                viewer.resize_task = None;
-                viewer.resize_pending = None;
+                viewer.svg_render_task = None;
+                viewer.svg_render_pending = None;
                 match result {
                     Ok(image) => {
-                        viewer.drop_scaled_image(cx);
-                        viewer.scaled_image = Some(ScaledImage { target, image });
+                        viewer.replace_svg_rendered_image(SvgRenderedImage { target, image }, cx);
+                        viewer.svg_render_failed = None;
                     }
                     Err(error) => {
-                        viewer.drop_scaled_image(cx);
-                        viewer.state = ImageViewerState::Failed(error);
+                        if viewer.svg_rendered_image.is_some() {
+                            viewer.svg_render_failed = Some(target);
+                        } else {
+                            viewer.state = ImageViewerState::Failed(error);
+                        }
                     }
                 }
                 cx.notify();
@@ -193,9 +217,23 @@ impl ImageViewer {
         }));
     }
 
-    fn drop_scaled_image(&mut self, cx: &mut Context<Self>) {
-        if let Some(scaled) = self.scaled_image.take() {
-            cx.drop_image(scaled.image, None);
+    fn cancel_pending_svg_render(&mut self) {
+        if self.svg_render_pending.is_some() {
+            self.svg_render_generation = self.svg_render_generation.wrapping_add(1);
+            self.svg_render_pending = None;
+            self.svg_render_task = None;
+        }
+    }
+
+    fn replace_svg_rendered_image(&mut self, rendered: SvgRenderedImage, cx: &mut Context<Self>) {
+        if let Some(previous) = self.svg_rendered_image.replace(rendered) {
+            cx.drop_image(previous.image, None);
+        }
+    }
+
+    fn drop_svg_rendered_image(&mut self, cx: &mut Context<Self>) {
+        if let Some(rendered) = self.svg_rendered_image.take() {
+            cx.drop_image(rendered.image, None);
         }
     }
 
@@ -258,34 +296,52 @@ impl ImageViewer {
             ImageViewerState::Failed(error) => {
                 image_viewer_status(format!("Cannot display {}: {error}", self.title))
             }
-            ImageViewerState::Ready(decoded) => {
-                let decoded = decoded.clone();
-                let target = fitted_image_target(
-                    decoded.width,
-                    decoded.height,
-                    available_width,
-                    available_height,
-                    scale_factor,
-                );
-                if let Some(target) = target {
-                    self.ensure_scaled_image(decoded, target, cx);
-                    if let Some(scaled) = self
-                        .scaled_image
-                        .as_ref()
-                        .filter(|scaled| scaled.target == target)
-                    {
-                        img(scaled.image.clone())
-                            .w(px(scaled.target.display_width))
-                            .h(px(scaled.target.display_height))
-                            .object_fit(ObjectFit::Contain)
-                            .into_any_element()
+            ImageViewerState::Ready(decoded) => match &decoded.source {
+                DecodedImageSource::Raster(image) => {
+                    let target = fitted_image_target(
+                        decoded.width,
+                        decoded.height,
+                        available_width,
+                        available_height,
+                        scale_factor,
+                    );
+                    if let Some(target) = target {
+                        render_ready_raster_image(image.clone(), target)
                     } else {
-                        image_viewer_status("Loading image...")
+                        image_viewer_status("Cannot display image.")
                     }
-                } else {
-                    image_viewer_status("Cannot display image.")
                 }
-            }
+                DecodedImageSource::Svg(bytes) => {
+                    let target = svg_image_target(
+                        decoded.width,
+                        decoded.height,
+                        available_width,
+                        available_height,
+                        scale_factor,
+                    );
+                    if let Some(target) = target {
+                        self.ensure_svg_rendered_image(bytes.clone(), target, cx);
+                        if let Some(display_target) = svg_render_display_target(
+                            self.svg_rendered_image
+                                .as_ref()
+                                .map(|rendered| rendered.target),
+                            target,
+                            self.svg_render_pending,
+                            self.svg_render_failed,
+                        ) {
+                            let rendered = self
+                                .svg_rendered_image
+                                .as_ref()
+                                .expect("svg rendered image target");
+                            render_ready_raster_image(rendered.image.clone(), display_target)
+                        } else {
+                            image_viewer_status("Loading image...")
+                        }
+                    } else {
+                        image_viewer_status("Cannot display image.")
+                    }
+                }
+            },
         };
 
         div()
@@ -352,13 +408,79 @@ impl ImageViewer {
         let viewport = window.viewport_size();
         let (available_width, available_height) =
             image_body_available_size(f32::from(viewport.width), f32::from(viewport.height));
-        fitted_image_target(
-            decoded.width,
-            decoded.height,
-            available_width,
-            available_height,
-            window.scale_factor(),
-        )
+        match &decoded.source {
+            DecodedImageSource::Raster(_) => fitted_image_target(
+                decoded.width,
+                decoded.height,
+                available_width,
+                available_height,
+                window.scale_factor(),
+            ),
+            DecodedImageSource::Svg(_) => svg_image_target(
+                decoded.width,
+                decoded.height,
+                available_width,
+                available_height,
+                window.scale_factor(),
+            ),
+        }
+    }
+}
+
+fn render_ready_raster_image(image: Arc<RenderImage>, target: ImageFitTarget) -> AnyElement {
+    img(image)
+        .w(px(target.display_width))
+        .h(px(target.display_height))
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
+}
+
+fn svg_render_display_target(
+    cached_target: Option<ImageFitTarget>,
+    requested_target: ImageFitTarget,
+    render_pending: Option<ImageFitTarget>,
+    render_failed: Option<ImageFitTarget>,
+) -> Option<ImageFitTarget> {
+    let cached_target = cached_target?;
+    if cached_target == requested_target {
+        return Some(cached_target);
+    }
+
+    (render_pending == Some(requested_target) || render_failed == Some(requested_target))
+        .then_some(requested_target)
+}
+
+fn render_svg_for_target(bytes: &[u8], target: ImageFitTarget) -> Result<Arc<RenderImage>, String> {
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
+        .map_err(|error| format!("Failed to parse SVG: {error}"))?;
+    let svg_size = tree.size();
+    let scale_x = target.pixel_width as f32 / svg_size.width();
+    let scale_y = target.pixel_height as f32 / svg_size.height();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(target.pixel_width, target.pixel_height)
+        .ok_or_else(|| "Failed to allocate SVG render target.".to_owned())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale_x, scale_y),
+        &mut pixmap.as_mut(),
+    );
+    let mut image =
+        image::RgbaImage::from_raw(target.pixel_width, target.pixel_height, pixmap.take())
+            .ok_or_else(|| "Failed to create SVG image buffer.".to_owned())?;
+    unpremultiply_rgba(&mut image);
+
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+}
+
+fn unpremultiply_rgba(image: &mut image::RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 || alpha == 255 {
+            continue;
+        }
+
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        }
     }
 }
 
@@ -440,9 +562,7 @@ fn status_scaling_percent(image_width: u32, target: Option<ImageFitTarget>) -> S
         return "--".to_owned();
     }
 
-    let percent = ((f64::from(target.pixel_width) / f64::from(image_width)) * 100.0)
-        .round()
-        .clamp(0.0, 100.0) as u32;
+    let percent = ((f64::from(target.pixel_width) / f64::from(image_width)) * 100.0).round() as u32;
     format!("{percent}%")
 }
 
@@ -511,7 +631,55 @@ fn image_title(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_viewer::decode::DecodedImageSource;
+
+    #[test]
+    fn svg_render_selection_uses_exact_target() {
+        let target = image_fit_target(400, 400);
+
+        assert_eq!(
+            svg_render_display_target(Some(target), target, None, None),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn svg_render_selection_uses_previous_render_while_new_target_is_pending() {
+        let cached = image_fit_target(300, 300);
+        let requested = image_fit_target(400, 400);
+
+        assert_eq!(
+            svg_render_display_target(Some(cached), requested, Some(requested), None),
+            Some(requested)
+        );
+    }
+
+    #[test]
+    fn svg_render_selection_without_cached_render_returns_fallback() {
+        let requested = image_fit_target(400, 400);
+
+        assert_eq!(
+            svg_render_display_target(None, requested, Some(requested), None),
+            None
+        );
+    }
+
+    #[test]
+    fn svg_render_helper_preserves_requested_dimensions() {
+        let image = render_svg_for_target(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#,
+            ImageFitTarget {
+                pixel_width: 80,
+                pixel_height: 40,
+                display_width: 80.0,
+                display_height: 40.0,
+            },
+        )
+        .unwrap();
+        let size = image.size(0);
+
+        assert_eq!(size.width.0, 80);
+        assert_eq!(size.height.0, 40);
+    }
 
     #[test]
     fn ready_status_labels_include_resolution_scaling_file_size_and_decompressed_size() {
@@ -606,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn scaling_percent_uses_fitted_source_pixel_ratio_and_caps_at_no_upscale() {
+    fn scaling_percent_uses_target_source_pixel_ratio() {
         assert_eq!(
             status_scaling_percent(
                 200,
@@ -641,7 +809,7 @@ mod tests {
                     display_height: 120.0,
                 })
             ),
-            "100%"
+            "120%"
         );
         assert_eq!(status_scaling_percent(0, None), "--");
     }
@@ -664,7 +832,18 @@ mod tests {
             width,
             height,
             source_decompressed_size_bytes,
-            source: DecodedImageSource::Raster(Arc::new(image::RgbaImage::new(1, 1))),
+            source: DecodedImageSource::Raster(Arc::new(RenderImage::new(vec![
+                image::Frame::new(image::RgbaImage::new(width.max(1), height.max(1))),
+            ]))),
+        }
+    }
+
+    fn image_fit_target(width: u32, height: u32) -> ImageFitTarget {
+        ImageFitTarget {
+            pixel_width: width,
+            pixel_height: height,
+            display_width: width as f32,
+            display_height: height as f32,
         }
     }
 }

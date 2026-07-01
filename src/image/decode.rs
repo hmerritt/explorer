@@ -1,5 +1,6 @@
 use std::{fs, path::Path, sync::Arc};
 
+use gpui::RenderImage;
 use image::ImageDecoder;
 
 use crate::image_viewer::color::apply_icc_profile_to_srgb;
@@ -14,7 +15,7 @@ pub(super) struct DecodedImage {
 
 #[derive(Clone)]
 pub(super) enum DecodedImageSource {
-    Raster(Arc<image::RgbaImage>),
+    Raster(Arc<RenderImage>),
     Svg(Arc<Vec<u8>>),
 }
 
@@ -48,16 +49,17 @@ fn decode_raster_source(path: &Path) -> Result<DecodedImage, String> {
     if image.width() == 0 || image.height() == 0 {
         return Err("Image has no renderable dimensions.".to_owned());
     }
+    let width = image.width();
+    let height = image.height();
+    let source_decompressed_size_bytes =
+        source_decompressed_size_bytes(width, height, source_color_type);
+    let image = Arc::new(RenderImage::new(vec![image::Frame::new(image)]));
 
     Ok(DecodedImage {
-        width: image.width(),
-        height: image.height(),
-        source_decompressed_size_bytes: source_decompressed_size_bytes(
-            image.width(),
-            image.height(),
-            source_color_type,
-        ),
-        source: DecodedImageSource::Raster(Arc::new(image)),
+        width,
+        height,
+        source_decompressed_size_bytes,
+        source: DecodedImageSource::Raster(image),
     })
 }
 
@@ -99,6 +101,30 @@ fn path_is_svg(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        env,
+        io::Cursor,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn raster_decode_produces_full_size_render_image() {
+        let temp = TestDir::new("decode-render-image");
+        let path = temp.path().join("photo.png");
+        fs::write(&path, png_bytes(4, 2)).unwrap();
+
+        let decoded = decode_image_source(&path).unwrap();
+        let DecodedImageSource::Raster(image) = decoded.source else {
+            panic!("expected raster image");
+        };
+        let size = image.size(0);
+
+        assert_eq!(decoded.width, 4);
+        assert_eq!(decoded.height, 2);
+        assert_eq!(size.width.0, 4);
+        assert_eq!(size.height.0, 2);
+    }
 
     #[test]
     fn source_decompressed_size_uses_color_type_bytes_per_pixel() {
@@ -118,5 +144,43 @@ mod tests {
             source_decompressed_size_bytes(u32::MAX, u32::MAX, image::ColorType::Rgba32F),
             None
         );
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = env::temp_dir().join(format!(
+                "explorer-image-decode-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

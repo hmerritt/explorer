@@ -1,15 +1,4 @@
-use std::sync::Arc;
-
-use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
-use gpui::RenderImage;
-
-use crate::image_viewer::decode::{DecodedImage, DecodedImageSource};
-
-const LANCZOS_OPTIONS: ResizeOptions = ResizeOptions {
-    algorithm: ResizeAlg::Convolution(FilterType::Lanczos3),
-    cropping: fast_image_resize::SrcCropping::None,
-    mul_div_alpha: true,
-};
+const SVG_TARGET_BODY_FRACTION: f64 = 0.8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ImageFitTarget {
@@ -49,78 +38,35 @@ pub(super) fn fitted_image_target(
     })
 }
 
-pub(super) fn render_image_for_target(
-    decoded: &DecodedImage,
-    target: ImageFitTarget,
-) -> Result<Arc<RenderImage>, String> {
-    match &decoded.source {
-        DecodedImageSource::Raster(image) => {
-            let resized = resize_raster_to_target(image, target)?;
-            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(resized)])))
-        }
-        DecodedImageSource::Svg(bytes) => {
-            let rendered = render_svg_to_target(bytes, target)?;
-            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(
-                rendered,
-            )])))
-        }
-    }
-}
-
-fn resize_raster_to_target(
-    image: &image::RgbaImage,
-    target: ImageFitTarget,
-) -> Result<image::RgbaImage, String> {
-    if image.width() == target.pixel_width && image.height() == target.pixel_height {
-        return Ok(image.clone());
+pub(super) fn svg_image_target(
+    image_width: u32,
+    image_height: u32,
+    available_width: f32,
+    available_height: f32,
+    scale_factor: f32,
+) -> Option<ImageFitTarget> {
+    if image_width == 0 || image_height == 0 {
+        return None;
     }
 
-    let mut resized = image::RgbaImage::new(target.pixel_width, target.pixel_height);
-    Resizer::new()
-        .resize(image, &mut resized, &LANCZOS_OPTIONS)
-        .map_err(|error| format!("Failed to resize image: {error}"))?;
-    Ok(resized)
-}
+    let scale_factor = scale_factor.max(1.0);
+    let max_display_width = f64::from(available_width.max(1.0)) * SVG_TARGET_BODY_FRACTION;
+    let max_display_height = f64::from(available_height.max(1.0)) * SVG_TARGET_BODY_FRACTION;
+    let display_scale = (max_display_width / f64::from(image_width))
+        .min(max_display_height / f64::from(image_height));
+    let pixel_width =
+        (f64::from(image_width) * display_scale * f64::from(scale_factor)).floor() as u32;
+    let pixel_height =
+        (f64::from(image_height) * display_scale * f64::from(scale_factor)).floor() as u32;
+    let pixel_width = pixel_width.max(1);
+    let pixel_height = pixel_height.max(1);
 
-fn render_svg_to_target(bytes: &[u8], target: ImageFitTarget) -> Result<image::RgbaImage, String> {
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
-        .map_err(|error| format!("Failed to parse SVG: {error}"))?;
-    let svg_size = tree.size();
-    let scale_x = target.pixel_width as f32 / svg_size.width();
-    let scale_y = target.pixel_height as f32 / svg_size.height();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(target.pixel_width, target.pixel_height)
-        .ok_or_else(|| "Failed to allocate SVG render target.".to_owned())?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_scale(scale_x, scale_y),
-        &mut pixmap.as_mut(),
-    );
-    let mut image =
-        image::RgbaImage::from_raw(target.pixel_width, target.pixel_height, pixmap.take())
-            .ok_or_else(|| "Failed to create SVG image buffer.".to_owned())?;
-    unpremultiply_rgba(&mut image);
-    Ok(image)
-}
-
-fn unpremultiply_rgba(image: &mut image::RgbaImage) {
-    for pixel in image.pixels_mut() {
-        let alpha = u32::from(pixel[3]);
-        if alpha == 0 || alpha == 255 {
-            continue;
-        }
-
-        for channel in &mut pixel.0[..3] {
-            *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn resize_algorithm_is_lanczos3() -> bool {
-    matches!(
-        LANCZOS_OPTIONS.algorithm,
-        ResizeAlg::Convolution(FilterType::Lanczos3)
-    )
+    Some(ImageFitTarget {
+        pixel_width,
+        pixel_height,
+        display_width: pixel_width as f32 / scale_factor,
+        display_height: pixel_height as f32 / scale_factor,
+    })
 }
 
 #[cfg(test)]
@@ -165,24 +111,42 @@ mod tests {
     }
 
     #[test]
-    fn resize_helper_uses_lanczos3() {
-        assert!(resize_algorithm_is_lanczos3());
+    fn svg_target_uses_eighty_percent_of_square_body() {
+        let target = svg_image_target(100, 100, 500.0, 500.0, 1.0).unwrap();
+
+        assert_eq!(target.pixel_width, 400);
+        assert_eq!(target.pixel_height, 400);
+        assert_eq!(target.display_width, 400.0);
+        assert_eq!(target.display_height, 400.0);
     }
 
     #[test]
-    fn raster_resize_preserves_requested_dimensions() {
-        let image = image::RgbaImage::from_pixel(4, 2, image::Rgba([20, 40, 60, 255]));
-        let resized = resize_raster_to_target(
-            &image,
-            ImageFitTarget {
-                pixel_width: 2,
-                pixel_height: 1,
-                display_width: 2.0,
-                display_height: 1.0,
-            },
-        )
-        .unwrap();
+    fn svg_target_preserves_landscape_aspect_inside_eighty_percent_box() {
+        let target = svg_image_target(200, 100, 500.0, 500.0, 1.0).unwrap();
 
-        assert_eq!(resized.dimensions(), (2, 1));
+        assert_eq!(target.pixel_width, 400);
+        assert_eq!(target.pixel_height, 200);
+        assert_eq!(target.display_width, 400.0);
+        assert_eq!(target.display_height, 200.0);
+    }
+
+    #[test]
+    fn svg_target_preserves_portrait_aspect_inside_eighty_percent_box() {
+        let target = svg_image_target(100, 200, 500.0, 500.0, 1.0).unwrap();
+
+        assert_eq!(target.pixel_width, 200);
+        assert_eq!(target.pixel_height, 400);
+        assert_eq!(target.display_width, 200.0);
+        assert_eq!(target.display_height, 400.0);
+    }
+
+    #[test]
+    fn svg_target_uses_device_pixels_for_scale_factor() {
+        let target = svg_image_target(100, 100, 500.0, 500.0, 2.0).unwrap();
+
+        assert_eq!(target.pixel_width, 800);
+        assert_eq!(target.pixel_height, 800);
+        assert_eq!(target.display_width, 400.0);
+        assert_eq!(target.display_height, 400.0);
     }
 }
