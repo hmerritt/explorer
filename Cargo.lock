@@ -2089,6 +2089,7 @@ dependencies = [
  "languages",
  "libc",
  "mime_guess",
+ "moxcms",
  "notify",
  "objc",
  "open",

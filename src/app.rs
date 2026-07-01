@@ -577,6 +577,7 @@ pub fn run() {
     });
 
     app.run(|cx: &mut App| {
+        let startup_image_path = crate::image_viewer::startup_image_path(env::args_os());
         register_embedded_fonts(cx);
         crate::http_client::initialize(cx);
         crate::debug_options::initialize(cx, env::args_os());
@@ -770,7 +771,11 @@ pub fn run() {
             KeyBinding::new("ctrl-v", SearchPaste, Some("ExplorerSearchInput")),
         ]);
 
-        open_explorer_window(cx);
+        if let Some(path) = startup_image_path {
+            crate::image_viewer::open_image_window(path, cx);
+        } else {
+            open_explorer_window(cx);
+        }
         cx.activate(true);
     });
 }

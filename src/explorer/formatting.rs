@@ -13,7 +13,7 @@ pub(super) fn format_timestamp(timestamp: Option<SystemTime>, date_format: &str)
     local.format(date_format).to_string()
 }
 
-pub(super) fn format_size(size: Option<u64>) -> String {
+pub(crate) fn format_size(size: Option<u64>) -> String {
     let Some(size) = size else {
         return String::new();
     };

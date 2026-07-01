@@ -49,7 +49,7 @@ pub(super) fn explorer_tooltip_element(label: impl Into<SharedString>) -> impl I
         )
 }
 
-pub(super) fn explorer_tooltip(
+pub(crate) fn explorer_tooltip(
     label: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView {
     let label = label.into();

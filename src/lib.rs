@@ -7,9 +7,14 @@ mod explorer;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod http_client;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[path = "image/mod.rs"]
+mod image_viewer;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod loaders;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod settings;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod window_chrome;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
