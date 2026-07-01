@@ -255,6 +255,7 @@ pub(super) struct PropertyDetailGroup {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum PropertyDetailGroupKind {
     File,
+    Tags,
     Media,
     Video,
     Audio,
@@ -272,6 +273,7 @@ impl PropertyDetailGroupKind {
     fn title(self) -> &'static str {
         match self {
             Self::File => "file",
+            Self::Tags => "tags",
             Self::Media => "media",
             Self::Video => "video",
             Self::Audio => "audio",
@@ -289,6 +291,7 @@ impl PropertyDetailGroupKind {
 
 const PROPERTY_DETAIL_GROUP_ORDER: &[PropertyDetailGroupKind] = &[
     PropertyDetailGroupKind::File,
+    PropertyDetailGroupKind::Tags,
     PropertyDetailGroupKind::Media,
     PropertyDetailGroupKind::Video,
     PropertyDetailGroupKind::Audio,
@@ -4275,7 +4278,7 @@ fn ffprobe_metadata_details(path: &Path, kind: FfprobeMetadataKind) -> Vec<Prope
         }
     };
     let grouping_started = Instant::now();
-    let groups = ffprobe_detail_groups_from_probe(&probe);
+    let groups = ffprobe_detail_groups_from_probe(&probe, kind);
     crate::debug_options::log_property_timing(
         grouping_started.elapsed(),
         format_args!(
@@ -4811,16 +4814,23 @@ impl FfprobeDetailBuilder {
     }
 }
 
-fn ffprobe_detail_groups_from_probe(probe: &serde_json::Value) -> Vec<PropertyDetailGroup> {
+fn ffprobe_detail_groups_from_probe(
+    probe: &serde_json::Value,
+    kind: FfprobeMetadataKind,
+) -> Vec<PropertyDetailGroup> {
     let mut builder = FfprobeDetailBuilder::default();
-    add_format_details(&mut builder, probe);
-    add_stream_details(&mut builder, probe);
+    add_format_details(&mut builder, probe, kind);
+    add_stream_details(&mut builder, probe, kind);
     add_chapter_details(&mut builder, probe);
-    add_unknown_ffprobe_details(&mut builder, probe);
+    add_unknown_ffprobe_details(&mut builder, probe, kind);
     builder.into_groups()
 }
 
-fn add_format_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
+fn add_format_details(
+    builder: &mut FfprobeDetailBuilder,
+    probe: &serde_json::Value,
+    kind: FfprobeMetadataKind,
+) {
     let Some(format) = probe.get("format").and_then(|format| format.as_object()) else {
         return;
     };
@@ -4842,15 +4852,20 @@ fn add_format_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Va
         .as_deref()
         .and_then(format_bit_rate_label);
     builder.push(PropertyDetailGroupKind::Media, "Bit rate", bit_rate);
-    let embedded_title = builder.tag_field(format, "format", "title");
-    builder.push(
-        PropertyDetailGroupKind::Media,
-        "Embedded title",
-        embedded_title,
-    );
-    push_format_tag_details(builder, format);
+    match kind {
+        FfprobeMetadataKind::Audio => push_audio_format_tag_details(builder, format, probe),
+        FfprobeMetadataKind::Video => {
+            let embedded_title = builder.tag_field(format, "format", "title");
+            builder.push(
+                PropertyDetailGroupKind::Media,
+                "Embedded title",
+                embedded_title,
+            );
+            push_format_tag_details(builder, format);
+        }
+    }
 
-    let counts = ffprobe_stream_counts(probe);
+    let counts = ffprobe_stream_counts(probe, kind);
     if let Some(nb_streams) = format.get("nb_streams") {
         builder.used_paths.insert("format.nb_streams".to_owned());
         let _ = nb_streams;
@@ -4901,12 +4916,101 @@ fn push_format_tag_details(
     }
 }
 
-fn add_stream_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
+fn push_audio_format_tag_details(
+    builder: &mut FfprobeDetailBuilder,
+    format: &serde_json::Map<String, serde_json::Value>,
+    probe: &serde_json::Value,
+) {
+    let mut consumed_keys = BTreeSet::new();
+    let tags = format.get("tags").and_then(|tags| tags.as_object());
+
+    if let Some(tags) = tags {
+        for (label, keys) in [
+            ("Title", &["title"][..]),
+            ("Artist", &["artist"][..]),
+            (
+                "Album artist",
+                &["album_artist", "albumartist", "album artist"],
+            ),
+            ("Album", &["album"][..]),
+            ("Year", &["date", "year"]),
+            ("Track", &["track", "tracknumber", "track_number"]),
+            ("Discnumber", &["discnumber", "disc", "disc_number"]),
+            ("Genre", &["genre"][..]),
+            ("Comment", &["comment"][..]),
+            ("Composer", &["composer"][..]),
+        ] {
+            let value = audio_tag_value(builder, tags, keys, &mut consumed_keys);
+            builder.push(PropertyDetailGroupKind::Tags, label, value);
+        }
+    }
+
+    builder.push(
+        PropertyDetailGroupKind::Tags,
+        "Cover",
+        Some(cover_count_label(attached_picture_stream_count(probe))),
+    );
+
+    let Some(tags) = tags else {
+        return;
+    };
+    for (key, value) in tags {
+        if consumed_keys.contains(key) {
+            continue;
+        }
+        builder.used_paths.insert(format!("format.tags.{key}"));
+        if let Some(value) = ffprobe_scalar_value_label(value) {
+            builder.push(
+                PropertyDetailGroupKind::Tags,
+                humanized_metadata_key(key),
+                Some(value),
+            );
+        }
+    }
+}
+
+fn audio_tag_value(
+    builder: &mut FfprobeDetailBuilder,
+    tags: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+    consumed_keys: &mut BTreeSet<String>,
+) -> Option<String> {
+    let mut selected = None;
+    for key in keys {
+        for (actual_key, value) in tags
+            .iter()
+            .filter(|(actual_key, _)| actual_key.eq_ignore_ascii_case(key))
+        {
+            consumed_keys.insert(actual_key.clone());
+            builder
+                .used_paths
+                .insert(format!("format.tags.{actual_key}"));
+            if selected.is_none() {
+                selected = ffprobe_scalar_value_label(value);
+            }
+        }
+    }
+    selected
+}
+
+fn cover_count_label(count: usize) -> String {
+    if count == 0 {
+        "No (0)".to_owned()
+    } else {
+        format!("Yes ({count})")
+    }
+}
+
+fn add_stream_details(
+    builder: &mut FfprobeDetailBuilder,
+    probe: &serde_json::Value,
+    kind: FfprobeMetadataKind,
+) {
     let Some(streams) = probe.get("streams").and_then(|streams| streams.as_array()) else {
         return;
     };
 
-    let counts = ffprobe_stream_counts(probe);
+    let counts = ffprobe_stream_counts(probe, kind);
     let mut video_count = 0usize;
     let mut audio_count = 0usize;
     let mut subtitle_count = 0usize;
@@ -4915,6 +5019,9 @@ fn add_stream_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Va
         let Some(stream) = stream_value.as_object() else {
             continue;
         };
+        if kind == FfprobeMetadataKind::Audio && is_attached_picture_stream(stream) {
+            continue;
+        }
         let base_path = format!("streams.{index}");
         let codec_type = builder
             .scalar_field(stream, &base_path, "codec_type")
@@ -5294,7 +5401,11 @@ fn add_chapter_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::V
     }
 }
 
-fn add_unknown_ffprobe_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
+fn add_unknown_ffprobe_details(
+    builder: &mut FfprobeDetailBuilder,
+    probe: &serde_json::Value,
+    kind: FfprobeMetadataKind,
+) {
     if let Some(format) = probe.get("format") {
         flatten_unknown_ffprobe_value(
             builder,
@@ -5306,6 +5417,11 @@ fn add_unknown_ffprobe_details(builder: &mut FfprobeDetailBuilder, probe: &serde
     }
     if let Some(streams) = probe.get("streams").and_then(|streams| streams.as_array()) {
         for (index, stream) in streams.iter().enumerate() {
+            if kind == FfprobeMetadataKind::Audio
+                && stream.as_object().is_some_and(is_attached_picture_stream)
+            {
+                continue;
+            }
             let label = builder
                 .stream_labels
                 .get(&index)
@@ -5408,7 +5524,10 @@ struct FfprobeStreamCounts {
     chapters: usize,
 }
 
-fn ffprobe_stream_counts(probe: &serde_json::Value) -> FfprobeStreamCounts {
+fn ffprobe_stream_counts(
+    probe: &serde_json::Value,
+    kind: FfprobeMetadataKind,
+) -> FfprobeStreamCounts {
     let mut counts = FfprobeStreamCounts {
         chapters: probe
             .get("chapters")
@@ -5421,6 +5540,11 @@ fn ffprobe_stream_counts(probe: &serde_json::Value) -> FfprobeStreamCounts {
     };
 
     for stream in streams {
+        if kind == FfprobeMetadataKind::Audio
+            && stream.as_object().is_some_and(is_attached_picture_stream)
+        {
+            continue;
+        }
         match stream
             .get("codec_type")
             .and_then(|codec_type| codec_type.as_str())
@@ -5432,6 +5556,27 @@ fn ffprobe_stream_counts(probe: &serde_json::Value) -> FfprobeStreamCounts {
         }
     }
     counts
+}
+
+fn attached_picture_stream_count(probe: &serde_json::Value) -> usize {
+    probe
+        .get("streams")
+        .and_then(|streams| streams.as_array())
+        .map_or(0, |streams| {
+            streams
+                .iter()
+                .filter(|stream| stream.as_object().is_some_and(is_attached_picture_stream))
+                .count()
+        })
+}
+
+fn is_attached_picture_stream(stream: &serde_json::Map<String, serde_json::Value>) -> bool {
+    stream
+        .get("disposition")
+        .and_then(|disposition| disposition.as_object())
+        .and_then(|disposition| disposition.get("attached_pic"))
+        .and_then(ffprobe_integer_value)
+        == Some(1)
 }
 
 fn stream_counts_summary_label(counts: &FfprobeStreamCounts) -> Option<String> {
@@ -9045,13 +9190,10 @@ mod tests {
 
     #[test]
     fn video_probe_details_are_grouped_and_formatted() {
-        let groups = ffprobe_detail_groups_from_probe(&sample_ffprobe_json(
-            "5025.678",
-            "4898900",
-            "Studio Cut",
-            1920,
-            1080,
-        ));
+        let groups = ffprobe_detail_groups_from_probe(
+            &sample_ffprobe_json("5025.678", "4898900", "Studio Cut", 1920, 1080),
+            FfprobeMetadataKind::Video,
+        );
 
         assert_detail_contains(
             &groups,
@@ -9144,7 +9286,10 @@ mod tests {
 
     #[test]
     fn audio_probe_details_are_grouped_and_formatted() {
-        let groups = ffprobe_detail_groups_from_probe(&sample_audio_ffprobe_json());
+        let groups = ffprobe_detail_groups_from_probe(
+            &sample_audio_ffprobe_json_with_cover_count(2),
+            FfprobeMetadataKind::Audio,
+        );
 
         assert_detail_contains(&groups, PropertyDetailGroupKind::Media, "Format", "FLAC");
         assert_eq!(
@@ -9155,41 +9300,76 @@ mod tests {
             detail_value(&groups, PropertyDetailGroupKind::Media, "Bit rate"),
             Some("0.92 Mb/s (921.60 kb/s)")
         );
+        let tags_index = group_index(&groups, PropertyDetailGroupKind::Tags).unwrap();
+        let media_index = group_index(&groups, PropertyDetailGroupKind::Media).unwrap();
+        assert!(tags_index < media_index);
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Embedded title"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Title"),
             Some("Song Title")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Artist"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Artist"),
             Some("Example Artist")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Album artist"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Album artist"),
             Some("Various Artists")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Album"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Album"),
             Some("Example Album")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Year"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Year"),
             Some("2024")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Genre"),
-            Some("Jazz")
-        );
-        assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Track"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Track"),
             Some("3/10")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Disc"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Discnumber"),
             Some("1/2")
         );
         assert_eq!(
-            detail_value(&groups, PropertyDetailGroupKind::Media, "Composer"),
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Genre"),
+            Some("Jazz")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Comment"),
+            Some("Loose note")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Composer"),
             Some("Example Composer")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Cover"),
+            Some("Yes (2)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Encoder"),
+            Some("reference encoder")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Mood"),
+            Some("Reflective")
+        );
+        assert_eq!(
+            detail_value(
+                &groups,
+                PropertyDetailGroupKind::Tags,
+                "Replaygain Track Gain"
+            ),
+            Some("-7.50 dB")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Embedded title"),
+            None
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Artist"),
+            None
         );
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::Media, "Streams"),
@@ -9203,6 +9383,7 @@ mod tests {
             detail_value(&groups, PropertyDetailGroupKind::Media, "Chapters"),
             Some("1")
         );
+        assert!(detail_group(&groups, PropertyDetailGroupKind::Video).is_none());
 
         assert_detail_contains(&groups, PropertyDetailGroupKind::Audio, "Codec", "FLAC");
         assert_eq!(
@@ -9261,6 +9442,18 @@ mod tests {
             None
         );
         assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Misc, "Format Tag Encoder"),
+            None
+        );
+        assert_eq!(
+            detail_value(
+                &groups,
+                PropertyDetailGroupKind::Misc,
+                "Format Tag Nested Ignored"
+            ),
+            None
+        );
+        assert_eq!(
             detail_value(
                 &groups,
                 PropertyDetailGroupKind::Misc,
@@ -9268,6 +9461,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn audio_tags_cover_reports_zero_when_no_attached_picture_streams() {
+        let groups = ffprobe_detail_groups_from_probe(
+            &sample_audio_ffprobe_json_with_cover_count(0),
+            FfprobeMetadataKind::Audio,
+        );
+
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Tags, "Cover"),
+            Some("No (0)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Streams"),
+            Some("1 Audio")
+        );
+        assert!(detail_group(&groups, PropertyDetailGroupKind::Video).is_none());
     }
 
     #[test]
@@ -9282,9 +9493,10 @@ mod tests {
 
     #[test]
     fn video_probe_unknown_scalars_are_preserved() {
-        let groups = ffprobe_detail_groups_from_probe(&sample_ffprobe_json(
-            "60.0", "1000000", "Clip", 1280, 720,
-        ));
+        let groups = ffprobe_detail_groups_from_probe(
+            &sample_ffprobe_json("60.0", "1000000", "Clip", 1280, 720),
+            FfprobeMetadataKind::Video,
+        );
 
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::Misc, "Format Probe Score"),
@@ -9306,7 +9518,10 @@ mod tests {
 
     #[test]
     fn video_probe_multiple_streams_use_numbered_subgroups() {
-        let groups = ffprobe_detail_groups_from_probe(&sample_multi_stream_ffprobe_json());
+        let groups = ffprobe_detail_groups_from_probe(
+            &sample_multi_stream_ffprobe_json(),
+            FfprobeMetadataKind::Video,
+        );
 
         assert_eq!(
             detail_rows(&groups, PropertyDetailGroupKind::Video),
@@ -10619,11 +10834,49 @@ mod tests {
         })
     }
 
-    fn sample_audio_ffprobe_json() -> serde_json::Value {
+    fn sample_audio_ffprobe_json_with_cover_count(cover_count: usize) -> serde_json::Value {
+        let mut streams = vec![serde_json::json!({
+            "index": 0,
+            "codec_name": "flac",
+            "codec_long_name": "FLAC (Free Lossless Audio Codec)",
+            "codec_type": "audio",
+            "sample_rate": "44100",
+            "channels": 2,
+            "channel_layout": "stereo",
+            "sample_fmt": "s32",
+            "bits_per_raw_sample": "24",
+            "duration": "192.500",
+            "bit_rate": "921600",
+            "disposition": {
+                "default": 1,
+                "attached_pic": 0
+            },
+            "tags": {
+                "language": "eng",
+                "title": "Main audio"
+            }
+        })];
+        for cover_index in 0..cover_count {
+            streams.push(serde_json::json!({
+                "index": cover_index + 1,
+                "codec_name": "mjpeg",
+                "codec_long_name": "Motion JPEG",
+                "codec_type": "video",
+                "width": 1200,
+                "height": 1200,
+                "disposition": {
+                    "attached_pic": 1
+                },
+                "tags": {
+                    "title": format!("Cover {}", cover_index + 1)
+                }
+            }));
+        }
+
         serde_json::json!({
             "format": {
                 "filename": "song.flac",
-                "nb_streams": 1,
+                "nb_streams": streams.len(),
                 "format_name": "flac",
                 "format_long_name": "raw FLAC",
                 "duration": "192.500",
@@ -10635,36 +10888,20 @@ mod tests {
                     "album_artist": "Various Artists",
                     "album": "Example Album",
                     "DATE": "2024",
-                    "genre": "Jazz",
                     "track": "3/10",
                     "discnumber": "1/2",
+                    "genre": "Jazz",
+                    "COMMENT": "Loose note",
                     "composer": "Example Composer",
-                    "encoder": "reference encoder"
-                }
-            },
-            "streams": [
-                {
-                    "index": 0,
-                    "codec_name": "flac",
-                    "codec_long_name": "FLAC (Free Lossless Audio Codec)",
-                    "codec_type": "audio",
-                    "sample_rate": "44100",
-                    "channels": 2,
-                    "channel_layout": "stereo",
-                    "sample_fmt": "s32",
-                    "bits_per_raw_sample": "24",
-                    "duration": "192.500",
-                    "bit_rate": "921600",
-                    "disposition": {
-                        "default": 1,
-                        "attached_pic": 0
-                    },
-                    "tags": {
-                        "language": "eng",
-                        "title": "Main audio"
+                    "encoder": "reference encoder",
+                    "mood": "Reflective",
+                    "replaygain_track_gain": "-7.50 dB",
+                    "nested": {
+                        "ignored": true
                     }
                 }
-            ],
+            },
+            "streams": streams,
             "programs": [],
             "chapters": [
                 {
