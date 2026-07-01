@@ -1233,7 +1233,9 @@ fn platform_path_is_remote_drive(_: &Path) -> bool {
 
 #[cfg(any(target_os = "macos", test))]
 fn macos_volume_drive_roots_from_dir(volumes_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from("/")];
+    let filesystem_root = PathBuf::from("/");
+    let filesystem_root_volume_key = path_volume_key(&filesystem_root);
+    let mut roots = vec![filesystem_root];
     let Ok(entries) = fs::read_dir(volumes_dir) else {
         return roots;
     };
@@ -1242,6 +1244,15 @@ fn macos_volume_drive_roots_from_dir(volumes_dir: &Path) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
+        .filter(|path| {
+            let Some(filesystem_root_volume_key) = filesystem_root_volume_key.as_deref() else {
+                return true;
+            };
+            let Some(volume_key) = path_volume_key(path) else {
+                return true;
+            };
+            volume_key != filesystem_root_volume_key
+        })
         .collect::<Vec<_>>();
     volumes.sort();
     volumes.dedup();
@@ -6585,9 +6596,15 @@ mod tests {
         let volumes = temp.path().join("Volumes");
         let archive = volumes.join("Archive Disk");
         let backup = volumes.join("Backup");
+        let startup = volumes.join("Macintosh HD");
         fs::create_dir_all(&archive).expect("create archive volume");
         fs::create_dir_all(&backup).expect("create backup volume");
+        fs::create_dir_all(&startup).expect("create startup volume alias");
         fs::write(volumes.join("not-a-volume"), "").expect("create file");
+        let _filesystem_root_volume = set_test_path_volume_key(Path::new("/"), Some("root-volume"));
+        let _archive_volume = set_test_path_volume_key(&archive, Some("archive-volume"));
+        let _backup_volume = set_test_path_volume_key(&backup, Some("backup-volume"));
+        let _startup_volume = set_test_path_volume_key(&startup, Some("root-volume"));
 
         assert_eq!(
             macos_volume_drive_roots_from_dir(&volumes),
