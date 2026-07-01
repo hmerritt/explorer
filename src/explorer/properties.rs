@@ -39,17 +39,19 @@ use crate::explorer::{
         language_segment_widths, scan_direct_codebase_summary,
     },
     constants::{
-        SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH, SCROLLBAR_THUMB_ACTIVE_BG,
-        SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG, SCROLLBAR_THUMB_HOVER_WIDTH,
-        SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG, NAV_ICON_DISABLED_COLOR,
+        NAV_ICON_ENABLED_COLOR, NAV_ICON_TEXT_SIZE, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
+        SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
+        SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
+        UTILITY_ICON_BUTTON_SIZE,
     },
     context_menu::clamped_context_menu_origin,
     entry::{DirectoryLinkKind, EntryKind, FileEntry},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryCodeInfo, scan_git_repository_code_info},
     icons::{
-        COPY_ICON, copy_file_dialog_icon_sized, directory_shortcut_icon_sized,
-        file_icon_for_path_sized, folder_icon_sized, image_icon,
+        COPY_ICON, NavIcon, copy_file_dialog_icon_sized, directory_shortcut_icon_sized,
+        file_icon_for_path_sized, folder_icon_sized, image_icon, nav_icon_font,
     },
     image_preview::{
         AnimatedImageSource, PropertyImagePreview, evict_animated_image_source_asset,
@@ -57,6 +59,7 @@ use crate::explorer::{
     },
     open_with::{DefaultAppChangeOutcome, DefaultApplication, default_application_for_file},
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
+    tooltip::explorer_tooltip,
     video::{
         ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe, ffprobe_scalar_value_label,
         parse_positive_f64, path_may_have_audio_metadata, path_may_have_video_metadata,
@@ -98,6 +101,8 @@ const PROPERTIES_IMAGE_CONTEXT_MENU_ICON_SLOT_SIZE: f32 = 14.0;
 const PROPERTIES_IMAGE_CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
 const PROPERTIES_IMAGE_CONTEXT_MENU_HORIZONTAL_PADDING: f32 = 18.0;
 const PROPERTIES_IMAGE_CONTEXT_MENU_CHILD_GAP: f32 = 10.0;
+const PROPERTIES_COVER_NAVIGATION_HEIGHT: f32 = 44.0;
+const PROPERTIES_BUTTON_ROW_TOP_PADDING: f32 = 12.0;
 const PROPERTIES_BORDER: u32 = 0xe5e5e5;
 const PROPERTIES_MUTED_TEXT: u32 = 0x666666;
 const PROPERTIES_GROUP_TITLE: u32 = 0x003399;
@@ -315,6 +320,7 @@ pub(super) struct PropertyDetail {
 enum PropertyTab {
     General,
     Details,
+    Cover,
     Code,
     Image,
     Frames,
@@ -323,6 +329,7 @@ enum PropertyTab {
 const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
     (PropertyTab::General, "General"),
     (PropertyTab::Details, "Details"),
+    (PropertyTab::Cover, "Cover"),
     (PropertyTab::Code, "Code"),
     (PropertyTab::Image, "Image"),
     (PropertyTab::Frames, "Frames"),
@@ -399,6 +406,13 @@ enum PropertyImageState {
     Failed(String),
 }
 
+enum PropertyCoverState {
+    NotStarted,
+    Loading,
+    Ready(Vec<PropertyCoverImage>),
+    Failed(String),
+}
+
 fn property_frames_state_label(state: &PropertyFramesState) -> &'static str {
     match state {
         PropertyFramesState::NotStarted => "not-started",
@@ -415,6 +429,12 @@ struct PropertyFrameThumbnail {
     width: u32,
     height: u32,
     aspect_ratio: f32,
+}
+
+#[derive(Clone, Debug)]
+struct PropertyCoverImage {
+    label: String,
+    preview: PropertyImagePreview,
 }
 
 #[derive(Clone)]
@@ -472,6 +492,9 @@ pub(super) struct PropertiesDialog {
     image_state: PropertyImageState,
     image_generation: u64,
     animated_image_asset_evictions: BTreeSet<String>,
+    cover_state: PropertyCoverState,
+    cover_generation: u64,
+    cover_index: usize,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -486,6 +509,7 @@ pub(super) struct PropertiesDialog {
     checksum_cancel: Option<Arc<AtomicBool>>,
     code_task: Option<Task<()>>,
     image_task: Option<Task<()>>,
+    cover_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
     default_app_task: Option<Task<()>>,
@@ -587,6 +611,9 @@ impl PropertiesDialog {
             image_state: PropertyImageState::NotStarted,
             image_generation: 0,
             animated_image_asset_evictions: BTreeSet::new(),
+            cover_state: PropertyCoverState::NotStarted,
+            cover_generation: 0,
+            cover_index: 0,
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -601,6 +628,7 @@ impl PropertiesDialog {
             checksum_cancel: None,
             code_task: None,
             image_task: None,
+            cover_task: None,
             frames_task: None,
             apply_task: None,
             default_app_task: None,
@@ -701,6 +729,14 @@ impl PropertiesDialog {
         self.animated_image_asset_evictions.clear();
     }
 
+    fn reset_cover_state(&mut self) {
+        self.cover_generation = self.cover_generation.wrapping_add(1);
+        self.cover_state = PropertyCoverState::NotStarted;
+        self.cover_index = 0;
+        self.cover_task = None;
+        self.image_copy_context_menu = None;
+    }
+
     fn reset_frames_state(&mut self) {
         self.frames_generation = self.frames_generation.wrapping_add(1);
         self.frames_state = PropertyFramesState::NotStarted;
@@ -721,6 +757,7 @@ impl PropertiesDialog {
         self.reset_checksum_state();
         self.reset_code_state();
         self.reset_image_state();
+        self.reset_cover_state();
         self.reset_frames_state();
         if let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state {
             if !property_tab_is_visible(self.active_tab, Some(snapshot)) {
@@ -731,6 +768,7 @@ impl PropertiesDialog {
             PropertyTab::Details => self.start_details_task(cx),
             PropertyTab::Code => self.start_code_task(cx),
             PropertyTab::Image => self.start_image_task(cx),
+            PropertyTab::Cover => self.start_cover_task(cx),
             PropertyTab::Frames => self.start_frames_task(cx),
             PropertyTab::General => {}
         }
@@ -1118,6 +1156,71 @@ impl PropertiesDialog {
             });
         });
         self.image_task = Some(task);
+    }
+
+    fn start_cover_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.cover_state, PropertyCoverState::NotStarted) {
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            return;
+        };
+        let Some(path) =
+            single_file_audio_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
+        else {
+            self.cover_state = PropertyCoverState::Failed(
+                "Audio covers are not available for this item.".to_owned(),
+            );
+            return;
+        };
+
+        self.cover_state = PropertyCoverState::Loading;
+        let generation = self.cover_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        let path = property_media_local_path(path)?;
+                        load_audio_cover_previews(&path)
+                    }
+                })
+                .await;
+
+            match &result {
+                Ok(covers) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "audio covers ready path={} covers={}",
+                        path.display(),
+                        covers.len()
+                    ),
+                ),
+                Err(error) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "audio covers failed path={} error={}",
+                        path.display(),
+                        error
+                    ),
+                ),
+            }
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.cover_generation == generation {
+                    dialog.cover_task = None;
+                    dialog.cover_index = 0;
+                    dialog.cover_state = match result {
+                        Ok(covers) => PropertyCoverState::Ready(covers),
+                        Err(error) => PropertyCoverState::Failed(error),
+                    };
+                    cx.notify();
+                }
+            });
+        });
+        self.cover_task = Some(task);
     }
 
     fn start_frames_task(&mut self, cx: &mut Context<Self>) {
@@ -1694,6 +1797,8 @@ impl PropertiesDialog {
                 self.start_code_task(cx);
             } else if tab == PropertyTab::Image {
                 self.start_image_task(cx);
+            } else if tab == PropertyTab::Cover {
+                self.start_cover_task(cx);
             } else if tab == PropertyTab::Frames {
                 if let Some(snapshot) = snapshot {
                     if let Some(path) = single_file_video_path(&snapshot.target, snapshot.item_kind)
@@ -1706,6 +1811,28 @@ impl PropertiesDialog {
                 }
                 self.start_frames_task(cx);
             }
+            cx.notify();
+        }
+    }
+
+    fn select_previous_cover(&mut self, cx: &mut Context<Self>) {
+        if self.cover_index > 0 {
+            self.cover_index -= 1;
+            self.image_copy_context_menu = None;
+            cx.notify();
+        }
+    }
+
+    fn select_next_cover(&mut self, cx: &mut Context<Self>) {
+        let cover_count = match &self.cover_state {
+            PropertyCoverState::Ready(covers) => covers.len(),
+            PropertyCoverState::NotStarted
+            | PropertyCoverState::Loading
+            | PropertyCoverState::Failed(_) => 0,
+        };
+        if self.cover_index + 1 < cover_count {
+            self.cover_index += 1;
+            self.image_copy_context_menu = None;
             cx.notify();
         }
     }
@@ -2138,7 +2265,8 @@ impl PropertiesDialog {
                 PropertyTab::General => self.render_general(&snapshot, window, cx),
                 PropertyTab::Details => self.render_details(&snapshot, cx),
                 PropertyTab::Code => self.render_code(&snapshot, cx),
-                PropertyTab::Image => self.render_image(&snapshot, cx),
+                PropertyTab::Image => self.render_image(&snapshot, window, cx),
+                PropertyTab::Cover => self.render_cover(&snapshot, window, cx),
                 PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
         };
@@ -2734,7 +2862,12 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_image(&mut self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn render_image(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if single_file_image_path(&snapshot.target, snapshot.item_kind).is_none() {
             return centered_message("Image preview is not available for this item.");
         }
@@ -2778,8 +2911,164 @@ impl PropertiesDialog {
                 if let Some(source) = &preview.animated_source {
                     self.evict_animated_image_source_once(source, cx);
                 }
-                body.child(property_image_preview(&preview, cx))
+                let max_size = property_preview_max_size(window, PropertyPreviewKind::Image);
+                body.child(property_image_preview(&preview, max_size, cx))
                     .into_any_element()
+            }
+        }
+    }
+
+    fn render_cover(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if single_file_audio_path(&snapshot.target, snapshot.item_kind).is_none() {
+            return centered_message("Audio covers are not available for this item.");
+        }
+
+        if let PropertyCoverState::Ready(covers) = &self.cover_state
+            && !covers.is_empty()
+            && self.cover_index >= covers.len()
+        {
+            self.cover_index = covers.len() - 1;
+        }
+
+        let body = div()
+            .id("properties-cover-body")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden();
+
+        match &self.cover_state {
+            PropertyCoverState::NotStarted | PropertyCoverState::Loading => body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child("Loading cover..."),
+                )
+                .child(linear_indeterminate(
+                    "properties-cover-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
+                .into_any_element(),
+            PropertyCoverState::Failed(error) => body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child(SharedString::from(error.clone())),
+                )
+                .into_any_element(),
+            PropertyCoverState::Ready(covers) if covers.is_empty() => body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                        .child("No embedded covers are available."),
+                )
+                .into_any_element(),
+            PropertyCoverState::Ready(covers) => {
+                let cover_count = covers.len();
+                let index = self.cover_index.min(cover_count - 1);
+                let cover = covers[index].clone();
+                let previous_enabled = index > 0;
+                let next_enabled = index + 1 < cover_count;
+                let label = if cover_count > 1 {
+                    format!("{} ({}/{})", cover.label, index + 1, cover_count)
+                } else {
+                    cover.label.clone()
+                };
+
+                let previous_button = cover_navigation_button(
+                    "properties-cover-previous",
+                    NavIcon::Back,
+                    "Previous cover",
+                    previous_enabled,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.select_previous_cover(cx);
+                        cx.stop_propagation();
+                    }),
+                );
+                let next_button = cover_navigation_button(
+                    "properties-cover-next",
+                    NavIcon::Forward,
+                    "Next cover",
+                    next_enabled,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.select_next_cover(cx);
+                        cx.stop_propagation();
+                    }),
+                );
+                let max_size = property_preview_max_size(window, PropertyPreviewKind::Cover);
+
+                body.child(
+                    div()
+                        .id("properties-cover-preview")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .overflow_hidden()
+                        .child(property_image_preview(&cover.preview, max_size, cx)),
+                )
+                .child(
+                    div()
+                        .id("properties-cover-navigation")
+                        .h(px(PROPERTIES_COVER_NAVIGATION_HEIGHT))
+                        .w_full()
+                        .flex_shrink_0()
+                        .px(px(PROPERTIES_PANEL_PADDING))
+                        .border_t_1()
+                        .border_color(rgb(PROPERTIES_BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(previous_button)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_center()
+                                .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                                .child(SharedString::from(label)),
+                        )
+                        .child(next_button),
+                )
+                .into_any_element()
             }
         }
     }
@@ -3140,7 +3429,7 @@ impl PropertiesDialog {
             .flex_row()
             .justify_end()
             .gap(px(8.0))
-            .pt(px(12.0))
+            .pt(px(PROPERTIES_BUTTON_ROW_TOP_PADDING))
             .child(
                 property_button("properties-ok", "OK", true, window.scale_factor()).on_click(
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -3989,7 +4278,7 @@ fn property_media_local_path(path: PathBuf) -> Result<PathBuf, String> {
 }
 
 const VIDEO_FRAME_COUNT: usize = 20;
-const VIDEO_FRAME_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const FFMPEG_PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 #[cfg(test)]
 const VIDEO_FRAME_FALLBACK_ASPECT_RATIO: f32 = 16.0 / 9.0;
 const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
@@ -3997,6 +4286,11 @@ const VIDEO_FRAME_PUBLISH_INTERVAL_MS: u64 = 16;
 fn single_file_image_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
     let path = single_file_path(target, item_kind)?;
     path_may_have_image_preview(path).then_some(path)
+}
+
+fn single_file_audio_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
+    let path = single_file_path(target, item_kind)?;
+    path_may_have_audio_metadata(path).then_some(path)
 }
 
 fn single_file_video_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Option<&Path> {
@@ -4385,6 +4679,297 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AudioCoverRequest {
+    stream_index: usize,
+    label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AudioCoverPng {
+    label: String,
+    stream_index: usize,
+    png: Vec<u8>,
+}
+
+fn load_audio_cover_previews(path: &Path) -> Result<Vec<PropertyCoverImage>, String> {
+    let requests = prepare_audio_cover_requests(path)?;
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut covers = Vec::new();
+    let mut errors = Vec::new();
+    for request in requests {
+        match extract_audio_cover_png(path, request).and_then(prepare_audio_cover_preview) {
+            Ok(cover) => covers.push(cover),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    if covers.is_empty() {
+        Err(format!(
+            "ffmpeg failed to extract audio covers: {}",
+            cover_extraction_error_summary(&errors)
+        ))
+    } else {
+        Ok(covers)
+    }
+}
+
+fn prepare_audio_cover_requests(path: &Path) -> Result<Vec<AudioCoverRequest>, String> {
+    let availability_started = Instant::now();
+    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "audio covers ffprobe availability path={} installed={}",
+            path.display(),
+            ffprobe_installed
+        ),
+    );
+    if !ffprobe_installed {
+        return Err(
+            "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
+                .to_owned(),
+        );
+    }
+    let availability_started = Instant::now();
+    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "audio covers ffmpeg availability path={} installed={}",
+            path.display(),
+            ffmpeg_installed
+        ),
+    );
+    if !ffmpeg_installed {
+        return Err(
+            "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
+                .to_owned(),
+        );
+    }
+
+    let output = ffprobe_json_output(path).map_err(|error| format!("ffprobe failed: {error}"))?;
+    let parse_started = Instant::now();
+    let probe: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(probe) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "audio covers ffprobe json parsed path={} stdout_bytes={}",
+                    path.display(),
+                    output.len()
+                ),
+            );
+            probe
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                parse_started.elapsed(),
+                format_args!(
+                    "audio covers ffprobe json parse failed path={} stdout_bytes={} error={}",
+                    path.display(),
+                    output.len(),
+                    error
+                ),
+            );
+            return Err(format!("ffprobe returned unreadable metadata: {error}"));
+        }
+    };
+
+    Ok(audio_cover_requests_from_probe(&probe))
+}
+
+fn audio_cover_requests_from_probe(probe: &serde_json::Value) -> Vec<AudioCoverRequest> {
+    let Some(streams) = probe.get("streams").and_then(|streams| streams.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut requests = Vec::new();
+    for (array_index, stream_value) in streams.iter().enumerate() {
+        let Some(stream) = stream_value.as_object() else {
+            continue;
+        };
+        if !is_attached_picture_stream(stream) {
+            continue;
+        }
+        let cover_number = requests.len() + 1;
+        let stream_index = stream
+            .get("index")
+            .and_then(ffprobe_integer_value)
+            .and_then(|index| usize::try_from(index).ok())
+            .unwrap_or(array_index);
+        requests.push(AudioCoverRequest {
+            stream_index,
+            label: audio_cover_label(stream, cover_number),
+        });
+    }
+    requests
+}
+
+fn audio_cover_label(
+    stream: &serde_json::Map<String, serde_json::Value>,
+    cover_number: usize,
+) -> String {
+    stream
+        .get("tags")
+        .and_then(|tags| tags.as_object())
+        .and_then(|tags| {
+            tags.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("title"))
+                .and_then(|(_, value)| ffprobe_scalar_value_label(value))
+        })
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| format!("Cover {cover_number}"))
+}
+
+fn extract_audio_cover_png(
+    path: &Path,
+    request: AudioCoverRequest,
+) -> Result<AudioCoverPng, String> {
+    let started = Instant::now();
+    match ffmpeg_cover_png_output(path, request.stream_index) {
+        Ok(png) if png.starts_with(FFMPEG_PNG_SIGNATURE) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "audio cover extracted path={} label={} stream={} stdout_bytes={}",
+                    path.display(),
+                    request.label,
+                    request.stream_index,
+                    png.len()
+                ),
+            );
+            Ok(AudioCoverPng {
+                label: request.label,
+                stream_index: request.stream_index,
+                png,
+            })
+        }
+        Ok(png) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "audio cover rejected path={} label={} stream={} stdout_bytes={} error=not-png",
+                    path.display(),
+                    request.label,
+                    request.stream_index,
+                    png.len()
+                ),
+            );
+            Err(format!(
+                "{}: ffmpeg returned {} bytes, but not a PNG image",
+                request.label,
+                png.len()
+            ))
+        }
+        Err(error) => {
+            crate::debug_options::log_property_timing(
+                started.elapsed(),
+                format_args!(
+                    "audio cover failed path={} label={} stream={} error={}",
+                    path.display(),
+                    request.label,
+                    request.stream_index,
+                    error
+                ),
+            );
+            Err(format!("{}: {error}", request.label))
+        }
+    }
+}
+
+fn prepare_audio_cover_preview(cover: AudioCoverPng) -> Result<PropertyCoverImage, String> {
+    let image = image::load_from_memory_with_format(&cover.png, image::ImageFormat::Png)
+        .map_err(|error| {
+            format!(
+                "{}: ffmpeg returned unreadable PNG data for stream {}: {error}",
+                cover.label, cover.stream_index
+            )
+        })?
+        .into_rgba8();
+    let preview = property_image_preview_from_rgba(&cover.label, image)?;
+    Ok(PropertyCoverImage {
+        label: cover.label,
+        preview,
+    })
+}
+
+fn property_image_preview_from_rgba(
+    label: &str,
+    mut image: image::RgbaImage,
+) -> Result<PropertyImagePreview, String> {
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "{label}: ffmpeg returned a PNG image with no dimensions"
+        ));
+    }
+
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+
+    Ok(PropertyImagePreview {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        width,
+        height,
+        animated_source: None,
+    })
+}
+
+fn ffmpeg_cover_png_output(path: &Path, stream_index: usize) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-nostdin")
+        .arg("-i")
+        .arg(path)
+        .arg("-map")
+        .arg(format!("0:{stream_index}"))
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-f")
+        .arg("image2pipe")
+        .arg("-vcodec")
+        .arg("png")
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not start ffmpeg: {error}"))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+
+    let stderr = command_error_output_label(&output.stderr);
+    if stderr.is_empty() {
+        Err(format!("ffmpeg exited with {}", output.status))
+    } else {
+        Err(format!("ffmpeg exited with {}: {stderr}", output.status))
+    }
+}
+
+fn cover_extraction_error_summary(errors: &[String]) -> String {
+    match errors {
+        [] => "no cover data was returned".to_owned(),
+        [error] => error.clone(),
+        [first, ..] => format!("{first} ({} cover attempts failed)", errors.len()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct VideoFrameRequest {
     label_seconds: f64,
@@ -4481,7 +5066,7 @@ fn extract_video_frame_png(
     let seek = request.seek_seconds;
     let started = Instant::now();
     match ffmpeg_frame_png_output(path, seek) {
-        Ok(png) if png.starts_with(VIDEO_FRAME_PNG_SIGNATURE) => {
+        Ok(png) if png.starts_with(FFMPEG_PNG_SIGNATURE) => {
             crate::debug_options::log_property_timing(
                 started.elapsed(),
                 format_args!(
@@ -7165,6 +7750,7 @@ fn property_tabs_for_snapshot(
 fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>) -> bool {
     match tab {
         PropertyTab::General | PropertyTab::Details => true,
+        PropertyTab::Cover => snapshot.is_some_and(snapshot_has_cover_tab),
         PropertyTab::Code => snapshot.is_some_and(snapshot_has_code_tab),
         PropertyTab::Image => snapshot.is_some_and(snapshot_has_image_tab),
         PropertyTab::Frames => snapshot.is_some_and(snapshot_has_frames_tab),
@@ -7177,6 +7763,10 @@ fn snapshot_has_code_tab(snapshot: &PropertySnapshot) -> bool {
 
 fn snapshot_has_image_tab(snapshot: &PropertySnapshot) -> bool {
     single_file_image_path(&snapshot.target, snapshot.item_kind).is_some()
+}
+
+fn snapshot_has_cover_tab(snapshot: &PropertySnapshot) -> bool {
+    single_file_audio_path(&snapshot.target, snapshot.item_kind).is_some()
 }
 
 fn snapshot_has_frames_tab(snapshot: &PropertySnapshot) -> bool {
@@ -7204,16 +7794,87 @@ fn property_scrollbar_metrics_for_dimensions(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PropertyPreviewSize {
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PropertyPreviewKind {
+    Image,
+    Cover,
+}
+
+fn property_preview_max_size(window: &Window, kind: PropertyPreviewKind) -> PropertyPreviewSize {
+    let bounds = window.bounds().size;
+    let width = f32::from(bounds.width)
+        - (PROPERTIES_PADDING * 2.0)
+        - (PROPERTIES_BORDER_WIDTH * 2.0)
+        - (PROPERTIES_PANEL_PADDING * 2.0);
+    let mut height = f32::from(bounds.height)
+        - (PROPERTIES_PADDING * 2.0)
+        - PROPERTIES_TAB_HEIGHT
+        - PROPERTIES_BORDER_WIDTH
+        - PROPERTIES_BORDER_WIDTH
+        - property_button_row_height()
+        - (PROPERTIES_PANEL_PADDING * 2.0);
+    if kind == PropertyPreviewKind::Cover {
+        height -= PROPERTIES_COVER_NAVIGATION_HEIGHT;
+    }
+
+    PropertyPreviewSize {
+        width: width.max(0.0),
+        height: height.max(0.0),
+    }
+}
+
+fn property_button_row_height() -> f32 {
+    PROPERTIES_BUTTON_ROW_TOP_PADDING + PROPERTIES_BUTTON_HEIGHT
+}
+
+fn property_preview_fit_rect(
+    source_width: u32,
+    source_height: u32,
+    max_width: f32,
+    max_height: f32,
+) -> Option<PropertyPreviewSize> {
+    if source_width == 0
+        || source_height == 0
+        || !max_width.is_finite()
+        || !max_height.is_finite()
+        || max_width <= 0.0
+        || max_height <= 0.0
+    {
+        return None;
+    }
+
+    let width = source_width as f32;
+    let height = source_height as f32;
+    let scale = (max_width / width).min(max_height / height).min(1.0);
+    (scale.is_finite() && scale > 0.0).then_some(PropertyPreviewSize {
+        width: width * scale,
+        height: height * scale,
+    })
+}
+
 fn property_image_preview(
     preview: &PropertyImagePreview,
+    max_size: PropertyPreviewSize,
     cx: &mut Context<PropertiesDialog>,
 ) -> AnyElement {
     let payload = property_image_preview_copy_payload(preview);
-    div()
-        .w(px(preview.width as f32))
-        .h(px(preview.height as f32))
-        .max_w_full()
-        .max_h_full()
+    let fit = property_preview_fit_rect(
+        preview.width,
+        preview.height,
+        max_size.width,
+        max_size.height,
+    );
+    let preview = div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
         .overflow_hidden()
         .on_mouse_down(
             MouseButton::Right,
@@ -7222,8 +7883,16 @@ fn property_image_preview(
                 cx.stop_propagation();
             }),
         )
-        .child(property_image_preview_content(preview))
-        .into_any_element()
+        .when_some(fit, |this, fit| {
+            this.child(
+                div()
+                    .w(px(fit.width))
+                    .h(px(fit.height))
+                    .overflow_hidden()
+                    .child(property_image_preview_content(preview)),
+            )
+        });
+    preview.into_any_element()
 }
 
 fn property_image_preview_content(preview: &PropertyImagePreview) -> AnyElement {
@@ -7615,6 +8284,7 @@ fn tab_button(
     let id = match tab {
         PropertyTab::General => "properties-tab-general",
         PropertyTab::Details => "properties-tab-details",
+        PropertyTab::Cover => "properties-tab-cover",
         PropertyTab::Code => "properties-tab-code",
         PropertyTab::Image => "properties-tab-image",
         PropertyTab::Frames => "properties-tab-frames",
@@ -7978,6 +8648,43 @@ fn property_button(
         .child(label)
 }
 
+fn cover_navigation_button(
+    id: &'static str,
+    icon: NavIcon,
+    tooltip: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .w(px(UTILITY_ICON_BUTTON_SIZE))
+        .h(px(UTILITY_ICON_BUTTON_SIZE))
+        .rounded(px(4.0))
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+                .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+                .on_click(on_click)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .tooltip(explorer_tooltip(tooltip))
+        .child(
+            div()
+                .font(nav_icon_font())
+                .text_size(px(NAV_ICON_TEXT_SIZE))
+                .text_color(if enabled {
+                    rgb(NAV_ICON_ENABLED_COLOR)
+                } else {
+                    rgb(NAV_ICON_DISABLED_COLOR)
+                })
+                .child(icon.glyph()),
+        )
+        .into_any_element()
+}
+
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
     use std::path::Path;
@@ -8339,12 +9046,13 @@ mod tests {
     }
 
     #[test]
-    fn properties_dialog_defines_general_details_code_image_and_frames_tabs() {
+    fn properties_dialog_defines_general_details_cover_code_image_and_frames_tabs() {
         assert_eq!(
             PROPERTY_TABS,
             &[
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details"),
+                (PropertyTab::Cover, "Cover"),
                 (PropertyTab::Code, "Code"),
                 (PropertyTab::Image, "Image"),
                 (PropertyTab::Frames, "Frames")
@@ -8529,6 +9237,47 @@ mod tests {
     }
 
     #[test]
+    fn property_preview_fit_rect_bounds_landscape_by_width() {
+        assert_eq!(
+            property_preview_fit_rect(1000, 500, 400.0, 300.0),
+            Some(PropertyPreviewSize {
+                width: 400.0,
+                height: 200.0
+            })
+        );
+    }
+
+    #[test]
+    fn property_preview_fit_rect_bounds_portrait_by_height() {
+        assert_eq!(
+            property_preview_fit_rect(500, 1000, 400.0, 300.0),
+            Some(PropertyPreviewSize {
+                width: 150.0,
+                height: 300.0
+            })
+        );
+    }
+
+    #[test]
+    fn property_preview_fit_rect_keeps_small_image_natural_size() {
+        assert_eq!(
+            property_preview_fit_rect(100, 50, 400.0, 300.0),
+            Some(PropertyPreviewSize {
+                width: 100.0,
+                height: 50.0
+            })
+        );
+    }
+
+    #[test]
+    fn property_preview_fit_rect_omits_invalid_or_empty_space() {
+        assert_eq!(property_preview_fit_rect(100, 50, 0.0, 300.0), None);
+        assert_eq!(property_preview_fit_rect(100, 50, 400.0, 0.0), None);
+        assert_eq!(property_preview_fit_rect(0, 50, 400.0, 300.0), None);
+        assert_eq!(property_preview_fit_rect(100, 0, 400.0, 300.0), None);
+    }
+
+    #[test]
     fn property_image_copy_payload_encodes_render_image_as_png() {
         let expected = vec![10, 20, 30, 255, 50, 60, 70, 128];
         let render_image = render_image_from_bgra(2, 1, vec![30, 20, 10, 255, 70, 60, 50, 128]);
@@ -8608,6 +9357,83 @@ mod tests {
                 panic!("frames should be unavailable");
             };
             assert_eq!(error, "Video frames are not available for this item.");
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_cover_tab_rejects_non_audio_target(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("a.txt");
+        fs::write(&file, b"abc").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Cover;
+                dialog.start_cover_task(cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let dialog = dialog.read(cx);
+            let PropertyCoverState::Failed(error) = &dialog.cover_state else {
+                panic!("cover should be unavailable");
+            };
+            assert_eq!(error, "Audio covers are not available for this item.");
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_cover_buttons_render_and_change_cover_index(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().join("song.mp3");
+        fs::write(&path, b"not real audio").unwrap();
+
+        let (dialog, cx) = test_properties_dialog_window(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Cover;
+                dialog.cover_state = PropertyCoverState::Ready(vec![
+                    test_property_cover_image("Front"),
+                    test_property_cover_image("Back"),
+                ]);
+                dialog.cover_index = 0;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("properties-cover-previous").is_some());
+        assert!(cx.debug_bounds("properties-cover-next").is_some());
+
+        click_visual_selector(cx, "properties-cover-previous");
+        cx.run_until_parked();
+        cx.read_entity(&dialog, |dialog, _| {
+            assert_eq!(dialog.cover_index, 0);
+        });
+
+        click_visual_selector(cx, "properties-cover-next");
+        cx.run_until_parked();
+        cx.read_entity(&dialog, |dialog, _| {
+            assert_eq!(dialog.cover_index, 1);
+        });
+
+        click_visual_selector(cx, "properties-cover-next");
+        cx.run_until_parked();
+        cx.read_entity(&dialog, |dialog, _| {
+            assert_eq!(dialog.cover_index, 1);
+        });
+
+        click_visual_selector(cx, "properties-cover-previous");
+        cx.run_until_parked();
+        cx.read_entity(&dialog, |dialog, _| {
+            assert_eq!(dialog.cover_index, 0);
         });
     }
 
@@ -8743,6 +9569,84 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&video)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Frames, "Frames")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&image)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Image, "Image")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&folder)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&missing)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&mixed)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details")
+            ]
+        );
+    }
+
+    #[test]
+    fn cover_tab_is_visible_only_for_single_audio_files() {
+        let temp = TempDir::new();
+        let audio = temp.path().join("song.mp3");
+        let video = temp.path().join("movie.mp4");
+        let image = temp.path().join("photo.jpg");
+        let folder = temp.path().join("folder");
+        let other = temp.path().join("other.txt");
+        let missing_path = temp.path().join("missing.mp3");
+        fs::write(&audio, b"not real audio").unwrap();
+        fs::write(&video, b"not real video").unwrap();
+        fs::write(&image, b"not real image").unwrap();
+        fs::write(&other, b"other").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let audio = collect_property_snapshot(PropertyTarget { paths: vec![audio] }).unwrap();
+        let video = collect_property_snapshot(PropertyTarget { paths: vec![video] }).unwrap();
+        let image = collect_property_snapshot(PropertyTarget { paths: vec![image] }).unwrap();
+        let folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+        let missing = collect_property_snapshot(PropertyTarget {
+            paths: vec![missing_path],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![audio.target.paths[0].clone(), other],
+        })
+        .unwrap();
+
+        assert_eq!(
+            property_tabs_for_snapshot(Some(&audio)),
+            vec![
+                (PropertyTab::General, "General"),
+                (PropertyTab::Details, "Details"),
+                (PropertyTab::Cover, "Cover")
+            ]
+        );
         assert_eq!(
             property_tabs_for_snapshot(Some(&video)),
             vec![
@@ -9479,6 +10383,55 @@ mod tests {
             Some("1 Audio")
         );
         assert!(detail_group(&groups, PropertyDetailGroupKind::Video).is_none());
+    }
+
+    #[test]
+    fn audio_cover_requests_use_attached_picture_stream_indexes_and_titles() {
+        let requests =
+            audio_cover_requests_from_probe(&sample_audio_ffprobe_json_with_cover_count(2));
+
+        assert_eq!(
+            requests,
+            vec![
+                AudioCoverRequest {
+                    stream_index: 1,
+                    label: "Cover 1".to_owned()
+                },
+                AudioCoverRequest {
+                    stream_index: 2,
+                    label: "Cover 2".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn audio_cover_requests_are_empty_without_attached_picture_streams() {
+        assert!(
+            audio_cover_requests_from_probe(&sample_audio_ffprobe_json_with_cover_count(0))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn audio_cover_preview_decodes_png_dimensions() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(3, 2));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+
+        let cover = prepare_audio_cover_preview(AudioCoverPng {
+            label: "Front".to_owned(),
+            stream_index: 1,
+            png: bytes,
+        })
+        .unwrap();
+
+        assert_eq!(cover.label, "Front");
+        assert_eq!(cover.preview.width, 3);
+        assert_eq!(cover.preview.height, 2);
+        assert_render_image_size(&cover.preview, 3, 2);
     }
 
     #[test]
@@ -10539,6 +11492,18 @@ mod tests {
         Arc::new(RenderImage::new(vec![image::Frame::new(image)]))
     }
 
+    fn test_property_cover_image(label: &str) -> PropertyCoverImage {
+        PropertyCoverImage {
+            label: label.to_owned(),
+            preview: PropertyImagePreview {
+                image: render_image_from_bgra(2, 2, vec![0, 0, 0, 255].repeat(4)),
+                width: 2,
+                height: 2,
+                animated_source: None,
+            },
+        }
+    }
+
     fn clipboard_item_image(item: &ClipboardItem) -> Option<Image> {
         item.entries().iter().find_map(|entry| match entry {
             gpui::ClipboardEntry::Image(image) => Some(image.clone()),
@@ -10581,6 +11546,40 @@ mod tests {
                 )
             })
         })
+    }
+
+    fn test_properties_dialog_window<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        target: PropertyTarget,
+    ) -> (
+        gpui::Entity<PropertiesDialog>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let explorer_root = target
+            .paths
+            .first()
+            .and_then(|path| path.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        cx.set_global(FileChecksumCache::new());
+        let explorer = cx.update(|cx| cx.new(|_| ExplorerView::new(explorer_root)));
+        let explorer = explorer.downgrade();
+        cx.add_window_view(move |_, cx| {
+            PropertiesDialog::new(
+                target,
+                explorer,
+                crate::settings::DEFAULT_DATE_FORMAT.to_owned(),
+                cx.focus_handle(),
+                cx,
+            )
+        })
+    }
+
+    fn click_visual_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+        let position = cx.debug_bounds(selector).expect("element bounds").center();
+        cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
     }
 
     #[cfg(unix)]
