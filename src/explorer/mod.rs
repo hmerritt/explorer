@@ -84,6 +84,10 @@ pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 pub(crate) use formatting::format_size;
 pub(crate) use image_thumbnails::initialize as initialize_image_thumbnail_cache;
 pub(crate) use properties::initialize_file_checksum_cache;
+pub(crate) use scrollbar::{
+    HorizontalScrollbarDrag, HorizontalScrollbarMetrics, ScrollbarArrow, ScrollbarDrag,
+    ScrollbarMetrics, horizontal_scrollbar_arrow_button, scrollbar_arrow_button, scrollbar_corner,
+};
 pub(crate) use tooltip::explorer_tooltip;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {

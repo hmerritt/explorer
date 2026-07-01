@@ -10,11 +10,17 @@ use gpui::{
 
 use crate::{
     explorer::{
+        HorizontalScrollbarDrag, HorizontalScrollbarMetrics, ScrollbarArrow, ScrollbarDrag,
+        ScrollbarMetrics,
         constants::{
+            HORIZONTAL_SCROLLBAR_LINE_DELTA, SCROLLBAR_ARROW_HEIGHT, SCROLLBAR_GUTTER_WIDTH,
+            SCROLLBAR_THUMB_ACTIVE_BG, SCROLLBAR_THUMB_BG, SCROLLBAR_THUMB_HOVER_BG,
+            SCROLLBAR_THUMB_HOVER_WIDTH, SCROLLBAR_THUMB_WIDTH, SCROLLBAR_TRACK_BG,
             STATUS_BAR_HEIGHT, STATUS_BAR_HORIZONTAL_PADDING, STATUS_BAR_SEPARATOR_COLOR,
             STATUS_BAR_TEXT_COLOR, STATUS_BAR_TEXT_SIZE,
         },
-        explorer_tooltip, format_size,
+        explorer_tooltip, format_size, horizontal_scrollbar_arrow_button, scrollbar_arrow_button,
+        scrollbar_corner,
     },
     image_viewer::{
         ImageZoomIn, ImageZoomOut,
@@ -41,10 +47,11 @@ const STATUS_TOOLTIP_SCALING: &str = "Rendered resolution percentage";
 const STATUS_TOOLTIP_SIZE: &str = "Size";
 const STATUS_TOOLTIP_DECOMPRESSED_SIZE: &str = "Decompressed size";
 const IMAGE_VIEWER_MIN_ZOOM: f64 = 0.02;
-const IMAGE_VIEWER_FINE_ZOOM_LIMIT: f64 = 0.10;
-const IMAGE_VIEWER_FINE_ZOOM_STEP: f64 = 0.01;
-const IMAGE_VIEWER_ZOOM_STEP: f64 = 0.10;
 const IMAGE_VIEWER_MAX_ZOOM: f64 = 28.0;
+const IMAGE_VIEWER_MIN_ZOOM_PERCENT: u32 = 2;
+const IMAGE_VIEWER_MAX_ZOOM_PERCENT: u32 = 2800;
+const IMAGE_VIEWER_ZOOM_STEP_FACTOR: f64 = 1.10;
+const IMAGE_VIEWER_SCROLLBAR_LINE_DELTA: f32 = 40.0;
 const IMAGE_VIEWER_WHEEL_LINE_HEIGHT: f32 = 40.0;
 const IMAGE_VIEWER_WHEEL_STEP_PIXELS: f32 = 120.0;
 const ZOOM_EPSILON: f64 = 0.000_001;
@@ -107,6 +114,10 @@ struct ImageViewer {
     manual_transform: bool,
     pan_offset: ImagePanOffset,
     pan_drag: Option<ImagePanDrag>,
+    vertical_scrollbar_hovered: bool,
+    vertical_scrollbar_drag: Option<ScrollbarDrag>,
+    horizontal_scrollbar_hovered: bool,
+    horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     wheel_zoom_delta: f32,
     should_move_window: bool,
 }
@@ -153,6 +164,14 @@ impl ImageDisplayPlacement {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ImageViewportLayout {
+    viewport_width: f32,
+    viewport_height: f32,
+    has_horizontal_scrollbar: bool,
+    has_vertical_scrollbar: bool,
+}
+
 #[derive(Clone)]
 enum ReadyImageRenderSource {
     Raster(Arc<RenderImage>),
@@ -190,6 +209,10 @@ impl ImageViewer {
             manual_transform: false,
             pan_offset: ImagePanOffset::default(),
             pan_drag: None,
+            vertical_scrollbar_hovered: false,
+            vertical_scrollbar_drag: None,
+            horizontal_scrollbar_hovered: false,
+            horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             should_move_window: false,
         };
@@ -322,6 +345,10 @@ impl ImageViewer {
         self.manual_transform = false;
         self.pan_offset = ImagePanOffset::default();
         self.pan_drag = None;
+        self.vertical_scrollbar_hovered = false;
+        self.vertical_scrollbar_drag = None;
+        self.horizontal_scrollbar_hovered = false;
+        self.horizontal_scrollbar_drag = None;
         self.wheel_zoom_delta = 0.0;
     }
 
@@ -367,7 +394,7 @@ impl ImageViewer {
     }
 
     fn handle_zoom_in(&mut self, _: &ImageZoomIn, window: &mut Window, cx: &mut Context<Self>) {
-        let (available_width, available_height) = current_body_available_size(window);
+        let (available_width, available_height) = self.current_image_viewport_size(window);
         let anchor = ImageBodyPoint {
             x: available_width / 2.0,
             y: available_height / 2.0,
@@ -385,7 +412,7 @@ impl ImageViewer {
     }
 
     fn handle_zoom_out(&mut self, _: &ImageZoomOut, window: &mut Window, cx: &mut Context<Self>) {
-        let (available_width, available_height) = current_body_available_size(window);
+        let (available_width, available_height) = self.current_image_viewport_size(window);
         let anchor = ImageBodyPoint {
             x: available_width / 2.0,
             y: available_height / 2.0,
@@ -426,6 +453,82 @@ impl ImageViewer {
             );
         }
         true
+    }
+
+    fn handle_wheel_pan(
+        &mut self,
+        delta_x: f32,
+        delta_y: f32,
+        body_size: gpui::Size<Pixels>,
+        scale_factor: f32,
+    ) -> bool {
+        let Some(placement) = self.current_placement_for_body(body_size, scale_factor) else {
+            return false;
+        };
+
+        let horizontal_metrics = horizontal_scrollbar_metrics_for_placement(placement);
+        let vertical_metrics = vertical_scrollbar_metrics_for_placement(placement);
+        if horizontal_metrics.is_none() && vertical_metrics.is_none() {
+            return false;
+        }
+
+        let mut pan_offset = placement.offset;
+        if let Some(metrics) = vertical_metrics {
+            let effective_delta_y = if delta_y != 0.0 { delta_y } else { delta_x };
+            if effective_delta_y != 0.0 {
+                let scroll_top = metrics.clamp_scroll_top(metrics.scroll_top - effective_delta_y);
+                pan_offset.y = pan_offset_y_from_scroll_top(scroll_top, placement.pan_limit.y);
+            }
+        }
+
+        if let Some(metrics) = horizontal_metrics {
+            let effective_delta_x = if delta_x != 0.0 || vertical_metrics.is_some() {
+                delta_x
+            } else {
+                delta_y
+            };
+            if effective_delta_x != 0.0 {
+                let scroll_left =
+                    metrics.clamp_scroll_left(metrics.scroll_left - effective_delta_x);
+                pan_offset.x = pan_offset_x_from_scroll_left(scroll_left, placement.pan_limit.x);
+            }
+        }
+
+        let pan_offset = clamp_pan_offset_to_limits(pan_offset, placement.pan_limit);
+        if pan_offset == self.pan_offset {
+            return false;
+        }
+
+        self.pan_offset = pan_offset;
+        self.manual_transform = true;
+        true
+    }
+
+    fn current_image_viewport_size(&self, window: &Window) -> (f32, f32) {
+        let (available_width, available_height) = current_body_available_size(window);
+        let Some((image_width, image_height, kind)) = self.ready_image_kind() else {
+            return (available_width, available_height);
+        };
+        let Some(initial_zoom) = initial_native_zoom_for_kind(
+            kind,
+            image_width,
+            image_height,
+            available_width,
+            available_height,
+            window.scale_factor(),
+        ) else {
+            return (available_width, available_height);
+        };
+        let zoom = self
+            .zoom
+            .unwrap_or_else(|| initial_zoom.clamp(0.0, IMAGE_VIEWER_MAX_ZOOM));
+        let Some(target) =
+            native_image_target(image_width, image_height, zoom, window.scale_factor())
+        else {
+            return (available_width, available_height);
+        };
+        let layout = image_viewport_layout(target, available_width, available_height);
+        (layout.viewport_width, layout.viewport_height)
     }
 
     fn zoom_by_steps(
@@ -542,6 +645,110 @@ impl ImageViewer {
         true
     }
 
+    fn handle_vertical_scrollbar_mouse_down(
+        &mut self,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+    ) {
+        if local_y < SCROLLBAR_ARROW_HEIGHT {
+            self.set_vertical_scroll_top(
+                metrics.scroll_by(-IMAGE_VIEWER_SCROLLBAR_LINE_DELTA),
+                placement,
+            );
+        } else if local_y > metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT {
+            self.set_vertical_scroll_top(
+                metrics.scroll_by(IMAGE_VIEWER_SCROLLBAR_LINE_DELTA),
+                placement,
+            );
+        } else if local_y >= metrics.thumb_top && local_y <= metrics.thumb_bottom() {
+            self.vertical_scrollbar_drag = Some(ScrollbarDrag {
+                pointer_offset_from_thumb_top: local_y - metrics.thumb_top,
+            });
+        } else if local_y < metrics.thumb_top {
+            self.set_vertical_scroll_top(metrics.scroll_by(-metrics.viewport_height), placement);
+        } else {
+            self.set_vertical_scroll_top(metrics.scroll_by(metrics.viewport_height), placement);
+        }
+    }
+
+    fn handle_vertical_scrollbar_drag(
+        &mut self,
+        local_y: f32,
+        metrics: ScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+    ) {
+        let Some(drag) = self.vertical_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_top = local_y - drag.pointer_offset_from_thumb_top;
+        self.set_vertical_scroll_top(metrics.scroll_top_for_thumb_top(thumb_top), placement);
+    }
+
+    fn handle_horizontal_scrollbar_mouse_down(
+        &mut self,
+        local_x: f32,
+        metrics: HorizontalScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+    ) {
+        if local_x < SCROLLBAR_ARROW_HEIGHT {
+            self.set_horizontal_scroll_left(
+                metrics.scroll_by(-HORIZONTAL_SCROLLBAR_LINE_DELTA),
+                placement,
+            );
+        } else if local_x > metrics.viewport_width - SCROLLBAR_ARROW_HEIGHT {
+            self.set_horizontal_scroll_left(
+                metrics.scroll_by(HORIZONTAL_SCROLLBAR_LINE_DELTA),
+                placement,
+            );
+        } else if local_x >= metrics.thumb_left && local_x <= metrics.thumb_right() {
+            self.horizontal_scrollbar_drag = Some(HorizontalScrollbarDrag {
+                pointer_offset_from_thumb_left: local_x - metrics.thumb_left,
+            });
+        } else if local_x < metrics.thumb_left {
+            self.set_horizontal_scroll_left(metrics.scroll_by(-metrics.viewport_width), placement);
+        } else {
+            self.set_horizontal_scroll_left(metrics.scroll_by(metrics.viewport_width), placement);
+        }
+    }
+
+    fn handle_horizontal_scrollbar_drag(
+        &mut self,
+        local_x: f32,
+        metrics: HorizontalScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+    ) {
+        let Some(drag) = self.horizontal_scrollbar_drag else {
+            return;
+        };
+
+        let thumb_left = local_x - drag.pointer_offset_from_thumb_left;
+        self.set_horizontal_scroll_left(metrics.scroll_left_for_thumb_left(thumb_left), placement);
+    }
+
+    fn set_vertical_scroll_top(&mut self, scroll_top: f32, placement: ImageDisplayPlacement) {
+        self.pan_offset = clamp_pan_offset_to_limits(
+            ImagePanOffset {
+                x: placement.offset.x,
+                y: pan_offset_y_from_scroll_top(scroll_top, placement.pan_limit.y),
+            },
+            placement.pan_limit,
+        );
+        self.manual_transform = true;
+    }
+
+    fn set_horizontal_scroll_left(&mut self, scroll_left: f32, placement: ImageDisplayPlacement) {
+        self.pan_offset = clamp_pan_offset_to_limits(
+            ImagePanOffset {
+                x: pan_offset_x_from_scroll_left(scroll_left, placement.pan_limit.x),
+                y: placement.offset.y,
+            },
+            placement.pan_limit,
+        );
+        self.manual_transform = true;
+    }
+
     fn current_placement_for_body(
         &self,
         body_size: gpui::Size<Pixels>,
@@ -623,21 +830,14 @@ impl ImageViewer {
         let (available_width, available_height) =
             image_body_available_size(f32::from(viewport.width), f32::from(viewport.height));
         let scale_factor = window.scale_factor();
-        let mut can_pan = false;
         let content = match &self.state {
             ImageViewerState::Loading => image_viewer_status("Loading image..."),
             ImageViewerState::Failed(error) => {
                 image_viewer_status(format!("Cannot display {}: {error}", self.title))
             }
-            ImageViewerState::Ready(_) => {
-                match self.render_ready_body(available_width, available_height, scale_factor, cx) {
-                    Some((content, ready_can_pan)) => {
-                        can_pan = ready_can_pan;
-                        content
-                    }
-                    None => image_viewer_status("Cannot display image."),
-                }
-            }
+            ImageViewerState::Ready(_) => self
+                .render_ready_body(available_width, available_height, scale_factor, cx)
+                .unwrap_or_else(|| image_viewer_status("Cannot display image.")),
         };
 
         div()
@@ -652,7 +852,6 @@ impl ImageViewer {
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .child(content)
-            .child(self.render_body_hit_layer(can_pan, cx))
             .into_any_element()
     }
 
@@ -662,7 +861,7 @@ impl ImageViewer {
         available_height: f32,
         scale_factor: f32,
         cx: &mut Context<Self>,
-    ) -> Option<(AnyElement, bool)> {
+    ) -> Option<AnyElement> {
         let (image_width, image_height, source) = self.ready_render_source()?;
         let initial_zoom = initial_native_zoom_for_kind(
             source.kind(),
@@ -674,9 +873,22 @@ impl ImageViewer {
         )?;
         let zoom = self.sync_zoom_to_initial(initial_zoom);
         let target = native_image_target(image_width, image_height, zoom, scale_factor)?;
-        let placement =
-            image_display_placement(target, available_width, available_height, self.pan_offset);
+        let layout = image_viewport_layout(target, available_width, available_height);
+        let placement = image_display_placement(
+            target,
+            layout.viewport_width,
+            layout.viewport_height,
+            self.pan_offset,
+        );
         self.pan_offset = placement.offset;
+        if !layout.has_vertical_scrollbar {
+            self.vertical_scrollbar_hovered = false;
+            self.vertical_scrollbar_drag = None;
+        }
+        if !layout.has_horizontal_scrollbar {
+            self.horizontal_scrollbar_hovered = false;
+            self.horizontal_scrollbar_drag = None;
+        }
 
         let content = match source {
             ReadyImageRenderSource::Raster(image) => {
@@ -703,7 +915,317 @@ impl ImageViewer {
             }
         };
 
-        Some((content, placement.can_pan()))
+        Some(self.render_ready_body_layout(content, placement, layout, cx))
+    }
+
+    fn render_ready_body_layout(
+        &self,
+        content: AnyElement,
+        placement: ImageDisplayPlacement,
+        layout: ImageViewportLayout,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("image-viewer-ready-body")
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("image-viewer-image-viewport")
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_1()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(content)
+                            .child(self.render_body_hit_layer(placement.can_pan(), cx)),
+                    )
+                    .when(layout.has_vertical_scrollbar, |this| {
+                        this.child(self.render_vertical_scrollbar(placement, cx))
+                    }),
+            )
+            .when(layout.has_horizontal_scrollbar, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .h(px(SCROLLBAR_GUTTER_WIDTH))
+                        .flex_shrink_0()
+                        .child(self.render_horizontal_scrollbar(placement, cx))
+                        .when(layout.has_vertical_scrollbar, |this| {
+                            this.child(scrollbar_corner())
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_vertical_scrollbar(
+        &self,
+        placement: ImageDisplayPlacement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(metrics) = vertical_scrollbar_metrics_for_placement(placement) else {
+            return div().into_any_element();
+        };
+
+        let hovered_or_dragged =
+            self.vertical_scrollbar_hovered || self.vertical_scrollbar_drag.is_some();
+        let thumb_width = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_right = (SCROLLBAR_GUTTER_WIDTH - thumb_width) / 2.0;
+        let thumb_color = if self.vertical_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let bottom_arrow_top = (metrics.viewport_height - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("image-viewer-vertical-scrollbar")
+            .relative()
+            .w(px(SCROLLBAR_GUTTER_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.vertical_scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(scrollbar_arrow_button(0.0, ScrollbarArrow::Up))
+                    .child(scrollbar_arrow_button(
+                        bottom_arrow_top,
+                        ScrollbarArrow::Down,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(metrics.thumb_top))
+                    .right(px(thumb_right))
+                    .w(px(thumb_width))
+                    .h(px(metrics.thumb_height))
+                    .rounded(px(thumb_width / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_vertical_scrollbar_hit_layer(metrics, placement, cx))
+            .into_any_element()
+    }
+
+    fn render_vertical_scrollbar_hit_layer(
+        &self,
+        metrics: ScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, window, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            this.handle_vertical_scrollbar_mouse_down(local_y, metrics, placement);
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            cx.notify();
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, window, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_y = f32::from(event.position.y - bounds.origin.y);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.vertical_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            this.handle_vertical_scrollbar_drag(local_y, metrics, placement);
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            cx.notify();
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.vertical_scrollbar_drag.take().is_some() {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    fn render_horizontal_scrollbar(
+        &self,
+        placement: ImageDisplayPlacement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(metrics) = horizontal_scrollbar_metrics_for_placement(placement) else {
+            return div().into_any_element();
+        };
+
+        let hovered_or_dragged =
+            self.horizontal_scrollbar_hovered || self.horizontal_scrollbar_drag.is_some();
+        let thumb_height = if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_WIDTH
+        } else {
+            SCROLLBAR_THUMB_WIDTH
+        };
+        let thumb_top = (SCROLLBAR_GUTTER_WIDTH - thumb_height) / 2.0;
+        let thumb_color = if self.horizontal_scrollbar_drag.is_some() {
+            SCROLLBAR_THUMB_ACTIVE_BG
+        } else if hovered_or_dragged {
+            SCROLLBAR_THUMB_HOVER_BG
+        } else {
+            SCROLLBAR_THUMB_BG
+        };
+        let right_arrow_left = (metrics.viewport_width - SCROLLBAR_ARROW_HEIGHT).max(0.0);
+
+        div()
+            .id("image-viewer-horizontal-scrollbar")
+            .relative()
+            .flex_1()
+            .h(px(SCROLLBAR_GUTTER_WIDTH))
+            .flex_shrink_0()
+            .bg(rgb(SCROLLBAR_TRACK_BG))
+            .cursor_default()
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.horizontal_scrollbar_hovered = *hovered;
+                cx.notify();
+            }))
+            .when(hovered_or_dragged, |this| {
+                this.child(horizontal_scrollbar_arrow_button(0.0, ScrollbarArrow::Left))
+                    .child(horizontal_scrollbar_arrow_button(
+                        right_arrow_left,
+                        ScrollbarArrow::Right,
+                    ))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(px(metrics.thumb_left))
+                    .top(px(thumb_top))
+                    .w(px(metrics.thumb_width))
+                    .h(px(thumb_height))
+                    .rounded(px(thumb_height / 2.0))
+                    .bg(rgb(thumb_color)),
+            )
+            .child(self.render_horizontal_scrollbar_hit_layer(metrics, placement, cx))
+            .into_any_element()
+    }
+
+    fn render_horizontal_scrollbar_hit_layer(
+        &self,
+        metrics: HorizontalScrollbarMetrics,
+        placement: ImageDisplayPlacement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseDownEvent, _, window, cx| {
+                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                            return;
+                        }
+
+                        let local_x = f32::from(event.position.x - bounds.origin.x);
+                        let _ = entity.update(cx, |this, cx| {
+                            this.handle_horizontal_scrollbar_mouse_down(
+                                local_x, metrics, placement,
+                            );
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            cx.notify();
+                        });
+                    }
+                });
+
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, window, cx| {
+                        if !event.dragging() {
+                            return;
+                        }
+
+                        let local_x = f32::from(event.position.x - bounds.origin.x);
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.horizontal_scrollbar_drag.is_none() {
+                                return;
+                            }
+
+                            this.handle_horizontal_scrollbar_drag(local_x, metrics, placement);
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            cx.notify();
+                        });
+                    }
+                });
+
+                window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.horizontal_scrollbar_drag.take().is_some() {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 
     fn render_status_bar(&self, target: Option<ImageFitTarget>) -> AnyElement {
@@ -821,19 +1343,25 @@ impl ImageViewer {
                 });
 
                 window.on_mouse_event(move |event: &ScrollWheelEvent, _, window, cx| {
-                    if !bounds.contains(&event.position) || !event.modifiers.secondary() {
+                    if !bounds.contains(&event.position) {
                         return;
                     }
 
-                    let anchor = local_body_point(event.position, &bounds);
-                    let delta_y = f32::from(
-                        event
-                            .delta
-                            .pixel_delta(px(IMAGE_VIEWER_WHEEL_LINE_HEIGHT))
-                            .y,
-                    );
+                    let delta = event.delta.pixel_delta(px(IMAGE_VIEWER_WHEEL_LINE_HEIGHT));
                     let _ = entity.update(cx, |this, cx| {
-                        if this.handle_wheel_zoom(delta_y, anchor, bounds.size, window) {
+                        let handled = if event.modifiers.secondary() {
+                            let anchor = local_body_point(event.position, &bounds);
+                            this.handle_wheel_zoom(f32::from(delta.y), anchor, bounds.size, window)
+                        } else {
+                            this.handle_wheel_pan(
+                                f32::from(delta.x),
+                                f32::from(delta.y),
+                                bounds.size,
+                                window.scale_factor(),
+                            )
+                        };
+
+                        if handled {
                             cx.stop_propagation();
                             window.prevent_default();
                             cx.notify();
@@ -937,36 +1465,42 @@ fn next_zoom_level(zoom: f64, direction: i32) -> f64 {
         if zoom < IMAGE_VIEWER_MIN_ZOOM - ZOOM_EPSILON {
             return IMAGE_VIEWER_MIN_ZOOM;
         }
-        if zoom < IMAGE_VIEWER_FINE_ZOOM_LIMIT - ZOOM_EPSILON {
-            let next = stepped_zoom(zoom, IMAGE_VIEWER_FINE_ZOOM_STEP, 1.0);
-            return next.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_FINE_ZOOM_LIMIT);
+
+        let percent = zoom_percent(zoom);
+        let mut next_zoom = zoom * IMAGE_VIEWER_ZOOM_STEP_FACTOR;
+        if zoom_percent(next_zoom) <= percent {
+            next_zoom = zoom_from_percent(percent.saturating_add(1));
         }
-        let next = stepped_zoom(zoom, IMAGE_VIEWER_ZOOM_STEP, 1.0);
-        return next.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
+        return next_zoom.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
     }
 
     if direction < 0 {
         if zoom <= IMAGE_VIEWER_MIN_ZOOM + ZOOM_EPSILON {
             return zoom;
         }
-        if zoom <= IMAGE_VIEWER_FINE_ZOOM_LIMIT + ZOOM_EPSILON {
-            let next = stepped_zoom(zoom, IMAGE_VIEWER_FINE_ZOOM_STEP, -1.0);
-            return next.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_FINE_ZOOM_LIMIT);
+
+        let percent = zoom_percent(zoom);
+        let mut next_zoom = zoom / IMAGE_VIEWER_ZOOM_STEP_FACTOR;
+        if zoom_percent(next_zoom) >= percent {
+            next_zoom = zoom_from_percent(percent.saturating_sub(1));
         }
-        let next = stepped_zoom(zoom, IMAGE_VIEWER_ZOOM_STEP, -1.0);
-        return next.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
+        return next_zoom.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
     }
 
     zoom
 }
 
-fn stepped_zoom(zoom: f64, step: f64, direction: f64) -> f64 {
-    let step_count = if direction > 0.0 {
-        ((zoom + ZOOM_EPSILON) / step).floor() + 1.0
-    } else {
-        ((zoom - ZOOM_EPSILON) / step).ceil() - 1.0
-    };
-    ((step_count * step) * 100.0).round() / 100.0
+fn zoom_percent(zoom: f64) -> u32 {
+    if !zoom.is_finite() {
+        return IMAGE_VIEWER_MAX_ZOOM_PERCENT;
+    }
+
+    ((zoom * 100.0).round() as u32)
+        .clamp(IMAGE_VIEWER_MIN_ZOOM_PERCENT, IMAGE_VIEWER_MAX_ZOOM_PERCENT)
+}
+
+fn zoom_from_percent(percent: u32) -> f64 {
+    f64::from(percent.clamp(IMAGE_VIEWER_MIN_ZOOM_PERCENT, IMAGE_VIEWER_MAX_ZOOM_PERCENT)) / 100.0
 }
 
 fn wheel_zoom_steps(accumulator: &mut f32, delta_y: f32) -> i32 {
@@ -1002,6 +1536,91 @@ fn image_display_placement(
         offset: clamp_pan_offset_to_limits(pan_offset, pan_limit),
         pan_limit,
     }
+}
+
+fn image_viewport_layout(
+    target: ImageFitTarget,
+    available_width: f32,
+    available_height: f32,
+) -> ImageViewportLayout {
+    let mut has_horizontal_scrollbar = false;
+    let mut has_vertical_scrollbar = false;
+
+    loop {
+        let viewport_width = image_viewport_axis_size(available_width, has_vertical_scrollbar);
+        let viewport_height = image_viewport_axis_size(available_height, has_horizontal_scrollbar);
+        let next_has_horizontal_scrollbar = target.display_width > viewport_width;
+        let next_has_vertical_scrollbar = target.display_height > viewport_height;
+
+        if next_has_horizontal_scrollbar == has_horizontal_scrollbar
+            && next_has_vertical_scrollbar == has_vertical_scrollbar
+        {
+            return ImageViewportLayout {
+                viewport_width,
+                viewport_height,
+                has_horizontal_scrollbar,
+                has_vertical_scrollbar,
+            };
+        }
+
+        has_horizontal_scrollbar = next_has_horizontal_scrollbar;
+        has_vertical_scrollbar = next_has_vertical_scrollbar;
+    }
+}
+
+fn image_viewport_axis_size(available: f32, reserve_cross_axis_scrollbar: bool) -> f32 {
+    (available
+        - if reserve_cross_axis_scrollbar {
+            SCROLLBAR_GUTTER_WIDTH
+        } else {
+            0.0
+        })
+    .max(1.0)
+}
+
+fn horizontal_scrollbar_metrics_for_placement(
+    placement: ImageDisplayPlacement,
+) -> Option<HorizontalScrollbarMetrics> {
+    if placement.pan_limit.x <= 0.0 {
+        return None;
+    }
+
+    HorizontalScrollbarMetrics::new(
+        placement.target.display_width - (placement.pan_limit.x * 2.0),
+        placement.target.display_width,
+        scroll_left_from_pan_offset(placement.offset.x, placement.pan_limit.x),
+    )
+}
+
+fn vertical_scrollbar_metrics_for_placement(
+    placement: ImageDisplayPlacement,
+) -> Option<ScrollbarMetrics> {
+    if placement.pan_limit.y <= 0.0 {
+        return None;
+    }
+
+    ScrollbarMetrics::new(
+        placement.target.display_width - (placement.pan_limit.x * 2.0),
+        placement.target.display_height - (placement.pan_limit.y * 2.0),
+        placement.target.display_height,
+        scroll_top_from_pan_offset(placement.offset.y, placement.pan_limit.y),
+    )
+}
+
+fn scroll_left_from_pan_offset(pan_x: f32, pan_limit_x: f32) -> f32 {
+    (pan_limit_x - pan_x).clamp(0.0, pan_limit_x * 2.0)
+}
+
+fn scroll_top_from_pan_offset(pan_y: f32, pan_limit_y: f32) -> f32 {
+    (pan_limit_y - pan_y).clamp(0.0, pan_limit_y * 2.0)
+}
+
+fn pan_offset_x_from_scroll_left(scroll_left: f32, pan_limit_x: f32) -> f32 {
+    pan_limit_x - scroll_left.clamp(0.0, pan_limit_x * 2.0)
+}
+
+fn pan_offset_y_from_scroll_top(scroll_top: f32, pan_limit_y: f32) -> f32 {
+    pan_limit_y - scroll_top.clamp(0.0, pan_limit_y * 2.0)
 }
 
 fn pan_limits(
@@ -1511,25 +2130,40 @@ mod tests {
     }
 
     #[test]
-    fn zoom_levels_use_requested_min_max_and_steps() {
+    fn zoom_levels_use_rounded_ten_percent_steps() {
+        let mut zoom = 1.0;
+        for expected_percent in [110, 121, 133, 146, 161, 177] {
+            zoom = next_zoom_level(zoom, 1);
+            assert_eq!(zoom_percent(zoom), expected_percent);
+        }
+
+        let mut zoom = 1.0;
+        for expected_percent in [91, 83, 75, 68, 62, 56, 51, 47, 42, 39, 35, 32] {
+            zoom = next_zoom_level(zoom, -1);
+            assert_eq!(zoom_percent(zoom), expected_percent);
+        }
+    }
+
+    #[test]
+    fn zoom_levels_preserve_min_max_and_monotonic_steps() {
         assert_eq!(next_zoom_level(0.01, 1), 0.02);
         assert_eq!(next_zoom_level(0.02, -1), 0.02);
         assert_eq!(next_zoom_level(27.95, 1), 28.0);
         assert_eq!(next_zoom_level(28.0, 1), 28.0);
-        assert_eq!(next_zoom_level(0.05, 1), 0.06);
-        assert_eq!(next_zoom_level(0.06, -1), 0.05);
-        assert_eq!(next_zoom_level(0.10, -1), 0.09);
-        assert_eq!(next_zoom_level(0.10, 1), 0.20);
-        assert_eq!(next_zoom_level(0.30, 1), 0.40);
-        assert_eq!(next_zoom_level(0.30, -1), 0.20);
+        assert_eq!(zoom_percent(next_zoom_level(0.02, 1)), 3);
+        assert_eq!(zoom_percent(next_zoom_level(0.03, -1)), 2);
+        assert_eq!(zoom_percent(next_zoom_level(0.10, -1)), 9);
+        assert_eq!(zoom_percent(next_zoom_level(0.10, 1)), 11);
+        assert_eq!(zoom_percent(next_zoom_level(0.30, 1)), 33);
+        assert_eq!(zoom_percent(next_zoom_level(0.30, -1)), 27);
     }
 
     #[test]
     fn zoom_levels_snap_arbitrary_fit_scales() {
-        assert_eq!(next_zoom_level(0.333, 1), 0.4);
-        assert_eq!(next_zoom_level(0.333, -1), 0.3);
-        assert_eq!(next_zoom_level(0.055, 1), 0.06);
-        assert_eq!(next_zoom_level(0.055, -1), 0.05);
+        assert_eq!(zoom_percent(next_zoom_level(0.333, 1)), 37);
+        assert_eq!(zoom_percent(next_zoom_level(0.333, -1)), 30);
+        assert_eq!(zoom_percent(next_zoom_level(0.055, 1)), 7);
+        assert_eq!(zoom_percent(next_zoom_level(0.055, -1)), 5);
         assert_eq!(next_zoom_level(0.005, 1), 0.02);
         assert_eq!(next_zoom_level(0.005, -1), 0.005);
     }
@@ -1593,6 +2227,142 @@ mod tests {
         assert_eq!(placement.offset, ImagePanOffset { x: -200.0, y: 0.0 });
         assert_eq!(placement.pan_limit, ImagePanOffset { x: 300.0, y: 0.0 });
         assert!(placement.can_pan());
+    }
+
+    #[test]
+    fn scrollbar_layout_rechecks_cross_axis_gutters() {
+        let vertical_then_horizontal = image_viewport_layout(
+            ImageFitTarget {
+                pixel_width: 390,
+                pixel_height: 320,
+                display_width: 390.0,
+                display_height: 320.0,
+            },
+            400.0,
+            318.0,
+        );
+        assert_eq!(
+            vertical_then_horizontal,
+            ImageViewportLayout {
+                viewport_width: 400.0 - SCROLLBAR_GUTTER_WIDTH,
+                viewport_height: 318.0 - SCROLLBAR_GUTTER_WIDTH,
+                has_horizontal_scrollbar: true,
+                has_vertical_scrollbar: true,
+            }
+        );
+
+        let horizontal_then_vertical = image_viewport_layout(
+            ImageFitTarget {
+                pixel_width: 405,
+                pixel_height: 301,
+                display_width: 405.0,
+                display_height: 301.0,
+            },
+            400.0,
+            318.0,
+        );
+        assert_eq!(
+            horizontal_then_vertical,
+            ImageViewportLayout {
+                viewport_width: 400.0 - SCROLLBAR_GUTTER_WIDTH,
+                viewport_height: 318.0 - SCROLLBAR_GUTTER_WIDTH,
+                has_horizontal_scrollbar: true,
+                has_vertical_scrollbar: true,
+            }
+        );
+    }
+
+    #[test]
+    fn scrollbar_metrics_map_to_center_based_pan_offsets() {
+        let placement = image_display_placement(
+            ImageFitTarget {
+                pixel_width: 1000,
+                pixel_height: 600,
+                display_width: 1000.0,
+                display_height: 600.0,
+            },
+            400.0,
+            300.0,
+            ImagePanOffset::default(),
+        );
+        let horizontal = horizontal_scrollbar_metrics_for_placement(placement).unwrap();
+        let vertical = vertical_scrollbar_metrics_for_placement(placement).unwrap();
+
+        assert_eq!(placement.pan_limit, ImagePanOffset { x: 300.0, y: 150.0 });
+        assert_eq!(horizontal.scroll_left, 300.0);
+        assert_eq!(horizontal.scroll_max, 600.0);
+        assert_eq!(vertical.scroll_top, 150.0);
+        assert_eq!(vertical.scroll_max, 300.0);
+        assert_eq!(
+            pan_offset_x_from_scroll_left(0.0, placement.pan_limit.x),
+            300.0
+        );
+        assert_eq!(
+            pan_offset_y_from_scroll_top(0.0, placement.pan_limit.y),
+            150.0
+        );
+        assert_eq!(
+            pan_offset_x_from_scroll_left(horizontal.scroll_max, placement.pan_limit.x),
+            -300.0
+        );
+        assert_eq!(
+            pan_offset_y_from_scroll_top(vertical.scroll_max, placement.pan_limit.y),
+            -150.0
+        );
+    }
+
+    #[test]
+    fn image_scrollbar_scroll_values_clamp_to_pan_limits() {
+        assert_eq!(pan_offset_x_from_scroll_left(-50.0, 300.0), 300.0);
+        assert_eq!(pan_offset_x_from_scroll_left(999.0, 300.0), -300.0);
+        assert_eq!(pan_offset_y_from_scroll_top(-50.0, 150.0), 150.0);
+        assert_eq!(pan_offset_y_from_scroll_top(999.0, 150.0), -150.0);
+        assert_eq!(scroll_left_from_pan_offset(999.0, 300.0), 0.0);
+        assert_eq!(scroll_left_from_pan_offset(-999.0, 300.0), 600.0);
+        assert_eq!(scroll_top_from_pan_offset(999.0, 150.0), 0.0);
+        assert_eq!(scroll_top_from_pan_offset(-999.0, 150.0), 300.0);
+    }
+
+    #[test]
+    fn image_scrollbar_line_page_and_thumb_movement_update_pan_coordinates() {
+        let placement = image_display_placement(
+            ImageFitTarget {
+                pixel_width: 1000,
+                pixel_height: 600,
+                display_width: 1000.0,
+                display_height: 600.0,
+            },
+            400.0,
+            300.0,
+            ImagePanOffset::default(),
+        );
+        let horizontal = horizontal_scrollbar_metrics_for_placement(placement).unwrap();
+        let vertical = vertical_scrollbar_metrics_for_placement(placement).unwrap();
+
+        let line_right = horizontal.scroll_by(HORIZONTAL_SCROLLBAR_LINE_DELTA);
+        assert_eq!(
+            pan_offset_x_from_scroll_left(line_right, placement.pan_limit.x),
+            -40.0
+        );
+        let line_down = vertical.scroll_by(IMAGE_VIEWER_SCROLLBAR_LINE_DELTA);
+        assert_eq!(
+            pan_offset_y_from_scroll_top(line_down, placement.pan_limit.y),
+            -40.0
+        );
+        let page_down = vertical.scroll_by(vertical.viewport_height);
+        assert_eq!(
+            pan_offset_y_from_scroll_top(page_down, placement.pan_limit.y),
+            -150.0
+        );
+
+        let thumb_bottom = vertical.track_top + vertical.track_height - vertical.thumb_height;
+        assert_eq!(
+            pan_offset_y_from_scroll_top(
+                vertical.scroll_top_for_thumb_top(thumb_bottom),
+                placement.pan_limit.y
+            ),
+            -150.0
+        );
     }
 
     #[test]

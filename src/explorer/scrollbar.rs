@@ -16,30 +16,30 @@ use crate::explorer::{
 use crate::settings::FileViewMode;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ScrollbarDrag {
-    pub(super) pointer_offset_from_thumb_top: f32,
+pub(crate) struct ScrollbarDrag {
+    pub(crate) pointer_offset_from_thumb_top: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct HorizontalScrollbarDrag {
-    pub(super) pointer_offset_from_thumb_left: f32,
+pub(crate) struct HorizontalScrollbarDrag {
+    pub(crate) pointer_offset_from_thumb_left: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ScrollbarMetrics {
-    pub(super) viewport_width: f32,
-    pub(super) viewport_height: f32,
-    pub(super) content_height: f32,
-    pub(super) scroll_top: f32,
-    pub(super) scroll_max: f32,
-    pub(super) track_top: f32,
-    pub(super) track_height: f32,
-    pub(super) thumb_top: f32,
-    pub(super) thumb_height: f32,
+pub(crate) struct ScrollbarMetrics {
+    pub(crate) viewport_width: f32,
+    pub(crate) viewport_height: f32,
+    pub(crate) content_height: f32,
+    pub(crate) scroll_top: f32,
+    pub(crate) scroll_max: f32,
+    pub(crate) track_top: f32,
+    pub(crate) track_height: f32,
+    pub(crate) thumb_top: f32,
+    pub(crate) thumb_height: f32,
 }
 
 impl ScrollbarMetrics {
-    pub(super) fn new(
+    pub(crate) fn new(
         viewport_width: f32,
         viewport_height: f32,
         content_height: f32,
@@ -79,19 +79,19 @@ impl ScrollbarMetrics {
         })
     }
 
-    pub(super) fn thumb_bottom(self) -> f32 {
+    pub(crate) fn thumb_bottom(self) -> f32 {
         self.thumb_top + self.thumb_height
     }
 
-    pub(super) fn clamp_scroll_top(self, scroll_top: f32) -> f32 {
+    pub(crate) fn clamp_scroll_top(self, scroll_top: f32) -> f32 {
         scroll_top.clamp(0.0, self.scroll_max)
     }
 
-    pub(super) fn scroll_by(self, delta: f32) -> f32 {
+    pub(crate) fn scroll_by(self, delta: f32) -> f32 {
         self.clamp_scroll_top(self.scroll_top + delta)
     }
 
-    pub(super) fn scroll_top_for_thumb_top(self, thumb_top: f32) -> f32 {
+    pub(crate) fn scroll_top_for_thumb_top(self, thumb_top: f32) -> f32 {
         let thumb_travel = self.track_height - self.thumb_height;
         if thumb_travel <= 0.0 {
             return 0.0;
@@ -103,7 +103,7 @@ impl ScrollbarMetrics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ScrollbarArrow {
+pub(crate) enum ScrollbarArrow {
     Up,
     Down,
     Left,
@@ -111,7 +111,7 @@ pub(super) enum ScrollbarArrow {
 }
 
 impl ScrollbarArrow {
-    pub(super) fn glyph(self) -> &'static str {
+    pub(crate) fn glyph(self) -> &'static str {
         match self {
             Self::Up => "\u{E70E}",
             Self::Down => "\u{E70D}",
@@ -122,19 +122,19 @@ impl ScrollbarArrow {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct HorizontalScrollbarMetrics {
-    pub(super) viewport_width: f32,
-    pub(super) content_width: f32,
-    pub(super) scroll_left: f32,
-    pub(super) scroll_max: f32,
-    pub(super) track_left: f32,
-    pub(super) track_width: f32,
-    pub(super) thumb_left: f32,
-    pub(super) thumb_width: f32,
+pub(crate) struct HorizontalScrollbarMetrics {
+    pub(crate) viewport_width: f32,
+    pub(crate) content_width: f32,
+    pub(crate) scroll_left: f32,
+    pub(crate) scroll_max: f32,
+    pub(crate) track_left: f32,
+    pub(crate) track_width: f32,
+    pub(crate) thumb_left: f32,
+    pub(crate) thumb_width: f32,
 }
 
 impl HorizontalScrollbarMetrics {
-    pub(super) fn new(viewport_width: f32, content_width: f32, scroll_left: f32) -> Option<Self> {
+    pub(crate) fn new(viewport_width: f32, content_width: f32, scroll_left: f32) -> Option<Self> {
         if viewport_width <= 0.0 || content_width <= viewport_width {
             return None;
         }
@@ -168,19 +168,19 @@ impl HorizontalScrollbarMetrics {
         })
     }
 
-    pub(super) fn thumb_right(self) -> f32 {
+    pub(crate) fn thumb_right(self) -> f32 {
         self.thumb_left + self.thumb_width
     }
 
-    pub(super) fn clamp_scroll_left(self, scroll_left: f32) -> f32 {
+    pub(crate) fn clamp_scroll_left(self, scroll_left: f32) -> f32 {
         scroll_left.clamp(0.0, self.scroll_max)
     }
 
-    pub(super) fn scroll_by(self, delta: f32) -> f32 {
+    pub(crate) fn scroll_by(self, delta: f32) -> f32 {
         self.clamp_scroll_left(self.scroll_left + delta)
     }
 
-    pub(super) fn scroll_left_for_thumb_left(self, thumb_left: f32) -> f32 {
+    pub(crate) fn scroll_left_for_thumb_left(self, thumb_left: f32) -> f32 {
         let thumb_travel = self.track_width - self.thumb_width;
         if thumb_travel <= 0.0 {
             return 0.0;
@@ -593,7 +593,7 @@ impl ExplorerView {
     }
 }
 
-pub(super) fn scrollbar_arrow_button(top: f32, arrow: ScrollbarArrow) -> Div {
+pub(crate) fn scrollbar_arrow_button(top: f32, arrow: ScrollbarArrow) -> Div {
     div()
         .absolute()
         .top(px(top))
@@ -618,7 +618,7 @@ pub(super) fn scrollbar_header_spacer() -> Div {
         .bg(rgb(0xffffff))
 }
 
-pub(super) fn horizontal_scrollbar_arrow_button(left: f32, arrow: ScrollbarArrow) -> Div {
+pub(crate) fn horizontal_scrollbar_arrow_button(left: f32, arrow: ScrollbarArrow) -> Div {
     div()
         .absolute()
         .left(px(left))
@@ -635,7 +635,7 @@ pub(super) fn horizontal_scrollbar_arrow_button(left: f32, arrow: ScrollbarArrow
         .child(arrow.glyph())
 }
 
-pub(super) fn scrollbar_corner() -> Div {
+pub(crate) fn scrollbar_corner() -> Div {
     div()
         .w(px(SCROLLBAR_GUTTER_WIDTH))
         .h(px(SCROLLBAR_GUTTER_WIDTH))
