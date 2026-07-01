@@ -4,10 +4,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gpui::actions;
+
 mod color;
 mod decode;
 mod resize;
 mod view;
+
+actions!(image_viewer, [ImageZoomIn, ImageZoomOut]);
 
 pub(crate) use view::open_image_window;
 

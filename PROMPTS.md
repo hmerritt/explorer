@@ -1,10 +1,9 @@
 ## 1
 
-- Scaling should be high-quality (Lanczos or equivalent)
+Image viewer tweaks:
 
----
-
-- Refactor image scaling so that the image
+- Status bar buttons right-aligned: "100%" (sets render resolution to 100%). "Fit Width", sets zoom so that image width is 100% of the window with no overflow (height can overflow). "Fit Height", sets zoom so that image height is 100% of the window height no overflow (width can overflow).
+- F keybinding to: jump to 100% render resolution, and once there if pressed again jump back to initial size (fit within window bounds)
 
 ## 2
 

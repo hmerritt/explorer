@@ -36,6 +36,7 @@ use crate::explorer::{
     SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
     SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
+use crate::image_viewer::{ImageZoomIn, ImageZoomOut};
 use crate::settings::{APP_ID, SettingsState, config_dir};
 
 const APP_TITLE: &str = "Explorer";
@@ -614,6 +615,9 @@ pub fn run() {
             KeyBinding::new("up", DialogFocusPrimary, Some("ExplorerDialog")),
             KeyBinding::new("right", DialogFocusSecondary, Some("ExplorerDialog")),
             KeyBinding::new("down", DialogFocusSecondary, Some("ExplorerDialog")),
+            KeyBinding::new("+", ImageZoomIn, Some("ImageViewer")),
+            KeyBinding::new("=", ImageZoomIn, Some("ImageViewer")),
+            KeyBinding::new("-", ImageZoomOut, Some("ImageViewer")),
             KeyBinding::new("ctrl-a", SelectAll, None),
             KeyBinding::new("ctrl-c", CopySelected, None),
             KeyBinding::new("ctrl-x", CutSelected, None),

@@ -69,6 +69,72 @@ pub(super) fn svg_image_target(
     })
 }
 
+pub(super) fn native_image_target(
+    image_width: u32,
+    image_height: u32,
+    zoom: f64,
+    scale_factor: f32,
+) -> Option<ImageFitTarget> {
+    if image_width == 0 || image_height == 0 {
+        return None;
+    }
+
+    let scale_factor = scale_factor.max(1.0);
+    let zoom = zoom.max(0.0);
+    let pixel_width = scaled_dimension(image_width, zoom);
+    let pixel_height = scaled_dimension(image_height, zoom);
+
+    Some(ImageFitTarget {
+        pixel_width,
+        pixel_height,
+        display_width: pixel_width as f32 / scale_factor,
+        display_height: pixel_height as f32 / scale_factor,
+    })
+}
+
+pub(super) fn raster_initial_native_zoom(
+    image_width: u32,
+    image_height: u32,
+    available_width: f32,
+    available_height: f32,
+    scale_factor: f32,
+) -> Option<f64> {
+    fitted_image_target(
+        image_width,
+        image_height,
+        available_width,
+        available_height,
+        scale_factor,
+    )
+    .map(|target| f64::from(target.pixel_width) / f64::from(image_width))
+}
+
+pub(super) fn svg_initial_native_zoom(
+    image_width: u32,
+    image_height: u32,
+    available_width: f32,
+    available_height: f32,
+    scale_factor: f32,
+) -> Option<f64> {
+    svg_image_target(
+        image_width,
+        image_height,
+        available_width,
+        available_height,
+        scale_factor,
+    )
+    .map(|target| f64::from(target.pixel_width) / f64::from(image_width))
+}
+
+fn scaled_dimension(source: u32, zoom: f64) -> u32 {
+    let scaled = (f64::from(source) * zoom).round();
+    if !scaled.is_finite() {
+        return u32::MAX;
+    }
+
+    scaled.clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +214,40 @@ mod tests {
         assert_eq!(target.pixel_height, 800);
         assert_eq!(target.display_width, 400.0);
         assert_eq!(target.display_height, 400.0);
+    }
+
+    #[test]
+    fn native_target_uses_zoom_as_source_pixel_ratio_and_device_pixels_for_display() {
+        let target = native_image_target(2000, 1000, 0.25, 2.0).unwrap();
+
+        assert_eq!(target.pixel_width, 500);
+        assert_eq!(target.pixel_height, 250);
+        assert_eq!(target.display_width, 250.0);
+        assert_eq!(target.display_height, 125.0);
+    }
+
+    #[test]
+    fn native_target_clamps_to_at_least_one_pixel() {
+        let target = native_image_target(10, 10, 0.02, 1.0).unwrap();
+
+        assert_eq!(target.pixel_width, 1);
+        assert_eq!(target.pixel_height, 1);
+        assert_eq!(native_image_target(0, 10, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn raster_initial_zoom_is_fit_ratio_capped_at_native_size() {
+        let large = raster_initial_native_zoom(2000, 1000, 800.0, 600.0, 1.0).unwrap();
+        let small = raster_initial_native_zoom(200, 100, 800.0, 600.0, 2.0).unwrap();
+
+        assert_eq!(large, 0.4);
+        assert_eq!(small, 1.0);
+    }
+
+    #[test]
+    fn svg_initial_zoom_uses_eighty_percent_target_ratio() {
+        let zoom = svg_initial_native_zoom(100, 100, 500.0, 500.0, 2.0).unwrap();
+
+        assert_eq!(zoom, 8.0);
     }
 }
