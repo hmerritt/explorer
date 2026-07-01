@@ -59,8 +59,8 @@ use crate::explorer::{
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     video::{
         ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe, ffprobe_scalar_value_label,
-        parse_positive_f64, path_may_have_video_metadata, safe_video_frame_seek_seconds,
-        video_frame_inset_seconds, video_frame_timestamp_label,
+        parse_positive_f64, path_may_have_audio_metadata, path_may_have_video_metadata,
+        safe_video_frame_seek_seconds, video_frame_inset_seconds, video_frame_timestamp_label,
     },
     view::ExplorerView,
 };
@@ -3978,7 +3978,7 @@ fn path_may_have_exif(path: &Path) -> bool {
 }
 
 fn path_may_have_media_details(path: &Path) -> bool {
-    path_may_have_exif(path) || path_may_have_video_metadata(path)
+    path_may_have_exif(path) || ffprobe_metadata_kind_for_path(path).is_some()
 }
 
 fn property_media_local_path(path: PathBuf) -> Result<PathBuf, String> {
@@ -4047,8 +4047,8 @@ fn media_details(path: &Path) -> Vec<PropertyDetailGroup> {
     if path_may_have_exif(path) {
         groups.extend(exif_details(path));
     }
-    if path_may_have_video_metadata(path) {
-        groups.extend(video_details(path));
+    if let Some(kind) = ffprobe_metadata_kind_for_path(path) {
+        groups.extend(ffprobe_metadata_details(path, kind));
     }
     groups
 }
@@ -4174,26 +4174,76 @@ const EXIF_VALUE_TOO_LARGE_LABEL: &str = "<value too large to display>";
 const EXIF_NON_STANDARD_VALUE_CHAR_LIMIT: usize = 1024;
 const EXIF_STANDARD_VALUE_CHAR_LIMIT: usize = 5120;
 
-fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FfprobeMetadataKind {
+    Audio,
+    Video,
+}
+
+impl FfprobeMetadataKind {
+    fn log_label(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn unavailable_detail_name(self) -> &'static str {
+        match self {
+            Self::Audio => "Audio metadata",
+            Self::Video => "Video metadata",
+        }
+    }
+
+    fn no_metadata_message(self) -> &'static str {
+        match self {
+            Self::Audio => "No audio metadata was reported.",
+            Self::Video => "No video metadata was reported.",
+        }
+    }
+}
+
+fn ffprobe_metadata_kind_for_path(path: &Path) -> Option<FfprobeMetadataKind> {
+    let mime = mime_guess::from_path(path).first_raw();
+    if mime.is_some_and(|mime| mime.starts_with("audio/")) {
+        return Some(FfprobeMetadataKind::Audio);
+    }
+    if mime.is_some_and(|mime| mime.starts_with("video/")) {
+        return Some(FfprobeMetadataKind::Video);
+    }
+    if path_may_have_audio_metadata(path) {
+        return Some(FfprobeMetadataKind::Audio);
+    }
+    if path_may_have_video_metadata(path) {
+        return Some(FfprobeMetadataKind::Video);
+    }
+    None
+}
+
+fn ffprobe_metadata_details(path: &Path, kind: FfprobeMetadataKind) -> Vec<PropertyDetailGroup> {
+    let log_label = kind.log_label();
     let availability_started = Instant::now();
     let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
-            "video ffprobe availability path={} installed={}",
+            "{log_label} ffprobe availability path={} installed={}",
             path.display(),
             ffprobe_installed
         ),
     );
     if !ffprobe_installed {
-        return video_metadata_unavailable_groups(
+        return ffprobe_metadata_unavailable_groups(
+            kind,
             "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer.",
         );
     }
 
     let output = match ffprobe_json_output(path) {
         Ok(output) => output,
-        Err(error) => return video_metadata_unavailable_groups(format!("ffprobe failed: {error}")),
+        Err(error) => {
+            return ffprobe_metadata_unavailable_groups(kind, format!("ffprobe failed: {error}"));
+        }
     };
     let parse_started = Instant::now();
     let probe: serde_json::Value = match serde_json::from_slice(&output) {
@@ -4201,7 +4251,7 @@ fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
             crate::debug_options::log_property_timing(
                 parse_started.elapsed(),
                 format_args!(
-                    "video ffprobe json parsed path={} stdout_bytes={}",
+                    "{log_label} ffprobe json parsed path={} stdout_bytes={}",
                     path.display(),
                     output.len()
                 ),
@@ -4212,40 +4262,44 @@ fn video_details(path: &Path) -> Vec<PropertyDetailGroup> {
             crate::debug_options::log_property_timing(
                 parse_started.elapsed(),
                 format_args!(
-                    "video ffprobe json parse failed path={} stdout_bytes={} error={}",
+                    "{log_label} ffprobe json parse failed path={} stdout_bytes={} error={}",
                     path.display(),
                     output.len(),
                     error
                 ),
             );
-            return video_metadata_unavailable_groups(format!(
-                "ffprobe returned unreadable metadata: {error}"
-            ));
+            return ffprobe_metadata_unavailable_groups(
+                kind,
+                format!("ffprobe returned unreadable metadata: {error}"),
+            );
         }
     };
     let grouping_started = Instant::now();
-    let groups = video_detail_groups_from_probe(&probe);
+    let groups = ffprobe_detail_groups_from_probe(&probe);
     crate::debug_options::log_property_timing(
         grouping_started.elapsed(),
         format_args!(
-            "video metadata grouped path={} groups={} details={}",
+            "{log_label} metadata grouped path={} groups={} details={}",
             path.display(),
             groups.len(),
             detail_count(&groups)
         ),
     );
     if groups.is_empty() {
-        return video_metadata_unavailable_groups("No video metadata was reported.");
+        return ffprobe_metadata_unavailable_groups(kind, kind.no_metadata_message());
     }
 
     groups
 }
 
-fn video_metadata_unavailable_groups(message: impl Into<String>) -> Vec<PropertyDetailGroup> {
+fn ffprobe_metadata_unavailable_groups(
+    kind: FfprobeMetadataKind,
+    message: impl Into<String>,
+) -> Vec<PropertyDetailGroup> {
     vec![property_detail_group(
         PropertyDetailGroupKind::Media,
         vec![PropertyDetail {
-            name: "Video metadata".to_owned(),
+            name: kind.unavailable_detail_name().to_owned(),
             value: message.into(),
         }],
     )]
@@ -4282,7 +4336,7 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
             crate::debug_options::log_property_timing(
                 started.elapsed(),
                 format_args!(
-                    "video ffprobe command failed path={} error={}",
+                    "ffprobe command failed path={} error={}",
                     path.display(),
                     error
                 ),
@@ -4294,7 +4348,7 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
         crate::debug_options::log_property_timing(
             started.elapsed(),
             format_args!(
-                "video ffprobe command succeeded path={} stdout_bytes={}",
+                "ffprobe command succeeded path={} stdout_bytes={}",
                 path.display(),
                 output.stdout.len()
             ),
@@ -4308,7 +4362,7 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
         crate::debug_options::log_property_timing(
             started.elapsed(),
             format_args!(
-                "video ffprobe command failed path={} error={}",
+                "ffprobe command failed path={} error={}",
                 path.display(),
                 error
             ),
@@ -4319,7 +4373,7 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
         crate::debug_options::log_property_timing(
             started.elapsed(),
             format_args!(
-                "video ffprobe command failed path={} error={}",
+                "ffprobe command failed path={} error={}",
                 path.display(),
                 error
             ),
@@ -4640,13 +4694,13 @@ fn frame_extraction_error_summary(errors: &[String]) -> String {
 }
 
 #[derive(Default)]
-struct VideoDetailBuilder {
+struct FfprobeDetailBuilder {
     groups: BTreeMap<PropertyDetailGroupKind, Vec<PropertyDetail>>,
     used_paths: BTreeSet<String>,
     stream_labels: BTreeMap<usize, String>,
 }
 
-impl VideoDetailBuilder {
+impl FfprobeDetailBuilder {
     fn push_heading(&mut self, kind: PropertyDetailGroupKind, name: impl Into<String>) {
         self.groups.entry(kind).or_default().push(PropertyDetail {
             name: name.into(),
@@ -4693,17 +4747,57 @@ impl VideoDetailBuilder {
         ffprobe_integer_value(value)
     }
 
+    fn scalar_field_from_keys(
+        &mut self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        base_path: &str,
+        keys: &[&str],
+    ) -> Option<String> {
+        let mut selected = None;
+        for key in keys {
+            if let Some((actual_key, value)) = object
+                .iter()
+                .find(|(actual_key, _)| actual_key.eq_ignore_ascii_case(key))
+            {
+                self.used_paths.insert(format!("{base_path}.{actual_key}"));
+                if selected.is_none() {
+                    selected = ffprobe_scalar_value_label(value);
+                }
+            }
+        }
+        selected
+    }
+
     fn tag_field(
         &mut self,
         object: &serde_json::Map<String, serde_json::Value>,
         base_path: &str,
         key: &str,
     ) -> Option<String> {
-        let path = format!("{base_path}.tags.{key}");
+        self.tag_field_from_keys(object, base_path, &[key])
+    }
+
+    fn tag_field_from_keys(
+        &mut self,
+        object: &serde_json::Map<String, serde_json::Value>,
+        base_path: &str,
+        keys: &[&str],
+    ) -> Option<String> {
         let tags = object.get("tags")?.as_object()?;
-        let value = tags.get(key)?;
-        self.used_paths.insert(path);
-        ffprobe_scalar_value_label(value)
+        let mut selected = None;
+        for key in keys {
+            if let Some((actual_key, value)) = tags
+                .iter()
+                .find(|(actual_key, _)| actual_key.eq_ignore_ascii_case(key))
+            {
+                self.used_paths
+                    .insert(format!("{base_path}.tags.{actual_key}"));
+                if selected.is_none() {
+                    selected = ffprobe_scalar_value_label(value);
+                }
+            }
+        }
+        selected
     }
 
     fn into_groups(mut self) -> Vec<PropertyDetailGroup> {
@@ -4717,8 +4811,8 @@ impl VideoDetailBuilder {
     }
 }
 
-fn video_detail_groups_from_probe(probe: &serde_json::Value) -> Vec<PropertyDetailGroup> {
-    let mut builder = VideoDetailBuilder::default();
+fn ffprobe_detail_groups_from_probe(probe: &serde_json::Value) -> Vec<PropertyDetailGroup> {
+    let mut builder = FfprobeDetailBuilder::default();
     add_format_details(&mut builder, probe);
     add_stream_details(&mut builder, probe);
     add_chapter_details(&mut builder, probe);
@@ -4726,7 +4820,7 @@ fn video_detail_groups_from_probe(probe: &serde_json::Value) -> Vec<PropertyDeta
     builder.into_groups()
 }
 
-fn add_format_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Value) {
+fn add_format_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
     let Some(format) = probe.get("format").and_then(|format| format.as_object()) else {
         return;
     };
@@ -4754,6 +4848,7 @@ fn add_format_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Valu
         "Embedded title",
         embedded_title,
     );
+    push_format_tag_details(builder, format);
 
     let counts = ffprobe_stream_counts(probe);
     if let Some(nb_streams) = format.get("nb_streams") {
@@ -4787,7 +4882,26 @@ fn add_format_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Valu
     );
 }
 
-fn add_stream_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Value) {
+fn push_format_tag_details(
+    builder: &mut FfprobeDetailBuilder,
+    format: &serde_json::Map<String, serde_json::Value>,
+) {
+    for (label, keys) in [
+        ("Artist", &["artist"][..]),
+        ("Album artist", &["album_artist", "albumartist"]),
+        ("Album", &["album"][..]),
+        ("Year", &["date", "year"]),
+        ("Genre", &["genre"][..]),
+        ("Track", &["track", "tracknumber"]),
+        ("Disc", &["disc", "discnumber"]),
+        ("Composer", &["composer"][..]),
+    ] {
+        let value = builder.tag_field_from_keys(format, "format", keys);
+        builder.push(PropertyDetailGroupKind::Media, label, value);
+    }
+}
+
+fn add_stream_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
     let Some(streams) = probe.get("streams").and_then(|streams| streams.as_array()) else {
         return;
     };
@@ -4863,7 +4977,7 @@ fn stream_detail_name(prefix: Option<&str>, name: &str) -> String {
 }
 
 fn add_video_stream_details(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
     label: Option<&str>,
@@ -4995,17 +5109,23 @@ fn add_video_stream_details(
 }
 
 fn add_audio_stream_details(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
     label: Option<&str>,
 ) {
     let codec_name = builder.scalar_field(stream, base_path, "codec_name");
     let codec_long_name = builder.scalar_field(stream, base_path, "codec_long_name");
+    let compression = codec_name.as_deref().and_then(audio_compression_label);
     builder.push(
         PropertyDetailGroupKind::Audio,
         stream_detail_name(label, "Codec"),
         metadata_name_label(codec_long_name, codec_name),
+    );
+    builder.push(
+        PropertyDetailGroupKind::Audio,
+        stream_detail_name(label, "Compression"),
+        compression.map(str::to_owned),
     );
     let channels = builder
         .integer_field(stream, base_path, "channels")
@@ -5039,6 +5159,29 @@ fn add_audio_stream_details(
         stream_detail_name(label, "Bit rate"),
         bit_rate,
     );
+    let bit_depth = builder
+        .scalar_field_from_keys(
+            stream,
+            base_path,
+            &[
+                "bits_per_sample",
+                "bits_per_raw_sample",
+                "bits_per_coded_sample",
+            ],
+        )
+        .as_deref()
+        .and_then(format_bit_depth_label);
+    builder.push(
+        PropertyDetailGroupKind::Audio,
+        stream_detail_name(label, "Bit depth"),
+        bit_depth,
+    );
+    let sample_format = builder.scalar_field(stream, base_path, "sample_fmt");
+    builder.push(
+        PropertyDetailGroupKind::Audio,
+        stream_detail_name(label, "Sample format"),
+        sample_format,
+    );
     let duration = builder
         .scalar_field(stream, base_path, "duration")
         .as_deref()
@@ -5060,10 +5203,16 @@ fn add_audio_stream_details(
         stream_detail_name(label, "Title"),
         title,
     );
+    let disposition = disposition_label(builder, stream, base_path);
+    builder.push(
+        PropertyDetailGroupKind::Audio,
+        stream_detail_name(label, "Disposition"),
+        disposition,
+    );
 }
 
 fn add_subtitle_stream_details(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
     label: Option<&str>,
@@ -5096,7 +5245,7 @@ fn add_subtitle_stream_details(
 }
 
 fn add_basic_stream_details(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
     kind: PropertyDetailGroupKind,
@@ -5115,7 +5264,7 @@ fn add_basic_stream_details(
     builder.push(kind, format!("{label} Title"), title);
 }
 
-fn add_chapter_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Value) {
+fn add_chapter_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
     let Some(chapters) = probe
         .get("chapters")
         .and_then(|chapters| chapters.as_array())
@@ -5145,7 +5294,7 @@ fn add_chapter_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Val
     }
 }
 
-fn add_unknown_ffprobe_details(builder: &mut VideoDetailBuilder, probe: &serde_json::Value) {
+fn add_unknown_ffprobe_details(builder: &mut FfprobeDetailBuilder, probe: &serde_json::Value) {
     if let Some(format) = probe.get("format") {
         flatten_unknown_ffprobe_value(
             builder,
@@ -5216,7 +5365,7 @@ fn add_unknown_ffprobe_details(builder: &mut VideoDetailBuilder, probe: &serde_j
 }
 
 fn flatten_unknown_ffprobe_value(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     value: &serde_json::Value,
     path: String,
     label: String,
@@ -5393,6 +5542,11 @@ fn format_sample_rate_label(value: &str) -> Option<String> {
     Some(format!("{} Hz", sample_rate.separate_with_commas()))
 }
 
+fn format_bit_depth_label(value: &str) -> Option<String> {
+    let bits = value.trim().parse::<u64>().ok()?;
+    Some(format!("{bits} bit"))
+}
+
 fn channels_label(channels: u64) -> String {
     format!(
         "{channels} {}",
@@ -5400,8 +5554,33 @@ fn channels_label(channels: u64) -> String {
     )
 }
 
+fn audio_compression_label(codec_name: &str) -> Option<&'static str> {
+    let codec = codec_name.trim().to_ascii_lowercase();
+    if codec.starts_with("pcm_")
+        || matches!(
+            codec.as_str(),
+            "flac" | "alac" | "ape" | "wavpack" | "tta" | "tak" | "truehd" | "mlp"
+        )
+    {
+        return Some("Lossless");
+    }
+
+    if codec.starts_with("wma")
+        || codec.starts_with("amr")
+        || codec.starts_with("ra_")
+        || matches!(
+            codec.as_str(),
+            "mp3" | "aac" | "ac3" | "eac3" | "dts" | "opus" | "vorbis" | "mp2"
+        )
+    {
+        return Some("Lossy");
+    }
+
+    None
+}
+
 fn disposition_label(
-    builder: &mut VideoDetailBuilder,
+    builder: &mut FfprobeDetailBuilder,
     stream: &serde_json::Map<String, serde_json::Value>,
     base_path: &str,
 ) -> Option<String> {
@@ -8866,7 +9045,7 @@ mod tests {
 
     #[test]
     fn video_probe_details_are_grouped_and_formatted() {
-        let groups = video_detail_groups_from_probe(&sample_ffprobe_json(
+        let groups = ffprobe_detail_groups_from_probe(&sample_ffprobe_json(
             "5025.678",
             "4898900",
             "Studio Cut",
@@ -8948,6 +9127,10 @@ mod tests {
             Some("2 channels")
         );
         assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Compression"),
+            Some("Lossy")
+        );
+        assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::Subtitles, "Disposition"),
             Some("Default")
         );
@@ -8960,8 +9143,146 @@ mod tests {
     }
 
     #[test]
+    fn audio_probe_details_are_grouped_and_formatted() {
+        let groups = ffprobe_detail_groups_from_probe(&sample_audio_ffprobe_json());
+
+        assert_detail_contains(&groups, PropertyDetailGroupKind::Media, "Format", "FLAC");
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Duration"),
+            Some("0h 03m (0:03:12.500)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Bit rate"),
+            Some("0.92 Mb/s (921.60 kb/s)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Embedded title"),
+            Some("Song Title")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Artist"),
+            Some("Example Artist")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Album artist"),
+            Some("Various Artists")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Album"),
+            Some("Example Album")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Year"),
+            Some("2024")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Genre"),
+            Some("Jazz")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Track"),
+            Some("3/10")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Disc"),
+            Some("1/2")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Composer"),
+            Some("Example Composer")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Streams"),
+            Some("1 Audio")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Audio tracks"),
+            Some("1")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Chapters"),
+            Some("1")
+        );
+
+        assert_detail_contains(&groups, PropertyDetailGroupKind::Audio, "Codec", "FLAC");
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Compression"),
+            Some("Lossless")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Channels"),
+            Some("2 channels")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Channel layout"),
+            Some("stereo")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Sample rate"),
+            Some("44,100 Hz")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Bit rate"),
+            Some("0.92 Mb/s (921.60 kb/s)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Bit depth"),
+            Some("24 bit")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Sample format"),
+            Some("s32")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Duration"),
+            Some("0h 03m (0:03:12.500)")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Language"),
+            Some("eng")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Title"),
+            Some("Main audio")
+        );
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Audio, "Disposition"),
+            Some("Default")
+        );
+        assert_detail_contains(
+            &groups,
+            PropertyDetailGroupKind::Chapters,
+            "Chapter 1",
+            "Intro",
+        );
+
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Misc, "Format Tag Artist"),
+            None
+        );
+        assert_eq!(
+            detail_value(
+                &groups,
+                PropertyDetailGroupKind::Misc,
+                "Audio 1 Bits Per Raw Sample"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn audio_compression_labels_known_codecs() {
+        assert_eq!(audio_compression_label("flac"), Some("Lossless"));
+        assert_eq!(audio_compression_label("pcm_s16le"), Some("Lossless"));
+        assert_eq!(audio_compression_label("aac"), Some("Lossy"));
+        assert_eq!(audio_compression_label("wmav2"), Some("Lossy"));
+        assert_eq!(audio_compression_label("ra_144"), Some("Lossy"));
+        assert_eq!(audio_compression_label("mystery"), None);
+    }
+
+    #[test]
     fn video_probe_unknown_scalars_are_preserved() {
-        let groups = video_detail_groups_from_probe(&sample_ffprobe_json(
+        let groups = ffprobe_detail_groups_from_probe(&sample_ffprobe_json(
             "60.0", "1000000", "Clip", 1280, 720,
         ));
 
@@ -8985,7 +9306,7 @@ mod tests {
 
     #[test]
     fn video_probe_multiple_streams_use_numbered_subgroups() {
-        let groups = video_detail_groups_from_probe(&sample_multi_stream_ffprobe_json());
+        let groups = ffprobe_detail_groups_from_probe(&sample_multi_stream_ffprobe_json());
 
         assert_eq!(
             detail_rows(&groups, PropertyDetailGroupKind::Video),
@@ -9005,9 +9326,11 @@ mod tests {
             vec![
                 ("#1", ""),
                 ("Codec", "AAC"),
+                ("Compression", "Lossy"),
                 ("Channels", "2 channels"),
                 ("#2", ""),
                 ("Codec", "Opus"),
+                ("Compression", "Lossy"),
                 ("Channels", "6 channels"),
             ]
         );
@@ -9040,7 +9363,8 @@ mod tests {
 
     #[test]
     fn unavailable_video_metadata_returns_nonfatal_group() {
-        let groups = video_metadata_unavailable_groups("ffprobe missing");
+        let groups =
+            ffprobe_metadata_unavailable_groups(FfprobeMetadataKind::Video, "ffprobe missing");
 
         assert_eq!(
             detail_value(&groups, PropertyDetailGroupKind::Media, "Video metadata"),
@@ -9049,10 +9373,43 @@ mod tests {
     }
 
     #[test]
-    fn video_metadata_detection_uses_video_mime_or_extension() {
-        assert!(path_may_have_video_metadata(Path::new("movie.mp4")));
-        assert!(path_may_have_video_metadata(Path::new("clip.mkv")));
-        assert!(!path_may_have_video_metadata(Path::new("note.txt")));
+    fn unavailable_audio_metadata_returns_nonfatal_group() {
+        let groups =
+            ffprobe_metadata_unavailable_groups(FfprobeMetadataKind::Audio, "ffprobe missing");
+
+        assert_eq!(
+            detail_value(&groups, PropertyDetailGroupKind::Media, "Audio metadata"),
+            Some("ffprobe missing")
+        );
+    }
+
+    #[test]
+    fn ffprobe_metadata_detection_prefers_audio_mime_before_video_extension_fallback() {
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("movie.mp4")),
+            Some(FfprobeMetadataKind::Video)
+        );
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("clip.mkv")),
+            Some(FfprobeMetadataKind::Video)
+        );
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("song.mp3")),
+            Some(FfprobeMetadataKind::Audio)
+        );
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("track.flac")),
+            Some(FfprobeMetadataKind::Audio)
+        );
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("clip.m4a")),
+            Some(FfprobeMetadataKind::Audio)
+        );
+        assert_eq!(
+            ffprobe_metadata_kind_for_path(Path::new("sound.ogg")),
+            Some(FfprobeMetadataKind::Audio)
+        );
+        assert_eq!(ffprobe_metadata_kind_for_path(Path::new("note.txt")), None);
     }
 
     #[test]
@@ -10256,6 +10613,66 @@ mod tests {
                     "end_time": "60.000000",
                     "tags": {
                         "title": "Opening"
+                    }
+                }
+            ]
+        })
+    }
+
+    fn sample_audio_ffprobe_json() -> serde_json::Value {
+        serde_json::json!({
+            "format": {
+                "filename": "song.flac",
+                "nb_streams": 1,
+                "format_name": "flac",
+                "format_long_name": "raw FLAC",
+                "duration": "192.500",
+                "size": "22176000",
+                "bit_rate": "921600",
+                "tags": {
+                    "TITLE": "Song Title",
+                    "ARTIST": "Example Artist",
+                    "album_artist": "Various Artists",
+                    "album": "Example Album",
+                    "DATE": "2024",
+                    "genre": "Jazz",
+                    "track": "3/10",
+                    "discnumber": "1/2",
+                    "composer": "Example Composer",
+                    "encoder": "reference encoder"
+                }
+            },
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": "flac",
+                    "codec_long_name": "FLAC (Free Lossless Audio Codec)",
+                    "codec_type": "audio",
+                    "sample_rate": "44100",
+                    "channels": 2,
+                    "channel_layout": "stereo",
+                    "sample_fmt": "s32",
+                    "bits_per_raw_sample": "24",
+                    "duration": "192.500",
+                    "bit_rate": "921600",
+                    "disposition": {
+                        "default": 1,
+                        "attached_pic": 0
+                    },
+                    "tags": {
+                        "language": "eng",
+                        "title": "Main audio"
+                    }
+                }
+            ],
+            "programs": [],
+            "chapters": [
+                {
+                    "id": 1,
+                    "start_time": "0.000000",
+                    "end_time": "15.000000",
+                    "tags": {
+                        "title": "Intro"
                     }
                 }
             ]

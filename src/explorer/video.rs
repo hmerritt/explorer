@@ -25,10 +25,34 @@ pub(super) fn path_may_have_video_metadata(path: &Path) -> bool {
     VIDEO_METADATA_EXTENSIONS.contains(&extension.as_str())
 }
 
+pub(super) fn path_may_have_audio_metadata(path: &Path) -> bool {
+    if mime_guess::from_path(path)
+        .first_raw()
+        .is_some_and(|mime| mime.starts_with("audio/"))
+    {
+        return true;
+    }
+
+    let Some(extension) = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+    else {
+        return false;
+    };
+
+    AUDIO_METADATA_EXTENSIONS.contains(&extension.as_str())
+}
+
 const VIDEO_METADATA_EXTENSIONS: &[&str] = &[
     "webm", "mkv", "flv", "vob", "ogv", "ogg", "rrc", "gifv", "mng", "mov", "avi", "qt", "wmv",
     "yuv", "rm", "asf", "amv", "m2ts", "mts", "ts", "mp4", "m4p", "m4v", "mpg", "mp2", "mpeg",
     "mpe", "mpv", "m2v", "svi", "3gp", "3g2", "mxf", "roq", "nsv", "f4v", "f4p", "f4a", "f4b",
+];
+
+const AUDIO_METADATA_EXTENSIONS: &[&str] = &[
+    "mp3", "wav", "wave", "flac", "aac", "m4a", "m4b", "wma", "opus", "ogg", "oga", "mid", "midi",
+    "aif", "aiff", "aifc", "ape", "amr", "au", "snd", "ac3", "dts", "ra", "mka", "mp2",
 ];
 
 pub(super) fn ffprobe_duration_seconds_from_probe(probe: &serde_json::Value) -> Option<f64> {
@@ -143,5 +167,16 @@ mod tests {
         assert!(path_may_have_video_metadata(Path::new("movie.mp4")));
         assert!(path_may_have_video_metadata(Path::new("clip.mkv")));
         assert!(!path_may_have_video_metadata(Path::new("note.txt")));
+    }
+
+    #[test]
+    fn audio_metadata_detection_uses_audio_mime_or_extension() {
+        assert!(path_may_have_audio_metadata(Path::new("song.mp3")));
+        assert!(path_may_have_audio_metadata(Path::new("track.flac")));
+        assert!(path_may_have_audio_metadata(Path::new("clip.m4a")));
+        assert!(path_may_have_audio_metadata(Path::new("sound.ogg")));
+        assert!(path_may_have_audio_metadata(Path::new("mix.mka")));
+        assert!(path_may_have_audio_metadata(Path::new("sample.mp2")));
+        assert!(!path_may_have_audio_metadata(Path::new("note.txt")));
     }
 }

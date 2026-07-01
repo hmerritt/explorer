@@ -8,7 +8,6 @@
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
-- Special settings value for "date_format" called "relative" and another "relative-timestamp", which shows relative human-readable "ago" times, and "-timestamp" varient includes "at <%H:%M>", e.g. "1 minute ago", "2 hours ago", "yesterday at 15:29", "2 days ago"...
 
 ## 3
 
@@ -18,8 +17,10 @@
 - Split-screen (see Zed)
 - Shell-extension system
 - SSH drive support
+- Spectrum analyser https://www.spek.cc/about
 - Google Drive, OneDrive, etc... mounting
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
+- Special settings value for "date_format" called "relative" and another "relative-timestamp", which shows relative human-readable "ago" times, and "-timestamp" varient includes "at <%H:%M>", e.g. "1 minute ago", "2 hours ago", "yesterday at 15:29", "2 days ago"...
 - A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
 
 ## Left to implement
@@ -57,4 +58,6 @@ Major remaining Windows Explorer parity areas:
     - Lines
     - Lines of text
     - Blanks
+- CSV
+- JSON
 - PDF view: https://crates.io/crates/pdf_oxide
