@@ -33,7 +33,10 @@ use std::{
     env,
     panic::{self, RefUnwindSafe},
     pin::Pin,
+    sync::Mutex,
 };
+
+static GPUI_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run the given test function with the configured parameters.
 /// This is intended for use with the `gpui::test` macro
@@ -45,6 +48,9 @@ pub fn run_test(
     test_fn: &mut (dyn RefUnwindSafe + Fn(TestDispatcher, u64)),
     on_fail_fn: Option<fn()>,
 ) {
+    let _guard = GPUI_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let (seeds, is_multiple_runs) = calculate_seeds(num_iterations as u64, explicit_seeds);
 
     for seed in seeds {

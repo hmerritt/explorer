@@ -28,8 +28,6 @@ mod mouse_selection;
 mod navigation;
 mod open_with;
 mod properties;
-#[cfg(feature = "rclone")]
-mod rclone;
 mod recursive_search;
 mod rename;
 mod render;

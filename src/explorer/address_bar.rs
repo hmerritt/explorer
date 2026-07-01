@@ -894,11 +894,6 @@ fn resolve_address_input_with_env(
         current_path.join(typed_path)
     };
 
-    #[cfg(feature = "rclone")]
-    if crate::explorer::rclone::parse_virtual_path(&candidate).is_some() {
-        return Ok(candidate);
-    }
-
     if !candidate.exists() {
         return Err(format!("Could not find {}.", candidate.display()));
     }
@@ -969,12 +964,6 @@ fn folder_suggestions_for_input_with_env(
         has_trailing_separator(&cleaned),
         current_path,
     );
-    #[cfg(feature = "rclone")]
-    if crate::explorer::rclone::is_virtual_namespace_path(current_path)
-        || crate::explorer::rclone::is_virtual_namespace_path(&parent)
-    {
-        return Vec::new();
-    }
 
     if !parent.is_dir() {
         return Vec::new();
@@ -1435,20 +1424,8 @@ mod tests {
         view::ExplorerView,
     };
     use crate::settings::AddressSlash;
-    #[cfg(feature = "rclone")]
-    use crate::settings::ExplorerSettings;
     use gpui::{ClipboardItem, Modifiers, MouseButton, TestAppContext};
     use std::{ffi::OsString, fs};
-
-    #[cfg(feature = "rclone")]
-    fn rclone_disabled_view(
-        path: PathBuf,
-        focus_handle: Option<gpui::FocusHandle>,
-    ) -> ExplorerView {
-        let mut settings = ExplorerSettings::default();
-        settings.rclone.enabled = false;
-        ExplorerView::new_unloaded_with_settings_for_test(path, focus_handle, &settings)
-    }
 
     fn env_path<'a>(
         name: &'static str,
@@ -1637,66 +1614,6 @@ mod tests {
         assert!(resolve_address_input("missing", temp.path()).is_err());
         assert!(resolve_address_input("file.txt", temp.path()).is_err());
         assert!(resolve_address_input("", temp.path()).is_err());
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn resolve_address_accepts_rclone_virtual_paths_without_filesystem_presence() {
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
-
-        assert_eq!(
-            resolve_address_input(&path.display().to_string(), Path::new("/")).unwrap(),
-            path
-        );
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn folder_suggestions_skip_rclone_virtual_namespace() {
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
-
-        assert!(folder_suggestions_for_input("", &path, true).is_empty());
-        assert!(
-            folder_suggestions_for_input(&path.display().to_string(), Path::new("/"), true)
-                .is_empty()
-        );
-    }
-
-    #[cfg(feature = "rclone")]
-    #[gpui::test]
-    fn address_commit_to_connecting_rclone_remote_is_silent_noop(cx: &mut TestAppContext) {
-        let _guard = crate::explorer::rclone::connecting_remotes_test_guard();
-        crate::explorer::rclone::reset_connecting_remotes_for_test();
-        let permit =
-            crate::explorer::rclone::try_begin_remote_connection("gdrive").expect("permit");
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive");
-        let second_path = PathBuf::from("second");
-        let (second, cx) = cx.add_window_view({
-            let second_path = second_path.clone();
-            move |window, cx| {
-                let focus_handle = cx.focus_handle();
-                focus_handle.focus(window);
-                rclone_disabled_view(second_path, Some(focus_handle))
-            }
-        });
-
-        cx.update(|window, app| {
-            second.update(app, |view, cx| {
-                view.active_address_bar = Some(AddressBarState::new(
-                    path.display().to_string(),
-                    Some(cx.focus_handle()),
-                ));
-
-                assert!(view.commit_address_bar_edit(window, cx));
-                assert!(view.rclone_connect_task.is_none());
-                assert_eq!(view.path, second_path);
-                assert!(view.back_stack.is_empty());
-                assert!(view.forward_stack.is_empty());
-                assert!(view.operation_notice.is_none());
-            });
-        });
-        drop(permit);
-        crate::explorer::rclone::reset_connecting_remotes_for_test();
     }
 
     #[cfg(windows)]

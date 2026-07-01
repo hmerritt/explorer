@@ -21,7 +21,8 @@ macro_rules! recursive_search_timing {
     };
 }
 
-use jwalk::{WalkDirGeneric, rayon::prelude::*};
+use jwalk::{Parallelism, WalkDirGeneric};
+use rayon::prelude::*;
 
 use crate::explorer::{
     entry::FileEntry,
@@ -30,6 +31,7 @@ use crate::explorer::{
 
 const CANCELLATION_CHECK_INTERVAL: usize = 5120;
 const PARALLEL_MATERIALIZATION_THRESHOLD: usize = 128;
+const RECURSIVE_SEARCH_MAX_PARALLELISM: usize = 16;
 
 #[derive(Default)]
 pub(super) struct RecursiveSearchProgress {
@@ -86,7 +88,6 @@ pub(super) struct RecursiveSearchOutput {
     pub(super) entries: Vec<FileEntry>,
 }
 
-#[cfg(any(test, feature = "benchmarks"))]
 pub(super) fn recursive_search_entries(
     generation: u64,
     root: PathBuf,
@@ -95,28 +96,6 @@ pub(super) fn recursive_search_entries(
     cached_search: Option<RecursiveSearchCache>,
     cancel: Arc<AtomicBool>,
     progress: Arc<RecursiveSearchProgress>,
-) -> RecursiveSearchOutput {
-    recursive_search_entries_with_rclone_settings(
-        generation,
-        root,
-        query,
-        visibility,
-        cached_search,
-        cancel,
-        progress,
-        &crate::settings::RcloneSettings::default(),
-    )
-}
-
-pub(super) fn recursive_search_entries_with_rclone_settings(
-    generation: u64,
-    root: PathBuf,
-    query: String,
-    visibility: impl Into<EntryVisibility>,
-    cached_search: Option<RecursiveSearchCache>,
-    cancel: Arc<AtomicBool>,
-    progress: Arc<RecursiveSearchProgress>,
-    rclone_settings: &crate::settings::RcloneSettings,
 ) -> RecursiveSearchOutput {
     let visibility = visibility.into();
     let total_started = Instant::now();
@@ -133,12 +112,11 @@ pub(super) fn recursive_search_entries_with_rclone_settings(
             let scan_started = Instant::now();
             progress.scanned_paths.store(0, Ordering::Relaxed);
             progress.scanning.store(true, Ordering::Relaxed);
-            let paths = scan_recursive_paths_with_progress_and_rclone_settings(
+            let paths = scan_recursive_paths_with_progress(
                 &root,
                 visibility,
                 cancel.clone(),
                 Some(&progress.scanned_paths),
-                rclone_settings,
             );
             progress.scanning.store(false, Ordering::Relaxed);
             recursive_search_timing!(
@@ -203,46 +181,21 @@ pub(super) fn scan_recursive_paths(
     scan_recursive_paths_with_progress(root, visibility.into(), cancel, None)
 }
 
-#[cfg(any(test, feature = "benchmarks"))]
 fn scan_recursive_paths_with_progress(
     root: &Path,
     visibility: EntryVisibility,
     cancel: Arc<AtomicBool>,
     progress: Option<&AtomicUsize>,
 ) -> Arc<Vec<RecursiveSearchPath>> {
-    scan_recursive_paths_with_progress_and_rclone_settings(
-        root,
-        visibility,
-        cancel,
-        progress,
-        &crate::settings::RcloneSettings::default(),
-    )
-}
-
-fn scan_recursive_paths_with_progress_and_rclone_settings(
-    root: &Path,
-    visibility: EntryVisibility,
-    cancel: Arc<AtomicBool>,
-    progress: Option<&AtomicUsize>,
-    _rclone_settings: &crate::settings::RcloneSettings,
-) -> Arc<Vec<RecursiveSearchPath>> {
     if cancel.load(Ordering::Relaxed) {
         return Arc::new(Vec::new());
     }
 
-    #[cfg(feature = "rclone")]
-    if crate::explorer::rclone::is_transfer_path(root) {
-        return scan_rclone_transfer_paths_with_progress(
-            root,
-            visibility,
-            cancel,
-            progress,
-            _rclone_settings,
-        );
-    }
-
     let process_cancel = cancel.clone();
     let walker = WalkDirGeneric::<((), String)>::new(root)
+        .parallelism(Parallelism::RayonNewPool(recursive_search_parallelism(
+            usize::MAX,
+        )))
         .sort(false)
         .skip_hidden(false)
         .follow_links(false)
@@ -300,85 +253,6 @@ fn scan_recursive_paths_with_progress_and_rclone_settings(
     Arc::new(paths)
 }
 
-#[cfg(feature = "rclone")]
-fn scan_rclone_transfer_paths_with_progress(
-    root: &Path,
-    visibility: EntryVisibility,
-    cancel: Arc<AtomicBool>,
-    progress: Option<&AtomicUsize>,
-    rclone_settings: &crate::settings::RcloneSettings,
-) -> Arc<Vec<RecursiveSearchPath>> {
-    let mut paths = Vec::new();
-    scan_rclone_transfer_directory(
-        root,
-        visibility,
-        1,
-        &cancel,
-        progress,
-        rclone_settings,
-        &mut paths,
-    );
-    if cancel.load(Ordering::Relaxed) {
-        Arc::new(Vec::new())
-    } else {
-        Arc::new(paths)
-    }
-}
-
-#[cfg(feature = "rclone")]
-fn scan_rclone_transfer_directory(
-    directory: &Path,
-    visibility: EntryVisibility,
-    depth: usize,
-    cancel: &AtomicBool,
-    progress: Option<&AtomicUsize>,
-    rclone_settings: &crate::settings::RcloneSettings,
-    paths: &mut Vec<RecursiveSearchPath>,
-) {
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let Ok(entries) =
-        crate::explorer::rclone::load_transfer_entries(directory, visibility, rclone_settings)
-    else {
-        return;
-    };
-    for entry in entries {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let file_name = entry
-            .path
-            .file_name()
-            .map(|name| name.to_owned())
-            .unwrap_or_default();
-        let normalized_name = file_name.to_string_lossy().to_lowercase();
-        let is_directory = entry.is_directory_like();
-        paths.push(RecursiveSearchPath {
-            parent_path: Arc::from(directory.to_path_buf().into_boxed_path()),
-            file_name,
-            normalized_name,
-            depth,
-            materialized_entry: Some(entry.clone()),
-        });
-        if let Some(progress) = progress {
-            progress.store(paths.len(), Ordering::Relaxed);
-        }
-        if is_directory {
-            scan_rclone_transfer_directory(
-                &entry.path,
-                visibility,
-                depth + 1,
-                cancel,
-                progress,
-                rclone_settings,
-                paths,
-            );
-        }
-    }
-}
-
 fn filter_recursive_paths(
     paths: &[RecursiveSearchPath],
     query: &str,
@@ -429,13 +303,7 @@ fn materialize_recursive_entries(
             .filter_map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
             .collect()
     } else {
-        result_indices
-            .par_iter()
-            .map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
+        materialize_recursive_entries_parallel(paths, result_indices, visibility, cancel)
     };
 
     if cancel.load(Ordering::Relaxed) {
@@ -443,6 +311,49 @@ fn materialize_recursive_entries(
     } else {
         materialized
     }
+}
+
+fn materialize_recursive_entries_parallel(
+    paths: &[RecursiveSearchPath],
+    result_indices: &[usize],
+    visibility: EntryVisibility,
+    cancel: &AtomicBool,
+) -> Vec<FileEntry> {
+    let parallelism = recursive_search_parallelism(result_indices.len());
+    if parallelism <= 1 {
+        return result_indices
+            .iter()
+            .filter_map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
+            .collect();
+    }
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(parallelism)
+        .thread_name(|index| format!("explorer-search-{index}"))
+        .build()
+    {
+        Ok(pool) => pool.install(|| {
+            result_indices
+                .par_iter()
+                .map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .flatten()
+                .collect()
+        }),
+        Err(_) => result_indices
+            .iter()
+            .filter_map(|&index| materialize_recursive_entry(&paths[index], visibility, cancel))
+            .collect(),
+    }
+}
+
+fn recursive_search_parallelism(work_count: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(work_count.max(1))
+        .min(RECURSIVE_SEARCH_MAX_PARALLELISM)
 }
 
 fn materialize_recursive_entry(

@@ -19,7 +19,6 @@ use crate::explorer::filesystem::{
     FileOperationPhase, FileOperationProgress, finalize_copied_file, paths_are_on_same_volume,
     preserve_file_metadata,
 };
-use crate::settings::RcloneSettings;
 
 pub(super) const RSYNC_MIN_BLOCK_SIZE: usize = 700;
 const RSYNC_MAX_BLOCK_SIZE: usize = 128 * 1024;
@@ -353,7 +352,6 @@ pub(super) fn copy_with_delta_progress(
         progress,
         on_progress,
         CopyOptions::explorer_safe(),
-        &RcloneSettings::default(),
     )
 }
 
@@ -364,7 +362,6 @@ pub(super) fn copy_with_delta_progress_with_options(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
-    rclone_settings: &RcloneSettings,
 ) -> io::Result<()> {
     let source_len = fs::metadata(source)?.len();
     copy_with_delta_progress_impl(
@@ -375,7 +372,6 @@ pub(super) fn copy_with_delta_progress_with_options(
         progress,
         on_progress,
         options,
-        rclone_settings,
     )
 }
 
@@ -400,7 +396,6 @@ pub(super) fn copy_with_delta_progress_for_test(
         progress,
         on_progress,
         CopyOptions::explorer_safe(),
-        &RcloneSettings::default(),
     )
 }
 
@@ -412,7 +407,6 @@ fn copy_with_delta_progress_impl(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
-    rclone_settings: &RcloneSettings,
 ) -> io::Result<()> {
     if block_size == 0 {
         return Err(io::Error::new(
@@ -545,7 +539,6 @@ fn copy_with_delta_progress_impl(
         progress,
         on_progress,
         options,
-        rclone_settings,
     )?;
     if options.should_sync() {
         sync_parent_directory(destination);
@@ -2135,7 +2128,6 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Safe),
-            &RcloneSettings::default(),
         )
         .expect("quick skip");
 
@@ -2165,7 +2157,6 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Safe),
-            &RcloneSettings::default(),
         )
         .expect("delta update");
 
@@ -2189,7 +2180,6 @@ mod tests {
             &mut progress,
             &mut |_| {},
             CopyOptions::rsync_update(CopyDurability::Fast),
-            &RcloneSettings::default(),
         )
         .expect("fast copy");
 

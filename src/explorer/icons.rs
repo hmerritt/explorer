@@ -184,8 +184,6 @@ svg_icon!(PROPERTIES_ICON, "utility", "properties.svg");
 svg_icon!(RENAME_ICON, "utility", "rename.svg");
 svg_icon!(RUN_ELEVATED_ICON, "utility", "run_elevated.svg");
 svg_icon!(SETTINGS_ICON, "utility", "settings.svg");
-#[cfg(feature = "rclone")]
-svg_icon!(SUCCESS_ICON, "utility", "success.svg");
 png_icon!(WSL_ALPINE_ICON, "wsl", "alpine.png");
 png_icon!(WSL_DEBIAN_ICON, "wsl", "debian.png");
 png_icon!(WSL_GENERIC_ICON, "wsl", "generic.png");
@@ -480,19 +478,6 @@ fn sshfs_drive_image_for_state(state: SshfsMountState) -> Arc<Image> {
     }
 }
 
-#[cfg(feature = "rclone")]
-pub(super) fn rclone_drive_icon(state: crate::explorer::rclone::RcloneSidebarState) -> AnyElement {
-    image_sidebar_icon(rclone_drive_image_for_state(state))
-}
-
-#[cfg(feature = "rclone")]
-fn rclone_drive_image_for_state(state: crate::explorer::rclone::RcloneSidebarState) -> Arc<Image> {
-    match state {
-        crate::explorer::rclone::RcloneSidebarState::Mounted => NETWORK_DRIVE_ICON.clone(),
-        _ => NETWORK_DRIVE_DISCONNECTED_ICON.clone(),
-    }
-}
-
 fn wsl_distro_image(kind: WslDistroKind) -> Arc<Image> {
     match kind {
         WslDistroKind::Alpine => WSL_ALPINE_ICON.clone(),
@@ -608,28 +593,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn rclone_drive_icons_use_connected_image_only_for_mounted_state() {
-        use crate::explorer::rclone::RcloneSidebarState;
-
-        assert_eq!(
-            rclone_drive_image_for_state(RcloneSidebarState::Mounted).id(),
-            NETWORK_DRIVE_ICON.clone().id()
-        );
-        for state in [
-            RcloneSidebarState::Disconnected,
-            RcloneSidebarState::Connecting,
-            RcloneSidebarState::TransferMode,
-            RcloneSidebarState::Error,
-        ] {
-            assert_eq!(
-                rclone_drive_image_for_state(state).id(),
-                NETWORK_DRIVE_DISCONNECTED_ICON.clone().id()
-            );
-        }
-    }
-
     #[test]
     fn optical_drive_png_assets_load_as_png_images() {
         assert_eq!(BLU_RAY_DISC_ICON.format, ImageFormat::Png);
@@ -654,8 +617,6 @@ mod tests {
     fn utility_icons_use_bundled_svg_assets() {
         assert!(!EJECT_ICON_BYTES.is_empty());
         assert!(!SETTINGS_ICON_BYTES.is_empty());
-        #[cfg(feature = "rclone")]
-        assert!(!SUCCESS_ICON_BYTES.is_empty());
     }
 
     #[test]

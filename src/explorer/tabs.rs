@@ -1989,47 +1989,6 @@ mod tests {
         assert_active_tab_focused(&tabs, cx);
     }
 
-    #[cfg(feature = "rclone")]
-    #[gpui::test]
-    fn new_tab_while_rclone_connecting_renders_local_sidebar(cx: &mut TestAppContext) {
-        let _guard = crate::explorer::rclone::connecting_remotes_test_guard();
-        crate::explorer::rclone::reset_connecting_remotes_for_test();
-        let temp = TempDir::new();
-        let start_path = temp.path().join("start");
-        let sidebar_path = temp.path().join("sidebar");
-        fs::create_dir_all(&start_path).expect("create start directory");
-        fs::create_dir_all(&sidebar_path).expect("create sidebar directory");
-        let mut settings = ExplorerSettings::default();
-        settings.app.start = crate::settings::StartLocation::Custom {
-            path: start_path.clone(),
-        };
-        settings.rclone.enabled = false;
-        settings.sidebar.items = vec![sidebar_path.clone()];
-        cx.set_global(SettingsState::for_test(settings));
-        let permit =
-            crate::explorer::rclone::try_begin_remote_connection("gdrive").expect("permit");
-        let (tabs, cx) = test_tabs_at_path(cx, start_path.clone());
-
-        let new_tab_view = cx.update(|window, app| {
-            tabs.update(app, |tabs, cx| {
-                tabs.add_new_tab(window, cx);
-                tabs.active_tab().expect("active tab").view.clone()
-            })
-        });
-
-        cx.read_entity(&new_tab_view, |view, _| {
-            assert!(
-                view.sidebar_sections
-                    .user_directories
-                    .iter()
-                    .any(|item| { item.path == sidebar_path })
-            );
-            assert!(view.sidebar_sections.rclone_remotes.is_empty());
-        });
-        drop(permit);
-        crate::explorer::rclone::reset_connecting_remotes_for_test();
-    }
-
     #[gpui::test]
     fn open_directory_in_new_tab_stays_in_background_by_default(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
@@ -2179,10 +2138,8 @@ mod tests {
             tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
             view.update(app, |view, _| {
                 view.sidebar_settings.items = vec![sidebar_path.clone()];
-                view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
-                    &view.sidebar_settings,
-                    &view.rclone_settings,
-                );
+                view.sidebar_sections =
+                    crate::explorer::sidebar::sidebar_sections(&view.sidebar_settings);
             });
         });
         cx.run_until_parked();

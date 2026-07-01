@@ -3,16 +3,11 @@ use std::path::{Path, PathBuf};
 use crate::explorer::filesystem::{
     SshfsMount, SshfsMountState, sshfs_mounts, windows_local_os_drive_root,
 };
-#[cfg(feature = "rclone")]
-use crate::explorer::rclone::{
-    RcloneSidebarState, apply_connecting_remote_states, apply_known_mount_states, discover_remotes,
-    sidebar_path_for_remote,
-};
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
     resolve_directory_kind, user_home_dir, wsl_drive_roots,
 };
-use crate::settings::{DriveHideKind, RcloneSettings, SidebarSettings, expand_configured_path};
+use crate::settings::{DriveHideKind, SidebarSettings, expand_configured_path};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -30,38 +25,10 @@ pub(super) enum SidebarItemKind {
     DriveWindows,
     DriveSshfs(SshfsMountState),
     DriveWsl,
-    #[cfg(feature = "rclone")]
-    RcloneRemote(RcloneSidebarState),
 }
 
-pub(super) fn sidebar_sections(
-    settings: &SidebarSettings,
-    rclone_settings: &RcloneSettings,
-) -> SidebarSections {
-    #[cfg(feature = "rclone")]
-    {
-        let _ = rclone_settings;
-        sidebar_sections_without_rclone(settings)
-    }
-    #[cfg(not(feature = "rclone"))]
-    {
-        let _ = rclone_settings;
-        sidebar_sections_without_rclone(settings)
-    }
-}
-
-#[cfg(feature = "rclone")]
-pub(super) fn sidebar_sections_with_rclone_remotes(
-    settings: &SidebarSettings,
-    rclone_settings: &RcloneSettings,
-) -> SidebarSections {
-    let mut sections = sidebar_sections_without_rclone(settings);
-    sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Blocking);
-    sections
-}
-
-pub(super) fn sidebar_sections_without_rclone(settings: &SidebarSettings) -> SidebarSections {
-    sidebar_sections_without_rclone_from_roots(
+pub(super) fn sidebar_sections(settings: &SidebarSettings) -> SidebarSections {
+    sidebar_sections_from_roots_internal(
         settings,
         local_drive_roots(),
         sshfs_mounts(),
@@ -69,7 +36,7 @@ pub(super) fn sidebar_sections_without_rclone(settings: &SidebarSettings) -> Sid
     )
 }
 
-fn sidebar_sections_without_rclone_from_roots(
+fn sidebar_sections_from_roots_internal(
     settings: &SidebarSettings,
     drive_roots: Vec<PathBuf>,
     sshfs_mounts: Vec<SshfsMount>,
@@ -88,60 +55,26 @@ fn sidebar_sections_without_rclone_from_roots(
         } else {
             wsl_drive_items_from_roots(wsl_roots)
         },
-        #[cfg(feature = "rclone")]
-        rclone_remotes: Vec::new(),
     }
 }
 
 #[cfg(test)]
 fn sidebar_sections_from_roots(
     settings: &SidebarSettings,
-    rclone_settings: &RcloneSettings,
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    #[cfg(feature = "rclone")]
-    {
-        let mut sections = sidebar_sections_without_rclone_from_roots(
-            settings,
-            drive_roots,
-            Vec::new(),
-            wsl_roots,
-        );
-        sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Cached);
-        sections
-    }
-    #[cfg(not(feature = "rclone"))]
-    {
-        let _ = rclone_settings;
-        sidebar_sections_without_rclone_from_roots(settings, drive_roots, Vec::new(), wsl_roots)
-    }
+    sidebar_sections_from_roots_internal(settings, drive_roots, Vec::new(), wsl_roots)
 }
 
 #[cfg(test)]
 fn sidebar_sections_from_sources(
     settings: &SidebarSettings,
-    rclone_settings: &RcloneSettings,
     drive_roots: Vec<PathBuf>,
     sshfs_mounts: Vec<SshfsMount>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    #[cfg(feature = "rclone")]
-    {
-        let mut sections = sidebar_sections_without_rclone_from_roots(
-            settings,
-            drive_roots,
-            sshfs_mounts,
-            wsl_roots,
-        );
-        sections.rclone_remotes = rclone_remote_items(rclone_settings, RcloneRemoteLoad::Cached);
-        sections
-    }
-    #[cfg(not(feature = "rclone"))]
-    {
-        let _ = rclone_settings;
-        sidebar_sections_without_rclone_from_roots(settings, drive_roots, sshfs_mounts, wsl_roots)
-    }
+    sidebar_sections_from_roots_internal(settings, drive_roots, sshfs_mounts, wsl_roots)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -150,8 +83,6 @@ pub(super) struct SidebarSections {
     pub(super) macos_system_locations: Vec<SidebarItem>,
     pub(super) drives: Vec<SidebarItem>,
     pub(super) wsl_drives: Vec<SidebarItem>,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_remotes: Vec<SidebarItem>,
 }
 
 #[cfg(test)]
@@ -235,8 +166,6 @@ fn sidebar_item_label_for_path(path: &Path, kind: SidebarItemKind) -> String {
         SidebarItemKind::DriveSshfs(_) => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
-        #[cfg(feature = "rclone")]
-        SidebarItemKind::RcloneRemote(_) => home_sidebar_label(path),
     }
 }
 
@@ -330,40 +259,6 @@ fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
         .collect()
 }
 
-#[cfg(feature = "rclone")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RcloneRemoteLoad {
-    Cached,
-    Blocking,
-}
-
-#[cfg(feature = "rclone")]
-fn rclone_remote_items(settings: &RcloneSettings, load: RcloneRemoteLoad) -> Vec<SidebarItem> {
-    if load == RcloneRemoteLoad::Cached {
-        let _ = settings;
-        return Vec::new();
-    }
-
-    let mut remotes = discover_remotes(settings);
-    apply_known_mount_states(&mut remotes);
-    apply_connecting_remote_states(&mut remotes);
-    remotes
-        .into_iter()
-        .map(|remote| SidebarItem {
-            label: rclone_remote_sidebar_label(&remote.display_name, remote.sidebar_state()),
-            path: sidebar_path_for_remote(&remote),
-            kind: SidebarItemKind::RcloneRemote(remote.sidebar_state()),
-            configured_index: None,
-        })
-        .collect()
-}
-
-#[cfg(feature = "rclone")]
-fn rclone_remote_sidebar_label(display_name: &str, state: RcloneSidebarState) -> String {
-    let _ = state;
-    display_name.to_owned()
-}
-
 fn sidebar_drive_label(path: &Path) -> String {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -390,7 +285,7 @@ fn sidebar_wsl_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use crate::settings::{DriveHideKind, RcloneSettings, SidebarSettings};
+    use crate::settings::{DriveHideKind, SidebarSettings};
     use std::fs;
 
     #[test]
@@ -619,7 +514,6 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
-            &RcloneSettings::default(),
             vec![PathBuf::from("X:\\")],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
@@ -638,7 +532,6 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
-            &RcloneSettings::default(),
             vec![PathBuf::from("X:\\")],
             vec![SshfsMount {
                 label: "hbox".to_owned(),
@@ -673,45 +566,11 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
-            &RcloneSettings::default(),
             vec![PathBuf::from("X:\\")],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
 
         assert_eq!(sections.drives.len(), 1);
         assert!(sections.wsl_drives.is_empty());
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn sidebar_sections_hide_rclone_remotes_when_disabled() {
-        let sections = sidebar_sections_from_roots(
-            &SidebarSettings {
-                items: Vec::new(),
-                ..SidebarSettings::default()
-            },
-            &RcloneSettings {
-                enabled: false,
-                ..RcloneSettings::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(sections.rclone_remotes.is_empty());
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn rclone_remote_sidebar_label_omits_state_suffixes() {
-        for state in [
-            RcloneSidebarState::Disconnected,
-            RcloneSidebarState::Connecting,
-            RcloneSidebarState::Mounted,
-            RcloneSidebarState::TransferMode,
-            RcloneSidebarState::Error,
-        ] {
-            assert_eq!(rclone_remote_sidebar_label("gdrive", state), "gdrive");
-        }
     }
 }

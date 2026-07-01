@@ -239,15 +239,6 @@ impl ExplorerView {
             return;
         }
 
-        #[cfg(feature = "rclone")]
-        if let Some(message) = paths
-            .iter()
-            .find_map(|path| crate::explorer::rclone::normal_open_block_message(path))
-        {
-            self.set_error_notice(message);
-            return;
-        }
-
         #[cfg(target_os = "linux")]
         {
             use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -1734,30 +1725,6 @@ mod tests {
             assert!(launcher_started.load(Ordering::SeqCst));
             assert!(view.open_with_task.is_none());
             assert_eq!(view.operation_notice, None);
-        });
-    }
-
-    #[cfg(feature = "rclone")]
-    #[gpui::test]
-    fn normal_open_blocks_rclone_transfer_paths_without_task(cx: &mut gpui::TestAppContext) {
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("large.bin");
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), focus_handle)
-        });
-
-        cx.update(|window, app| {
-            view.update(app, |view, cx| {
-                view.open_file_with_default_app(&path, window, cx);
-
-                assert!(view.open_with_task.is_none());
-                assert!(
-                    view.operation_notice
-                        .as_ref()
-                        .is_some_and(|notice| notice.text.contains("rclone transfer mode"))
-                );
-            });
         });
     }
 

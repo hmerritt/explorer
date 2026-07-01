@@ -2,7 +2,6 @@ pub(crate) const COLUMN_NAME_MIN_WIDTH: f32 = 250.0;
 pub(crate) const COLUMN_DATE_WIDTH: f32 = 150.0;
 pub(crate) const COLUMN_TYPE_WIDTH: f32 = 150.0;
 pub(crate) const COLUMN_SIZE_WIDTH: f32 = 120.0;
-pub(crate) const COLUMN_UPLOAD_WIDTH: f32 = 90.0;
 pub(super) const NAVBAR_HEIGHT: f32 = 52.0;
 pub(super) const NAV_ICON_TEXT_SIZE: f32 = 12.0;
 pub(super) const NAV_ICON_ENABLED_COLOR: u32 = 0x1f1f1f;

@@ -1,10 +1,5 @@
-## Todo
-
-- rclone https://rclone.org/ builtin. https://crates.io/crates/librclone
-
 ## 1
 
-- rclone support in general currently feels very fragile. There are freezes and blocks that need fixing. Broaden the plan to all rclone flows, including properties, thumbnails, context menu commands, and progress/cancel polish.
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 
 ## 2
@@ -24,7 +19,6 @@
 - Shell-extension system
 - SSH drive support
 - Google Drive, OneDrive, etc... mounting
-- rclone hook for drive, B2, S3, etc...
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 - A new implementation detail regarding selecting items, and triggering rubber-band selection. Currenty the logic is that anywhere in the Name column won't select, but the othe columns will. There is more to be done here. Windows Explorer actually has it like this: Name column will not select, but Name column on the item text (filename/folder name) WILL select straight away. The same is true for the rubber-band. If I drag on an item Name text, it will drag straight away, whereas on the Name column but not the text won't
 

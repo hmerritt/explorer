@@ -16,11 +16,7 @@ use gpui::{
     UniformListScrollHandle, Window, point, px,
 };
 
-#[cfg(feature = "rclone")]
-use crate::explorer::sidebar::sidebar_sections_with_rclone_remotes;
-use crate::explorer::sidebar::{
-    SidebarSections, sidebar_sections, sidebar_sections_without_rclone,
-};
+use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -31,9 +27,8 @@ use crate::explorer::{
     explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress,
-        load_entries_with_rclone_settings, path_is_filesystem_root, path_is_remote_drive,
-        path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress, load_entries,
+        path_is_filesystem_root, path_is_remote_drive, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
@@ -50,12 +45,10 @@ use crate::explorer::{
 };
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
-    FileViewMode, RcloneSettings, SidebarSettings, SortDirection,
+    FileViewMode, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
-#[cfg(feature = "rclone")]
-const RCLONE_UPLOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ViewModeSelection {
@@ -80,18 +73,6 @@ pub struct ExplorerView {
     pub(super) image_mount_task: Option<Task<()>>,
     #[cfg(target_os = "windows")]
     pub(super) sshfs_connect_task: Option<Task<()>>,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_connect_task: Option<Task<()>>,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_upload_snapshot: crate::explorer::rclone::RcloneUploadSnapshot,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_upload_task: Option<Task<()>>,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_upload_generation: u64,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_sidebar_task: Option<Task<()>>,
-    #[cfg(feature = "rclone")]
-    pub(super) rclone_sidebar_generation: u64,
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) forward_stack: Vec<PathBuf>,
     pub(super) scroll_handle: UniformListScrollHandle,
@@ -158,7 +139,6 @@ pub struct ExplorerView {
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
-    pub(super) rclone_settings: RcloneSettings,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
@@ -442,18 +422,6 @@ impl ExplorerView {
             image_mount_task: None,
             #[cfg(target_os = "windows")]
             sshfs_connect_task: None,
-            #[cfg(feature = "rclone")]
-            rclone_connect_task: None,
-            #[cfg(feature = "rclone")]
-            rclone_upload_snapshot: crate::explorer::rclone::RcloneUploadSnapshot::default(),
-            #[cfg(feature = "rclone")]
-            rclone_upload_task: None,
-            #[cfg(feature = "rclone")]
-            rclone_upload_generation: 0,
-            #[cfg(feature = "rclone")]
-            rclone_sidebar_task: None,
-            #[cfg(feature = "rclone")]
-            rclone_sidebar_generation: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -521,9 +489,8 @@ impl ExplorerView {
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
-            rclone_settings: settings.rclone.clone(),
             sidebar_settings: settings.sidebar.clone(),
-            sidebar_sections: sidebar_sections_without_rclone(&settings.sidebar),
+            sidebar_sections: sidebar_sections(&settings.sidebar),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
             folder_size_generation: 0,
@@ -543,7 +510,6 @@ impl ExplorerView {
             || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
-        let rclone_changed = self.rclone_settings != settings.rclone;
         let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
         self.font = crate::settings::app_font(settings);
@@ -585,7 +551,6 @@ impl ExplorerView {
         }
 
         self.sidebar_settings = settings.sidebar.clone();
-        self.rclone_settings = settings.rclone.clone();
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
         }
@@ -612,18 +577,7 @@ impl ExplorerView {
             self.file_columns = settings.view.file_columns.clone();
         }
 
-        let rclone_transfer_path_changed = {
-            #[cfg(feature = "rclone")]
-            {
-                rclone_changed && crate::explorer::rclone::parse_virtual_path(&self.path).is_some()
-            }
-            #[cfg(not(feature = "rclone"))]
-            {
-                false
-            }
-        };
-
-        if visibility_changed || rclone_transfer_path_changed {
+        if visibility_changed {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
@@ -648,15 +602,9 @@ impl ExplorerView {
             if file_sort_changed {
                 self.apply_file_sort_preserving_selection();
             }
-            if sidebar_changed || rclone_changed || !folder_size_changed {
+            if sidebar_changed || !folder_size_changed {
                 self.rebuild_fast_sidebar_sections();
-                #[cfg(feature = "rclone")]
-                self.refresh_rclone_sidebar_sections(cx);
             }
-        }
-        #[cfg(feature = "rclone")]
-        if rclone_changed {
-            self.restart_rclone_upload_polling(cx);
         }
         cx.notify();
     }
@@ -682,11 +630,7 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(mode);
 
         let load_started = Instant::now();
-        match load_entries_with_rclone_settings(
-            &self.path,
-            self.entry_visibility(),
-            &self.rclone_settings,
-        ) {
+        match load_entries(&self.path, self.entry_visibility()) {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
                     load_started.elapsed(),
@@ -762,7 +706,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.rclone_settings);
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -986,15 +930,10 @@ impl ExplorerView {
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
-        let rclone_settings = self.rclone_settings.clone();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
         );
-        #[cfg(feature = "rclone")]
-        if mode.rebuild_sidebar {
-            self.refresh_rclone_sidebar_sections(cx);
-        }
 
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
@@ -1003,8 +942,7 @@ impl ExplorerView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let entries =
-                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
+                        let entries = load_entries(&path, visibility);
                         DirectoryLoadResult {
                             entries,
                             sidebar_sections: None,
@@ -1069,15 +1007,10 @@ impl ExplorerView {
         };
         let path = state.path.clone();
         let visibility = self.entry_visibility();
-        let rclone_settings = self.rclone_settings.clone();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
         );
-        #[cfg(feature = "rclone")]
-        if mode.rebuild_sidebar {
-            self.refresh_rclone_sidebar_sections(cx);
-        }
 
         let task = cx.spawn_in(window, async move |this, cx| {
             let load_started = Instant::now();
@@ -1086,8 +1019,7 @@ impl ExplorerView {
                 .spawn({
                     let path = path.clone();
                     async move {
-                        let entries =
-                            load_entries_with_rclone_settings(&path, visibility, &rclone_settings);
+                        let entries = load_entries(&path, visibility);
                         DirectoryLoadResult {
                             entries,
                             sidebar_sections: None,
@@ -1117,52 +1049,7 @@ impl ExplorerView {
     }
 
     fn rebuild_fast_sidebar_sections(&mut self) {
-        #[cfg(feature = "rclone")]
-        {
-            let mut sections = sidebar_sections_without_rclone(&self.sidebar_settings);
-            sections.rclone_remotes = self.sidebar_sections.rclone_remotes.clone();
-            self.sidebar_sections = sections;
-        }
-        #[cfg(not(feature = "rclone"))]
-        {
-            self.sidebar_sections = sidebar_sections_without_rclone(&self.sidebar_settings);
-        }
-    }
-
-    #[cfg(feature = "rclone")]
-    fn refresh_rclone_sidebar_sections(&mut self, cx: &mut Context<Self>) {
-        self.rclone_sidebar_generation = self.rclone_sidebar_generation.wrapping_add(1);
-        let generation = self.rclone_sidebar_generation;
-        self.rclone_sidebar_task = None;
-
-        if !self.rclone_settings.enabled {
-            if !self.sidebar_sections.rclone_remotes.is_empty() {
-                self.sidebar_sections.rclone_remotes.clear();
-                cx.notify();
-            }
-            return;
-        }
-
-        let sidebar_settings = self.sidebar_settings.clone();
-        let rclone_settings = self.rclone_settings.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let sections = cx
-                .background_executor()
-                .spawn(async move {
-                    sidebar_sections_with_rclone_remotes(&sidebar_settings, &rclone_settings)
-                })
-                .await;
-
-            let _ = this.update(cx, |explorer, cx| {
-                if explorer.rclone_sidebar_generation != generation {
-                    return;
-                }
-                explorer.sidebar_sections = sections;
-                explorer.rclone_sidebar_task = None;
-                cx.notify();
-            });
-        });
-        self.rclone_sidebar_task = Some(task);
+        self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
     }
 
     fn apply_directory_load_result(
@@ -1208,8 +1095,6 @@ impl ExplorerView {
                 self.start_rename_for_path_without_focus(&path);
             }
         }
-        #[cfg(feature = "rclone")]
-        self.restart_rclone_upload_polling(cx);
 
         if state.refresh_search {
             self.refresh_search_after_external_change(cx);
@@ -1222,81 +1107,6 @@ impl ExplorerView {
         }
 
         true
-    }
-
-    #[cfg(feature = "rclone")]
-    fn restart_rclone_upload_polling(&mut self, cx: &mut Context<Self>) {
-        self.rclone_upload_generation = self.rclone_upload_generation.wrapping_add(1);
-        self.rclone_upload_task = None;
-
-        if !crate::explorer::rclone::path_has_known_managed_mount(&self.path) {
-            if self.rclone_upload_snapshot
-                != crate::explorer::rclone::RcloneUploadSnapshot::default()
-            {
-                self.rclone_upload_snapshot =
-                    crate::explorer::rclone::RcloneUploadSnapshot::default();
-                cx.notify();
-            }
-            return;
-        }
-
-        let generation = self.rclone_upload_generation;
-        let path = self.path.clone();
-        let settings = self.rclone_settings.clone();
-        let mut previous = self.rclone_upload_snapshot.clone();
-        let task = cx.spawn(async move |this, cx| {
-            loop {
-                let snapshot_task = cx.background_executor().spawn({
-                    let path = path.clone();
-                    let settings = settings.clone();
-                    let previous = previous.clone();
-                    async move {
-                        crate::explorer::rclone::upload_snapshot_for_directory(
-                            &path, &previous, &settings,
-                        )
-                    }
-                });
-                let result = snapshot_task.await;
-                let mut should_continue = false;
-                let mut next_previous = previous.clone();
-                let _ = this.update(cx, |explorer, cx| {
-                    if explorer.rclone_upload_generation != generation || explorer.path != path {
-                        return;
-                    }
-
-                    should_continue = true;
-                    match result {
-                        Ok(snapshot) => {
-                            next_previous = snapshot.clone();
-                            if explorer.rclone_upload_snapshot != snapshot {
-                                explorer.rclone_upload_snapshot = snapshot;
-                                cx.notify();
-                            }
-                        }
-                        Err(_) => {
-                            if explorer.rclone_upload_snapshot
-                                != crate::explorer::rclone::RcloneUploadSnapshot::default()
-                            {
-                                explorer.rclone_upload_snapshot =
-                                    crate::explorer::rclone::RcloneUploadSnapshot::default();
-                                cx.notify();
-                            }
-                            explorer.rclone_upload_task = None;
-                            should_continue = false;
-                        }
-                    }
-                });
-
-                if !should_continue {
-                    break;
-                }
-                previous = next_previous;
-                cx.background_executor()
-                    .timer(RCLONE_UPLOAD_POLL_INTERVAL)
-                    .await;
-            }
-        });
-        self.rclone_upload_task = Some(task);
     }
 
     fn cancel_directory_load(&mut self) {
@@ -1675,7 +1485,7 @@ impl ExplorerView {
 
     pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) -> bool {
         let started = Instant::now();
-        let refresh_driver = ExplorerFs::new(&self.rclone_settings).refresh_driver(&self.path);
+        let refresh_driver = ExplorerFs::new().refresh_driver(&self.path);
         self.directory_watcher = match refresh_driver {
             ExplorerRefreshDriver::Notify => DirectoryWatcher::start(self.path.clone(), cx),
             ExplorerRefreshDriver::Poll => DirectoryWatcher::start_polling(self.path.clone(), cx),
@@ -1700,9 +1510,7 @@ impl ExplorerView {
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
-        self.has_active_file_operation()
-            || self.sshfs_connection_is_working()
-            || self.rclone_connection_is_working()
+        self.has_active_file_operation() || self.sshfs_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -1746,56 +1554,11 @@ impl ExplorerView {
     }
 
     pub(super) fn minimum_file_columns_width(&self) -> f32 {
-        let mut width = crate::explorer::columns::minimum_file_columns_width(&self.file_columns);
-        if self.upload_column_is_visible() {
-            width += crate::explorer::constants::COLUMN_UPLOAD_WIDTH;
-        }
-        width
+        crate::explorer::columns::minimum_file_columns_width(&self.file_columns)
     }
 
     pub(super) fn effective_name_column_width(&self, viewport_width: f32) -> f32 {
-        let upload_width = if self.upload_column_is_visible() {
-            crate::explorer::constants::COLUMN_UPLOAD_WIDTH
-        } else {
-            0.0
-        };
-        crate::explorer::columns::effective_name_column_width(
-            viewport_width - upload_width,
-            &self.file_columns,
-        )
-    }
-
-    pub(super) fn upload_column_is_visible(&self) -> bool {
-        #[cfg(feature = "rclone")]
-        {
-            self.rclone_upload_snapshot.has_pending()
-        }
-        #[cfg(not(feature = "rclone"))]
-        {
-            false
-        }
-    }
-
-    pub(super) fn entry_upload_is_pending(&self, path: &Path) -> bool {
-        #[cfg(feature = "rclone")]
-        {
-            self.rclone_upload_snapshot
-                .state_for_path(path)
-                .is_some_and(crate::explorer::rclone::RcloneUploadState::is_pending)
-        }
-        #[cfg(not(feature = "rclone"))]
-        {
-            let _ = path;
-            false
-        }
-    }
-
-    #[cfg(feature = "rclone")]
-    pub(super) fn rclone_upload_state_for_path(
-        &self,
-        path: &Path,
-    ) -> Option<&crate::explorer::rclone::RcloneUploadState> {
-        self.rclone_upload_snapshot.state_for_path(path)
+        crate::explorer::columns::effective_name_column_width(viewport_width, &self.file_columns)
     }
 
     pub(super) fn name_column_is_manual_width(&self) -> bool {
@@ -2115,18 +1878,6 @@ impl ExplorerView {
 
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
         self.all_entries.is_empty() && self.read_error.is_none() && !self.is_directory_loading()
-    }
-
-    pub(super) fn rclone_connection_is_working(&self) -> bool {
-        #[cfg(feature = "rclone")]
-        {
-            self.rclone_connect_task.is_some()
-        }
-
-        #[cfg(not(feature = "rclone"))]
-        {
-            false
-        }
     }
 
     pub(super) fn sshfs_connection_is_working(&self) -> bool {
@@ -2593,62 +2344,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn upload_column_is_visible_only_for_pending_uploads() {
-        let mut view = ExplorerView::new_unloaded_inner_with_settings(
-            PathBuf::from("uploads"),
-            None,
-            &ExplorerSettings::default(),
-        );
-        let file = PathBuf::from("uploads").join("file.txt");
-
-        assert!(!view.upload_column_is_visible());
-        assert!(!view.entry_upload_is_pending(&file));
-
-        view.rclone_upload_snapshot.entries.insert(
-            file.clone(),
-            crate::explorer::rclone::RcloneUploadState::Completed,
-        );
-        assert!(!view.upload_column_is_visible());
-        assert!(!view.entry_upload_is_pending(&file));
-
-        view.rclone_upload_snapshot.entries.insert(
-            file.clone(),
-            crate::explorer::rclone::RcloneUploadState::Queued,
-        );
-        assert!(view.upload_column_is_visible());
-        assert!(view.entry_upload_is_pending(&file));
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn upload_column_extends_details_width_only_while_visible() {
-        let mut view = ExplorerView::new_unloaded_inner_with_settings(
-            PathBuf::from("uploads"),
-            None,
-            &ExplorerSettings::default(),
-        );
-        let base_width = crate::explorer::columns::minimum_file_columns_width(&view.file_columns);
-        let file = PathBuf::from("uploads").join("file.txt");
-
-        assert_eq!(view.minimum_file_columns_width(), base_width);
-
-        view.rclone_upload_snapshot.entries.insert(
-            file.clone(),
-            crate::explorer::rclone::RcloneUploadState::Queued,
-        );
-        assert_eq!(
-            view.minimum_file_columns_width(),
-            base_width + crate::explorer::constants::COLUMN_UPLOAD_WIDTH
-        );
-
-        view.rclone_upload_snapshot
-            .entries
-            .insert(file, crate::explorer::rclone::RcloneUploadState::Completed);
-        assert_eq!(view.minimum_file_columns_width(), base_width);
-    }
-
     #[test]
     fn effective_view_mode_uses_all_entries_not_search_filtered_entries() {
         let mut view = ExplorerView::new(PathBuf::from("media-search"));
@@ -2765,28 +2460,6 @@ mod tests {
     fn thumbnail_source_policy_reads_remote_source_when_setting_enabled() {
         assert_eq!(
             thumbnail_source_policy_for_remote(true, true),
-            ThumbnailSourcePolicy::ReadSource
-        );
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn thumbnail_source_policy_uses_cache_only_for_rclone_virtual_paths() {
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
-
-        assert_eq!(
-            thumbnail_source_policy_for_path(&path, false),
-            ThumbnailSourcePolicy::CacheOnly
-        );
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn thumbnail_source_policy_reads_rclone_virtual_source_when_setting_enabled() {
-        let path = crate::explorer::rclone::virtual_root_for_remote("gdrive").join("Photos");
-
-        assert_eq!(
-            thumbnail_source_policy_for_path(&path, true),
             ThumbnailSourcePolicy::ReadSource
         );
     }
@@ -3496,25 +3169,6 @@ mod tests {
                 assert!(view.entries.is_empty());
             });
         });
-    }
-
-    #[cfg(feature = "rclone")]
-    #[test]
-    fn fast_sidebar_rebuild_preserves_cached_rclone_remotes() {
-        let mut view = ExplorerView::new(PathBuf::from("sidebar"));
-        let remote = crate::explorer::sidebar::SidebarItem {
-            label: "gdrive".to_owned(),
-            path: crate::explorer::rclone::virtual_root_for_remote("gdrive"),
-            kind: crate::explorer::sidebar::SidebarItemKind::RcloneRemote(
-                crate::explorer::rclone::RcloneSidebarState::TransferMode,
-            ),
-            configured_index: None,
-        };
-        view.sidebar_sections.rclone_remotes = vec![remote.clone()];
-
-        view.rebuild_fast_sidebar_sections();
-
-        assert_eq!(view.sidebar_sections.rclone_remotes, vec![remote]);
     }
 
     #[gpui::test]
