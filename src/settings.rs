@@ -1164,6 +1164,13 @@ fn load_settings_from_path(path: &Path) -> io::Result<ExplorerSettings> {
 
 fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
     let source = fs::read_to_string(path)?;
+    if source.trim().is_empty() {
+        let value = ExplorerSettings::default();
+        let mut document = settings_document(&value);
+        save_document_to_path(path, &mut document)?;
+        return Ok(LoadedSettings { value, document });
+    }
+
     let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
     let value =
         serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
@@ -1730,193 +1737,7 @@ fn settings_document(settings: &ExplorerSettings) -> Value {
 }
 
 fn sync_settings_document(document: &mut Value, settings: &ExplorerSettings) {
-    let known = settings_document(settings);
-    let Some(document) = document.as_object_mut() else {
-        *document = known;
-        return;
-    };
-    let known = known
-        .as_object()
-        .expect("serialized ExplorerSettings is an object");
-
-    for (key, value) in known {
-        match key.as_str() {
-            "contextmenu" => {
-                sync_context_menu(document.entry(key.clone()).or_insert(Value::Null), settings)
-            }
-            "sidebar" => sync_sidebar(document.entry(key.clone()).or_insert(Value::Null), settings),
-            "view" => sync_view(document.entry(key.clone()).or_insert(Value::Null), settings),
-            _ => merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value),
-        }
-    }
-}
-
-fn sync_view(document: &mut Value, settings: &ExplorerSettings) {
-    let known =
-        serde_json::to_value(&settings.view).expect("ViewSettings serialization cannot fail");
-    let Some(document) = document.as_object_mut() else {
-        *document = known;
-        return;
-    };
-    let known = known
-        .as_object()
-        .expect("serialized ViewSettings is an object");
-
-    for (key, value) in known {
-        if key == "file_columns" {
-            sync_file_columns(document.entry(key.clone()).or_insert(Value::Null), settings);
-        } else {
-            merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
-        }
-    }
-}
-
-fn sync_file_columns(document: &mut Value, settings: &ExplorerSettings) {
-    let known = serde_json::to_value(&settings.view.file_columns)
-        .expect("FileColumnSettings serialization cannot fail");
-    let Some(document) = document.as_object_mut() else {
-        *document = known;
-        return;
-    };
-
-    let known = known
-        .as_object()
-        .expect("serialized FileColumnSettings is an object");
-    for (key, value) in known {
-        merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
-    }
-    if settings.view.file_columns.name_width.is_none() {
-        document.remove("name_width");
-    }
-}
-
-fn sync_context_menu(document: &mut Value, settings: &ExplorerSettings) {
-    let known = serde_json::to_value(&settings.contextmenu)
-        .expect("ContextMenuSettings serialization cannot fail");
-    match document {
-        Value::Array(_) => {
-            sync_custom_context_menu_items(document, &settings.contextmenu.items);
-        }
-        Value::Object(object) => {
-            let mut existing = Vec::new();
-            if let Some(file_folder) = object.get("file_folder").and_then(Value::as_array) {
-                existing.extend(file_folder.iter().cloned());
-            }
-            if let Some(directory) = object.get("directory").and_then(Value::as_array) {
-                existing.extend(directory.iter().cloned().map(add_directory_only_to_value));
-            }
-            *document = Value::Array(existing);
-            sync_custom_context_menu_items(document, &settings.contextmenu.items);
-        }
-        _ => {
-            *document = known;
-        }
-    }
-}
-
-fn add_directory_only_to_value(mut value: Value) -> Value {
-    add_directory_only_to_value_item(&mut value);
-    value
-}
-
-fn add_directory_only_to_value_item(value: &mut Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
-        for item in items {
-            add_directory_only_to_value_item(item);
-        }
-        return;
-    }
-
-    let only = object
-        .entry("only".to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(only) = only.as_array_mut() else {
-        return;
-    };
-    if !only
-        .iter()
-        .filter_map(Value::as_str)
-        .any(|value| value.trim().eq_ignore_ascii_case("*directory"))
-    {
-        only.push(Value::String("*directory".to_owned()));
-    }
-}
-
-fn sync_custom_context_menu_items(document: &mut Value, configured: &[CustomContextMenuItem]) {
-    let existing = document.as_array().cloned().unwrap_or_default();
-    let mut used = vec![false; existing.len()];
-    let mut items = Vec::with_capacity(configured.len());
-
-    for item in configured {
-        let known =
-            serde_json::to_value(item).expect("CustomContextMenuItem serialization cannot fail");
-        let matching = existing.iter().enumerate().find_map(|(index, value)| {
-            (!used[index]
-                && serde_json::from_value::<CustomContextMenuItem>(value.clone())
-                    .ok()
-                    .as_ref()
-                    == Some(item))
-            .then_some(index)
-        });
-        let mut value = matching
-            .map(|index| {
-                used[index] = true;
-                existing[index].clone()
-            })
-            .unwrap_or(Value::Null);
-        let existing_children = value.get("items").cloned();
-        merge_known_value(&mut value, &known);
-        if let Some(object) = value.as_object_mut() {
-            object.remove("kind");
-            if matches!(item, CustomContextMenuItem::Item { .. }) {
-                object.remove("executable");
-            }
-        }
-
-        if let CustomContextMenuItem::Submenu {
-            items: child_items, ..
-        } = item
-            && let Some(children) = value.get_mut("items")
-        {
-            if let Some(existing_children) = existing_children {
-                *children = existing_children;
-            }
-            sync_custom_context_menu_items(children, child_items);
-        }
-        items.push(value);
-    }
-
-    *document = Value::Array(items);
-}
-
-fn sync_sidebar(document: &mut Value, settings: &ExplorerSettings) {
-    let known = serde_json::to_value(SerializableSidebarSettings::new(settings))
-        .expect("SidebarSettings serialization cannot fail");
-    let Some(document) = document.as_object_mut() else {
-        *document = known;
-        return;
-    };
-    let known = known
-        .as_object()
-        .expect("serialized SidebarSettings is an object");
-
-    for (key, value) in known {
-        merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
-    }
-}
-
-fn merge_known_value(document: &mut Value, known: &Value) {
-    match (document, known) {
-        (Value::Object(document), Value::Object(known)) => {
-            for (key, value) in known {
-                merge_known_value(document.entry(key.clone()).or_insert(Value::Null), value);
-            }
-        }
-        (document, known) => *document = known.clone(),
-    }
+    *document = settings_document(settings);
 }
 
 fn sort_json_objects(value: &mut Value) {
@@ -2385,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_missing_fields_and_ignore_unknown_fields() {
+    fn settings_default_missing_fields_when_unknown_fields_are_present() {
         let settings: ExplorerSettings =
             serde_json::from_str(r#"{"view":{"show_hidden":true},"future_option":42}"#)
                 .expect("deserialize partial settings");
@@ -3258,7 +3079,7 @@ mod tests {
     }
 
     #[test]
-    fn contextmenu_sync_preserves_unknown_fields_recursively() {
+    fn contextmenu_sync_removes_unknown_fields_recursively() {
         let mut document: Value = serde_json::from_str(
             r#"{
                 "contextmenu": {
@@ -3287,8 +3108,6 @@ mod tests {
         sync_settings_document(&mut document, &settings);
 
         assert!(document["contextmenu"].is_array());
-        assert_eq!(document["contextmenu"][0]["note"], "parent");
-        assert_eq!(document["contextmenu"][0]["items"][0]["note"], "child");
         assert_eq!(
             document["contextmenu"][0]["items"][0]["exe"],
             "~/bin/inspect"
@@ -3302,7 +3121,9 @@ mod tests {
             serde_json::json!(["*directory"])
         );
         assert!(document["contextmenu"].get("directory").is_none());
+        assert!(document["contextmenu"][0].get("note").is_none());
         assert!(document["contextmenu"][0].get("kind").is_none());
+        assert!(document["contextmenu"][0]["items"][0].get("note").is_none());
         assert!(document["contextmenu"][0]["items"][0].get("kind").is_none());
         assert!(
             document["contextmenu"][0]["items"][0]
@@ -3386,14 +3207,14 @@ mod tests {
                 )
         ));
         assert!(document["contextmenu"].is_array());
-        assert_eq!(document["contextmenu"][0]["note"], "parent");
-        assert_eq!(document["contextmenu"][0]["items"][0]["note"], "child");
         assert_eq!(
             document["contextmenu"][0]["items"][0]["only"],
             serde_json::json!(["*directory"])
         );
         assert!(document["contextmenu"].get("directory").is_none());
+        assert!(document["contextmenu"][0].get("note").is_none());
         assert!(document["contextmenu"][0].get("kind").is_none());
+        assert!(document["contextmenu"][0]["items"][0].get("note").is_none());
         assert!(document["contextmenu"][0]["items"][0].get("kind").is_none());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -3468,9 +3289,34 @@ mod tests {
     }
 
     #[test]
-    fn live_reload_recreates_deleted_file_and_rejects_malformed_edits() {
+    fn empty_existing_settings_are_repopulated_with_defaults() {
+        let path = unique_temp_dir("empty-settings").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, " \n\t").unwrap();
+
+        let loaded = load_or_create_settings(&path);
+        assert_eq!(loaded.value, ExplorerSettings::default());
+        assert_eq!(
+            loaded.document,
+            settings_document(&ExplorerSettings::default())
+        );
+        assert_eq!(
+            load_settings_from_path(&path).unwrap(),
+            ExplorerSettings::default()
+        );
+        assert!(!fs::read_to_string(&path).unwrap().trim().is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn live_reload_recreates_deleted_and_empty_files_and_rejects_malformed_edits() {
         let path = unique_temp_dir("live-reload").join(SETTINGS_FILE_NAME);
         let defaults = load_settings_after_change(&path).expect("recreate deleted settings");
+        assert_eq!(defaults.value, ExplorerSettings::default());
+        assert_eq!(load_settings_from_path(&path).unwrap(), defaults.value);
+
+        fs::write(&path, " \n\t").unwrap();
+        let defaults = load_settings_after_change(&path).expect("repopulate empty settings");
         assert_eq!(defaults.value, ExplorerSettings::default());
         assert_eq!(load_settings_from_path(&path).unwrap(), defaults.value);
 
@@ -3481,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_partial_settings_are_completed_sorted_and_preserve_unknown_fields() {
+    fn valid_partial_settings_are_completed_sorted_and_remove_unknown_fields() {
         let path = unique_temp_dir("normalize").join(SETTINGS_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
@@ -3498,11 +3344,11 @@ mod tests {
         let object = document.as_object().unwrap();
         assert_eq!(
             object.len(),
-            settings_document(&loaded.value).as_object().unwrap().len() + 2
+            settings_document(&loaded.value).as_object().unwrap().len()
         );
-        assert_eq!(object["future_option"]["a"], 2);
-        assert_eq!(object["future_option"]["z"], 1);
-        assert_eq!(object["view"]["future_view"], 7);
+        assert!(object.get("future_option").is_none());
+        assert!(object.get("show_hidden_files").is_none());
+        assert!(object["view"].get("future_view").is_none());
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
@@ -3519,18 +3365,14 @@ mod tests {
         assert_eq!(object["rclone"]["conf_path"], Value::Null);
         assert_eq!(object["rclone"]["enabled"], true);
         assert_eq!(object["rclone"]["mount"]["cache_dir"], "auto");
-        assert_eq!(object["show_hidden_files"], true);
-        assert!(
-            normalized.find("\"app\"").unwrap() < normalized.find("\"future_option\"").unwrap()
-        );
-        assert!(normalized.find("\"a\"").unwrap() < normalized.find("\"z\"").unwrap());
+        assert!(normalized.find("\"app\"").unwrap() < normalized.find("\"contextmenu\"").unwrap());
         assert!(normalized.find("\"rclone\"").unwrap() < normalized.find("\"sidebar\"").unwrap());
         assert!(normalized.find("\"sidebar\"").unwrap() < normalized.find("\"tabs\"").unwrap());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn rclone_sync_preserves_unknown_fields() {
+    fn rclone_sync_removes_unknown_fields() {
         let mut document: Value =
             serde_json::from_str(
                 r#"{"rclone":{"enabled":false,"mount":{"cache_dir":null,"future_mount":{"z":1,"a":2}},"future_rclone":{"z":1,"a":2}}}"#,
@@ -3543,15 +3385,13 @@ mod tests {
         assert_eq!(document["rclone"]["enabled"], false);
         assert_eq!(document["rclone"]["conf_path"], Value::Null);
         assert_eq!(document["rclone"]["mount"]["cache_dir"], "auto");
-        assert_eq!(document["rclone"]["mount"]["future_mount"]["a"], 2);
-        assert_eq!(document["rclone"]["mount"]["future_mount"]["z"], 1);
-        assert_eq!(document["rclone"]["future_rclone"]["a"], 2);
-        assert_eq!(document["rclone"]["future_rclone"]["z"], 1);
+        assert!(document["rclone"]["mount"].get("future_mount").is_none());
+        assert!(document["rclone"].get("future_rclone").is_none());
     }
 
     #[gpui::test]
-    fn app_setting_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
-        let path = unique_temp_dir("preserve-unknown").join(SETTINGS_FILE_NAME);
+    fn app_setting_updates_remove_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("remove-unknown").join(SETTINGS_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -3569,16 +3409,15 @@ mod tests {
         cx.update(|cx| set_show_hidden(true, cx));
 
         let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(document["future_option"]["a"], 2);
-        assert_eq!(document["future_option"]["z"], 1);
-        assert_eq!(document["view"]["future_view"], 7);
+        assert!(document.get("future_option").is_none());
+        assert!(document["view"].get("future_view").is_none());
         assert_eq!(document["view"]["show_hidden"], true);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[gpui::test]
-    fn dotfile_setting_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
-        let path = unique_temp_dir("dotfiles-preserve-unknown").join(SETTINGS_FILE_NAME);
+    fn dotfile_setting_updates_remove_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("dotfiles-remove-unknown").join(SETTINGS_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -3596,15 +3435,15 @@ mod tests {
         cx.update(|cx| set_show_dotfiles(false, cx));
 
         let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(document["future_option"], 42);
-        assert_eq!(document["view"]["future_view"], 7);
+        assert!(document.get("future_option").is_none());
+        assert!(document["view"].get("future_view").is_none());
         assert_eq!(document["view"]["show_dotfiles"], false);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[gpui::test]
-    fn view_mode_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
-        let path = unique_temp_dir("view-mode-preserve-unknown").join(SETTINGS_FILE_NAME);
+    fn view_mode_updates_remove_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("view-mode-remove-unknown").join(SETTINGS_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -3622,16 +3461,15 @@ mod tests {
         cx.update(|cx| set_view_mode(FileViewMode::LargeIcons, cx));
 
         let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(document["future_option"]["a"], 2);
-        assert_eq!(document["future_option"]["z"], 1);
-        assert_eq!(document["view"]["future_view"], 7);
+        assert!(document.get("future_option").is_none());
+        assert!(document["view"].get("future_view").is_none());
         assert_eq!(document["view"]["mode"], "large_icons");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[gpui::test]
-    fn file_sort_updates_preserve_unknown_fields(cx: &mut gpui::TestAppContext) {
-        let path = unique_temp_dir("file-sort-preserve-unknown").join(SETTINGS_FILE_NAME);
+    fn file_sort_updates_remove_unknown_fields(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("file-sort-remove-unknown").join(SETTINGS_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -3657,8 +3495,8 @@ mod tests {
         });
 
         let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(document["view"]["future_view"], 7);
-        assert_eq!(document["view"]["sort"]["future_sort"], 9);
+        assert!(document["view"].get("future_view").is_none());
+        assert!(document["view"]["sort"].get("future_sort").is_none());
         assert_eq!(document["view"]["sort"]["column"], "size");
         assert_eq!(document["view"]["sort"]["direction"], "ascending");
         let _ = fs::remove_dir_all(path.parent().unwrap());
