@@ -15,6 +15,8 @@ mod loaders;
 mod settings;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod window_chrome;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod window_state;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{

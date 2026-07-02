@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
-    env, fs, io,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -13,7 +13,6 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px,
     size,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::explorer::{
     AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel, AddressCommit,
@@ -41,6 +40,10 @@ use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
 };
 use crate::settings::{APP_ID, SettingsState, config_dir};
+use crate::window_state::{
+    StoredWindowState, WindowStateOptions,
+    load_window_state_from_path as load_stored_window_state_from_path, save_window_state_to_path,
+};
 
 const APP_TITLE: &str = "Explorer";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
@@ -49,92 +52,15 @@ const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const MIN_WINDOW_WIDTH: f32 = 400.0;
 const MIN_WINDOW_HEIGHT: f32 = 120.0;
 const NEW_WINDOW_OFFSET: f32 = 50.0;
+const EXPLORER_WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
+    min_width: MIN_WINDOW_WIDTH,
+    min_height: MIN_WINDOW_HEIGHT,
+    include_fullscreen: false,
+};
 const SEGOE_FLUENT_ICONS: &[u8] = include_bytes!("../assets/fonts/Segoe Fluent Icons.ttf");
 const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/fonts/Segoe MDL2 Assets.ttf");
 #[cfg(any(target_os = "linux", test))]
 const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum StoredWindowMode {
-    Windowed,
-    Maximized,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-struct StoredWindowState {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    state: StoredWindowMode,
-}
-
-impl StoredWindowState {
-    fn new(x: f32, y: f32, width: f32, height: f32, state: StoredWindowMode) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-            state,
-        }
-    }
-
-    fn is_valid(&self) -> bool {
-        self.x.is_finite()
-            && self.y.is_finite()
-            && self.width.is_finite()
-            && self.height.is_finite()
-            && self.width >= MIN_WINDOW_WIDTH
-            && self.height >= MIN_WINDOW_HEIGHT
-    }
-
-    fn from_window_bounds(window_bounds: WindowBounds) -> Option<Self> {
-        let (bounds, state) = match window_bounds {
-            WindowBounds::Windowed(bounds) => (bounds, StoredWindowMode::Windowed),
-            WindowBounds::Maximized(bounds) => (bounds, StoredWindowMode::Maximized),
-            WindowBounds::Fullscreen(_) => return None,
-        };
-
-        let state = Self::new(
-            f32::from(bounds.origin.x),
-            f32::from(bounds.origin.y),
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
-            state,
-        );
-        state.is_valid().then_some(state)
-    }
-
-    fn to_window_bounds(self, display_bounds: &[Bounds<Pixels>]) -> Option<WindowBounds> {
-        if !self.is_valid() {
-            return None;
-        }
-
-        let bounds = Bounds::new(
-            point(px(self.x), px(self.y)),
-            size(px(self.width), px(self.height)),
-        );
-        if !bounds_fit_current_display(bounds, display_bounds) {
-            return None;
-        }
-
-        Some(match self.state {
-            StoredWindowMode::Windowed => WindowBounds::Windowed(bounds),
-            StoredWindowMode::Maximized => WindowBounds::Maximized(bounds),
-        })
-    }
-}
-
-fn bounds_fit_current_display(
-    window_bounds: Bounds<Pixels>,
-    display_bounds: &[Bounds<Pixels>],
-) -> bool {
-    display_bounds
-        .iter()
-        .any(|display_bounds| window_bounds.is_contained_within(display_bounds))
-}
 
 struct Explorer {
     explorer: gpui::Entity<ExplorerTabs>,
@@ -329,7 +255,7 @@ fn startup_window_bounds_from_state(
     default_bounds: WindowBounds,
 ) -> WindowBounds {
     state
-        .and_then(|state| state.to_window_bounds(display_bounds))
+        .and_then(|state| state.to_window_bounds(display_bounds, EXPLORER_WINDOW_STATE_OPTIONS))
         .unwrap_or(default_bounds)
 }
 
@@ -457,13 +383,14 @@ fn load_window_state() -> Option<StoredWindowState> {
 }
 
 fn load_window_state_from_path(path: &Path) -> Option<StoredWindowState> {
-    let state = serde_json::from_str::<StoredWindowState>(&fs::read_to_string(path).ok()?).ok()?;
-    state.is_valid().then_some(state)
+    load_stored_window_state_from_path(path, EXPLORER_WINDOW_STATE_OPTIONS)
 }
 
 #[cfg_attr(test, allow(dead_code))]
 fn save_window_bounds(window_bounds: WindowBounds) {
-    let Some(state) = StoredWindowState::from_window_bounds(window_bounds) else {
+    let Some(state) =
+        StoredWindowState::from_window_bounds(window_bounds, EXPLORER_WINDOW_STATE_OPTIONS)
+    else {
         return;
     };
     let Some(path) = window_state_path() else {
@@ -471,15 +398,6 @@ fn save_window_bounds(window_bounds: WindowBounds) {
     };
 
     let _ = save_window_state_to_path(&path, &state);
-}
-
-fn save_window_state_to_path(path: &Path, state: &StoredWindowState) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let json = serde_json::to_string_pretty(state).map_err(io::Error::other)?;
-    fs::write(path, json)
 }
 
 #[cfg(not(test))]
@@ -954,8 +872,12 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::settings::{ConfigPlatform, ExplorerSettings, config_dir_for};
+    use crate::window_state::StoredWindowMode;
     use gpui::{Keystroke, TestAppContext};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn has_binding<A: gpui::Action>(
         bindings: &[KeyBinding],
@@ -1313,7 +1235,7 @@ mod tests {
                 600.0,
                 StoredWindowMode::Windowed
             )
-            .is_valid()
+            .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
         assert!(
             !StoredWindowState::new(
@@ -1323,19 +1245,19 @@ mod tests {
                 MIN_WINDOW_HEIGHT - 1.0,
                 StoredWindowMode::Windowed
             )
-            .is_valid()
+            .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
         assert!(
             !StoredWindowState::new(f32::NAN, 0.0, 800.0, 600.0, StoredWindowMode::Windowed)
-                .is_valid()
+                .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
         assert!(
             !StoredWindowState::new(0.0, f32::NAN, 800.0, 600.0, StoredWindowMode::Windowed)
-                .is_valid()
+                .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
         assert!(
             !StoredWindowState::new(0.0, 0.0, f32::NAN, 600.0, StoredWindowMode::Windowed)
-                .is_valid()
+                .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
         assert!(
             StoredWindowState::new(
@@ -1345,7 +1267,7 @@ mod tests {
                 MIN_WINDOW_HEIGHT,
                 StoredWindowMode::Windowed
             )
-            .is_valid()
+            .is_valid(EXPLORER_WINDOW_STATE_OPTIONS)
         );
     }
 
@@ -1354,7 +1276,10 @@ mod tests {
         let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
 
         assert_eq!(
-            StoredWindowState::from_window_bounds(WindowBounds::Windowed(bounds)),
+            StoredWindowState::from_window_bounds(
+                WindowBounds::Windowed(bounds),
+                EXPLORER_WINDOW_STATE_OPTIONS,
+            ),
             Some(StoredWindowState::new(
                 10.0,
                 20.0,
@@ -1364,7 +1289,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            StoredWindowState::from_window_bounds(WindowBounds::Maximized(bounds)),
+            StoredWindowState::from_window_bounds(
+                WindowBounds::Maximized(bounds),
+                EXPLORER_WINDOW_STATE_OPTIONS,
+            ),
             Some(StoredWindowState::new(
                 10.0,
                 20.0,
@@ -1374,7 +1302,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            StoredWindowState::from_window_bounds(WindowBounds::Fullscreen(bounds)),
+            StoredWindowState::from_window_bounds(
+                WindowBounds::Fullscreen(bounds),
+                EXPLORER_WINDOW_STATE_OPTIONS,
+            ),
             None
         );
     }
@@ -1386,7 +1317,7 @@ mod tests {
         let expected = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
 
         assert_eq!(
-            state.to_window_bounds(&[display]),
+            state.to_window_bounds(&[display], EXPLORER_WINDOW_STATE_OPTIONS),
             Some(WindowBounds::Windowed(expected))
         );
     }
@@ -1398,7 +1329,7 @@ mod tests {
         let expected = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
 
         assert_eq!(
-            state.to_window_bounds(&[display]),
+            state.to_window_bounds(&[display], EXPLORER_WINDOW_STATE_OPTIONS),
             Some(WindowBounds::Maximized(expected))
         );
     }
@@ -1409,12 +1340,12 @@ mod tests {
 
         assert_eq!(
             StoredWindowState::new(1700.0, 20.0, 900.0, 700.0, StoredWindowMode::Windowed)
-                .to_window_bounds(&[display]),
+                .to_window_bounds(&[display], EXPLORER_WINDOW_STATE_OPTIONS),
             None
         );
         assert_eq!(
             StoredWindowState::new(10.0, 20.0, 900.0, 700.0, StoredWindowMode::Windowed)
-                .to_window_bounds(&[]),
+                .to_window_bounds(&[], EXPLORER_WINDOW_STATE_OPTIONS),
             None
         );
     }

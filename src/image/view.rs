@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
@@ -35,10 +40,15 @@ use crate::{
         },
     },
     loaders::{LinearProgressStyle, linear_indeterminate},
-    settings::APP_ID,
+    settings::{APP_ID, config_dir},
     window_chrome::{
         MAC_TRAFFIC_LIGHT_PADDING, TITLEBAR_HEIGHT, WindowDragState, render_platform_window_frame,
         render_titlebar_drag_overlay, render_titlebar_drag_region, render_window_controls,
+    },
+    window_state::{
+        StoredWindowState, WindowStateOptions,
+        load_window_state_from_path as load_stored_window_state_from_path,
+        save_window_state_to_path,
     },
 };
 
@@ -46,6 +56,12 @@ const IMAGE_VIEWER_WINDOW_WIDTH: f32 = 1024.0;
 const IMAGE_VIEWER_WINDOW_HEIGHT: f32 = 820.0;
 const IMAGE_VIEWER_MIN_WIDTH: f32 = 400.0;
 const IMAGE_VIEWER_MIN_HEIGHT: f32 = 120.0;
+const IMAGE_VIEWER_WINDOW_STATE_FILE_NAME: &str = "image-window-state.json";
+const IMAGE_VIEWER_WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
+    min_width: IMAGE_VIEWER_MIN_WIDTH,
+    min_height: IMAGE_VIEWER_MIN_HEIGHT,
+    include_fullscreen: true,
+};
 const STATUS_TOOLTIP_RESOLUTION: &str = "Resolution";
 const STATUS_TOOLTIP_RENDERED_RESOLUTION: &str = "Rendered resolution";
 const STATUS_TOOLTIP_SCALING: &str = "Rendered resolution percentage";
@@ -72,16 +88,10 @@ const ZOOM_EPSILON: f64 = 0.000_001;
 
 pub(crate) fn open_image_window(path: PathBuf, cx: &mut App) {
     let title = SharedString::from(image_title(&path));
+    let window_bounds = startup_image_window_bounds(cx);
     cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(
-                    px(IMAGE_VIEWER_WINDOW_WIDTH),
-                    px(IMAGE_VIEWER_WINDOW_HEIGHT),
-                ),
-                cx,
-            ))),
+            window_bounds: Some(window_bounds),
             window_min_size: Some(size(
                 px(IMAGE_VIEWER_MIN_WIDTH),
                 px(IMAGE_VIEWER_MIN_HEIGHT),
@@ -110,6 +120,78 @@ pub(crate) fn open_image_window(path: PathBuf, cx: &mut App) {
     )
     .expect("failed to open image viewer window");
 }
+
+fn image_window_state_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME))
+}
+
+fn default_image_window_bounds(cx: &App) -> WindowBounds {
+    WindowBounds::Windowed(Bounds::centered(
+        None,
+        size(
+            px(IMAGE_VIEWER_WINDOW_WIDTH),
+            px(IMAGE_VIEWER_WINDOW_HEIGHT),
+        ),
+        cx,
+    ))
+}
+
+fn startup_image_window_bounds_from_state(
+    state: Option<StoredWindowState>,
+    display_bounds: &[Bounds<Pixels>],
+    default_bounds: WindowBounds,
+) -> WindowBounds {
+    state
+        .and_then(|state| state.to_window_bounds(display_bounds, IMAGE_VIEWER_WINDOW_STATE_OPTIONS))
+        .unwrap_or(default_bounds)
+}
+
+fn startup_image_window_bounds(cx: &App) -> WindowBounds {
+    let display_bounds = cx
+        .displays()
+        .into_iter()
+        .map(|display| display.bounds())
+        .collect::<Vec<_>>();
+
+    startup_image_window_bounds_from_state(
+        load_image_window_state(),
+        &display_bounds,
+        default_image_window_bounds(cx),
+    )
+}
+
+fn load_image_window_state() -> Option<StoredWindowState> {
+    load_image_window_state_from_path(&image_window_state_path()?)
+}
+
+fn load_image_window_state_from_path(path: &Path) -> Option<StoredWindowState> {
+    load_stored_window_state_from_path(path, IMAGE_VIEWER_WINDOW_STATE_OPTIONS)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn save_image_window_bounds(window_bounds: WindowBounds) {
+    let Some(state) =
+        StoredWindowState::from_window_bounds(window_bounds, IMAGE_VIEWER_WINDOW_STATE_OPTIONS)
+    else {
+        return;
+    };
+    let Some(path) = image_window_state_path() else {
+        return;
+    };
+
+    let _ = save_window_state_to_path(&path, &state);
+}
+
+#[cfg(not(test))]
+fn observe_image_window_bounds(window: &mut Window, cx: &mut Context<ImageViewerWindow>) {
+    cx.observe_window_bounds(window, |_, window, _| {
+        save_image_window_bounds(window.window_bounds());
+    })
+    .detach();
+}
+
+#[cfg(test)]
+fn observe_image_window_bounds(_: &mut Window, _: &mut Context<ImageViewerWindow>) {}
 
 pub(crate) fn new_embedded_image_viewer(
     path: PathBuf,
@@ -233,10 +315,11 @@ impl ImageViewerWindow {
         path: PathBuf,
         title: SharedString,
         focus_handle: FocusHandle,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let surface = new_embedded_image_viewer(path, focus_handle, cx);
+        observe_image_window_bounds(window, cx);
         cx.subscribe_in(
             &surface,
             window,
@@ -2768,12 +2851,153 @@ fn image_title(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        settings::{ConfigPlatform, config_dir_for},
+        window_state::StoredWindowMode,
+    };
     use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
     use std::{
         env,
         path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn image_window_state_paths_use_separate_file_name() {
+        assert_eq!(
+            test_image_window_state_path(ConfigPlatform::MacOS, &[("HOME", "home")]),
+            Some(
+                PathBuf::from("home")
+                    .join(".config")
+                    .join("explorer")
+                    .join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME)
+            )
+        );
+        assert_eq!(
+            test_image_window_state_path(
+                ConfigPlatform::Linux,
+                &[("XDG_CONFIG_HOME", "xdg"), ("HOME", "home")]
+            ),
+            Some(
+                PathBuf::from("xdg")
+                    .join("explorer")
+                    .join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME)
+            )
+        );
+        assert_eq!(
+            test_image_window_state_path(
+                ConfigPlatform::Windows,
+                &[("APPDATA", "appdata"), ("USERPROFILE", "profile")]
+            ),
+            Some(
+                PathBuf::from("appdata")
+                    .join(APP_ID)
+                    .join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME)
+            )
+        );
+    }
+
+    #[test]
+    fn startup_image_window_bounds_restores_windowed_maximized_and_fullscreen() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let expected = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(700.0)));
+        let default_bounds = WindowBounds::Windowed(Bounds::new(
+            point(px(448.0), px(130.0)),
+            size(
+                px(IMAGE_VIEWER_WINDOW_WIDTH),
+                px(IMAGE_VIEWER_WINDOW_HEIGHT),
+            ),
+        ));
+
+        assert_eq!(
+            startup_image_window_bounds_from_state(
+                Some(StoredWindowState::new(
+                    10.0,
+                    20.0,
+                    900.0,
+                    700.0,
+                    StoredWindowMode::Windowed,
+                )),
+                &[display],
+                default_bounds,
+            ),
+            WindowBounds::Windowed(expected)
+        );
+        assert_eq!(
+            startup_image_window_bounds_from_state(
+                Some(StoredWindowState::new(
+                    10.0,
+                    20.0,
+                    900.0,
+                    700.0,
+                    StoredWindowMode::Maximized,
+                )),
+                &[display],
+                default_bounds,
+            ),
+            WindowBounds::Maximized(expected)
+        );
+        assert_eq!(
+            startup_image_window_bounds_from_state(
+                Some(StoredWindowState::new(
+                    10.0,
+                    20.0,
+                    900.0,
+                    700.0,
+                    StoredWindowMode::Fullscreen,
+                )),
+                &[display],
+                default_bounds,
+            ),
+            WindowBounds::Fullscreen(expected)
+        );
+    }
+
+    #[test]
+    fn startup_image_window_bounds_falls_back_to_default_when_saved_bounds_are_not_safe() {
+        let display = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let default_bounds = WindowBounds::Windowed(Bounds::new(
+            point(px(448.0), px(130.0)),
+            size(
+                px(IMAGE_VIEWER_WINDOW_WIDTH),
+                px(IMAGE_VIEWER_WINDOW_HEIGHT),
+            ),
+        ));
+
+        assert_eq!(
+            startup_image_window_bounds_from_state(None, &[display], default_bounds),
+            default_bounds
+        );
+        assert_eq!(
+            startup_image_window_bounds_from_state(
+                Some(StoredWindowState::new(
+                    1700.0,
+                    20.0,
+                    900.0,
+                    700.0,
+                    StoredWindowMode::Windowed,
+                )),
+                &[display],
+                default_bounds,
+            ),
+            default_bounds
+        );
+    }
+
+    #[test]
+    fn image_window_state_loader_accepts_fullscreen_round_trip() {
+        let temp = TestDir::new("image-window-state");
+        let path = temp.path().join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME);
+        let bounds = Bounds::new(point(px(12.0), px(34.0)), size(px(960.0), px(540.0)));
+        let state = StoredWindowState::from_window_bounds(
+            WindowBounds::Fullscreen(bounds),
+            IMAGE_VIEWER_WINDOW_STATE_OPTIONS,
+        )
+        .expect("fullscreen state is allowed for image viewer");
+
+        save_window_state_to_path(&path, &state).expect("save state");
+        assert_eq!(load_image_window_state_from_path(&path), Some(state));
+    }
 
     #[test]
     fn svg_render_selection_uses_exact_target() {
@@ -3922,6 +4146,18 @@ mod tests {
             }
         }
         bytes
+    }
+
+    fn test_image_window_state_path(
+        platform: ConfigPlatform,
+        vars: &[(&str, &str)],
+    ) -> Option<PathBuf> {
+        config_dir_for(platform, |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| PathBuf::from(value))
+        })
+        .map(|dir| dir.join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME))
     }
 
     struct TestDir {
