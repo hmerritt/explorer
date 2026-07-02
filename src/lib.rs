@@ -17,6 +17,8 @@ mod settings;
 mod window_chrome;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod window_state;
+#[cfg(any(target_os = "windows", test))]
+mod windows_file_associations;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
@@ -35,5 +37,15 @@ pub mod benchmark_support {
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    match windows_file_associations::handle_file_association_command(std::env::args_os()) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("failed to update Explorer file associations: {error}");
+            std::process::exit(1);
+        }
+    }
+
     app::run();
 }

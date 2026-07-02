@@ -154,6 +154,7 @@ jobs:
                     - name: windows-amd64
                       target: x86_64-pc-windows-msvc
                       binary: explorer.exe
+                      package_binary: file-explorer.exe
         steps:
             - name: Checkout
               uses: actions/checkout@v6
@@ -196,10 +197,10 @@ jobs:
               shell: pwsh
               run: |
                   New-Item -ItemType Directory -Force -Path dist, package | Out-Null
-                  Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.binary }}"
-                  upx -9 "package/${{ matrix.binary }}"
-                  upx -t "package/${{ matrix.binary }}"
-                  Compress-Archive -Path "package/${{ matrix.binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
+                  Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.package_binary }}"
+                  upx -9 "package/${{ matrix.package_binary }}"
+                  upx -t "package/${{ matrix.package_binary }}"
+                  Compress-Archive -Path "package/${{ matrix.package_binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
 
             - name: Upload release asset
               if: steps.tag_check.outputs.valid == 'true'
