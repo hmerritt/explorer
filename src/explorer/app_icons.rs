@@ -3192,6 +3192,18 @@ mod tests {
             )
         );
         assert_eq!(
+            native_icon_cache_dir_for(ConfigPlatform::Windows, |name| {
+                (name == "USERPROFILE").then(|| PathBuf::from("profile"))
+            }),
+            Some(
+                PathBuf::from("profile")
+                    .join(".config")
+                    .join("explorer")
+                    .join("cache")
+                    .join(NATIVE_ICON_CACHE_VERSION)
+            )
+        );
+        assert_eq!(
             native_icon_cache_dir_for(ConfigPlatform::Linux, |name| {
                 (name == "XDG_CACHE_HOME").then(|| PathBuf::from("xdg"))
             }),

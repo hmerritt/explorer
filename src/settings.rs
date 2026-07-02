@@ -1994,12 +1994,8 @@ pub(crate) fn config_dir_for(
             .or_else(|| {
                 env_path("HOME").map(|home| home.join(".config").join(LINUX_CONFIG_DIR_NAME))
             }),
-        ConfigPlatform::Windows => env_path("APPDATA")
-            .map(|appdata| appdata.join(APP_ID))
-            .or_else(|| {
-                env_path("USERPROFILE")
-                    .map(|profile| profile.join("AppData").join("Roaming").join(APP_ID))
-            }),
+        ConfigPlatform::Windows => env_path("USERPROFILE")
+            .map(|profile| profile.join(".config").join(LINUX_CONFIG_DIR_NAME)),
     }
 }
 
@@ -3701,8 +3697,16 @@ mod tests {
             Some(PathBuf::from("xdg").join(LINUX_CONFIG_DIR_NAME))
         );
         assert_eq!(
+            test_config_dir(ConfigPlatform::Windows, &[("USERPROFILE", "profile")]),
+            Some(
+                PathBuf::from("profile")
+                    .join(".config")
+                    .join(LINUX_CONFIG_DIR_NAME)
+            )
+        );
+        assert_eq!(
             test_config_dir(ConfigPlatform::Windows, &[("APPDATA", "appdata")]),
-            Some(PathBuf::from("appdata").join(APP_ID))
+            None
         );
     }
 

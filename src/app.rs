@@ -1525,8 +1525,9 @@ mod tests {
                 &[("APPDATA", "appdata"), ("USERPROFILE", "profile")]
             ),
             Some(
-                PathBuf::from("appdata")
-                    .join(APP_ID)
+                PathBuf::from("profile")
+                    .join(".config")
+                    .join("explorer")
                     .join(WINDOW_STATE_FILE_NAME)
             )
         );
@@ -1534,11 +1535,14 @@ mod tests {
             test_window_state_path(ConfigPlatform::Windows, &[("USERPROFILE", "profile")]),
             Some(
                 PathBuf::from("profile")
-                    .join("AppData")
-                    .join("Roaming")
-                    .join(APP_ID)
+                    .join(".config")
+                    .join("explorer")
                     .join(WINDOW_STATE_FILE_NAME)
             )
+        );
+        assert_eq!(
+            test_window_state_path(ConfigPlatform::Windows, &[("APPDATA", "appdata")]),
+            None
         );
         assert_eq!(test_window_state_path(ConfigPlatform::Linux, &[]), None);
     }

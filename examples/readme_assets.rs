@@ -175,7 +175,7 @@ fn prepare(repo: &Path, target: &Path) -> io::Result<()> {
     println!();
     println!("Windows example:");
     println!(
-        "  $env:APPDATA='{}'; cargo run",
+        "  $env:USERPROFILE='{}'; cargo run",
         scenario_root(target, "overview").display()
     );
     println!();
@@ -253,7 +253,7 @@ fn write_scenario_config(
     let state = window_state_json();
     let root = scenario_root(target, scenario);
 
-    let windows_dir = root.join("com.hmerritt.explorer");
+    let windows_dir = root.join(".config").join("explorer");
     let linux_dir = root.join("explorer");
     let mac_dir = root.join("home").join(".config").join("explorer");
 

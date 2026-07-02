@@ -2890,10 +2890,15 @@ mod tests {
                 &[("APPDATA", "appdata"), ("USERPROFILE", "profile")]
             ),
             Some(
-                PathBuf::from("appdata")
-                    .join(APP_ID)
+                PathBuf::from("profile")
+                    .join(".config")
+                    .join("explorer")
                     .join(IMAGE_VIEWER_WINDOW_STATE_FILE_NAME)
             )
+        );
+        assert_eq!(
+            test_image_window_state_path(ConfigPlatform::Windows, &[("APPDATA", "appdata")]),
+            None
         );
     }
 

@@ -19,7 +19,7 @@ This creates:
 
 ## Capture Screenshots
 
-Use the generated settings for each screenshot scenario. On Windows, launch Explorer with `APPDATA` set to a scenario config directory. On Linux, launch with `XDG_CONFIG_HOME` set to the scenario config directory. On macOS, launch with `HOME` set to the generated scenario home directory.
+Use the generated settings for each screenshot scenario. On Windows, launch Explorer with `USERPROFILE` set to the scenario config directory. On Linux, launch with `XDG_CONFIG_HOME` set to the scenario config directory. On macOS, launch with `HOME` set to the generated scenario home directory.
 
 Expected committed files:
 

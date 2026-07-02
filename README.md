@@ -20,10 +20,10 @@
   |
   <a href="#features">⚡ Features</a>
   |
-  <a href="#anti-features-that-will-not-be-implemented"><s>Anti-Features</s></a>
+  <a href="#-anti-features-that-will-not-be-implemented"><s>🔃 Anti-Features</s></a>
 </p>
 
-## Install
+## 💾 Install
 
 [**➡️ Manually Download The Latest Release Here**](https://github.com/hmerritt/explorer/releases/latest), or via one of the supported package managers:
 
@@ -46,7 +46,7 @@ scoop bucket add hmerritt https://github.com/hmerritt/scoop-bucket
 scoop install hmerritt/explorer
 ```
 
-## Features ⚡
+## ⚡ Features
 
 - [x] Cross-platform macOS, Linux (Wayland/X11), and Windows
 - [x] GPU-accelerated Explorer UI ([GPUI](https://gpui.rs/))
@@ -73,7 +73,7 @@ scoop install hmerritt/explorer
 - [x] A simple, functional, built-in image viewer (you can set `explorer` to the default image viewer)
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
 
-## 'Anti-Features' that will NOT be implemented
+## 🔃 'Anti-Features' that will NOT be implemented
 
 - [x] 3D Objects _that gets used as much as a welcome mat at a house that never has visitors_
 - [x] File grouping _that randomly appears when you didn't set it_
@@ -88,7 +88,7 @@ Explorer stores settings as JSON and watches the file for changes while the app 
 
 - macOS: `~/.config/explorer/settings.json`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/explorer/settings.json`
-- Windows: `%APPDATA%\com.hmerritt.explorer\settings.json`
+- Windows: `%USERPROFILE%\.config\explorer\settings.json`
 
 Minimal example:
 
