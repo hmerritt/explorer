@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::{
     cell::RefCell,
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt, fs,
     io::{self, BufReader, Read},
@@ -34,7 +35,7 @@ use crate::explorer::image_preview::load_property_image_preview;
 #[cfg(test)]
 use crate::explorer::image_preview::svg_raster_dimensions;
 use crate::explorer::{
-    DialogCancel, DialogConfirm,
+    DialogCancel, DialogConfirm, PropertiesOpenNext, PropertiesOpenPrevious,
     app_icons::NativeIconSize,
     codebase_summary::{
         CodebaseLanguageSummary, CodebaseSummary, direct_git_repository_root,
@@ -324,6 +325,12 @@ enum PropertyTab {
     Code,
     Image,
     Frames,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PropertyNavigationDirection {
+    Previous,
+    Next,
 }
 
 const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
@@ -1124,6 +1131,20 @@ impl PropertiesDialog {
         cx.notify();
     }
 
+    fn retarget_to_path_preserving_tab(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.target = PropertyTarget {
+            paths: vec![path.clone()],
+        };
+        window.set_window_title(&properties_window_title(&self.target.paths));
+        self.start_snapshot_task(cx);
+        cx.notify();
+    }
+
     fn start_cover_task(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.cover_state, PropertyCoverState::NotStarted) {
             return;
@@ -1413,6 +1434,39 @@ impl PropertiesDialog {
         } else {
             self.close(window, cx);
         }
+    }
+
+    fn handle_properties_open_previous(
+        &mut self,
+        _: &PropertiesOpenPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_adjacent_properties_target(PropertyNavigationDirection::Previous, window, cx);
+    }
+
+    fn handle_properties_open_next(
+        &mut self,
+        _: &PropertiesOpenNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_adjacent_properties_target(PropertyNavigationDirection::Next, window, cx);
+    }
+
+    fn open_adjacent_properties_target(
+        &mut self,
+        direction: PropertyNavigationDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.ready_snapshot().and_then(|snapshot| {
+            adjacent_property_path(&snapshot.target, snapshot.item_kind, direction)
+        }) else {
+            return;
+        };
+
+        self.retarget_to_path_preserving_tab(path, window, cx);
     }
 
     fn close(&mut self, window: &mut Window, _: &mut Context<Self>) {
@@ -1824,7 +1878,7 @@ impl Render for PropertiesDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .font(self.font.clone())
-            .key_context("ExplorerDialog")
+            .key_context("ExplorerDialog PropertiesDialog")
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(rgb(0xf3f3f3))
@@ -1833,6 +1887,8 @@ impl Render for PropertiesDialog {
             .text_color(rgb(0x000000))
             .on_action(cx.listener(Self::handle_cancel))
             .on_action(cx.listener(Self::handle_confirm))
+            .on_action(cx.listener(Self::handle_properties_open_previous))
+            .on_action(cx.listener(Self::handle_properties_open_next))
             .child(
                 div()
                     .flex()
@@ -4240,6 +4296,104 @@ fn single_file_path(target: &PropertyTarget, item_kind: PropertyItemKind) -> Opt
         return None;
     }
     target.paths.first().map(PathBuf::as_path)
+}
+
+#[derive(Clone, Debug)]
+struct PropertyNavigationSibling {
+    path: PathBuf,
+    name: String,
+    sorts_as_directory: bool,
+}
+
+fn single_property_navigation_path(
+    target: &PropertyTarget,
+    item_kind: PropertyItemKind,
+) -> Option<&Path> {
+    if !matches!(
+        item_kind,
+        PropertyItemKind::SingleFile
+            | PropertyItemKind::SingleFolder
+            | PropertyItemKind::SingleShortcut
+    ) || target.paths.len() != 1
+    {
+        return None;
+    }
+    target.paths.first().map(PathBuf::as_path)
+}
+
+fn adjacent_property_path(
+    target: &PropertyTarget,
+    item_kind: PropertyItemKind,
+    direction: PropertyNavigationDirection,
+) -> Option<PathBuf> {
+    let current_path = single_property_navigation_path(target, item_kind)?;
+    adjacent_property_sibling_path(current_path, direction)
+}
+
+fn adjacent_property_sibling_path(
+    current_path: &Path,
+    direction: PropertyNavigationDirection,
+) -> Option<PathBuf> {
+    let current_name = current_path.file_name()?;
+    let parent = current_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut siblings = fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| property_navigation_sibling(entry.path()))
+        .collect::<Vec<_>>();
+
+    if siblings.len() <= 1 {
+        return None;
+    }
+
+    siblings.sort_by(compare_property_navigation_siblings);
+    let current_index = siblings
+        .iter()
+        .position(|candidate| candidate.path.file_name() == Some(current_name))?;
+    let target_index = match direction {
+        PropertyNavigationDirection::Previous => {
+            if current_index == 0 {
+                siblings.len() - 1
+            } else {
+                current_index - 1
+            }
+        }
+        PropertyNavigationDirection::Next => (current_index + 1) % siblings.len(),
+    };
+
+    Some(siblings[target_index].path.clone())
+}
+
+fn property_navigation_sibling(path: PathBuf) -> Option<PropertyNavigationSibling> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let link_metadata = fs::symlink_metadata(&path).ok()?;
+    let entry = FileEntry::from_path_with_link_metadata(path.clone(), link_metadata.clone());
+    let metadata = property_target_metadata(&path, Some(&link_metadata));
+    let sorts_as_directory = entry.as_ref().is_some_and(FileEntry::sorts_as_directory)
+        || metadata.as_ref().is_some_and(|metadata| {
+            metadata.is_dir() && !metadata_is_directory_link(&link_metadata)
+        });
+
+    Some(PropertyNavigationSibling {
+        path,
+        name,
+        sorts_as_directory,
+    })
+}
+
+fn compare_property_navigation_siblings(
+    left: &PropertyNavigationSibling,
+    right: &PropertyNavigationSibling,
+) -> CmpOrdering {
+    match (left.sorts_as_directory, right.sorts_as_directory) {
+        (true, false) => CmpOrdering::Less,
+        (false, true) => CmpOrdering::Greater,
+        _ => crate::explorer::compare_file_names(&left.name, &right.name)
+            .then_with(|| left.path.cmp(&right.path)),
+    }
 }
 
 fn collect_property_code_summary(repo_root: &Path) -> Result<PropertyCodeSummary, String> {
@@ -8681,6 +8835,15 @@ mod tests {
     use git2::{Commit, Oid, Repository, Signature};
     use std::{collections::HashSet, io::Cursor, time::Duration};
 
+    fn write_test_png(path: &Path, width: u32, height: u32) {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn open_properties_target_uses_selected_entries() {
         let temp = TempDir::new();
@@ -8978,6 +9141,176 @@ mod tests {
         );
     }
 
+    #[test]
+    fn property_navigation_siblings_include_files_and_folders_in_explorer_order() {
+        let temp = TempDir::new();
+        let folder_2 = temp.path().join("folder 2");
+        let folder_10 = temp.path().join("folder 10");
+        let file_2 = temp.path().join("file 2.txt");
+        let file_10 = temp.path().join("file 10.txt");
+        fs::create_dir(&folder_10).unwrap();
+        fs::write(&file_10, b"10").unwrap();
+        fs::create_dir(&folder_2).unwrap();
+        fs::write(&file_2, b"2").unwrap();
+
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![folder_2.clone()]
+                },
+                PropertyItemKind::SingleFolder,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(folder_10.clone())
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![folder_10.clone()]
+                },
+                PropertyItemKind::SingleFolder,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(file_2.clone())
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![file_2.clone()]
+                },
+                PropertyItemKind::SingleFile,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(file_10)
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![file_2]
+                },
+                PropertyItemKind::SingleFile,
+                PropertyNavigationDirection::Previous,
+            ),
+            Some(folder_10)
+        );
+    }
+
+    #[test]
+    fn property_navigation_wraps_directory_edges() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let a = temp.path().join("a.txt");
+        let b = temp.path().join("b.txt");
+        fs::create_dir(&folder).unwrap();
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![folder.clone()]
+                },
+                PropertyItemKind::SingleFolder,
+                PropertyNavigationDirection::Previous,
+            ),
+            Some(b.clone())
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget { paths: vec![b] },
+                PropertyItemKind::SingleFile,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(folder)
+        );
+    }
+
+    #[cfg(any(unix, target_os = "windows"))]
+    #[test]
+    fn property_navigation_siblings_include_directory_links() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let link = temp.path().join("linked");
+        let file = temp.path().join("note.txt");
+        fs::create_dir(&folder).unwrap();
+        if create_directory_symlink(&folder, &link).is_err() {
+            return;
+        }
+        fs::write(&file, b"note").unwrap();
+
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![folder]
+                },
+                PropertyItemKind::SingleFolder,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(link.clone())
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget { paths: vec![link] },
+                PropertyItemKind::SingleShortcut,
+                PropertyNavigationDirection::Next,
+            ),
+            Some(file)
+        );
+    }
+
+    #[test]
+    fn property_navigation_returns_none_for_missing_current_multiselect_and_no_sibling() {
+        let temp = TempDir::new();
+        let a = temp.path().join("a.txt");
+        let b = temp.path().join("b.txt");
+        let missing = temp.path().join("missing.txt");
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![missing]
+                },
+                PropertyItemKind::SingleFile,
+                PropertyNavigationDirection::Next,
+            ),
+            None
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![a.clone(), b]
+                },
+                PropertyItemKind::MultipleFiles,
+                PropertyNavigationDirection::Next,
+            ),
+            None
+        );
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget {
+                    paths: vec![a.clone()]
+                },
+                PropertyItemKind::Missing,
+                PropertyNavigationDirection::Next,
+            ),
+            None
+        );
+
+        let lone_temp = TempDir::new();
+        let only = lone_temp.path().join("only.txt");
+        fs::write(&only, b"only").unwrap();
+        assert_eq!(
+            adjacent_property_path(
+                &PropertyTarget { paths: vec![only] },
+                PropertyItemKind::SingleFile,
+                PropertyNavigationDirection::Next,
+            ),
+            None
+        );
+    }
+
     #[gpui::test]
     fn properties_dialog_snapshot_task_loads_target(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
@@ -9123,12 +9456,7 @@ mod tests {
     fn properties_dialog_image_tab_embeds_viewer_and_decodes_image(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().join("image.png");
-        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
-        fs::write(&path, bytes).unwrap();
+        write_test_png(&path, 4, 2);
 
         let (dialog, cx) = test_properties_dialog_window(
             cx,
@@ -9162,12 +9490,7 @@ mod tests {
         let first = temp.path().join("a.png");
         let second = temp.path().join("b.png");
         for (path, width, height) in [(&first, 4, 2), (&second, 6, 3)] {
-            let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
-            let mut bytes = Vec::new();
-            image
-                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-                .unwrap();
-            fs::write(path, bytes).unwrap();
+            write_test_png(path, width, height);
         }
 
         let (dialog, cx) = test_properties_dialog_window(
@@ -9213,6 +9536,183 @@ mod tests {
                 replacement_viewer.read(cx).ready_dimensions_for_test(),
                 Some((6, 3))
             );
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_arrow_navigation_retargets_file_or_folder_from_details_tab(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let file = temp.path().join("note.txt");
+        fs::create_dir(&folder).unwrap();
+        fs::write(&file, b"note").unwrap();
+
+        let (dialog, cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![folder.clone()],
+            },
+        );
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Details;
+                dialog.start_details_task(cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let focus_handle = dialog.read(cx).focus_handle(cx);
+            focus_handle.focus(window);
+        });
+        cx.dispatch_action(PropertiesOpenNext);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, vec![file.clone()]);
+            assert_eq!(dialog.active_tab, PropertyTab::Details);
+            let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                panic!("snapshot should be ready");
+            };
+            assert_eq!(snapshot.target.paths, vec![file]);
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_arrow_navigation_resets_invalid_image_tab_to_general(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let image = temp.path().join("a.png");
+        let text = temp.path().join("b.txt");
+        write_test_png(&image, 4, 2);
+        fs::write(&text, b"text").unwrap();
+
+        let (dialog, cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![image.clone()],
+            },
+        );
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Image;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let focus_handle = dialog.read(cx).focus_handle(cx);
+            focus_handle.focus(window);
+        });
+        cx.dispatch_action(PropertiesOpenNext);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, vec![text.clone()]);
+            assert_eq!(dialog.active_tab, PropertyTab::General);
+            let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                panic!("snapshot should be ready");
+            };
+            assert_eq!(snapshot.target.paths, vec![text]);
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_arrow_navigation_keeps_image_tab_for_next_image(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.png");
+        let second = temp.path().join("b.png");
+        write_test_png(&first, 4, 2);
+        write_test_png(&second, 6, 3);
+
+        let (dialog, cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![first.clone()],
+            },
+        );
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Image;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let focus_handle = dialog.read(cx).focus_handle(cx);
+            focus_handle.focus(window);
+        });
+        cx.dispatch_action(PropertiesOpenNext);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, vec![second.clone()]);
+            assert_eq!(dialog.active_tab, PropertyTab::Image);
+            assert_eq!(dialog.image_viewer_path.as_deref(), Some(second.as_path()));
+            let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                panic!("snapshot should be ready");
+            };
+            assert_eq!(snapshot.target.paths, vec![second]);
+        });
+    }
+
+    #[gpui::test]
+    fn properties_dialog_arrow_navigation_no_ops_for_multiselect(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.txt");
+        let second = temp.path().join("b.txt");
+        let third = temp.path().join("c.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        fs::write(&third, b"c").unwrap();
+
+        let target = PropertyTarget {
+            paths: vec![first.clone(), second.clone()],
+        };
+        let (dialog, cx) = test_properties_dialog_window(cx, target.clone());
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Details;
+                dialog.start_details_task(cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let focus_handle = dialog.read(cx).focus_handle(cx);
+            focus_handle.focus(window);
+        });
+        cx.dispatch_action(PropertiesOpenNext);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, target.paths);
+            assert_eq!(dialog.active_tab, PropertyTab::Details);
+            let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                panic!("snapshot should be ready");
+            };
+            assert_eq!(snapshot.target.paths, vec![first, second]);
         });
     }
 

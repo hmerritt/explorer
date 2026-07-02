@@ -1,7 +1,9 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Properties Image tab has arrow navigation keybinding which changes the whole properties tab to the next/prev file. Currently thr keybinding is only active when on the Image tab. Let's make it a Properties-wide binding, so a user can do that in any tab.
+- Image viewer tweaks
+    - GIFs currently only render the first frame. I would like full gif support.
+    - Remember window position, size, state for image viewer (separatly to explorer)
 
 ## 2
 
@@ -19,7 +21,6 @@
 - Split-screen (see Zed)
 - Shell-extension system
 - SSH drive support
-- Spectrum analyser https://www.spek.cc/about
 - Google Drive, OneDrive, etc... mounting
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
 - Special settings value for "date_format" called "relative" and another "relative-timestamp", which shows relative human-readable "ago" times, and "-timestamp" varient includes "at <%H:%M>", e.g. "1 minute ago", "2 hours ago", "yesterday at 15:29", "2 days ago"...
@@ -58,5 +59,6 @@ Major remaining Windows Explorer parity areas:
     - Blanks
 - CSV
 - JSON
+- Spectrum analyser https://www.spek.cc/about
 - PDF view: https://crates.io/crates/pdf_oxide
 - EPUB: https://crates.io/crates/rbook

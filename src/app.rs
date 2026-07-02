@@ -25,16 +25,17 @@ use crate::explorer::{
     DialogFocusPrimary, DialogFocusSecondary, EnterSelected, EnterSelectedInNewTab, ExplorerTabs,
     ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
     MoveHome, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected, OpenSelectedInNewTab,
-    OpenSettings, PasteClipboard, PermanentlyDeleteSelected, RecursiveSearchEdit, Refresh,
-    RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
-    RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
-    RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
-    RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight,
-    SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut,
-    SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
-    SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
-    SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
-    SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
+    OpenSettings, PasteClipboard, PermanentlyDeleteSelected, PropertiesOpenNext,
+    PropertiesOpenPrevious, RecursiveSearchEdit, Refresh, RenameBackspace, RenameBackspaceWord,
+    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
+    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
+    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
+    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
+    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
+    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
+    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
+    SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
@@ -605,6 +606,18 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBinding::new("down", DialogFocusSecondary, Some("ExplorerDialog")),
         KeyBinding::new("left", ImageOpenPrevious, Some("ImageViewer")),
         KeyBinding::new("right", ImageOpenNext, Some("ImageViewer")),
+        KeyBinding::new("left", PropertiesOpenPrevious, Some("PropertiesDialog")),
+        KeyBinding::new("right", PropertiesOpenNext, Some("PropertiesDialog")),
+        KeyBinding::new(
+            "left",
+            PropertiesOpenPrevious,
+            Some("PropertiesDialog > ImageViewer"),
+        ),
+        KeyBinding::new(
+            "right",
+            PropertiesOpenNext,
+            Some("PropertiesDialog > ImageViewer"),
+        ),
         KeyBinding::new("+", ImageZoomIn, Some("ImageViewer")),
         KeyBinding::new("=", ImageZoomIn, Some("ImageViewer")),
         KeyBinding::new("-", ImageZoomOut, Some("ImageViewer")),
@@ -986,6 +999,42 @@ mod tests {
                 ImageOpenNext,
                 "right",
                 Some("ImageViewer")
+            ));
+            assert!(has_binding(
+                &bindings,
+                PropertiesOpenPrevious,
+                "left",
+                Some("PropertiesDialog")
+            ));
+            assert!(has_binding(
+                &bindings,
+                PropertiesOpenNext,
+                "right",
+                Some("PropertiesDialog")
+            ));
+            assert!(has_binding(
+                &bindings,
+                PropertiesOpenPrevious,
+                "left",
+                Some("PropertiesDialog > ImageViewer")
+            ));
+            assert!(has_binding(
+                &bindings,
+                PropertiesOpenNext,
+                "right",
+                Some("PropertiesDialog > ImageViewer")
+            ));
+            assert!(!has_binding(
+                &bindings,
+                ImageOpenPrevious,
+                "left",
+                Some("PropertiesImageDialog")
+            ));
+            assert!(!has_binding(
+                &bindings,
+                ImageOpenNext,
+                "right",
+                Some("PropertiesImageDialog")
             ));
             assert!(has_binding(&bindings, OpenSelected, "right", None));
         }

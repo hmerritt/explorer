@@ -25,6 +25,8 @@ actions!(
         OpenSelected,
         OpenSelectedInNewTab,
         OpenProperties,
+        PropertiesOpenPrevious,
+        PropertiesOpenNext,
         OpenSettings,
         EnterSelected,
         EnterSelectedInNewTab,
