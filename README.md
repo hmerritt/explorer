@@ -10,8 +10,8 @@
 
 <p align="center">
   <a href="https://github.com/hmerritt/explorer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hmerritt/explorer"></a>
-  <a href="https://github.com/hmerritt/explorer/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/hmerritt/explorer/total"></a>
   <a href="https://coveralls.io/github/hmerritt/explorer?branch=master"><img alt="Coverage" src="https://img.shields.io/coverallsCoverage/github/hmerritt/explorer"></a>
+  <a href="https://github.com/hmerritt/explorer/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/hmerritt/explorer/total"></a>
   <a href="./LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -25,7 +25,7 @@
 
 ## 💾 Install
 
-[**➡️ Manually Download The Latest Release Here**](https://github.com/hmerritt/explorer/releases/latest), or via one of the supported package managers:
+[**➡️ Manually Download The Latest Release Here**](https://github.com/hmerritt/explorer/releases/latest), or install via one of the supported package managers:
 
 #### ➡️ macOS via Homebrew
 
@@ -88,14 +88,30 @@ Explorer stores settings as JSON and watches the file for changes while the app 
 
 - macOS: `~/.config/explorer/settings.json`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/explorer/settings.json`
-- Windows: `%USERPROFILE%\.config\explorer\settings.json`
+- Windows: `%USERPROFILE%/.config/explorer/settings.json`
 
 Minimal example:
 
 ```json
 {
     "app": {
-        "start": "<full path to Downloads>"
+        "start": "~/Downloads"
+    },
+    "view": {
+        "mode": "details",
+        "show_extensions": true,
+        "show_hidden": false,
+        "show_folder_sizes": false
+    }
+}
+```
+
+Example with sidebar and contextmenu items:
+
+```json
+{
+    "app": {
+        "start": "~/Downloads"
     },
     "view": {
         "mode": "details",
@@ -103,14 +119,19 @@ Minimal example:
         "show_hidden": false,
         "show_folder_sizes": false
     },
-    "tabs": {
-        "focus_new": false
-    },
     "sidebar": {
-        "items": [],
+        "items": ["~", "~/Downloads", "~/Documents", "~/Pictures"],
         "width": 225
     },
-    "contextmenu": []
+    "contextmenu": [
+        {
+            "exe": "zed",
+            "icon": "",
+            "args": [],
+            "label": "Open with Zed",
+            "only": ["*directory", "*folders", "*files"]
+        }
+    ]
 }
 ```
 

@@ -1468,22 +1468,20 @@ impl ExplorerView {
             );
             children.push(self.render_sidebar_row(index, item, cx));
         }
-        let final_insertion_index = sections
-            .user_directories
-            .last()
-            .and_then(|item| item.configured_index)
-            .map(|index| index + 1)
-            .unwrap_or(self.sidebar_settings.items.len());
-        children.push(self.render_sidebar_insertion_zone(
-            final_insertion_index,
-            sections.user_directories.len(),
-            if has_user_directories {
-                SIDEBAR_ITEM_GAP
-            } else {
-                SIDEBAR_ROW_HEIGHT
-            },
-            cx,
-        ));
+        if has_user_directories {
+            let final_insertion_index = sections
+                .user_directories
+                .last()
+                .and_then(|item| item.configured_index)
+                .map(|index| index + 1)
+                .unwrap_or(self.sidebar_settings.items.len());
+            children.push(self.render_sidebar_insertion_zone(
+                final_insertion_index,
+                sections.user_directories.len(),
+                SIDEBAR_ITEM_GAP,
+                cx,
+            ));
+        }
 
         if has_user_directories && !sections.macos_system_locations.is_empty() {
             children.push(sidebar_separator().into_any_element());
@@ -6354,7 +6352,7 @@ mod tests {
         git_status::{GitDivergence, GitRepositoryStatus},
         navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
-        sidebar::{SidebarItem, SidebarItemKind},
+        sidebar::{SidebarItem, SidebarItemKind, SidebarSections},
         test_support::{TempDir, test_view_entity_at_path},
         view::{ExplorerView, OperationNoticeKind, ViewModeSelection},
     };
@@ -6995,6 +6993,46 @@ mod tests {
         );
         assert_eq!(sidebar_width, 312.0);
         assert!(cx.debug_bounds("explorer-sidebar-resizer").is_some());
+    }
+
+    #[gpui::test]
+    fn sidebar_omits_empty_configured_items_section_before_drives(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        let sidebar = cx.debug_bounds("explorer-sidebar").expect("sidebar bounds");
+        let drive = cx
+            .debug_bounds("explorer-sidebar-row-2000")
+            .expect("drive row bounds");
+        let drive_top_offset = f32::from(drive.origin.y) - f32::from(sidebar.origin.y);
+
+        assert!(
+            (drive_top_offset - 8.0).abs() <= 1.0,
+            "drive row should start after sidebar top padding, got {drive_top_offset}"
+        );
     }
 
     #[gpui::test]
