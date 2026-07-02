@@ -34,7 +34,7 @@ use crate::{
     settings::APP_ID,
     window_chrome::{
         MAC_TRAFFIC_LIGHT_PADDING, TITLEBAR_HEIGHT, WindowDragState, render_platform_window_frame,
-        render_titlebar_drag_region, render_window_controls,
+        render_titlebar_drag_overlay, render_titlebar_drag_region, render_window_controls,
     },
 };
 
@@ -1094,6 +1094,8 @@ impl ImageViewer {
             .child(
                 div()
                     .id("image-viewer-filename")
+                    .debug_selector(|| "image-viewer-filename".to_owned())
+                    .relative()
                     .h_full()
                     .max_w(px(420.0))
                     .min_w(px(0.0))
@@ -1103,7 +1105,12 @@ impl ImageViewer {
                     .overflow_hidden()
                     .text_size(px(12.0))
                     .text_color(rgb(0x1f1f1f))
-                    .child(self.title.clone()),
+                    .child(self.title.clone())
+                    .child(render_titlebar_drag_overlay(
+                        "image-viewer-filename-drag-overlay",
+                        decorations,
+                        cx,
+                    )),
             )
             .child(render_titlebar_drag_region(
                 "image-viewer-titlebar-drag-region",
@@ -2390,7 +2397,7 @@ fn image_title(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
 
     #[test]
     fn svg_render_selection_uses_exact_target() {
@@ -2762,6 +2769,52 @@ mod tests {
         assert_eq!(layout.viewport_height, 282.0);
         assert!(layout.has_horizontal_scrollbar);
         assert!(!layout.has_vertical_scrollbar);
+    }
+
+    #[gpui::test]
+    fn image_viewer_titlebar_filename_starts_drag(cx: &mut TestAppContext) {
+        let (viewer, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ImageViewer {
+                path: PathBuf::new(),
+                title: SharedString::from("image.png"),
+                file_size_bytes: None,
+                focus_handle,
+                state: ImageViewerState::Loading,
+                decode_generation: 0,
+                decode_task: None,
+                svg_render_generation: 0,
+                svg_render_task: None,
+                svg_render_pending: None,
+                svg_render_failed: None,
+                svg_rendered_image: None,
+                zoom: None,
+                manual_transform: false,
+                pan_offset: ImagePanOffset::default(),
+                pan_drag: None,
+                vertical_scrollbar_hovered: false,
+                vertical_scrollbar_drag: None,
+                horizontal_scrollbar_hovered: false,
+                horizontal_scrollbar_drag: None,
+                wheel_zoom_delta: 0.0,
+                should_move_window: false,
+            }
+        });
+
+        let filename = cx
+            .debug_bounds("image-viewer-filename")
+            .expect("filename bounds");
+        viewer.update(cx, |viewer, _| assert!(!viewer.should_move_window));
+
+        cx.simulate_mouse_down(filename.center(), MouseButton::Left, Modifiers::default());
+        viewer.update(cx, |viewer, _| assert!(viewer.should_move_window));
+
+        cx.simulate_mouse_move(filename.center(), MouseButton::Left, Modifiers::default());
+        viewer.update(cx, |viewer, _| assert!(!viewer.should_move_window));
+
+        cx.simulate_mouse_up(filename.center(), MouseButton::Left, Modifiers::default());
+        viewer.update(cx, |viewer, _| assert!(!viewer.should_move_window));
     }
 
     #[gpui::test]

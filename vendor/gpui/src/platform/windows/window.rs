@@ -763,6 +763,22 @@ impl PlatformWindow for WindowsWindow {
             .ok();
     }
 
+    fn start_window_move(&self) {
+        if !self.0.is_movable || self.0.state.borrow().is_fullscreen() {
+            return;
+        }
+
+        unsafe {
+            ReleaseCapture().log_err();
+            SendMessageW(
+                self.0.hwnd,
+                WM_SYSCOMMAND,
+                Some(WPARAM((SC_MOVE | HTCAPTION) as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let hwnd = self.0.hwnd;
 

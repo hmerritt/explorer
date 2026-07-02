@@ -285,9 +285,7 @@ impl PlatformWindow for TestWindow {
         unimplemented!()
     }
 
-    fn start_window_move(&self) {
-        unimplemented!()
-    }
+    fn start_window_move(&self) {}
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 

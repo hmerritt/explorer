@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Decorations, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    Styled, Window, WindowControlArea, div, font, prelude::*, px, rgb,
+    AnyElement, Context, Decorations, Div, IntoElement, MouseButton, MouseDownEvent, ParentElement,
+    Stateful, Styled, Window, WindowControlArea, div, font, prelude::*, px, rgb,
 };
 #[cfg(target_os = "linux")]
 use gpui::{CursorStyle, transparent_black};
@@ -106,16 +106,13 @@ fn linux_caption_buttons(
     buttons
 }
 
-pub(crate) fn render_titlebar_drag_region<T: WindowDragState + 'static>(
+pub(crate) fn render_titlebar_drag_surface<T: WindowDragState + 'static>(
     id: &'static str,
     decorations: Decorations,
     cx: &mut Context<T>,
-) -> AnyElement {
+) -> Stateful<Div> {
     div()
         .id(id)
-        .h_full()
-        .min_w(px(TITLEBAR_DRAG_MIN_WIDTH))
-        .flex_1()
         .window_control_area(WindowControlArea::Drag)
         .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, _| {
             if event.button == MouseButton::Left {
@@ -157,6 +154,30 @@ pub(crate) fn render_titlebar_drag_region<T: WindowDragState + 'static>(
                 })
             },
         )
+}
+
+pub(crate) fn render_titlebar_drag_region<T: WindowDragState + 'static>(
+    id: &'static str,
+    decorations: Decorations,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    render_titlebar_drag_surface(id, decorations, cx)
+        .h_full()
+        .min_w(px(TITLEBAR_DRAG_MIN_WIDTH))
+        .flex_1()
+        .into_any_element()
+}
+
+pub(crate) fn render_titlebar_drag_overlay<T: WindowDragState + 'static>(
+    id: &'static str,
+    decorations: Decorations,
+    cx: &mut Context<T>,
+) -> AnyElement {
+    render_titlebar_drag_surface(id, decorations, cx)
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .size_full()
         .into_any_element()
 }
 
