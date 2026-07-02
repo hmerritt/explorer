@@ -23,6 +23,8 @@
   <a href="#-anti-features-that-will-not-be-implemented"><s>🔃 Anti-Features</s></a>
 </p>
 
+![Explorer UI](docs/assets/explorer.png)
+
 ## 💾 Install
 
 [**➡️ Manually Download The Latest Release Here**](https://github.com/hmerritt/explorer/releases/latest), or install via one of the supported package managers:
