@@ -1,14 +1,12 @@
 <img src="./assets/explorer.png" draggable="false" width="100px" />
 
-# Explorer
+# Explorer Development
 
-[![Release](https://img.shields.io/github/v/release/hmerritt/explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%explorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%explorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master)
+[![Release](https://img.shields.io/github/v/release/hmerritt/explorer)](https://github.com/hmerritt/explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master)
 
-File Explorer for Windows, macOS, and Linux, built with [GPUI](https://www.gpui.rs/).
+Explorer is a Rust/GPUI desktop file manager for Windows Explorer-style workflows on macOS, Linux, and Windows.
 
-## Development 🛠️
-
-This repository is currently a Rust/GPUI application skeleton with a stub window. The real file explorer UI and filesystem browsing behavior are intentionally not implemented yet.
+## Development
 
 This app currently targets Windows, macOS, and Linux. Other platforms compile a small fallback binary that prints a platform support message.
 
@@ -16,6 +14,13 @@ This app currently targets Windows, macOS, and Linux. Other platforms compile a 
 cargo check
 cargo test
 cargo run
+```
+
+CI and release builds use locked dependency resolution. Prefer these checks before dependency-sensitive changes:
+
+```sh
+cargo check --locked
+cargo test --locked --all-targets
 ```
 
 On Linux, Explorer is GUI-only and requires either X11 or Wayland at startup.
@@ -29,6 +34,13 @@ unavailable `wayland` or `x11` backends fail startup instead of falling back. If
 neither backend is available, startup exits with a fatal error.
 
 The canonical app icon source is `assets/explorer.png`. It is referenced as package/bundle metadata in `Cargo.toml` for tooling that understands `[package.metadata.bundle]`; `assets/explorer.ico` is a derived Windows executable resource.
+
+README screenshots are generated from deterministic fixture content. See
+`docs/assets/README.md` and run:
+
+```sh
+cargo run --example readme_assets -- prepare
+```
 
 ---
 

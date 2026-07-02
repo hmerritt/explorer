@@ -1,9 +1,6 @@
 ## 1
 
 - Improve readme - add screenshots / branding
-- Image viewer tweaks
-    - GIFs currently only render the first frame. I would like full gif support.
-    - Remember window position, size, state for image viewer (separatly to explorer)
 
 ## 2
 

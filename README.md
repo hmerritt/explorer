@@ -1,22 +1,33 @@
-<img src="./assets/explorer.png" draggable="false" width="100px" />
+<p align="center">
+  <img src="./assets/explorer.png" alt="Explorer app icon" width="96" height="96">
+</p>
 
-# Explorer
+<h1 align="center">Explorer</h1>
 
-[![Release](https://img.shields.io/github/v/release/hmerritt/explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) ![GitHub License](https://img.shields.io/github/license/hmerritt/explorer)
+<p align="center">
+  <strong><s>Windows</s> File Explorer for macOS, Linux, and Windows. Built in pure Rust with <a href="https://gpui.rs/">GPUI</a>.</strong>
+</p>
 
-~~Windows~~ Explorer for macOS, Linux, and Windows.
+<p align="center">
+  <a href="https://github.com/hmerritt/explorer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/hmerritt/explorer"></a>
+  <a href="https://github.com/hmerritt/explorer/releases/latest"><img alt="Downloads" src="https://img.shields.io/github/downloads/hmerritt/explorer/total"></a>
+  <a href="https://coveralls.io/github/hmerritt/explorer?branch=master"><img alt="Coverage" src="https://img.shields.io/coverallsCoverage/github/hmerritt/explorer"></a>
+  <a href="./LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-- [Download](#download-)
-- [Features](#features-)
-- [~~Anti-Features~~](#anti-features-that-will-not-be-implemented)
+<p align="center">
+  <a href="#install">💾 Install</a>
+  |
+  <a href="#features">⚡ Features</a>
+  |
+  <a href="#anti-features-that-will-not-be-implemented"><s>Anti-Features</s></a>
+</p>
 
-## Download 💾
+## Install
 
-#### [➡️ Manually Download The Latest Release Here](https://github.com/hmerritt/explorer/releases/latest)
+[**➡️ Manually Download The Latest Release Here**](https://github.com/hmerritt/explorer/releases/latest), or via one of the supported package managers:
 
-Or via one of the supported package managers:
-
-#### ➡️ macOS via [Homebrew](https://brew.sh/)
+#### ➡️ macOS via Homebrew
 
 ```sh
 brew install --cask hmerritt/tap/explorer
@@ -28,20 +39,17 @@ brew install --cask hmerritt/tap/explorer
 curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh | sh
 ```
 
-#### ➡️ Windows via [Scoop](https://scoop.sh/)
+#### ➡️ Windows via Scoop
 
 ```sh
 scoop bucket add hmerritt https://github.com/hmerritt/scoop-bucket
-```
-
-```sh
 scoop install hmerritt/explorer
 ```
 
 ## Features ⚡
 
 - [x] Cross-platform macOS, Linux (Wayland/X11), and Windows
-- [x] GPU-accelerated Explorer UI ([GPUI](https://www.gpui.rs/))
+- [x] GPU-accelerated Explorer UI ([GPUI](https://gpui.rs/))
 - [x] Search
     - [x] Type-to-search current directory
     - [x] Recursive search (much faster than Windows)
@@ -72,6 +80,57 @@ scoop install hmerritt/explorer
 - [x] List, Titles, and Content file view modes _that are as pointless as a screen door on a submarine_
 - [x] Search _that takes as long as a cross-country flight_
 - [x] Context menu delays _that take longer than my wife does when deciding where to eat_
+- [x] _Claiming it's built in 'pure rust' when really it's just a WebView wrapper with basic app logic in rust_.
+
+## Configuration
+
+Explorer stores settings as JSON and watches the file for changes while the app is running.
+
+- macOS: `~/.config/explorer/settings.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/explorer/settings.json`
+- Windows: `%APPDATA%\com.hmerritt.explorer\settings.json`
+
+Minimal example:
+
+```json
+{
+    "app": {
+        "start": {
+            "kind": "downloads"
+        }
+    },
+    "view": {
+        "mode": "details",
+        "show_extensions": true,
+        "show_hidden": false,
+        "show_folder_sizes": false
+    },
+    "tabs": {
+        "focus_new": false
+    },
+    "sidebar": {
+        "items": [],
+        "width": 225
+    },
+    "contextmenu": []
+}
+```
+
+## Development
+
+Explorer is a Rust 2024 project using GPUI.
+
+```sh
+cargo check --locked
+cargo test --locked --all-targets
+cargo run
+```
+
+Useful project docs:
+
+- [README-development.md](./README-development.md): platform notes, local installs, and development setup.
+- [BENCHMARKS.md](./BENCHMARKS.md): benchmark suites for search, navigation, thumbnails, image viewing, properties, copy, and archive extraction.
+- [docs/assets/README.md](./docs/assets/README.md): reproducible README screenshot workflow.
 
 ---
 
