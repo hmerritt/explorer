@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, FocusHandle, Focusable, MouseButton,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
     RenderImage, ScrollWheelEvent, SharedString, Styled, Task, TitlebarOptions, Window,
     WindowBounds, WindowDecorations, WindowOptions, canvas, div, img, point, prelude::*, px, rgb,
@@ -46,6 +46,13 @@ const STATUS_TOOLTIP_RENDERED_RESOLUTION: &str = "Rendered resolution";
 const STATUS_TOOLTIP_SCALING: &str = "Rendered resolution percentage";
 const STATUS_TOOLTIP_SIZE: &str = "Size";
 const STATUS_TOOLTIP_DECOMPRESSED_SIZE: &str = "Decompressed size";
+const STATUS_TOOLTIP_ZOOM_100: &str = "Set rendered resolution to 100%";
+const STATUS_TOOLTIP_FIT_WIDTH: &str = "Fit width";
+const STATUS_TOOLTIP_FIT_HEIGHT: &str = "Fit height";
+const IMAGE_STATUS_ZOOM_BUTTON_WIDTH: f32 = 48.0;
+const IMAGE_STATUS_FIT_BUTTON_WIDTH: f32 = 72.0;
+const IMAGE_STATUS_BUTTON_HEIGHT: f32 = 20.0;
+const IMAGE_STATUS_BUTTON_GAP: f32 = 6.0;
 const IMAGE_VIEWER_MIN_ZOOM: f64 = 0.02;
 const IMAGE_VIEWER_MAX_ZOOM: f64 = 28.0;
 const IMAGE_VIEWER_MIN_ZOOM_PERCENT: u32 = 2;
@@ -442,6 +449,65 @@ impl ImageViewer {
         }
     }
 
+    fn handle_zoom_100_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (available_width, available_height) = self.current_image_viewport_size(window);
+        cx.stop_propagation();
+        if self.set_zoom_to_native_resolution(
+            available_width,
+            available_height,
+            window.scale_factor(),
+        ) {
+            cx.notify();
+        }
+    }
+
+    fn handle_fit_width_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (body_width, body_height) = current_body_available_size(window);
+        let (available_width, available_height) = self.current_image_viewport_size(window);
+        cx.stop_propagation();
+        if self.set_zoom_to_fit_axis(
+            ImageFitAxis::Width,
+            body_width,
+            body_height,
+            available_width,
+            available_height,
+            window.scale_factor(),
+        ) {
+            cx.notify();
+        }
+    }
+
+    fn handle_fit_height_click(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (body_width, body_height) = current_body_available_size(window);
+        let (available_width, available_height) = self.current_image_viewport_size(window);
+        cx.stop_propagation();
+        if self.set_zoom_to_fit_axis(
+            ImageFitAxis::Height,
+            body_width,
+            body_height,
+            available_width,
+            available_height,
+            window.scale_factor(),
+        ) {
+            cx.notify();
+        }
+    }
+
     fn handle_wheel_zoom(
         &mut self,
         delta_y: f32,
@@ -515,6 +581,106 @@ impl ImageViewer {
         self.pan_offset = pan_offset;
         self.manual_transform = true;
         true
+    }
+
+    fn set_zoom_to_native_resolution(
+        &mut self,
+        available_width: f32,
+        available_height: f32,
+        scale_factor: f32,
+    ) -> bool {
+        self.set_zoom_to(1.0, available_width, available_height, scale_factor)
+    }
+
+    fn set_zoom_to_fit_axis(
+        &mut self,
+        axis: ImageFitAxis,
+        body_width: f32,
+        body_height: f32,
+        available_width: f32,
+        available_height: f32,
+        scale_factor: f32,
+    ) -> bool {
+        let Some((image_width, image_height, _)) = self.ready_image_kind() else {
+            return false;
+        };
+        let Some(zoom) = fit_axis_zoom(
+            image_width,
+            image_height,
+            body_width,
+            body_height,
+            scale_factor,
+            axis,
+        ) else {
+            return false;
+        };
+
+        self.set_zoom_to(zoom, available_width, available_height, scale_factor)
+    }
+
+    fn set_zoom_to(
+        &mut self,
+        zoom: f64,
+        available_width: f32,
+        available_height: f32,
+        scale_factor: f32,
+    ) -> bool {
+        let Some((image_width, image_height, kind)) = self.ready_image_kind() else {
+            return false;
+        };
+        let Some(initial_zoom) = initial_native_zoom_for_kind(
+            kind,
+            image_width,
+            image_height,
+            available_width,
+            available_height,
+            scale_factor,
+        ) else {
+            return false;
+        };
+
+        let old_zoom = self
+            .zoom
+            .unwrap_or_else(|| initial_zoom.clamp(0.0, IMAGE_VIEWER_MAX_ZOOM));
+        let new_zoom = zoom.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
+        let Some(old_target) =
+            native_image_target(image_width, image_height, old_zoom, scale_factor)
+        else {
+            return false;
+        };
+        let Some(new_target) =
+            native_image_target(image_width, image_height, new_zoom, scale_factor)
+        else {
+            return false;
+        };
+        let old_pan = clamp_pan_offset(
+            self.pan_offset,
+            old_target,
+            available_width,
+            available_height,
+        );
+        let anchor = ImageBodyPoint {
+            x: available_width / 2.0,
+            y: available_height / 2.0,
+        };
+        let new_pan = pan_offset_after_zoom(
+            old_pan,
+            old_target,
+            new_target,
+            available_width,
+            available_height,
+            anchor,
+        );
+
+        let changed = (new_zoom - old_zoom).abs() >= ZOOM_EPSILON
+            || self.zoom != Some(new_zoom)
+            || !self.manual_transform
+            || self.pan_offset != new_pan;
+
+        self.zoom = Some(new_zoom);
+        self.manual_transform = true;
+        self.pan_offset = new_pan;
+        changed
     }
 
     fn toggle_actual_size(
@@ -1302,11 +1468,17 @@ impl ImageViewer {
         .into_any_element()
     }
 
-    fn render_status_bar(&self, target: Option<ImageFitTarget>) -> AnyElement {
+    fn render_status_bar(
+        &self,
+        target: Option<ImageFitTarget>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let labels = image_status_labels(&self.state, self.file_size_bytes, target);
+        let buttons_enabled = matches!(self.state, ImageViewerState::Ready(_));
 
         div()
             .id("image-viewer-status-bar")
+            .debug_selector(|| "image-viewer-status-bar".to_owned())
             .flex()
             .flex_row()
             .items_center()
@@ -1318,35 +1490,81 @@ impl ImageViewer {
             .px(px(STATUS_BAR_HORIZONTAL_PADDING))
             .text_size(px(STATUS_BAR_TEXT_SIZE))
             .text_color(rgb(STATUS_BAR_TEXT_COLOR))
-            .child(image_status_item(
-                "image-viewer-status-resolution",
-                labels.resolution,
-                STATUS_TOOLTIP_RESOLUTION,
-            ))
-            .child(image_status_separator())
-            .child(image_status_item(
-                "image-viewer-status-rendered-resolution",
-                labels.rendered_resolution,
-                STATUS_TOOLTIP_RENDERED_RESOLUTION,
-            ))
-            .child(image_status_separator())
-            .child(image_status_item(
-                "image-viewer-status-scaling",
-                labels.scaling,
-                STATUS_TOOLTIP_SCALING,
-            ))
-            .child(image_status_separator())
-            .child(image_status_item(
-                "image-viewer-status-size",
-                labels.file_size,
-                STATUS_TOOLTIP_SIZE,
-            ))
-            .child(image_status_slash())
-            .child(image_status_item(
-                "image-viewer-status-decompressed-size",
-                labels.decompressed_size,
-                STATUS_TOOLTIP_DECOMPRESSED_SIZE,
-            ))
+            .child(
+                div()
+                    .id("image-viewer-status-metadata")
+                    .debug_selector(|| "image-viewer-status-metadata".to_owned())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w(px(0.0))
+                    .flex_shrink()
+                    .overflow_hidden()
+                    .child(image_status_item(
+                        "image-viewer-status-resolution",
+                        labels.resolution,
+                        STATUS_TOOLTIP_RESOLUTION,
+                    ))
+                    .child(image_status_separator())
+                    .child(image_status_item(
+                        "image-viewer-status-rendered-resolution",
+                        labels.rendered_resolution,
+                        STATUS_TOOLTIP_RENDERED_RESOLUTION,
+                    ))
+                    .child(image_status_separator())
+                    .child(image_status_item(
+                        "image-viewer-status-scaling",
+                        labels.scaling,
+                        STATUS_TOOLTIP_SCALING,
+                    ))
+                    .child(image_status_separator())
+                    .child(image_status_item(
+                        "image-viewer-status-size",
+                        labels.file_size,
+                        STATUS_TOOLTIP_SIZE,
+                    ))
+                    .child(image_status_slash())
+                    .child(image_status_item(
+                        "image-viewer-status-decompressed-size",
+                        labels.decompressed_size,
+                        STATUS_TOOLTIP_DECOMPRESSED_SIZE,
+                    )),
+            )
+            .child(div().min_w(px(8.0)).flex_1())
+            .child(
+                div()
+                    .id("image-viewer-status-zoom-buttons")
+                    .debug_selector(|| "image-viewer-status-zoom-buttons".to_owned())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(IMAGE_STATUS_BUTTON_GAP))
+                    .flex_shrink_0()
+                    .child(image_status_button(
+                        "image-viewer-status-zoom-100",
+                        "100%",
+                        IMAGE_STATUS_ZOOM_BUTTON_WIDTH,
+                        STATUS_TOOLTIP_ZOOM_100,
+                        buttons_enabled,
+                        cx.listener(Self::handle_zoom_100_click),
+                    ))
+                    .child(image_status_button(
+                        "image-viewer-status-fit-width",
+                        "Fit Width",
+                        IMAGE_STATUS_FIT_BUTTON_WIDTH,
+                        STATUS_TOOLTIP_FIT_WIDTH,
+                        buttons_enabled,
+                        cx.listener(Self::handle_fit_width_click),
+                    ))
+                    .child(image_status_button(
+                        "image-viewer-status-fit-height",
+                        "Fit Height",
+                        IMAGE_STATUS_FIT_BUTTON_WIDTH,
+                        STATUS_TOOLTIP_FIT_HEIGHT,
+                        buttons_enabled,
+                        cx.listener(Self::handle_fit_height_click),
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1583,12 +1801,81 @@ enum ActualSizeToggle {
     ResetToInitial,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageFitAxis {
+    Width,
+    Height,
+}
+
 fn actual_size_toggle_for_zoom(zoom: f64) -> ActualSizeToggle {
     if (zoom - 1.0).abs() <= ZOOM_EPSILON {
         ActualSizeToggle::ResetToInitial
     } else {
         ActualSizeToggle::ZoomToActualSize
     }
+}
+
+fn fit_axis_zoom(
+    image_width: u32,
+    image_height: u32,
+    available_width: f32,
+    available_height: f32,
+    scale_factor: f32,
+    axis: ImageFitAxis,
+) -> Option<f64> {
+    if image_width == 0 || image_height == 0 {
+        return None;
+    }
+
+    let initial_axis_size = match axis {
+        ImageFitAxis::Width => available_width,
+        ImageFitAxis::Height => available_height,
+    };
+    let initial_zoom = native_zoom_for_axis(
+        image_axis_size(image_width, image_height, axis),
+        initial_axis_size,
+        scale_factor,
+    )?;
+    let initial_target =
+        native_image_target(image_width, image_height, initial_zoom, scale_factor)?;
+    let final_axis_size = match axis {
+        ImageFitAxis::Width => image_viewport_axis_size(
+            available_width,
+            initial_target.display_height > available_height.max(1.0),
+        ),
+        ImageFitAxis::Height => image_viewport_axis_size(
+            available_height,
+            initial_target.display_width > available_width.max(1.0),
+        ),
+    };
+
+    native_zoom_for_axis(
+        image_axis_size(image_width, image_height, axis),
+        final_axis_size,
+        scale_factor,
+    )
+    .map(|zoom| zoom.clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM))
+}
+
+fn image_axis_size(image_width: u32, image_height: u32, axis: ImageFitAxis) -> u32 {
+    match axis {
+        ImageFitAxis::Width => image_width,
+        ImageFitAxis::Height => image_height,
+    }
+}
+
+fn native_zoom_for_axis(
+    source_axis_size: u32,
+    available_axis_size: f32,
+    scale_factor: f32,
+) -> Option<f64> {
+    if source_axis_size == 0 {
+        return None;
+    }
+
+    let scale_factor = scale_factor.max(1.0);
+    let pixel_size = ((available_axis_size.max(1.0) * scale_factor).floor() as u32).max(1);
+    Some(f64::from(pixel_size) / f64::from(source_axis_size))
 }
 
 fn wheel_zoom_steps(accumulator: &mut f32, delta_y: f32) -> i32 {
@@ -1882,7 +2169,7 @@ impl Render for ImageViewer {
             .bg(rgb(0xffffff))
             .child(self.render_titlebar(window, cx))
             .child(self.render_body(window, cx))
-            .child(self.render_status_bar(self.current_render_target(window)))
+            .child(self.render_status_bar(self.current_render_target(window), cx))
             .into_any_element();
 
         render_platform_window_frame(content, window)
@@ -1968,11 +2255,47 @@ fn status_decompressed_size(size_bytes: Option<u64>) -> String {
 fn image_status_item(id: &'static str, text: String, tooltip: &'static str) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .min_w(px(0.0))
         .flex_shrink_0()
         .truncate()
         .tooltip(explorer_tooltip(tooltip))
         .child(SharedString::from(text))
+        .into_any_element()
+}
+
+fn image_status_button(
+    id: &'static str,
+    label: &'static str,
+    width: f32,
+    tooltip: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(width))
+        .h(px(IMAGE_STATUS_BUTTON_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .rounded(px(2.0))
+        .border_1()
+        .border_color(rgb(0xd8d8d8))
+        .bg(rgb(0xf8f8f8))
+        .text_color(rgb(0x1f1f1f))
+        .cursor_default()
+        .tooltip(explorer_tooltip(tooltip))
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(0xe5f3ff)).border_color(rgb(0x7aa7d9)))
+                .active(|style| style.opacity(0.72))
+                .on_click(on_click)
+        })
+        .when(!enabled, |this| this.opacity(0.45))
+        .child(SharedString::from(label))
         .into_any_element()
 }
 
@@ -2318,6 +2641,135 @@ mod tests {
             assert!(!viewer.horizontal_scrollbar_hovered);
             assert_eq!(viewer.wheel_zoom_delta, 0.0);
         });
+    }
+
+    #[gpui::test]
+    fn zoom_100_sets_native_resolution_without_toggling(cx: &mut TestAppContext) {
+        let viewer = cx.new(|cx| ImageViewer {
+            path: PathBuf::new(),
+            title: SharedString::from("image.png"),
+            file_size_bytes: None,
+            focus_handle: cx.focus_handle(),
+            state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+            decode_generation: 0,
+            decode_task: None,
+            svg_render_generation: 0,
+            svg_render_task: None,
+            svg_render_pending: None,
+            svg_render_failed: None,
+            svg_rendered_image: None,
+            zoom: Some(0.5),
+            manual_transform: true,
+            pan_offset: ImagePanOffset::default(),
+            pan_drag: None,
+            vertical_scrollbar_hovered: false,
+            vertical_scrollbar_drag: None,
+            horizontal_scrollbar_hovered: false,
+            horizontal_scrollbar_drag: None,
+            wheel_zoom_delta: 0.0,
+            should_move_window: false,
+        });
+
+        viewer.update(cx, |viewer, _| {
+            assert!(viewer.set_zoom_to_native_resolution(800.0, 600.0, 1.0));
+            assert_eq!(viewer.zoom, Some(1.0));
+            let target = native_image_target(2000, 1000, viewer.zoom.unwrap(), 1.0).unwrap();
+            assert_eq!(target.pixel_width, 2000);
+            assert_eq!(target.pixel_height, 1000);
+
+            viewer.pan_offset = ImagePanOffset { x: 100.0, y: 0.0 };
+            assert!(!viewer.set_zoom_to_native_resolution(800.0, 600.0, 1.0));
+            assert_eq!(viewer.zoom, Some(1.0));
+            assert!(viewer.manual_transform);
+            assert_eq!(viewer.pan_offset, ImagePanOffset { x: 100.0, y: 0.0 });
+        });
+    }
+
+    #[test]
+    fn fit_width_zoom_uses_hidpi_pixels_and_reserves_vertical_scrollbar() {
+        let zoom = fit_axis_zoom(1000, 1000, 400.0, 300.0, 2.0, ImageFitAxis::Width).unwrap();
+        let target = native_image_target(1000, 1000, zoom, 2.0).unwrap();
+        let layout = image_viewport_layout(target, 400.0, 300.0);
+
+        assert_eq!(target.pixel_width, 764);
+        assert_eq!(target.display_width, 382.0);
+        assert_eq!(target.display_height, 382.0);
+        assert_eq!(layout.viewport_width, 382.0);
+        assert!(layout.has_vertical_scrollbar);
+        assert!(!layout.has_horizontal_scrollbar);
+    }
+
+    #[test]
+    fn fit_height_zoom_uses_hidpi_pixels_and_reserves_horizontal_scrollbar() {
+        let zoom = fit_axis_zoom(1000, 500, 400.0, 300.0, 2.0, ImageFitAxis::Height).unwrap();
+        let target = native_image_target(1000, 500, zoom, 2.0).unwrap();
+        let layout = image_viewport_layout(target, 400.0, 300.0);
+
+        assert_eq!(target.pixel_height, 564);
+        assert_eq!(target.display_width, 564.0);
+        assert_eq!(target.display_height, 282.0);
+        assert_eq!(layout.viewport_height, 282.0);
+        assert!(layout.has_horizontal_scrollbar);
+        assert!(!layout.has_vertical_scrollbar);
+    }
+
+    #[gpui::test]
+    fn status_bar_zoom_buttons_render_right_aligned(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ImageViewer {
+                path: PathBuf::new(),
+                title: SharedString::from("image.png"),
+                file_size_bytes: Some(1536),
+                focus_handle,
+                state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, Some(8_000_000))),
+                decode_generation: 0,
+                decode_task: None,
+                svg_render_generation: 0,
+                svg_render_task: None,
+                svg_render_pending: None,
+                svg_render_failed: None,
+                svg_rendered_image: None,
+                zoom: Some(0.5),
+                manual_transform: true,
+                pan_offset: ImagePanOffset::default(),
+                pan_drag: None,
+                vertical_scrollbar_hovered: false,
+                vertical_scrollbar_drag: None,
+                horizontal_scrollbar_hovered: false,
+                horizontal_scrollbar_drag: None,
+                wheel_zoom_delta: 0.0,
+                should_move_window: false,
+            }
+        });
+
+        cx.run_until_parked();
+
+        let status = cx
+            .debug_bounds("image-viewer-status-bar")
+            .expect("status bar bounds");
+        let metadata = cx
+            .debug_bounds("image-viewer-status-metadata")
+            .expect("metadata bounds");
+        let zoom_100 = cx
+            .debug_bounds("image-viewer-status-zoom-100")
+            .expect("100 percent button bounds");
+        let fit_width = cx
+            .debug_bounds("image-viewer-status-fit-width")
+            .expect("fit width button bounds");
+        let fit_height = cx
+            .debug_bounds("image-viewer-status-fit-height")
+            .expect("fit height button bounds");
+
+        let metadata_right = f32::from(metadata.origin.x) + f32::from(metadata.size.width);
+        let status_right = f32::from(status.origin.x) + f32::from(status.size.width);
+        let fit_height_right = f32::from(fit_height.origin.x) + f32::from(fit_height.size.width);
+
+        assert!(metadata_right <= f32::from(zoom_100.origin.x));
+        assert!(f32::from(zoom_100.origin.x) < f32::from(fit_width.origin.x));
+        assert!(f32::from(fit_width.origin.x) < f32::from(fit_height.origin.x));
+        assert!((status_right - STATUS_BAR_HORIZONTAL_PADDING - fit_height_right).abs() <= 1.0);
     }
 
     #[test]

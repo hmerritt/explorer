@@ -2,7 +2,6 @@
 
 Image viewer tweaks:
 
-- Status bar buttons right-aligned: "100%" (sets render resolution to 100%). "Fit Width", sets zoom so that image width is 100% of the window with no overflow (height can overflow). "Fit Height", sets zoom so that image height is 100% of the window height no overflow (width can overflow).
 - Add ability to use arrow keys to nagivate supported images in the same directory. Left opens previous image, right opens next image (when sorted alphabetically). At the start/end, loop.
 
 ## 2
