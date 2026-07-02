@@ -4,11 +4,11 @@
 
 [![Release](https://img.shields.io/github/v/release/hmerritt/explorer?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Downloads](https://img.shields.io/github/downloads/hmerritt/explorer/total?link=https%3A%2F%2Fgithub.com%2Fhmerritt%2Fexplorer%2Freleases%2Flatest)](https://github.com/hmerritt/explorer/releases/latest) [![Coverage](https://img.shields.io/coverallsCoverage/github/hmerritt/explorer)](https://coveralls.io/github/hmerritt/explorer?branch=master)
 
-~Windows~ Explorer for macOS, Linux, and Windows.
+~~Windows~~ Explorer for macOS, Linux, and Windows.
 
 - [Download](#download-)
 - [Features](#features-)
-- [~Anti-Features~](#anti-features-that-will-not-be-implemented)
+- [~~Anti-Features~~](#anti-features-that-will-not-be-implemented)
 
 ## Download 💾
 
@@ -28,6 +28,16 @@ brew install --cask hmerritt/tap/explorer
 curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh | sh
 ```
 
+#### Windows via [Scoop](https://scoop.sh/)
+
+```sh
+scoop bucket add hmerritt https://github.com/hmerritt/scoop-bucket
+```
+
+```sh
+scoop install hmerritt/explorer
+```
+
 ## Features ⚡
 
 - [x] Cross-platform macOS, Linux (Wayland/X11), and Windows
@@ -38,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh
 - [x] Tabs
 - [x] Arrow keys navigation
 - [x] Sidebar custom pins (drag-to-pin)
-- [x] Key bindings for ~everything~ most things
+- [x] Key bindings for ~~everything~~ most things
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
 
 ## 'Anti-Features' that will NOT be implemented
