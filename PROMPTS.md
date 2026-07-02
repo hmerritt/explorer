@@ -2,8 +2,8 @@
 
 Image viewer tweaks:
 
-- Top bar currently is not draggable
-- Refactor the image opening pipeline. Currently it is very slow (multiple seconds) even for small images. Add benchmarks to the image viewer for visibility
+- Remove the "Loading" and instead add an indeterminate loading bar at the bottom, just above the status bar.
+- Add a "Fit" status bar button, to the right of "100%" (before "Fit Width"). This should make the image fit within the bounds
 
 ## 2
 

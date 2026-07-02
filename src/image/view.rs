@@ -1,11 +1,11 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
-    RenderImage, ScrollWheelEvent, SharedString, Styled, Task, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowOptions, canvas, div, img, point, prelude::*, px, rgb,
-    size,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, Context, CursorStyle,
+    FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement, Pixels, Point, Render, RenderImage, ScrollWheelEvent, SharedString, Styled,
+    Task, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, div,
+    img, point, prelude::*, px, relative, rgb, size,
 };
 
 use crate::{
@@ -57,6 +57,11 @@ const IMAGE_STATUS_ZOOM_BUTTON_WIDTH: f32 = 48.0;
 const IMAGE_STATUS_FIT_BUTTON_WIDTH: f32 = 72.0;
 const IMAGE_STATUS_BUTTON_HEIGHT: f32 = 20.0;
 const IMAGE_STATUS_BUTTON_GAP: f32 = 6.0;
+const IMAGE_VIEWER_LOADING_BAR_HEIGHT: f32 = 3.0;
+const IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH: f32 = 0.28;
+const IMAGE_VIEWER_LOADING_BAR_ANIMATION_MS: u64 = 1_200;
+const IMAGE_VIEWER_LOADING_BAR_TRACK_COLOR: u32 = 0xf2f2f2;
+const IMAGE_VIEWER_LOADING_BAR_COLOR: u32 = 0x0078d7;
 const IMAGE_VIEWER_MIN_ZOOM: f64 = 0.02;
 const IMAGE_VIEWER_MAX_ZOOM: f64 = 28.0;
 const IMAGE_VIEWER_MIN_ZOOM_PERCENT: u32 = 2;
@@ -435,6 +440,17 @@ impl ImageViewer {
         Some((decoded.width, decoded.height, kind))
     }
 
+    fn loading_bar_visible(&self) -> bool {
+        match &self.state {
+            ImageViewerState::Loading => true,
+            ImageViewerState::Ready(decoded) => {
+                matches!(decoded.source, DecodedImageSource::Svg(_))
+                    && self.svg_rendered_image.is_none()
+            }
+            ImageViewerState::Failed(_) => false,
+        }
+    }
+
     fn sync_zoom_to_initial(&mut self, initial_zoom: f64) -> f64 {
         let initial_zoom = initial_zoom.clamp(0.0, IMAGE_VIEWER_MAX_ZOOM);
         if !self.manual_transform || self.zoom.is_none() {
@@ -573,7 +589,8 @@ impl ImageViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (body_width, body_height) = current_body_available_size(window);
+        let (body_width, body_height) =
+            current_body_available_size(window, self.loading_bar_visible());
         let (available_width, available_height) = self.current_image_viewport_size(window);
         cx.stop_propagation();
         if self.set_zoom_to_fit_axis(
@@ -594,7 +611,8 @@ impl ImageViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (body_width, body_height) = current_body_available_size(window);
+        let (body_width, body_height) =
+            current_body_available_size(window, self.loading_bar_visible());
         let (available_width, available_height) = self.current_image_viewport_size(window);
         cx.stop_propagation();
         if self.set_zoom_to_fit_axis(
@@ -846,7 +864,8 @@ impl ImageViewer {
     }
 
     fn current_image_viewport_size(&self, window: &Window) -> (f32, f32) {
-        let (available_width, available_height) = current_body_available_size(window);
+        let (available_width, available_height) =
+            current_body_available_size(window, self.loading_bar_visible());
         let Some((image_width, image_height, kind)) = self.ready_image_kind() else {
             return (available_width, available_height);
         };
@@ -1173,13 +1192,21 @@ impl ImageViewer {
             .into_any_element()
     }
 
-    fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(
+        &mut self,
+        window: &mut Window,
+        loading_bar_visible: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let viewport = window.viewport_size();
-        let (available_width, available_height) =
-            image_body_available_size(f32::from(viewport.width), f32::from(viewport.height));
+        let (available_width, available_height) = image_body_available_size(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            loading_bar_visible,
+        );
         let scale_factor = window.scale_factor();
         let content = match &self.state {
-            ImageViewerState::Loading => image_viewer_status("Loading image..."),
+            ImageViewerState::Loading => image_viewer_empty_body(),
             ImageViewerState::Failed(error) => {
                 image_viewer_status(format!("Cannot display {}: {error}", self.title))
             }
@@ -1258,7 +1285,7 @@ impl ImageViewer {
                         .expect("svg rendered image target");
                     render_ready_image(rendered.image.clone(), display_target, placement.offset)
                 } else {
-                    image_viewer_status("Loading image...")
+                    image_viewer_empty_body()
                 }
             }
         };
@@ -1778,11 +1805,18 @@ impl ImageViewer {
         .into_any_element()
     }
 
-    fn current_render_target(&self, window: &Window) -> Option<ImageFitTarget> {
+    fn current_render_target(
+        &self,
+        window: &Window,
+        loading_bar_visible: bool,
+    ) -> Option<ImageFitTarget> {
         let (image_width, image_height, kind) = self.ready_image_kind()?;
         let viewport = window.viewport_size();
-        let (available_width, available_height) =
-            image_body_available_size(f32::from(viewport.width), f32::from(viewport.height));
+        let (available_width, available_height) = image_body_available_size(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            loading_bar_visible,
+        );
         let initial_zoom = initial_native_zoom_for_kind(
             kind,
             image_width,
@@ -2208,9 +2242,13 @@ fn pan_offset_after_zoom(
     )
 }
 
-fn current_body_available_size(window: &Window) -> (f32, f32) {
+fn current_body_available_size(window: &Window, loading_bar_visible: bool) -> (f32, f32) {
     let viewport = window.viewport_size();
-    image_body_available_size(f32::from(viewport.width), f32::from(viewport.height))
+    image_body_available_size(
+        f32::from(viewport.width),
+        f32::from(viewport.height),
+        loading_bar_visible,
+    )
 }
 
 fn available_size_from_body_size(body_size: gpui::Size<Pixels>) -> (f32, f32) {
@@ -2299,6 +2337,9 @@ impl Focusable for ImageViewer {
 
 impl Render for ImageViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let loading_bar_visible = self.loading_bar_visible();
+        let body = self.render_body(window, loading_bar_visible, cx);
+        let render_target = self.current_render_target(window, loading_bar_visible);
         let content = div()
             .key_context("ImageViewer")
             .track_focus(&self.focus_handle)
@@ -2313,8 +2354,9 @@ impl Render for ImageViewer {
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .child(self.render_titlebar(window, cx))
-            .child(self.render_body(window, cx))
-            .child(self.render_status_bar(self.current_render_target(window), cx))
+            .child(body)
+            .when(loading_bar_visible, |this| this.child(render_loading_bar()))
+            .child(self.render_status_bar(render_target, cx))
             .into_any_element();
 
         render_platform_window_frame(content, window)
@@ -2323,6 +2365,7 @@ impl Render for ImageViewer {
 
 fn image_viewer_status(text: impl Into<SharedString>) -> AnyElement {
     div()
+        .debug_selector(|| "image-viewer-status-message".to_owned())
         .flex()
         .items_center()
         .justify_center()
@@ -2330,6 +2373,43 @@ fn image_viewer_status(text: impl Into<SharedString>) -> AnyElement {
         .text_size(px(13.0))
         .text_color(rgb(0x5f5f5f))
         .child(text.into())
+        .into_any_element()
+}
+
+fn image_viewer_empty_body() -> AnyElement {
+    div().into_any_element()
+}
+
+fn render_loading_bar() -> AnyElement {
+    div()
+        .id("image-viewer-loading-bar")
+        .debug_selector(|| "image-viewer-loading-bar".to_owned())
+        .relative()
+        .w_full()
+        .h(px(IMAGE_VIEWER_LOADING_BAR_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .bg(rgb(IMAGE_VIEWER_LOADING_BAR_TRACK_COLOR))
+        .child(
+            div()
+                .id("image-viewer-loading-bar-segment")
+                .debug_selector(|| "image-viewer-loading-bar-segment".to_owned())
+                .absolute()
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .bg(rgb(IMAGE_VIEWER_LOADING_BAR_COLOR))
+                .with_animation(
+                    "image-viewer-loading-bar-segment-animation",
+                    Animation::new(Duration::from_millis(IMAGE_VIEWER_LOADING_BAR_ANIMATION_MS))
+                        .repeat(),
+                    |bar, delta| {
+                        let left = -IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH
+                            + (1.0 + IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH) * delta;
+                        bar.left(relative(left))
+                            .w(relative(IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH))
+                    },
+                ),
+        )
         .into_any_element()
 }
 
@@ -2462,10 +2542,19 @@ fn image_status_separator() -> AnyElement {
         .into_any_element()
 }
 
-fn image_body_available_size(viewport_width: f32, viewport_height: f32) -> (f32, f32) {
+fn image_body_available_size(
+    viewport_width: f32,
+    viewport_height: f32,
+    loading_bar_visible: bool,
+) -> (f32, f32) {
+    let loading_bar_height = if loading_bar_visible {
+        IMAGE_VIEWER_LOADING_BAR_HEIGHT
+    } else {
+        0.0
+    };
     (
         viewport_width,
-        (viewport_height - TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
+        (viewport_height - TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT - loading_bar_height).max(1.0),
     )
 }
 
@@ -2987,6 +3076,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn loading_state_renders_bottom_loading_bar_above_status_bar(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            image_viewer_for_test(focus_handle, ImageViewerState::Loading)
+        });
+
+        let loading_bar = cx
+            .debug_bounds("image-viewer-loading-bar")
+            .expect("loading bar bounds");
+        cx.debug_bounds("image-viewer-loading-bar-segment")
+            .expect("loading bar segment bounds");
+        let status = cx
+            .debug_bounds("image-viewer-status-bar")
+            .expect("status bar bounds");
+
+        let loading_bottom = f32::from(loading_bar.origin.y) + f32::from(loading_bar.size.height);
+        assert!((loading_bottom - f32::from(status.origin.y)).abs() <= 1.0);
+        assert!(cx.debug_bounds("image-viewer-status-message").is_none());
+    }
+
+    #[gpui::test]
+    fn ready_image_does_not_render_loading_bar(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            image_viewer_for_test(
+                focus_handle,
+                ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+            )
+        });
+
+        assert!(cx.debug_bounds("image-viewer-loading-bar").is_none());
+        assert!(
+            cx.debug_bounds("image-viewer-loading-bar-segment")
+                .is_none()
+        );
+        cx.debug_bounds("image-viewer-status-bar")
+            .expect("status bar bounds");
+    }
+
+    #[gpui::test]
     fn status_bar_zoom_buttons_render_right_aligned(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
@@ -3306,12 +3437,47 @@ mod tests {
     }
 
     #[test]
-    fn image_body_available_size_excludes_titlebar_and_status_bar() {
+    fn image_body_available_size_excludes_titlebar_status_bar_and_optional_loading_bar() {
         assert_eq!(
-            image_body_available_size(800.0, 600.0),
+            image_body_available_size(800.0, 600.0, false),
             (800.0, 600.0 - TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT)
         );
-        assert_eq!(image_body_available_size(800.0, 0.0), (800.0, 1.0));
+        assert_eq!(
+            image_body_available_size(800.0, 600.0, true),
+            (
+                800.0,
+                600.0 - TITLEBAR_HEIGHT - STATUS_BAR_HEIGHT - IMAGE_VIEWER_LOADING_BAR_HEIGHT
+            )
+        );
+        assert_eq!(image_body_available_size(800.0, 0.0, true), (800.0, 1.0));
+    }
+
+    fn image_viewer_for_test(focus_handle: FocusHandle, state: ImageViewerState) -> ImageViewer {
+        ImageViewer {
+            path: PathBuf::new(),
+            title: SharedString::from("image.png"),
+            file_size_bytes: None,
+            focus_handle,
+            state,
+            decode_generation: 0,
+            decode_task: None,
+            icc_correction_task: None,
+            svg_render_generation: 0,
+            svg_render_task: None,
+            svg_render_pending: None,
+            svg_render_failed: None,
+            svg_rendered_image: None,
+            zoom: None,
+            manual_transform: false,
+            pan_offset: ImagePanOffset::default(),
+            pan_drag: None,
+            vertical_scrollbar_hovered: false,
+            vertical_scrollbar_drag: None,
+            horizontal_scrollbar_hovered: false,
+            horizontal_scrollbar_drag: None,
+            wheel_zoom_delta: 0.0,
+            should_move_window: false,
+        }
     }
 
     fn raster_decoded_image(
