@@ -1,13 +1,10 @@
 ## 1
 
-Image viewer tweaks:
-
-- Remove the "Loading" and instead add an indeterminate loading bar at the bottom, just above the status bar.
-- Add a "Fit" status bar button, to the right of "100%" (before "Fit Width"). This should make the image fit within the bounds
+- Improve readme - add screenshots / branding
 
 ## 2
 
-- Improve readme - add screenshots / branding
+- Image viewer tweaks
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)

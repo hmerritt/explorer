@@ -1,11 +1,11 @@
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, Context, CursorStyle,
-    FocusHandle, Focusable, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    ParentElement, Pixels, Point, Render, RenderImage, ScrollWheelEvent, SharedString, Styled,
-    Task, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, canvas, div,
-    img, point, prelude::*, px, relative, rgb, size,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render,
+    RenderImage, ScrollWheelEvent, SharedString, Styled, Task, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowOptions, canvas, div, img, point, prelude::*, px, rgb,
+    size,
 };
 
 use crate::{
@@ -34,6 +34,7 @@ use crate::{
             svg_initial_native_zoom,
         },
     },
+    loaders::{LinearProgressStyle, linear_indeterminate},
     settings::APP_ID,
     window_chrome::{
         MAC_TRAFFIC_LIGHT_PADDING, TITLEBAR_HEIGHT, WindowDragState, render_platform_window_frame,
@@ -58,11 +59,7 @@ const IMAGE_STATUS_ZOOM_BUTTON_WIDTH: f32 = 48.0;
 const IMAGE_STATUS_FIT_BUTTON_WIDTH: f32 = 72.0;
 const IMAGE_STATUS_BUTTON_HEIGHT: f32 = 20.0;
 const IMAGE_STATUS_BUTTON_GAP: f32 = 6.0;
-const IMAGE_VIEWER_LOADING_BAR_HEIGHT: f32 = 3.0;
-const IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH: f32 = 0.28;
-const IMAGE_VIEWER_LOADING_BAR_ANIMATION_MS: u64 = 1_200;
-const IMAGE_VIEWER_LOADING_BAR_TRACK_COLOR: u32 = 0xf2f2f2;
-const IMAGE_VIEWER_LOADING_BAR_COLOR: u32 = 0x0078d7;
+const IMAGE_VIEWER_LOADING_BAR_HEIGHT: f32 = 4.0;
 const IMAGE_VIEWER_MIN_ZOOM: f64 = 0.02;
 const IMAGE_VIEWER_MAX_ZOOM: f64 = 28.0;
 const IMAGE_VIEWER_MIN_ZOOM_PERCENT: u32 = 2;
@@ -2399,36 +2396,10 @@ fn image_viewer_empty_body() -> AnyElement {
 }
 
 fn render_loading_bar() -> AnyElement {
-    div()
-        .id("image-viewer-loading-bar")
-        .debug_selector(|| "image-viewer-loading-bar".to_owned())
-        .relative()
-        .w_full()
-        .h(px(IMAGE_VIEWER_LOADING_BAR_HEIGHT))
-        .flex_shrink_0()
-        .overflow_hidden()
-        .bg(rgb(IMAGE_VIEWER_LOADING_BAR_TRACK_COLOR))
-        .child(
-            div()
-                .id("image-viewer-loading-bar-segment")
-                .debug_selector(|| "image-viewer-loading-bar-segment".to_owned())
-                .absolute()
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .bg(rgb(IMAGE_VIEWER_LOADING_BAR_COLOR))
-                .with_animation(
-                    "image-viewer-loading-bar-segment-animation",
-                    Animation::new(Duration::from_millis(IMAGE_VIEWER_LOADING_BAR_ANIMATION_MS))
-                        .repeat(),
-                    |bar, delta| {
-                        let left = -IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH
-                            + (1.0 + IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH) * delta;
-                        bar.left(relative(left))
-                            .w(relative(IMAGE_VIEWER_LOADING_BAR_SEGMENT_WIDTH))
-                    },
-                ),
-        )
-        .into_any_element()
+    linear_indeterminate(
+        "image-viewer-loading-bar",
+        LinearProgressStyle::explorer_copy_green(),
+    )
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3157,8 +3128,10 @@ mod tests {
         let loading_bar = cx
             .debug_bounds("image-viewer-loading-bar")
             .expect("loading bar bounds");
-        cx.debug_bounds("image-viewer-loading-bar-segment")
-            .expect("loading bar segment bounds");
+        cx.debug_bounds("image-viewer-loading-bar-segment-0")
+            .expect("primary loading bar segment bounds");
+        cx.debug_bounds("image-viewer-loading-bar-segment-1")
+            .expect("secondary loading bar segment bounds");
         let status = cx
             .debug_bounds("image-viewer-status-bar")
             .expect("status bar bounds");
@@ -3181,7 +3154,11 @@ mod tests {
 
         assert!(cx.debug_bounds("image-viewer-loading-bar").is_none());
         assert!(
-            cx.debug_bounds("image-viewer-loading-bar-segment")
+            cx.debug_bounds("image-viewer-loading-bar-segment-0")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("image-viewer-loading-bar-segment-1")
                 .is_none()
         );
         cx.debug_bounds("image-viewer-status-bar")

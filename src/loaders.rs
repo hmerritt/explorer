@@ -36,6 +36,7 @@ enum BarType {
 pub(crate) fn linear_indeterminate(id: &'static str, style: LinearProgressStyle) -> AnyElement {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .relative()
         .w_full()
         .h(px(style.height))
@@ -60,7 +61,9 @@ fn animated_linear_progress_bar(
     color: u32,
     bar_type: BarType,
 ) -> AnyElement {
+    let (root_id, segment_ix) = id;
     div()
+        .debug_selector(move || format!("{root_id}-segment-{segment_ix}"))
         .absolute()
         .top(px(0.0))
         .bottom(px(0.0))
