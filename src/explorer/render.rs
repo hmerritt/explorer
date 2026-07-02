@@ -5936,17 +5936,19 @@ fn directory_open_mode_for_entry_click(
     event: &ClickEvent,
     click_count: usize,
 ) -> DirectoryOpenMode {
-    if is_ctrl_entry_double_click(event, click_count) {
+    if is_secondary_entry_double_click(event, click_count) {
         DirectoryOpenMode::NewTab
     } else {
         DirectoryOpenMode::CurrentTab
     }
 }
 
-fn is_ctrl_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
+fn is_secondary_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
     match event {
         ClickEvent::Mouse(event) => {
-            event.down.button == MouseButton::Left && click_count == 2 && event.up.modifiers.control
+            event.down.button == MouseButton::Left
+                && click_count == 2
+                && event.up.modifiers.secondary()
         }
         ClickEvent::Keyboard(_) => false,
     }
@@ -6371,12 +6373,13 @@ mod tests {
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
         git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
-        image_hover_preview_render_size, is_alt_entry_double_click, is_ctrl_entry_double_click,
-        is_normal_entry_click, lines_of_code_tooltip, open_current_folder_context_menu_from_event,
-        operation_notice_style, recursive_result_text_width, search_working_detail,
-        selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
+        image_hover_preview_render_size, is_alt_entry_double_click, is_normal_entry_click,
+        is_secondary_entry_double_click, lines_of_code_tooltip,
+        open_current_folder_context_menu_from_event, operation_notice_style,
+        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
+        sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
+        sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
@@ -8817,7 +8820,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_entry_double_click_detects_left_mouse_double_click() {
+    fn secondary_entry_double_click_detects_left_mouse_double_click() {
         let event = ClickEvent::Mouse(MouseClickEvent {
             down: MouseDownEvent {
                 button: MouseButton::Left,
@@ -8825,14 +8828,15 @@ mod tests {
             },
             up: MouseUpEvent {
                 modifiers: Modifiers {
-                    control: true,
+                    control: !cfg!(target_os = "macos"),
+                    platform: cfg!(target_os = "macos"),
                     ..Modifiers::default()
                 },
                 ..MouseUpEvent::default()
             },
         });
 
-        assert!(is_ctrl_entry_double_click(&event, 2));
+        assert!(is_secondary_entry_double_click(&event, 2));
         assert_eq!(
             directory_open_mode_for_entry_click(&event, 2),
             DirectoryOpenMode::NewTab
@@ -8840,7 +8844,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_entry_double_click_rejects_plain_or_single_clicks() {
+    fn secondary_entry_double_click_rejects_plain_or_single_clicks() {
         let plain = ClickEvent::Mouse(MouseClickEvent {
             down: MouseDownEvent {
                 button: MouseButton::Left,
@@ -8855,19 +8859,20 @@ mod tests {
             },
             up: MouseUpEvent {
                 modifiers: Modifiers {
-                    control: true,
+                    control: !cfg!(target_os = "macos"),
+                    platform: cfg!(target_os = "macos"),
                     ..Modifiers::default()
                 },
                 ..MouseUpEvent::default()
             },
         });
 
-        assert!(!is_ctrl_entry_double_click(&plain, 2));
+        assert!(!is_secondary_entry_double_click(&plain, 2));
         assert_eq!(
             directory_open_mode_for_entry_click(&plain, 2),
             DirectoryOpenMode::CurrentTab
         );
-        assert!(!is_ctrl_entry_double_click(&ctrl, 1));
+        assert!(!is_secondary_entry_double_click(&ctrl, 1));
         assert_eq!(
             directory_open_mode_for_entry_click(&ctrl, 1),
             DirectoryOpenMode::CurrentTab
@@ -8875,7 +8880,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_entry_double_click_rejects_non_left_clicks() {
+    fn secondary_entry_double_click_rejects_non_left_clicks() {
         for button in [MouseButton::Middle, MouseButton::Right] {
             let event = ClickEvent::Mouse(MouseClickEvent {
                 down: MouseDownEvent {
@@ -8884,14 +8889,15 @@ mod tests {
                 },
                 up: MouseUpEvent {
                     modifiers: Modifiers {
-                        control: true,
+                        control: !cfg!(target_os = "macos"),
+                        platform: cfg!(target_os = "macos"),
                         ..Modifiers::default()
                     },
                     ..MouseUpEvent::default()
                 },
             });
 
-            assert!(!is_ctrl_entry_double_click(&event, 2));
+            assert!(!is_secondary_entry_double_click(&event, 2));
         }
     }
 

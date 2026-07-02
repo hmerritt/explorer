@@ -563,6 +563,340 @@ fn should_open_window_on_reopen(open_window_count: usize) -> bool {
     open_window_count == 0
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyBindingProfile {
+    Mac,
+    WindowsLike,
+}
+
+fn platform_key_binding_profile() -> KeyBindingProfile {
+    if cfg!(target_os = "macos") {
+        KeyBindingProfile::Mac
+    } else {
+        KeyBindingProfile::WindowsLike
+    }
+}
+
+fn platform_key_bindings() -> Vec<KeyBinding> {
+    key_bindings_for_profile(platform_key_binding_profile())
+}
+
+fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new("up", MoveUp, None),
+        KeyBinding::new("down", MoveDown, None),
+        KeyBinding::new("shift-up", ExtendUp, None),
+        KeyBinding::new("shift-down", ExtendDown, None),
+        KeyBinding::new("home", MoveHome, None),
+        KeyBinding::new("end", MoveEnd, None),
+        KeyBinding::new("shift-home", ExtendHome, None),
+        KeyBinding::new("shift-end", ExtendEnd, None),
+        KeyBinding::new("right", OpenSelected, None),
+        KeyBinding::new("enter", EnterSelected, None),
+        KeyBinding::new("f5", Refresh, None),
+        KeyBinding::new("escape", CancelDrag, None),
+        KeyBinding::new("escape", DialogCancel, Some("ExplorerDialog")),
+        KeyBinding::new("enter", DialogConfirm, Some("ExplorerDialog")),
+        KeyBinding::new("left", DialogFocusPrimary, Some("ExplorerDialog")),
+        KeyBinding::new("up", DialogFocusPrimary, Some("ExplorerDialog")),
+        KeyBinding::new("right", DialogFocusSecondary, Some("ExplorerDialog")),
+        KeyBinding::new("down", DialogFocusSecondary, Some("ExplorerDialog")),
+        KeyBinding::new("+", ImageZoomIn, Some("ImageViewer")),
+        KeyBinding::new("=", ImageZoomIn, Some("ImageViewer")),
+        KeyBinding::new("-", ImageZoomOut, Some("ImageViewer")),
+        KeyBinding::new("f", ImageToggleActualSize, Some("ImageViewer")),
+        KeyBinding::new("ctrl-tab", SelectNextTab, None),
+        KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, None),
+    ];
+
+    match profile {
+        KeyBindingProfile::Mac => push_mac_key_bindings(&mut bindings),
+        KeyBindingProfile::WindowsLike => push_windows_like_key_bindings(&mut bindings),
+    }
+
+    bindings
+}
+
+fn push_mac_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    bindings.extend([
+        KeyBinding::new("cmd-[", GoBack, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("cmd-]", GoForward, None),
+        KeyBinding::new("alt-right", GoForward, None),
+        KeyBinding::new("cmd-up", GoUp, None),
+        KeyBinding::new("alt-up", GoUp, None),
+        KeyBinding::new("cmd-down", EnterSelected, None),
+        KeyBinding::new("cmd-o", EnterSelected, None),
+        KeyBinding::new("cmd-i", OpenProperties, Some("Explorer")),
+        KeyBinding::new("alt-enter", OpenProperties, Some("Explorer")),
+        KeyBinding::new("cmd-a", SelectAll, None),
+        KeyBinding::new("cmd-c", CopySelected, None),
+        KeyBinding::new("cmd-x", CutSelected, None),
+        KeyBinding::new("cmd-v", PasteClipboard, None),
+        KeyBinding::new("cmd-z", UndoFileOperation, Some("Explorer")),
+        KeyBinding::new("cmd-backspace", TrashSelected, None),
+        KeyBinding::new("cmd-delete", TrashSelected, None),
+        KeyBinding::new("alt-cmd-backspace", PermanentlyDeleteSelected, None),
+        KeyBinding::new("alt-cmd-delete", PermanentlyDeleteSelected, None),
+        KeyBinding::new("shift-cmd-g", AddressEdit, Some("Explorer")),
+        KeyBinding::new("cmd-f", SearchEdit, Some("Explorer")),
+        KeyBinding::new("shift-cmd-n", CreateNewFolder, Some("Explorer")),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-n", NewWindow, None),
+        KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("f2", RenameSelected, Some("Explorer")),
+    ]);
+    push_mac_text_input_key_bindings(bindings);
+}
+
+fn push_windows_like_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    bindings.extend([
+        KeyBinding::new("left", GoUp, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("ctrl-right", OpenSelectedInNewTab, None),
+        KeyBinding::new("alt-right", GoForward, None),
+        KeyBinding::new("ctrl-enter", EnterSelectedInNewTab, None),
+        KeyBinding::new("alt-enter", OpenProperties, Some("Explorer")),
+        KeyBinding::new("backspace", GoUp, None),
+        KeyBinding::new("alt-up", GoUp, None),
+        KeyBinding::new("ctrl-a", SelectAll, None),
+        KeyBinding::new("ctrl-c", CopySelected, None),
+        KeyBinding::new("ctrl-x", CutSelected, None),
+        KeyBinding::new("ctrl-v", PasteClipboard, None),
+        KeyBinding::new("ctrl-z", UndoFileOperation, Some("Explorer")),
+        KeyBinding::new("delete", TrashSelected, None),
+        KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
+        KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),
+        KeyBinding::new("ctrl-l", AddressEdit, Some("Explorer")),
+        KeyBinding::new("f4", AddressEdit, Some("Explorer")),
+        KeyBinding::new("ctrl-f", SearchEdit, Some("Explorer")),
+        KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
+        KeyBinding::new("ctrl-shift-f", RecursiveSearchEdit, Some("Explorer")),
+        KeyBinding::new("ctrl-shift-s", OpenSettings, None),
+        KeyBinding::new("ctrl-n", NewWindow, None),
+        KeyBinding::new("ctrl-t", NewTab, None),
+        KeyBinding::new("ctrl-w", CloseTab, None),
+        KeyBinding::new("ctrl-1", SelectTabByIndex { index: 0 }, None),
+        KeyBinding::new("ctrl-2", SelectTabByIndex { index: 1 }, None),
+        KeyBinding::new("ctrl-3", SelectTabByIndex { index: 2 }, None),
+        KeyBinding::new("ctrl-4", SelectTabByIndex { index: 3 }, None),
+        KeyBinding::new("ctrl-5", SelectTabByIndex { index: 4 }, None),
+        KeyBinding::new("ctrl-6", SelectTabByIndex { index: 5 }, None),
+        KeyBinding::new("ctrl-7", SelectTabByIndex { index: 6 }, None),
+        KeyBinding::new("ctrl-8", SelectTabByIndex { index: 7 }, None),
+        KeyBinding::new("ctrl-9", SelectTabByIndex { index: 8 }, None),
+        KeyBinding::new("f2", RenameSelected, Some("Explorer")),
+    ]);
+    push_windows_like_text_input_key_bindings(bindings);
+}
+
+fn push_mac_text_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    push_mac_rename_input_key_bindings(bindings);
+    push_mac_address_input_key_bindings(bindings);
+    push_mac_search_input_key_bindings(bindings);
+}
+
+fn push_windows_like_text_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    push_windows_like_rename_input_key_bindings(bindings);
+    push_windows_like_address_input_key_bindings(bindings);
+    push_windows_like_search_input_key_bindings(bindings);
+}
+
+fn push_mac_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerRenameInput");
+    bindings.extend([
+        KeyBinding::new("enter", RenameCommit, context),
+        KeyBinding::new("escape", RenameCancel, context),
+        KeyBinding::new("backspace", RenameBackspace, context),
+        KeyBinding::new("alt-backspace", RenameBackspaceWord, context),
+        KeyBinding::new("cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("alt-cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("delete", RenameDelete, context),
+        KeyBinding::new("left", RenameLeft, context),
+        KeyBinding::new("right", RenameRight, context),
+        KeyBinding::new("alt-left", RenameWordLeft, context),
+        KeyBinding::new("alt-right", RenameWordRight, context),
+        KeyBinding::new("shift-left", RenameSelectLeft, context),
+        KeyBinding::new("shift-right", RenameSelectRight, context),
+        KeyBinding::new("alt-shift-left", RenameSelectWordLeft, context),
+        KeyBinding::new("alt-shift-right", RenameSelectWordRight, context),
+        KeyBinding::new("home", RenameHome, context),
+        KeyBinding::new("end", RenameEnd, context),
+        KeyBinding::new("cmd-left", RenameHome, context),
+        KeyBinding::new("cmd-right", RenameEnd, context),
+        KeyBinding::new("shift-home", RenameSelectHome, context),
+        KeyBinding::new("shift-end", RenameSelectEnd, context),
+        KeyBinding::new("cmd-shift-left", RenameSelectHome, context),
+        KeyBinding::new("cmd-shift-right", RenameSelectEnd, context),
+        KeyBinding::new("cmd-a", RenameSelectAll, context),
+        KeyBinding::new("cmd-c", RenameCopy, context),
+        KeyBinding::new("cmd-x", RenameCut, context),
+        KeyBinding::new("cmd-v", RenamePaste, context),
+        KeyBinding::new("up", RenameNoop, context),
+        KeyBinding::new("down", RenameNoop, context),
+        KeyBinding::new("shift-up", RenameNoop, context),
+        KeyBinding::new("shift-down", RenameNoop, context),
+    ]);
+}
+
+fn push_windows_like_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerRenameInput");
+    bindings.extend([
+        KeyBinding::new("enter", RenameCommit, context),
+        KeyBinding::new("escape", RenameCancel, context),
+        KeyBinding::new("backspace", RenameBackspace, context),
+        KeyBinding::new("ctrl-backspace", RenameBackspaceWord, context),
+        KeyBinding::new("delete", RenameDelete, context),
+        KeyBinding::new("left", RenameLeft, context),
+        KeyBinding::new("right", RenameRight, context),
+        KeyBinding::new("ctrl-left", RenameWordLeft, context),
+        KeyBinding::new("ctrl-right", RenameWordRight, context),
+        KeyBinding::new("shift-left", RenameSelectLeft, context),
+        KeyBinding::new("shift-right", RenameSelectRight, context),
+        KeyBinding::new("ctrl-shift-left", RenameSelectWordLeft, context),
+        KeyBinding::new("ctrl-shift-right", RenameSelectWordRight, context),
+        KeyBinding::new("home", RenameHome, context),
+        KeyBinding::new("end", RenameEnd, context),
+        KeyBinding::new("shift-home", RenameSelectHome, context),
+        KeyBinding::new("shift-end", RenameSelectEnd, context),
+        KeyBinding::new("ctrl-a", RenameSelectAll, context),
+        KeyBinding::new("ctrl-c", RenameCopy, context),
+        KeyBinding::new("ctrl-x", RenameCut, context),
+        KeyBinding::new("ctrl-v", RenamePaste, context),
+        KeyBinding::new("up", RenameNoop, context),
+        KeyBinding::new("down", RenameNoop, context),
+        KeyBinding::new("shift-up", RenameNoop, context),
+        KeyBinding::new("shift-down", RenameNoop, context),
+    ]);
+}
+
+fn push_mac_address_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerAddressInput");
+    bindings.extend([
+        KeyBinding::new("enter", AddressCommit, context),
+        KeyBinding::new("escape", AddressCancel, context),
+        KeyBinding::new("backspace", AddressBackspace, context),
+        KeyBinding::new("alt-backspace", AddressBackspaceWord, context),
+        KeyBinding::new("cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("alt-cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("delete", AddressDelete, context),
+        KeyBinding::new("left", AddressLeft, context),
+        KeyBinding::new("right", AddressRight, context),
+        KeyBinding::new("alt-left", AddressWordLeft, context),
+        KeyBinding::new("alt-right", AddressWordRight, context),
+        KeyBinding::new("shift-left", AddressSelectLeft, context),
+        KeyBinding::new("shift-right", AddressSelectRight, context),
+        KeyBinding::new("alt-shift-left", AddressSelectWordLeft, context),
+        KeyBinding::new("alt-shift-right", AddressSelectWordRight, context),
+        KeyBinding::new("home", AddressHome, context),
+        KeyBinding::new("end", AddressEnd, context),
+        KeyBinding::new("cmd-left", AddressHome, context),
+        KeyBinding::new("cmd-right", AddressEnd, context),
+        KeyBinding::new("shift-home", AddressSelectHome, context),
+        KeyBinding::new("shift-end", AddressSelectEnd, context),
+        KeyBinding::new("cmd-shift-left", AddressSelectHome, context),
+        KeyBinding::new("cmd-shift-right", AddressSelectEnd, context),
+        KeyBinding::new("cmd-a", AddressSelectAll, context),
+        KeyBinding::new("cmd-c", AddressCopy, context),
+        KeyBinding::new("cmd-x", AddressCut, context),
+        KeyBinding::new("cmd-v", AddressPaste, context),
+        KeyBinding::new("up", AddressSuggestionUp, context),
+        KeyBinding::new("down", AddressSuggestionDown, context),
+        KeyBinding::new("tab", AddressAcceptSuggestion, context),
+    ]);
+}
+
+fn push_windows_like_address_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerAddressInput");
+    bindings.extend([
+        KeyBinding::new("enter", AddressCommit, context),
+        KeyBinding::new("escape", AddressCancel, context),
+        KeyBinding::new("backspace", AddressBackspace, context),
+        KeyBinding::new("ctrl-backspace", AddressBackspaceWord, context),
+        KeyBinding::new("delete", AddressDelete, context),
+        KeyBinding::new("left", AddressLeft, context),
+        KeyBinding::new("right", AddressRight, context),
+        KeyBinding::new("ctrl-left", AddressWordLeft, context),
+        KeyBinding::new("ctrl-right", AddressWordRight, context),
+        KeyBinding::new("shift-left", AddressSelectLeft, context),
+        KeyBinding::new("shift-right", AddressSelectRight, context),
+        KeyBinding::new("ctrl-shift-left", AddressSelectWordLeft, context),
+        KeyBinding::new("ctrl-shift-right", AddressSelectWordRight, context),
+        KeyBinding::new("home", AddressHome, context),
+        KeyBinding::new("end", AddressEnd, context),
+        KeyBinding::new("shift-home", AddressSelectHome, context),
+        KeyBinding::new("shift-end", AddressSelectEnd, context),
+        KeyBinding::new("ctrl-a", AddressSelectAll, context),
+        KeyBinding::new("ctrl-c", AddressCopy, context),
+        KeyBinding::new("ctrl-x", AddressCut, context),
+        KeyBinding::new("ctrl-v", AddressPaste, context),
+        KeyBinding::new("up", AddressSuggestionUp, context),
+        KeyBinding::new("down", AddressSuggestionDown, context),
+        KeyBinding::new("tab", AddressAcceptSuggestion, context),
+    ]);
+}
+
+fn push_mac_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerSearchInput");
+    bindings.extend([
+        KeyBinding::new("enter", SearchCommit, context),
+        KeyBinding::new("escape", SearchCancel, context),
+        KeyBinding::new("backspace", SearchBackspace, context),
+        KeyBinding::new("alt-backspace", SearchBackspaceWord, context),
+        KeyBinding::new("cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("alt-cmd-backspace", gpui::NoAction {}, context),
+        KeyBinding::new("delete", SearchDelete, context),
+        KeyBinding::new("left", SearchLeft, context),
+        KeyBinding::new("right", SearchRight, context),
+        KeyBinding::new("alt-left", SearchWordLeft, context),
+        KeyBinding::new("alt-right", SearchWordRight, context),
+        KeyBinding::new("shift-left", SearchSelectLeft, context),
+        KeyBinding::new("shift-right", SearchSelectRight, context),
+        KeyBinding::new("alt-shift-left", SearchSelectWordLeft, context),
+        KeyBinding::new("alt-shift-right", SearchSelectWordRight, context),
+        KeyBinding::new("home", SearchHome, context),
+        KeyBinding::new("end", SearchEnd, context),
+        KeyBinding::new("cmd-left", SearchHome, context),
+        KeyBinding::new("cmd-right", SearchEnd, context),
+        KeyBinding::new("shift-home", SearchSelectHome, context),
+        KeyBinding::new("shift-end", SearchSelectEnd, context),
+        KeyBinding::new("cmd-shift-left", SearchSelectHome, context),
+        KeyBinding::new("cmd-shift-right", SearchSelectEnd, context),
+        KeyBinding::new("cmd-a", SearchSelectAll, context),
+        KeyBinding::new("cmd-c", SearchCopy, context),
+        KeyBinding::new("cmd-x", SearchCut, context),
+        KeyBinding::new("cmd-v", SearchPaste, context),
+    ]);
+}
+
+fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some("ExplorerSearchInput");
+    bindings.extend([
+        KeyBinding::new("enter", SearchCommit, context),
+        KeyBinding::new("escape", SearchCancel, context),
+        KeyBinding::new("backspace", SearchBackspace, context),
+        KeyBinding::new("ctrl-backspace", SearchBackspaceWord, context),
+        KeyBinding::new("delete", SearchDelete, context),
+        KeyBinding::new("left", SearchLeft, context),
+        KeyBinding::new("right", SearchRight, context),
+        KeyBinding::new("ctrl-left", SearchWordLeft, context),
+        KeyBinding::new("ctrl-right", SearchWordRight, context),
+        KeyBinding::new("shift-left", SearchSelectLeft, context),
+        KeyBinding::new("shift-right", SearchSelectRight, context),
+        KeyBinding::new("ctrl-shift-left", SearchSelectWordLeft, context),
+        KeyBinding::new("ctrl-shift-right", SearchSelectWordRight, context),
+        KeyBinding::new("home", SearchHome, context),
+        KeyBinding::new("end", SearchEnd, context),
+        KeyBinding::new("shift-home", SearchSelectHome, context),
+        KeyBinding::new("shift-end", SearchSelectEnd, context),
+        KeyBinding::new("ctrl-a", SearchSelectAll, context),
+        KeyBinding::new("ctrl-c", SearchCopy, context),
+        KeyBinding::new("ctrl-x", SearchCut, context),
+        KeyBinding::new("ctrl-v", SearchPaste, context),
+    ]);
+}
+
 pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
@@ -588,193 +922,7 @@ pub fn run() {
         crate::explorer::initialize_folder_size_cache(cx);
         crate::explorer::initialize_file_checksum_cache(cx);
         crate::explorer::initialize_cache_cleanup(cx);
-        cx.bind_keys([
-            KeyBinding::new("up", MoveUp, None),
-            KeyBinding::new("down", MoveDown, None),
-            KeyBinding::new("shift-up", ExtendUp, None),
-            KeyBinding::new("shift-down", ExtendDown, None),
-            KeyBinding::new("home", MoveHome, None),
-            KeyBinding::new("end", MoveEnd, None),
-            KeyBinding::new("shift-home", ExtendHome, None),
-            KeyBinding::new("shift-end", ExtendEnd, None),
-            KeyBinding::new("left", GoUp, None),
-            KeyBinding::new("alt-left", GoBack, None),
-            KeyBinding::new("right", OpenSelected, None),
-            KeyBinding::new("ctrl-right", OpenSelectedInNewTab, None),
-            KeyBinding::new("alt-right", GoForward, None),
-            KeyBinding::new("enter", EnterSelected, None),
-            KeyBinding::new("ctrl-enter", EnterSelectedInNewTab, None),
-            KeyBinding::new("alt-enter", OpenProperties, Some("Explorer")),
-            KeyBinding::new("f5", Refresh, None),
-            KeyBinding::new("backspace", GoUp, None),
-            KeyBinding::new("alt-up", GoUp, None),
-            KeyBinding::new("escape", CancelDrag, None),
-            KeyBinding::new("escape", DialogCancel, Some("ExplorerDialog")),
-            KeyBinding::new("enter", DialogConfirm, Some("ExplorerDialog")),
-            KeyBinding::new("left", DialogFocusPrimary, Some("ExplorerDialog")),
-            KeyBinding::new("up", DialogFocusPrimary, Some("ExplorerDialog")),
-            KeyBinding::new("right", DialogFocusSecondary, Some("ExplorerDialog")),
-            KeyBinding::new("down", DialogFocusSecondary, Some("ExplorerDialog")),
-            KeyBinding::new("+", ImageZoomIn, Some("ImageViewer")),
-            KeyBinding::new("=", ImageZoomIn, Some("ImageViewer")),
-            KeyBinding::new("-", ImageZoomOut, Some("ImageViewer")),
-            KeyBinding::new("f", ImageToggleActualSize, Some("ImageViewer")),
-            KeyBinding::new("ctrl-a", SelectAll, None),
-            KeyBinding::new("ctrl-c", CopySelected, None),
-            KeyBinding::new("ctrl-x", CutSelected, None),
-            KeyBinding::new("ctrl-v", PasteClipboard, None),
-            KeyBinding::new("ctrl-z", UndoFileOperation, Some("Explorer")),
-            KeyBinding::new("delete", TrashSelected, None),
-            KeyBinding::new("shift-delete", PermanentlyDeleteSelected, None),
-            KeyBinding::new("alt-d", AddressEdit, Some("Explorer")),
-            KeyBinding::new("ctrl-l", AddressEdit, Some("Explorer")),
-            KeyBinding::new("f4", AddressEdit, Some("Explorer")),
-            KeyBinding::new("ctrl-f", SearchEdit, Some("Explorer")),
-            KeyBinding::new("ctrl-shift-n", CreateNewFolder, Some("Explorer")),
-            KeyBinding::new("ctrl-shift-f", RecursiveSearchEdit, Some("Explorer")),
-            KeyBinding::new("ctrl-shift-s", OpenSettings, None),
-            KeyBinding::new("ctrl-n", NewWindow, None),
-            KeyBinding::new("ctrl-t", NewTab, None),
-            KeyBinding::new("ctrl-w", CloseTab, None),
-            KeyBinding::new("ctrl-tab", SelectNextTab, None),
-            KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, None),
-            KeyBinding::new("ctrl-1", SelectTabByIndex { index: 0 }, None),
-            KeyBinding::new("ctrl-2", SelectTabByIndex { index: 1 }, None),
-            KeyBinding::new("ctrl-3", SelectTabByIndex { index: 2 }, None),
-            KeyBinding::new("ctrl-4", SelectTabByIndex { index: 3 }, None),
-            KeyBinding::new("ctrl-5", SelectTabByIndex { index: 4 }, None),
-            KeyBinding::new("ctrl-6", SelectTabByIndex { index: 5 }, None),
-            KeyBinding::new("ctrl-7", SelectTabByIndex { index: 6 }, None),
-            KeyBinding::new("ctrl-8", SelectTabByIndex { index: 7 }, None),
-            KeyBinding::new("ctrl-9", SelectTabByIndex { index: 8 }, None),
-            KeyBinding::new("f2", RenameSelected, Some("Explorer")),
-            KeyBinding::new("enter", RenameCommit, Some("ExplorerRenameInput")),
-            KeyBinding::new("escape", RenameCancel, Some("ExplorerRenameInput")),
-            KeyBinding::new("backspace", RenameBackspace, Some("ExplorerRenameInput")),
-            KeyBinding::new(
-                "ctrl-backspace",
-                RenameBackspaceWord,
-                Some("ExplorerRenameInput"),
-            ),
-            KeyBinding::new("delete", RenameDelete, Some("ExplorerRenameInput")),
-            KeyBinding::new("left", RenameLeft, Some("ExplorerRenameInput")),
-            KeyBinding::new("right", RenameRight, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-left", RenameWordLeft, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-right", RenameWordRight, Some("ExplorerRenameInput")),
-            KeyBinding::new("shift-left", RenameSelectLeft, Some("ExplorerRenameInput")),
-            KeyBinding::new(
-                "shift-right",
-                RenameSelectRight,
-                Some("ExplorerRenameInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-left",
-                RenameSelectWordLeft,
-                Some("ExplorerRenameInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-right",
-                RenameSelectWordRight,
-                Some("ExplorerRenameInput"),
-            ),
-            KeyBinding::new("home", RenameHome, Some("ExplorerRenameInput")),
-            KeyBinding::new("end", RenameEnd, Some("ExplorerRenameInput")),
-            KeyBinding::new("shift-home", RenameSelectHome, Some("ExplorerRenameInput")),
-            KeyBinding::new("shift-end", RenameSelectEnd, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-a", RenameSelectAll, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-c", RenameCopy, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-x", RenameCut, Some("ExplorerRenameInput")),
-            KeyBinding::new("ctrl-v", RenamePaste, Some("ExplorerRenameInput")),
-            KeyBinding::new("up", RenameNoop, Some("ExplorerRenameInput")),
-            KeyBinding::new("down", RenameNoop, Some("ExplorerRenameInput")),
-            KeyBinding::new("shift-up", RenameNoop, Some("ExplorerRenameInput")),
-            KeyBinding::new("shift-down", RenameNoop, Some("ExplorerRenameInput")),
-            KeyBinding::new("enter", AddressCommit, Some("ExplorerAddressInput")),
-            KeyBinding::new("escape", AddressCancel, Some("ExplorerAddressInput")),
-            KeyBinding::new("backspace", AddressBackspace, Some("ExplorerAddressInput")),
-            KeyBinding::new(
-                "ctrl-backspace",
-                AddressBackspaceWord,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new("delete", AddressDelete, Some("ExplorerAddressInput")),
-            KeyBinding::new("left", AddressLeft, Some("ExplorerAddressInput")),
-            KeyBinding::new("right", AddressRight, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-left", AddressWordLeft, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-right", AddressWordRight, Some("ExplorerAddressInput")),
-            KeyBinding::new(
-                "shift-left",
-                AddressSelectLeft,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new(
-                "shift-right",
-                AddressSelectRight,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-left",
-                AddressSelectWordLeft,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-right",
-                AddressSelectWordRight,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new("home", AddressHome, Some("ExplorerAddressInput")),
-            KeyBinding::new("end", AddressEnd, Some("ExplorerAddressInput")),
-            KeyBinding::new(
-                "shift-home",
-                AddressSelectHome,
-                Some("ExplorerAddressInput"),
-            ),
-            KeyBinding::new("shift-end", AddressSelectEnd, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-a", AddressSelectAll, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-c", AddressCopy, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-x", AddressCut, Some("ExplorerAddressInput")),
-            KeyBinding::new("ctrl-v", AddressPaste, Some("ExplorerAddressInput")),
-            KeyBinding::new("up", AddressSuggestionUp, Some("ExplorerAddressInput")),
-            KeyBinding::new("down", AddressSuggestionDown, Some("ExplorerAddressInput")),
-            KeyBinding::new("tab", AddressAcceptSuggestion, Some("ExplorerAddressInput")),
-            KeyBinding::new("enter", SearchCommit, Some("ExplorerSearchInput")),
-            KeyBinding::new("escape", SearchCancel, Some("ExplorerSearchInput")),
-            KeyBinding::new("backspace", SearchBackspace, Some("ExplorerSearchInput")),
-            KeyBinding::new(
-                "ctrl-backspace",
-                SearchBackspaceWord,
-                Some("ExplorerSearchInput"),
-            ),
-            KeyBinding::new("delete", SearchDelete, Some("ExplorerSearchInput")),
-            KeyBinding::new("left", SearchLeft, Some("ExplorerSearchInput")),
-            KeyBinding::new("right", SearchRight, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-left", SearchWordLeft, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-right", SearchWordRight, Some("ExplorerSearchInput")),
-            KeyBinding::new("shift-left", SearchSelectLeft, Some("ExplorerSearchInput")),
-            KeyBinding::new(
-                "shift-right",
-                SearchSelectRight,
-                Some("ExplorerSearchInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-left",
-                SearchSelectWordLeft,
-                Some("ExplorerSearchInput"),
-            ),
-            KeyBinding::new(
-                "ctrl-shift-right",
-                SearchSelectWordRight,
-                Some("ExplorerSearchInput"),
-            ),
-            KeyBinding::new("home", SearchHome, Some("ExplorerSearchInput")),
-            KeyBinding::new("end", SearchEnd, Some("ExplorerSearchInput")),
-            KeyBinding::new("shift-home", SearchSelectHome, Some("ExplorerSearchInput")),
-            KeyBinding::new("shift-end", SearchSelectEnd, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-a", SearchSelectAll, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-c", SearchCopy, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-x", SearchCut, Some("ExplorerSearchInput")),
-            KeyBinding::new("ctrl-v", SearchPaste, Some("ExplorerSearchInput")),
-        ]);
+        cx.bind_keys(platform_key_bindings());
 
         if let Some(path) = startup_image_path {
             crate::image_viewer::open_image_window(path, cx);
@@ -789,14 +937,279 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::settings::{ConfigPlatform, ExplorerSettings, config_dir_for};
-    use gpui::TestAppContext;
+    use gpui::{Keystroke, TestAppContext};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn has_binding<A: gpui::Action>(
+        bindings: &[KeyBinding],
+        action: A,
+        keystroke: &str,
+        context: Option<&str>,
+    ) -> bool {
+        let keystroke = Keystroke::parse(keystroke).expect("valid test keystroke");
+        bindings.iter().any(|binding| {
+            binding.action().partial_eq(&action)
+                && binding
+                    .predicate()
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref()
+                    == context
+                && matches!(binding.match_keystrokes(&[keystroke.clone()]), Some(false))
+        })
+    }
 
     #[test]
     fn embedded_icon_fonts_are_present() {
         assert!(!SEGOE_FLUENT_ICONS.is_empty());
         assert!(!SEGOE_MDL2_ASSETS.is_empty());
         assert!(SEGOE_FLUENT_ICONS.len() > SEGOE_MDL2_ASSETS.len());
+    }
+
+    #[test]
+    fn mac_key_bindings_use_finder_style_shortcuts_and_requested_aliases() {
+        let bindings = key_bindings_for_profile(KeyBindingProfile::Mac);
+
+        assert!(has_binding(&bindings, EnterSelected, "enter", None));
+        assert!(has_binding(&bindings, EnterSelected, "cmd-down", None));
+        assert!(has_binding(&bindings, EnterSelected, "cmd-o", None));
+        assert!(!has_binding(
+            &bindings,
+            RenameSelected,
+            "enter",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameSelected,
+            "f2",
+            Some("Explorer")
+        ));
+
+        assert!(has_binding(
+            &bindings,
+            OpenProperties,
+            "cmd-i",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            OpenProperties,
+            "alt-enter",
+            Some("Explorer")
+        ));
+        assert!(has_binding(&bindings, GoBack, "cmd-[", None));
+        assert!(has_binding(&bindings, GoBack, "alt-left", None));
+        assert!(has_binding(&bindings, GoForward, "cmd-]", None));
+        assert!(has_binding(&bindings, GoForward, "alt-right", None));
+        assert!(has_binding(&bindings, GoUp, "cmd-up", None));
+        assert!(has_binding(&bindings, GoUp, "alt-up", None));
+
+        assert!(has_binding(&bindings, SelectAll, "cmd-a", None));
+        assert!(has_binding(&bindings, CopySelected, "cmd-c", None));
+        assert!(has_binding(&bindings, CutSelected, "cmd-x", None));
+        assert!(has_binding(&bindings, PasteClipboard, "cmd-v", None));
+        assert!(has_binding(
+            &bindings,
+            UndoFileOperation,
+            "cmd-z",
+            Some("Explorer")
+        ));
+        assert!(has_binding(&bindings, TrashSelected, "cmd-delete", None));
+        assert!(has_binding(&bindings, TrashSelected, "cmd-backspace", None));
+        assert!(has_binding(
+            &bindings,
+            PermanentlyDeleteSelected,
+            "alt-cmd-delete",
+            None
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressEdit,
+            "shift-cmd-g",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            SearchEdit,
+            "cmd-f",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            CreateNewFolder,
+            "shift-cmd-n",
+            Some("Explorer")
+        ));
+        assert!(has_binding(&bindings, OpenSettings, "cmd-,", None));
+        assert!(has_binding(&bindings, NewWindow, "cmd-n", None));
+        assert!(has_binding(&bindings, NewTab, "cmd-t", None));
+        assert!(has_binding(&bindings, CloseTab, "cmd-w", None));
+    }
+
+    #[test]
+    fn mac_text_input_bindings_use_command_and_option_navigation() {
+        let bindings = key_bindings_for_profile(KeyBindingProfile::Mac);
+
+        assert!(has_binding(
+            &bindings,
+            RenameCopy,
+            "cmd-c",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameBackspaceWord,
+            "alt-backspace",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameWordLeft,
+            "alt-left",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameSelectWordRight,
+            "alt-shift-right",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameHome,
+            "cmd-left",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            RenameSelectEnd,
+            "cmd-shift-right",
+            Some("ExplorerRenameInput")
+        ));
+
+        assert!(has_binding(
+            &bindings,
+            AddressSelectAll,
+            "cmd-a",
+            Some("ExplorerAddressInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressWordRight,
+            "alt-right",
+            Some("ExplorerAddressInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressSelectHome,
+            "cmd-shift-left",
+            Some("ExplorerAddressInput")
+        ));
+
+        assert!(has_binding(
+            &bindings,
+            SearchPaste,
+            "cmd-v",
+            Some("ExplorerSearchInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            SearchWordLeft,
+            "alt-left",
+            Some("ExplorerSearchInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            SearchSelectWordRight,
+            "alt-shift-right",
+            Some("ExplorerSearchInput")
+        ));
+    }
+
+    #[test]
+    fn windows_like_key_bindings_preserve_existing_shortcuts() {
+        let bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
+
+        assert!(has_binding(&bindings, EnterSelected, "enter", None));
+        assert!(has_binding(&bindings, GoUp, "left", None));
+        assert!(has_binding(&bindings, GoUp, "backspace", None));
+        assert!(has_binding(&bindings, GoBack, "alt-left", None));
+        assert!(has_binding(&bindings, GoForward, "alt-right", None));
+        assert!(has_binding(
+            &bindings,
+            OpenSelectedInNewTab,
+            "ctrl-right",
+            None
+        ));
+        assert!(has_binding(
+            &bindings,
+            EnterSelectedInNewTab,
+            "ctrl-enter",
+            None
+        ));
+        assert!(has_binding(
+            &bindings,
+            OpenProperties,
+            "alt-enter",
+            Some("Explorer")
+        ));
+        assert!(has_binding(&bindings, SelectAll, "ctrl-a", None));
+        assert!(has_binding(&bindings, TrashSelected, "delete", None));
+        assert!(has_binding(
+            &bindings,
+            PermanentlyDeleteSelected,
+            "shift-delete",
+            None
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressEdit,
+            "ctrl-l",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressEdit,
+            "alt-d",
+            Some("Explorer")
+        ));
+        assert!(has_binding(
+            &bindings,
+            SearchEdit,
+            "ctrl-f",
+            Some("Explorer")
+        ));
+        assert!(has_binding(&bindings, NewWindow, "ctrl-n", None));
+        assert!(has_binding(&bindings, NewTab, "ctrl-t", None));
+        assert!(has_binding(&bindings, CloseTab, "ctrl-w", None));
+        assert!(has_binding(
+            &bindings,
+            RenameWordLeft,
+            "ctrl-left",
+            Some("ExplorerRenameInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            AddressSelectWordRight,
+            "ctrl-shift-right",
+            Some("ExplorerAddressInput")
+        ));
+        assert!(has_binding(
+            &bindings,
+            SearchBackspaceWord,
+            "ctrl-backspace",
+            Some("ExplorerSearchInput")
+        ));
+
+        assert!(!has_binding(&bindings, SelectAll, "cmd-a", None));
+        assert!(!has_binding(&bindings, GoBack, "cmd-[", None));
+        assert!(!has_binding(
+            &bindings,
+            RenameCopy,
+            "cmd-c",
+            Some("ExplorerRenameInput")
+        ));
     }
 
     #[test]
