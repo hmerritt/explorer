@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     explorer::{entry::FileEntry, image_resize::resize_rgba, view::ExplorerView},
-    settings::{APP_ID, ConfigPlatform, config_dir_for},
+    settings::{ConfigPlatform, config_dir_for},
 };
 
 const NATIVE_ICON_LOAD_INTERVAL: Duration = Duration::from_millis(16);
 const URL_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v5";
+const NATIVE_ICON_CACHE_VERSION: &str = "native-icons-v1";
 const URL_ICON_CACHE_VERSION: &str = "url-icons-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "mappings.json";
 const DISK_ICON_DIR_NAME: &str = "icons";
@@ -2187,21 +2187,9 @@ fn native_icon_cache_dir_for(
 
 fn platform_cache_dir(
     platform: ConfigPlatform,
-    mut env_path: impl FnMut(&str) -> Option<PathBuf>,
+    env_path: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    match platform {
-        ConfigPlatform::MacOS => {
-            env_path("HOME").map(|home| home.join(".config").join("explorer").join("cache"))
-        }
-        ConfigPlatform::Linux => env_path("XDG_CACHE_HOME")
-            .map(|cache_home| cache_home.join("explorer"))
-            .or_else(|| env_path("HOME").map(|home| home.join(".cache").join("explorer"))),
-        ConfigPlatform::Windows => env_path("LOCALAPPDATA")
-            .map(|local_appdata| local_appdata.join(APP_ID).join("cache"))
-            .or_else(|| {
-                config_dir_for(ConfigPlatform::Windows, env_path).map(|dir| dir.join("cache"))
-            }),
-    }
+    config_dir_for(platform, env_path).map(|dir| dir.join("cache"))
 }
 
 fn existing_url_icon_file_path(cache_dir: Option<&Path>, url: &str) -> Option<PathBuf> {
@@ -2384,7 +2372,7 @@ mod tests {
 
     #[test]
     fn native_icon_cache_version_invalidates_old_low_resolution_icons() {
-        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v5");
+        assert_eq!(NATIVE_ICON_CACHE_VERSION, "native-icons-v1");
     }
 
     #[test]
@@ -3182,17 +3170,6 @@ mod tests {
         );
         assert_eq!(
             native_icon_cache_dir_for(ConfigPlatform::Windows, |name| {
-                (name == "LOCALAPPDATA").then(|| PathBuf::from("local"))
-            }),
-            Some(
-                PathBuf::from("local")
-                    .join(APP_ID)
-                    .join("cache")
-                    .join(NATIVE_ICON_CACHE_VERSION)
-            )
-        );
-        assert_eq!(
-            native_icon_cache_dir_for(ConfigPlatform::Windows, |name| {
                 (name == "USERPROFILE").then(|| PathBuf::from("profile"))
             }),
             Some(
@@ -3204,14 +3181,27 @@ mod tests {
             )
         );
         assert_eq!(
+            native_icon_cache_dir_for(ConfigPlatform::Windows, |name| {
+                (name == "LOCALAPPDATA").then(|| PathBuf::from("local"))
+            }),
+            None
+        );
+        assert_eq!(
             native_icon_cache_dir_for(ConfigPlatform::Linux, |name| {
-                (name == "XDG_CACHE_HOME").then(|| PathBuf::from("xdg"))
+                (name == "XDG_CONFIG_HOME").then(|| PathBuf::from("xdg"))
             }),
             Some(
                 PathBuf::from("xdg")
                     .join("explorer")
+                    .join("cache")
                     .join(NATIVE_ICON_CACHE_VERSION)
             )
+        );
+        assert_eq!(
+            native_icon_cache_dir_for(ConfigPlatform::Linux, |name| {
+                (name == "XDG_CACHE_HOME").then(|| PathBuf::from("xdg-cache"))
+            }),
+            None
         );
     }
 

@@ -35,7 +35,7 @@ use crate::{
         },
         view::ExplorerView,
     },
-    settings::{APP_ID, ConfigPlatform, config_dir_for},
+    settings::{ConfigPlatform, config_dir_for},
 };
 
 #[cfg(test)]
@@ -43,7 +43,7 @@ use crate::explorer::image_preview::{
     hover_image_preview_dimensions, load_image_thumbnail_png_with_cancel_timed,
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v7";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v1";
 const DISK_MANIFEST_FILE_NAME: &str = "manifest.json";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
@@ -109,7 +109,7 @@ impl ImageThumbnailUsage {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image",
             (Self::Standard, ImageThumbnailKind::Video) => "video",
-            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-v2",
+            (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-v1",
             (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview",
         }
     }
@@ -1866,8 +1866,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn image_thumbnail_cache_dir() -> Option<PathBuf> {
-    platform_cache_dir(current_config_platform(), env_path)
-        .map(|dir| dir.join(IMAGE_THUMBNAIL_CACHE_VERSION))
+    image_thumbnail_cache_dir_for(current_config_platform(), env_path)
+}
+
+fn image_thumbnail_cache_dir_for(
+    platform: ConfigPlatform,
+    env_path: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    platform_cache_dir(platform, env_path).map(|dir| dir.join(IMAGE_THUMBNAIL_CACHE_VERSION))
 }
 
 fn current_config_platform() -> ConfigPlatform {
@@ -1888,21 +1894,9 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 fn platform_cache_dir(
     platform: ConfigPlatform,
-    mut env_path: impl FnMut(&str) -> Option<PathBuf>,
+    env_path: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    match platform {
-        ConfigPlatform::MacOS => {
-            env_path("HOME").map(|home| home.join(".config").join("explorer").join("cache"))
-        }
-        ConfigPlatform::Linux => env_path("XDG_CACHE_HOME")
-            .map(|cache_home| cache_home.join("explorer"))
-            .or_else(|| env_path("HOME").map(|home| home.join(".cache").join("explorer"))),
-        ConfigPlatform::Windows => env_path("LOCALAPPDATA")
-            .map(|local_appdata| local_appdata.join(APP_ID).join("cache"))
-            .or_else(|| {
-                config_dir_for(ConfigPlatform::Windows, env_path).map(|dir| dir.join("cache"))
-            }),
-    }
+    config_dir_for(platform, env_path).map(|dir| dir.join("cache"))
 }
 
 fn normalized_path_key(path: &Path) -> String {
@@ -1957,7 +1951,58 @@ mod tests {
 
     #[test]
     fn thumbnail_cache_version_invalidates_prepared_render_images() {
-        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v7");
+        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v1");
+    }
+
+    #[test]
+    fn thumbnail_cache_dirs_follow_platform_conventions() {
+        assert_eq!(
+            image_thumbnail_cache_dir_for(ConfigPlatform::MacOS, |name| {
+                (name == "HOME").then(|| PathBuf::from("home"))
+            }),
+            Some(
+                PathBuf::from("home")
+                    .join(".config")
+                    .join("explorer")
+                    .join("cache")
+                    .join(IMAGE_THUMBNAIL_CACHE_VERSION)
+            )
+        );
+        assert_eq!(
+            image_thumbnail_cache_dir_for(ConfigPlatform::Windows, |name| {
+                (name == "USERPROFILE").then(|| PathBuf::from("profile"))
+            }),
+            Some(
+                PathBuf::from("profile")
+                    .join(".config")
+                    .join("explorer")
+                    .join("cache")
+                    .join(IMAGE_THUMBNAIL_CACHE_VERSION)
+            )
+        );
+        assert_eq!(
+            image_thumbnail_cache_dir_for(ConfigPlatform::Windows, |name| {
+                (name == "LOCALAPPDATA").then(|| PathBuf::from("local"))
+            }),
+            None
+        );
+        assert_eq!(
+            image_thumbnail_cache_dir_for(ConfigPlatform::Linux, |name| {
+                (name == "XDG_CONFIG_HOME").then(|| PathBuf::from("xdg"))
+            }),
+            Some(
+                PathBuf::from("xdg")
+                    .join("explorer")
+                    .join("cache")
+                    .join(IMAGE_THUMBNAIL_CACHE_VERSION)
+            )
+        );
+        assert_eq!(
+            image_thumbnail_cache_dir_for(ConfigPlatform::Linux, |name| {
+                (name == "XDG_CACHE_HOME").then(|| PathBuf::from("xdg-cache"))
+            }),
+            None
+        );
     }
 
     #[test]
@@ -2032,7 +2077,7 @@ mod tests {
 
         assert_eq!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
-            "91426f780197402b"
+            "5a1de52252785a81"
         );
     }
 
@@ -2058,6 +2103,10 @@ mod tests {
 
         assert_eq!(preview.kind, ImageThumbnailKind::Image);
         assert_eq!(preview.usage, ImageThumbnailUsage::HoverPreview);
+        assert_eq!(
+            preview.usage.cache_namespace(preview.kind),
+            "image-hover-preview-v1"
+        );
         assert_eq!(preview.key, hover_image_preview_key(&entry));
         assert_ne!(
             preview.key,
