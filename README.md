@@ -28,7 +28,7 @@ brew install --cask hmerritt/tap/explorer
 curl -fsSL https://raw.githubusercontent.com/hmerritt/explorer/master/install.sh | sh
 ```
 
-#### Windows via [Scoop](https://scoop.sh/)
+#### ➡️ Windows via [Scoop](https://scoop.sh/)
 
 ```sh
 scoop bucket add hmerritt https://github.com/hmerritt/scoop-bucket
@@ -49,6 +49,20 @@ scoop install hmerritt/explorer
 - [x] Arrow keys navigation
 - [x] Sidebar custom pins (drag-to-pin)
 - [x] Key bindings for ~~everything~~ most things
+- [x] Fast image and video previews on `Alt+hover`
+- [x] Git support
+    - [x] Branch
+    - [x] Outgoing/Incoming commits
+    - [x] Lines of code
+    - [x] Primary language used
+    - [x] Github-style language makup bar
+- [x] File properties
+    - [x] Generic file/folder information
+    - [x] In-depth image/video/audio metadata
+    - [x] Image EXIF tags (grouped and organised for ease-of-use)
+    - [x] Image preview in properties
+    - [x] Video frames preview in properties
+- [x] A simple, functional, built-in image viewer (you can set `explorer` to the default image viewer)
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
 
 ## 'Anti-Features' that will NOT be implemented
