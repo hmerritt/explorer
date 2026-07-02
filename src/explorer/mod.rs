@@ -88,6 +88,7 @@ pub(crate) use scrollbar::{
     HorizontalScrollbarDrag, HorizontalScrollbarMetrics, ScrollbarArrow, ScrollbarDrag,
     ScrollbarMetrics, horizontal_scrollbar_arrow_button, scrollbar_arrow_button, scrollbar_corner,
 };
+pub(crate) use sorting::compare_file_names;
 pub(crate) use tooltip::explorer_tooltip;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {

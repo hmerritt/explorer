@@ -23,7 +23,8 @@ use crate::{
         scrollbar_corner,
     },
     image_viewer::{
-        ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
+        ImageNavigationDirection, ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize,
+        ImageZoomIn, ImageZoomOut, adjacent_image_path,
         decode::{DecodedImage, DecodedImageSource, decode_image_source},
         resize::{
             ImageFitTarget, native_image_target, raster_initial_native_zoom,
@@ -398,6 +399,54 @@ impl ImageViewer {
             .clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
         self.zoom = Some(zoom);
         zoom
+    }
+
+    fn handle_open_previous(
+        &mut self,
+        _: &ImageOpenPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_adjacent_image(ImageNavigationDirection::Previous, window, cx);
+    }
+
+    fn handle_open_next(&mut self, _: &ImageOpenNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_adjacent_image(ImageNavigationDirection::Next, window, cx);
+    }
+
+    fn open_adjacent_image(
+        &mut self,
+        direction: ImageNavigationDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        let Some(path) = adjacent_image_path(&self.path, direction) else {
+            return;
+        };
+
+        self.open_image_path(path, window, cx);
+    }
+
+    fn open_image_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let title = image_title(&path);
+        self.decode_generation = self.decode_generation.wrapping_add(1);
+        self.decode_task = None;
+        self.drop_decoded_image(cx);
+        self.svg_render_generation = self.svg_render_generation.wrapping_add(1);
+        self.svg_render_task = None;
+        self.svg_render_pending = None;
+        self.svg_render_failed = None;
+        self.drop_svg_rendered_image(cx);
+        self.reset_transform();
+
+        self.path = path;
+        self.title = SharedString::from(title.clone());
+        self.file_size_bytes = image_file_size(&self.path);
+        self.state = ImageViewerState::Loading;
+        window.set_window_title(&title);
+        self.start_decode(cx);
+        cx.notify();
     }
 
     fn handle_zoom_in(&mut self, _: &ImageZoomIn, window: &mut Window, cx: &mut Context<Self>) {
@@ -2159,6 +2208,8 @@ impl Render for ImageViewer {
         let content = div()
             .key_context("ImageViewer")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::handle_open_previous))
+            .on_action(cx.listener(Self::handle_open_next))
             .on_action(cx.listener(Self::handle_zoom_in))
             .on_action(cx.listener(Self::handle_zoom_out))
             .on_action(cx.listener(Self::handle_toggle_actual_size))

@@ -13,10 +13,22 @@ mod view;
 
 actions!(
     image_viewer,
-    [ImageZoomIn, ImageZoomOut, ImageToggleActualSize]
+    [
+        ImageZoomIn,
+        ImageZoomOut,
+        ImageToggleActualSize,
+        ImageOpenPrevious,
+        ImageOpenNext
+    ]
 );
 
 pub(crate) use view::open_image_window;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImageNavigationDirection {
+    Previous,
+    Next,
+}
 
 pub(crate) fn startup_image_path(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
     let mut args = args.into_iter();
@@ -39,8 +51,59 @@ pub(crate) fn startup_image_path(args: impl IntoIterator<Item = OsString>) -> Op
     None
 }
 
+pub(crate) fn adjacent_image_path(
+    path: &Path,
+    direction: ImageNavigationDirection,
+) -> Option<PathBuf> {
+    let current_name = path.file_name()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut images = fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| image_like_existing_file(path))
+        .collect::<Vec<_>>();
+
+    if images.len() <= 1 {
+        return None;
+    }
+
+    images.sort_by(|left, right| {
+        crate::explorer::compare_file_names(
+            image_sort_name(left).as_ref(),
+            image_sort_name(right).as_ref(),
+        )
+        .then_with(|| left.cmp(right))
+    });
+
+    let current_index = images
+        .iter()
+        .position(|candidate| candidate.file_name() == Some(current_name))?;
+    let target_index = match direction {
+        ImageNavigationDirection::Previous => {
+            if current_index == 0 {
+                images.len() - 1
+            } else {
+                current_index - 1
+            }
+        }
+        ImageNavigationDirection::Next => (current_index + 1) % images.len(),
+    };
+
+    Some(images[target_index].clone())
+}
+
 fn image_like_existing_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && path_is_image_like(path)
+}
+
+fn image_sort_name(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| path.as_os_str().to_string_lossy())
 }
 
 fn path_is_image_like(path: &Path) -> bool {
@@ -149,6 +212,70 @@ mod tests {
         values.extend(args(&[&text, &image]));
 
         assert_eq!(startup_image_path(values), None);
+    }
+
+    #[test]
+    fn adjacent_image_path_filters_supported_files_and_sorts_naturally() {
+        let temp = TestDir::new("adjacent-sort");
+        let file1 = temp.path().join("file1.png");
+        let file2 = temp.path().join("file2");
+        let file10 = temp.path().join("file10.png");
+        let unsupported = temp.path().join("file3.txt");
+        let directory = temp.path().join("file0.png");
+        fs::write(&file1, b"extension is enough for routing").unwrap();
+        fs::write(&file2, png_bytes(1, 1)).unwrap();
+        fs::write(&file10, b"extension is enough for routing").unwrap();
+        fs::write(&unsupported, b"not an image").unwrap();
+        fs::create_dir(&directory).unwrap();
+
+        assert_eq!(
+            adjacent_image_path(&file2, ImageNavigationDirection::Previous),
+            Some(file1.clone())
+        );
+        assert_eq!(
+            adjacent_image_path(&file2, ImageNavigationDirection::Next),
+            Some(file10.clone())
+        );
+    }
+
+    #[test]
+    fn adjacent_image_path_wraps_at_directory_edges() {
+        let temp = TestDir::new("adjacent-wrap");
+        let first = temp.path().join("file1.png");
+        let middle = temp.path().join("file2.png");
+        let last = temp.path().join("file10.png");
+        fs::write(&first, b"extension is enough for routing").unwrap();
+        fs::write(&middle, b"extension is enough for routing").unwrap();
+        fs::write(&last, b"extension is enough for routing").unwrap();
+
+        assert_eq!(
+            adjacent_image_path(&first, ImageNavigationDirection::Previous),
+            Some(last.clone())
+        );
+        assert_eq!(
+            adjacent_image_path(&last, ImageNavigationDirection::Next),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn adjacent_image_path_requires_another_supported_image_and_current_entry() {
+        let temp = TestDir::new("adjacent-none");
+        let only = temp.path().join("only.png");
+        let missing = temp.path().join("missing.png");
+        fs::write(&only, b"extension is enough for routing").unwrap();
+
+        assert_eq!(
+            adjacent_image_path(&only, ImageNavigationDirection::Next),
+            None
+        );
+
+        let other = temp.path().join("other.png");
+        fs::write(&other, b"extension is enough for routing").unwrap();
+        assert_eq!(
+            adjacent_image_path(&missing, ImageNavigationDirection::Next),
+            None
+        );
     }
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {

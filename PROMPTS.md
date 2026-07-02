@@ -2,6 +2,7 @@
 
 Image viewer tweaks:
 
+- Top bar currently is not draggable
 - Add ability to use arrow keys to nagivate supported images in the same directory. Left opens previous image, right opens next image (when sorted alphabetically). At the start/end, loop.
 
 ## 2

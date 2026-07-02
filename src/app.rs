@@ -36,7 +36,9 @@ use crate::explorer::{
     SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
     SelectNextTab, SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
 };
-use crate::image_viewer::{ImageToggleActualSize, ImageZoomIn, ImageZoomOut};
+use crate::image_viewer::{
+    ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
+};
 use crate::settings::{APP_ID, SettingsState, config_dir};
 
 const APP_TITLE: &str = "Explorer";
@@ -601,6 +603,8 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBinding::new("up", DialogFocusPrimary, Some("ExplorerDialog")),
         KeyBinding::new("right", DialogFocusSecondary, Some("ExplorerDialog")),
         KeyBinding::new("down", DialogFocusSecondary, Some("ExplorerDialog")),
+        KeyBinding::new("left", ImageOpenPrevious, Some("ImageViewer")),
+        KeyBinding::new("right", ImageOpenNext, Some("ImageViewer")),
         KeyBinding::new("+", ImageZoomIn, Some("ImageViewer")),
         KeyBinding::new("=", ImageZoomIn, Some("ImageViewer")),
         KeyBinding::new("-", ImageZoomOut, Some("ImageViewer")),
@@ -964,6 +968,30 @@ mod tests {
         assert!(!SEGOE_FLUENT_ICONS.is_empty());
         assert!(!SEGOE_MDL2_ASSETS.is_empty());
         assert!(SEGOE_FLUENT_ICONS.len() > SEGOE_MDL2_ASSETS.len());
+    }
+
+    #[test]
+    fn image_viewer_arrow_bindings_navigate_sibling_images() {
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+
+            assert!(has_binding(
+                &bindings,
+                ImageOpenPrevious,
+                "left",
+                Some("ImageViewer")
+            ));
+            assert!(has_binding(
+                &bindings,
+                ImageOpenNext,
+                "right",
+                Some("ImageViewer")
+            ));
+            assert!(has_binding(&bindings, OpenSelected, "right", None));
+        }
+
+        let windows_like_bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
+        assert!(has_binding(&windows_like_bindings, GoUp, "left", None));
     }
 
     #[test]

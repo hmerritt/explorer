@@ -7,6 +7,10 @@ pub(super) fn sort_entries(entries: &mut [FileEntry], sort: FileSortSettings) {
     entries.sort_by(|a, b| compare_entries(a, b, sort));
 }
 
+pub(crate) fn compare_file_names(a: &str, b: &str) -> Ordering {
+    compare_names(a, b)
+}
+
 fn compare_entries(a: &FileEntry, b: &FileEntry, sort: FileSortSettings) -> Ordering {
     match (a.sorts_as_directory(), b.sorts_as_directory()) {
         (true, false) => Ordering::Less,
