@@ -51,6 +51,7 @@ const STATUS_TOOLTIP_SCALING: &str = "Rendered resolution percentage";
 const STATUS_TOOLTIP_SIZE: &str = "Size";
 const STATUS_TOOLTIP_DECOMPRESSED_SIZE: &str = "Decompressed size";
 const STATUS_TOOLTIP_ZOOM_100: &str = "Set rendered resolution to 100%";
+const STATUS_TOOLTIP_FIT: &str = "Fit";
 const STATUS_TOOLTIP_FIT_WIDTH: &str = "Fit width";
 const STATUS_TOOLTIP_FIT_HEIGHT: &str = "Fit height";
 const IMAGE_STATUS_ZOOM_BUTTON_WIDTH: f32 = 48.0;
@@ -579,6 +580,15 @@ impl ImageViewer {
             available_height,
             window.scale_factor(),
         ) {
+            cx.notify();
+        }
+    }
+
+    fn handle_fit_click(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let changed = self.manual_transform;
+        cx.stop_propagation();
+        self.reset_transform();
+        if changed {
             cx.notify();
         }
     }
@@ -1682,6 +1692,14 @@ impl ImageViewer {
                         STATUS_TOOLTIP_ZOOM_100,
                         buttons_enabled,
                         cx.listener(Self::handle_zoom_100_click),
+                    ))
+                    .child(image_status_button(
+                        "image-viewer-status-fit",
+                        "Fit",
+                        IMAGE_STATUS_ZOOM_BUTTON_WIDTH,
+                        STATUS_TOOLTIP_FIT,
+                        buttons_enabled,
+                        cx.listener(Self::handle_fit_click),
                     ))
                     .child(image_status_button(
                         "image-viewer-status-fit-width",
@@ -3000,6 +3018,59 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn fit_reset_path_restores_initial_size_transform_state(cx: &mut TestAppContext) {
+        let viewer = cx.new(|cx| {
+            let mut viewer = image_viewer_for_test(
+                cx.focus_handle(),
+                ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+            );
+            configure_manual_fit_reset_state(&mut viewer);
+            viewer
+        });
+
+        viewer.update(cx, |viewer, _| {
+            viewer.reset_transform();
+            assert_eq!(viewer.zoom, None);
+            assert!(!viewer.manual_transform);
+            assert_eq!(viewer.pan_offset, ImagePanOffset::default());
+            assert!(viewer.pan_drag.is_none());
+            assert!(!viewer.vertical_scrollbar_hovered);
+            assert!(!viewer.horizontal_scrollbar_hovered);
+            assert_eq!(viewer.wheel_zoom_delta, 0.0);
+        });
+    }
+
+    #[gpui::test]
+    fn fit_status_button_resets_to_initial_size_without_toggling(cx: &mut TestAppContext) {
+        let (viewer, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut viewer = image_viewer_for_test(
+                focus_handle,
+                ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+            );
+            configure_manual_fit_reset_state(&mut viewer);
+            viewer
+        });
+
+        cx.run_until_parked();
+        let fit = cx
+            .debug_bounds("image-viewer-status-fit")
+            .expect("fit button bounds");
+        cx.simulate_click(fit.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        viewer.update(cx, |viewer, _| {
+            assert!(!viewer.manual_transform);
+            assert_eq!(viewer.pan_offset, ImagePanOffset::default());
+            assert!(viewer.pan_drag.is_none());
+            assert!(!viewer.vertical_scrollbar_hovered);
+            assert!(!viewer.horizontal_scrollbar_hovered);
+            assert_eq!(viewer.wheel_zoom_delta, 0.0);
+        });
+    }
+
     #[test]
     fn fit_width_zoom_uses_hidpi_pixels_and_reserves_vertical_scrollbar() {
         let zoom = fit_axis_zoom(1000, 1000, 400.0, 300.0, 2.0, ImageFitAxis::Width).unwrap();
@@ -3160,6 +3231,9 @@ mod tests {
         let zoom_100 = cx
             .debug_bounds("image-viewer-status-zoom-100")
             .expect("100 percent button bounds");
+        let fit = cx
+            .debug_bounds("image-viewer-status-fit")
+            .expect("fit button bounds");
         let fit_width = cx
             .debug_bounds("image-viewer-status-fit-width")
             .expect("fit width button bounds");
@@ -3172,7 +3246,8 @@ mod tests {
         let fit_height_right = f32::from(fit_height.origin.x) + f32::from(fit_height.size.width);
 
         assert!(metadata_right <= f32::from(zoom_100.origin.x));
-        assert!(f32::from(zoom_100.origin.x) < f32::from(fit_width.origin.x));
+        assert!(f32::from(zoom_100.origin.x) < f32::from(fit.origin.x));
+        assert!(f32::from(fit.origin.x) < f32::from(fit_width.origin.x));
         assert!(f32::from(fit_width.origin.x) < f32::from(fit_height.origin.x));
         assert!((status_right - STATUS_BAR_HORIZONTAL_PADDING - fit_height_right).abs() <= 1.0);
     }
@@ -3478,6 +3553,19 @@ mod tests {
             wheel_zoom_delta: 0.0,
             should_move_window: false,
         }
+    }
+
+    fn configure_manual_fit_reset_state(viewer: &mut ImageViewer) {
+        viewer.zoom = Some(0.5);
+        viewer.manual_transform = true;
+        viewer.pan_offset = ImagePanOffset { x: 40.0, y: -20.0 };
+        viewer.pan_drag = Some(ImagePanDrag {
+            start_position: point(px(10.0), px(10.0)),
+            start_pan: ImagePanOffset { x: 40.0, y: -20.0 },
+        });
+        viewer.vertical_scrollbar_hovered = true;
+        viewer.horizontal_scrollbar_hovered = true;
+        viewer.wheel_zoom_delta = 60.0;
     }
 
     fn raster_decoded_image(
