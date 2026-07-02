@@ -23,7 +23,7 @@ use crate::{
         scrollbar_corner,
     },
     image_viewer::{
-        ImageZoomIn, ImageZoomOut,
+        ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
         decode::{DecodedImage, DecodedImageSource, decode_image_source},
         resize::{
             ImageFitTarget, native_image_target, raster_initial_native_zoom,
@@ -429,6 +429,19 @@ impl ImageViewer {
         }
     }
 
+    fn handle_toggle_actual_size(
+        &mut self,
+        _: &ImageToggleActualSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (available_width, available_height) = self.current_image_viewport_size(window);
+        if self.toggle_actual_size(available_width, available_height, window.scale_factor()) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
     fn handle_wheel_zoom(
         &mut self,
         delta_y: f32,
@@ -501,6 +514,67 @@ impl ImageViewer {
 
         self.pan_offset = pan_offset;
         self.manual_transform = true;
+        true
+    }
+
+    fn toggle_actual_size(
+        &mut self,
+        available_width: f32,
+        available_height: f32,
+        scale_factor: f32,
+    ) -> bool {
+        let Some((image_width, image_height, kind)) = self.ready_image_kind() else {
+            return false;
+        };
+        let Some(initial_zoom) = initial_native_zoom_for_kind(
+            kind,
+            image_width,
+            image_height,
+            available_width,
+            available_height,
+            scale_factor,
+        ) else {
+            return false;
+        };
+
+        let old_zoom = self
+            .zoom
+            .unwrap_or_else(|| initial_zoom.clamp(0.0, IMAGE_VIEWER_MAX_ZOOM));
+        if actual_size_toggle_for_zoom(old_zoom) == ActualSizeToggle::ResetToInitial {
+            self.reset_transform();
+            return true;
+        }
+
+        let Some(old_target) =
+            native_image_target(image_width, image_height, old_zoom, scale_factor)
+        else {
+            return false;
+        };
+        let Some(new_target) = native_image_target(image_width, image_height, 1.0, scale_factor)
+        else {
+            return false;
+        };
+        let old_pan = clamp_pan_offset(
+            self.pan_offset,
+            old_target,
+            available_width,
+            available_height,
+        );
+        let anchor = ImageBodyPoint {
+            x: available_width / 2.0,
+            y: available_height / 2.0,
+        };
+
+        self.zoom = Some(1.0);
+        self.manual_transform = true;
+        self.pan_offset = pan_offset_after_zoom(
+            old_pan,
+            old_target,
+            new_target,
+            available_width,
+            available_height,
+            anchor,
+        );
         true
     }
 
@@ -1503,6 +1577,20 @@ fn zoom_from_percent(percent: u32) -> f64 {
     f64::from(percent.clamp(IMAGE_VIEWER_MIN_ZOOM_PERCENT, IMAGE_VIEWER_MAX_ZOOM_PERCENT)) / 100.0
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActualSizeToggle {
+    ZoomToActualSize,
+    ResetToInitial,
+}
+
+fn actual_size_toggle_for_zoom(zoom: f64) -> ActualSizeToggle {
+    if (zoom - 1.0).abs() <= ZOOM_EPSILON {
+        ActualSizeToggle::ResetToInitial
+    } else {
+        ActualSizeToggle::ZoomToActualSize
+    }
+}
+
 fn wheel_zoom_steps(accumulator: &mut f32, delta_y: f32) -> i32 {
     if delta_y == 0.0 {
         return 0;
@@ -1786,6 +1874,7 @@ impl Render for ImageViewer {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_zoom_in))
             .on_action(cx.listener(Self::handle_zoom_out))
+            .on_action(cx.listener(Self::handle_toggle_actual_size))
             .size_full()
             .flex()
             .flex_col()
@@ -1927,6 +2016,7 @@ fn image_title(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext, TestAppContext};
 
     #[test]
     fn svg_render_selection_uses_exact_target() {
@@ -2166,6 +2256,68 @@ mod tests {
         assert_eq!(zoom_percent(next_zoom_level(0.055, -1)), 5);
         assert_eq!(next_zoom_level(0.005, 1), 0.02);
         assert_eq!(next_zoom_level(0.005, -1), 0.005);
+    }
+
+    #[test]
+    fn actual_size_toggle_decision_uses_zoom_epsilon() {
+        assert_eq!(
+            actual_size_toggle_for_zoom(0.5),
+            ActualSizeToggle::ZoomToActualSize
+        );
+        assert_eq!(
+            actual_size_toggle_for_zoom(1.5),
+            ActualSizeToggle::ZoomToActualSize
+        );
+        assert_eq!(
+            actual_size_toggle_for_zoom(1.0 - (ZOOM_EPSILON / 2.0)),
+            ActualSizeToggle::ResetToInitial
+        );
+        assert_eq!(
+            actual_size_toggle_for_zoom(1.0 + (ZOOM_EPSILON / 2.0)),
+            ActualSizeToggle::ResetToInitial
+        );
+    }
+
+    #[gpui::test]
+    fn actual_size_toggle_at_actual_size_resets_to_initial_fit_state(cx: &mut TestAppContext) {
+        let viewer = cx.new(|cx| ImageViewer {
+            path: PathBuf::new(),
+            title: SharedString::from("image.png"),
+            file_size_bytes: None,
+            focus_handle: cx.focus_handle(),
+            state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+            decode_generation: 0,
+            decode_task: None,
+            svg_render_generation: 0,
+            svg_render_task: None,
+            svg_render_pending: None,
+            svg_render_failed: None,
+            svg_rendered_image: None,
+            zoom: Some(1.0),
+            manual_transform: true,
+            pan_offset: ImagePanOffset { x: 40.0, y: -20.0 },
+            pan_drag: Some(ImagePanDrag {
+                start_position: point(px(10.0), px(10.0)),
+                start_pan: ImagePanOffset { x: 40.0, y: -20.0 },
+            }),
+            vertical_scrollbar_hovered: true,
+            vertical_scrollbar_drag: None,
+            horizontal_scrollbar_hovered: true,
+            horizontal_scrollbar_drag: None,
+            wheel_zoom_delta: 60.0,
+            should_move_window: true,
+        });
+
+        viewer.update(cx, |viewer, _| {
+            assert!(viewer.toggle_actual_size(800.0, 600.0, 1.0));
+            assert_eq!(viewer.zoom, None);
+            assert!(!viewer.manual_transform);
+            assert_eq!(viewer.pan_offset, ImagePanOffset::default());
+            assert!(viewer.pan_drag.is_none());
+            assert!(!viewer.vertical_scrollbar_hovered);
+            assert!(!viewer.horizontal_scrollbar_hovered);
+            assert_eq!(viewer.wheel_zoom_delta, 0.0);
+        });
     }
 
     #[test]

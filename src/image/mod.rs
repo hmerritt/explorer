@@ -11,7 +11,10 @@ mod decode;
 mod resize;
 mod view;
 
-actions!(image_viewer, [ImageZoomIn, ImageZoomOut]);
+actions!(
+    image_viewer,
+    [ImageZoomIn, ImageZoomOut, ImageToggleActualSize]
+);
 
 pub(crate) use view::open_image_window;
 
