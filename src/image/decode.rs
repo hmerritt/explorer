@@ -1,13 +1,13 @@
 use std::{
     fs::{self, File},
     io::BufReader,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use gpui::RenderImage;
-use image::ImageDecoder;
+use image::{ImageDecoder, ImageFormat};
 
 use crate::image_viewer::color::{apply_icc_profile_to_srgb, convert_rgba_to_srgb};
 
@@ -25,7 +25,15 @@ pub(super) struct DecodedImage {
 #[derive(Clone)]
 pub(super) enum DecodedImageSource {
     Raster(Arc<RenderImage>),
+    AnimatedGif(AnimatedGifSource),
     Svg(Arc<Vec<u8>>),
+}
+
+#[derive(Clone)]
+pub(super) struct AnimatedGifSource {
+    pub(super) path: PathBuf,
+    pub(super) cache_key: String,
+    pub(super) fallback_image: Arc<RenderImage>,
 }
 
 #[derive(Clone)]
@@ -117,23 +125,22 @@ fn decode_raster_source(
 ) -> Result<DecodedImage, String> {
     let reader = open_image_reader_with_extension(path, timings_enabled, timings)?;
     if reader.format().is_some() {
-        match decode_raster_reader(reader, icc_mode, timings_enabled, timings) {
+        match decode_raster_reader(path, reader, icc_mode, timings_enabled, timings) {
             Ok(decoded) => return Ok(decoded),
             Err(extension_error) => {
                 let reader = open_image_reader_with_guessed_format(path, timings_enabled, timings)?;
-                return decode_raster_reader(reader, icc_mode, timings_enabled, timings).map_err(
-                    |guess_error| {
+                return decode_raster_reader(path, reader, icc_mode, timings_enabled, timings)
+                    .map_err(|guess_error| {
                         format!(
                             "{guess_error}; extension-based decode also failed: {extension_error}"
                         )
-                    },
-                );
+                    });
             }
         }
     }
 
     let reader = open_image_reader_with_guessed_format(path, timings_enabled, timings)?;
-    decode_raster_reader(reader, icc_mode, timings_enabled, timings)
+    decode_raster_reader(path, reader, icc_mode, timings_enabled, timings)
 }
 
 fn open_image_reader_with_extension(
@@ -163,12 +170,14 @@ fn open_image_reader_with_guessed_format(
 }
 
 fn decode_raster_reader(
+    path: &Path,
     reader: ImageFileReader,
     icc_mode: IccDecodeMode,
     timings_enabled: bool,
     timings: &mut ImageDecodeTimings,
 ) -> Result<DecodedImage, String> {
     let metadata_started = timing_started(timings_enabled);
+    let format = reader.format();
     let mut decoder = reader
         .into_decoder()
         .map_err(|error| format!("Unsupported image format: {error}"))?;
@@ -220,13 +229,26 @@ fn decode_raster_reader(
         height,
         icc_profile,
     });
+    let source = if format == Some(ImageFormat::Gif) {
+        DecodedImageSource::AnimatedGif(AnimatedGifSource {
+            path: path.to_path_buf(),
+            cache_key: animated_gif_cache_key(path),
+            fallback_image: image,
+        })
+    } else {
+        DecodedImageSource::Raster(image)
+    };
 
     Ok(DecodedImage {
         width,
         height,
         source_decompressed_size_bytes,
-        deferred_icc_correction,
-        source: DecodedImageSource::Raster(image),
+        deferred_icc_correction: if matches!(&source, DecodedImageSource::AnimatedGif(_)) {
+            None
+        } else {
+            deferred_icc_correction
+        },
+        source,
     })
 }
 
@@ -275,6 +297,36 @@ fn path_is_svg(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
 }
 
+fn animated_gif_cache_key(path: &Path) -> String {
+    let mut key = String::from("image-viewer-gif:");
+    key.push_str(&path.to_string_lossy().replace('\\', "/"));
+
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            key.push(':');
+            key.push_str(&metadata.len().to_string());
+            key.push(':');
+            key.push_str(
+                &metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| {
+                        duration
+                            .as_secs()
+                            .saturating_mul(1_000_000_000)
+                            .saturating_add(u64::from(duration.subsec_nanos()))
+                    })
+                    .unwrap_or(0)
+                    .to_string(),
+            );
+        }
+        Err(_) => key.push_str(":missing:0"),
+    }
+
+    key
+}
+
 fn timing_started(enabled: bool) -> Option<Instant> {
     enabled.then(Instant::now)
 }
@@ -316,6 +368,28 @@ mod tests {
     }
 
     #[test]
+    fn gif_decode_produces_animated_source_with_first_frame_fallback() {
+        let temp = TestDir::new("decode-animated-gif");
+        let path = temp.path().join("loop.gif");
+        fs::write(&path, animated_gif_bytes(4, 2)).unwrap();
+
+        let decoded = decode_image_source(&path).unwrap();
+        let DecodedImageSource::AnimatedGif(source) = decoded.source else {
+            panic!("expected animated gif source");
+        };
+        let size = source.fallback_image.size(0);
+
+        assert_eq!(decoded.width, 4);
+        assert_eq!(decoded.height, 2);
+        assert_eq!(size.width.0, 4);
+        assert_eq!(size.height.0, 2);
+        assert_eq!(source.fallback_image.frame_count(), 1);
+        assert_eq!(source.path, path);
+        assert!(source.cache_key.starts_with("image-viewer-gif:"));
+        assert!(decoded.deferred_icc_correction.is_none());
+    }
+
+    #[test]
     fn extension_decode_falls_back_to_content_sniffing() {
         let temp = TestDir::new("extension-fallback");
         let path = temp.path().join("photo.jpg");
@@ -325,6 +399,22 @@ mod tests {
 
         assert_eq!(decoded.width, 3);
         assert_eq!(decoded.height, 2);
+    }
+
+    #[test]
+    fn content_sniffed_gif_uses_animated_source_after_extension_fallback() {
+        let temp = TestDir::new("gif-extension-fallback");
+        let path = temp.path().join("loop.jpg");
+        fs::write(&path, animated_gif_bytes(3, 2)).unwrap();
+
+        let decoded = decode_image_source(&path).unwrap();
+        let DecodedImageSource::AnimatedGif(source) = decoded.source else {
+            panic!("expected animated gif source");
+        };
+
+        assert_eq!(decoded.width, 3);
+        assert_eq!(decoded.height, 2);
+        assert_eq!(source.path, path);
     }
 
     #[test]
@@ -397,6 +487,27 @@ mod tests {
         image
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
+        bytes
+    }
+
+    fn animated_gif_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            for rgba in [[220, 40, 80, 255], [40, 140, 220, 255]] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .unwrap();
+            }
+        }
         bytes
     }
 

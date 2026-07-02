@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, fs, path::PathBuf, sync::Arc};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
@@ -26,8 +26,8 @@ use crate::{
         ImageNavigationDirection, ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize,
         ImageZoomIn, ImageZoomOut, adjacent_image_path,
         decode::{
-            DecodedImage, DecodedImageSource, DeferredIccCorrection, apply_deferred_icc_correction,
-            decode_image_source, render_image_from_rgba,
+            AnimatedGifSource, DecodedImage, DecodedImageSource, DeferredIccCorrection,
+            apply_deferred_icc_correction, decode_image_source, render_image_from_rgba,
         },
         resize::{
             ImageFitTarget, native_image_target, raster_initial_native_zoom,
@@ -160,6 +160,7 @@ pub(crate) struct ImageViewer {
     horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     wheel_zoom_delta: f32,
     last_surface_size: Option<gpui::Size<Pixels>>,
+    animated_gif_asset_evictions: BTreeSet<String>,
 }
 
 impl EventEmitter<ImageViewerEvent> for ImageViewer {}
@@ -217,10 +218,11 @@ struct ImageViewportLayout {
 #[derive(Clone)]
 enum ReadyImageRenderSource {
     Raster(Arc<RenderImage>),
+    AnimatedGif(AnimatedGifSource),
     Svg(Arc<Vec<u8>>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadyImageKind {
     Raster,
     Svg,
@@ -382,6 +384,7 @@ impl ImageViewer {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         };
         viewer.start_decode(cx);
         viewer
@@ -485,10 +488,14 @@ impl ImageViewer {
     }
 
     fn drop_decoded_image(&mut self, cx: &mut App) {
-        if let ImageViewerState::Ready(decoded) = &self.state
-            && let DecodedImageSource::Raster(image) = &decoded.source
-        {
-            cx.drop_image(image.clone(), None);
+        if let ImageViewerState::Ready(decoded) = &self.state {
+            match &decoded.source {
+                DecodedImageSource::Raster(image) => cx.drop_image(image.clone(), None),
+                DecodedImageSource::AnimatedGif(source) => {
+                    cx.drop_image(source.fallback_image.clone(), None);
+                }
+                DecodedImageSource::Svg(_) => {}
+            }
         }
     }
 
@@ -592,6 +599,9 @@ impl ImageViewer {
 
         let source = match &decoded.source {
             DecodedImageSource::Raster(image) => ReadyImageRenderSource::Raster(image.clone()),
+            DecodedImageSource::AnimatedGif(source) => {
+                ReadyImageRenderSource::AnimatedGif(source.clone())
+            }
             DecodedImageSource::Svg(bytes) => ReadyImageRenderSource::Svg(bytes.clone()),
         };
         Some((decoded.width, decoded.height, source))
@@ -604,6 +614,7 @@ impl ImageViewer {
 
         let kind = match &decoded.source {
             DecodedImageSource::Raster(_) => ReadyImageKind::Raster,
+            DecodedImageSource::AnimatedGif(_) => ReadyImageKind::Raster,
             DecodedImageSource::Svg(_) => ReadyImageKind::Svg,
         };
         Some((decoded.width, decoded.height, kind))
@@ -1390,6 +1401,10 @@ impl ImageViewer {
             ReadyImageRenderSource::Raster(image) => {
                 render_ready_image(image, placement.target, placement.offset)
             }
+            ReadyImageRenderSource::AnimatedGif(source) => {
+                self.evict_animated_gif_source_once(&source, cx);
+                render_ready_animated_gif(source, placement.target, placement.offset)
+            }
             ReadyImageRenderSource::Svg(bytes) => {
                 self.ensure_svg_rendered_image(bytes, placement.target, cx);
                 if let Some(display_target) = svg_render_display_target(
@@ -1412,6 +1427,20 @@ impl ImageViewer {
         };
 
         Some(self.render_ready_body_layout(content, placement, layout, cx))
+    }
+
+    fn evict_animated_gif_source_once(
+        &mut self,
+        source: &AnimatedGifSource,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .animated_gif_asset_evictions
+            .insert(source.cache_key.clone())
+        {
+            let resource: gpui::Resource = source.path.clone().into();
+            cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
+        }
     }
 
     fn render_ready_body_layout(
@@ -1996,6 +2025,47 @@ fn render_ready_image(
         .into_any_element()
 }
 
+fn render_ready_animated_gif(
+    source: AnimatedGifSource,
+    target: ImageFitTarget,
+    offset: ImagePanOffset,
+) -> AnyElement {
+    let loading_image = source.fallback_image.clone();
+    let fallback_image = source.fallback_image.clone();
+    div()
+        .debug_selector(|| "image-viewer-animated-gif".to_owned())
+        .relative()
+        .left(px(offset.x))
+        .top(px(offset.y))
+        .child(
+            img(source.path)
+                .debug_selector(|| "image-viewer-animated-gif-image".to_owned())
+                .id(animated_gif_element_id(&source.cache_key))
+                .w(px(target.display_width))
+                .h(px(target.display_height))
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || {
+                    img(loading_image.clone())
+                        .w(px(target.display_width))
+                        .h(px(target.display_height))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element()
+                })
+                .with_fallback(move || {
+                    img(fallback_image.clone())
+                        .w(px(target.display_width))
+                        .h(px(target.display_height))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element()
+                }),
+        )
+        .into_any_element()
+}
+
+fn animated_gif_element_id(cache_key: &str) -> SharedString {
+    SharedString::from(format!("image-viewer-animated-gif-image:{cache_key}"))
+}
+
 fn replace_ready_raster_image_for_icc(
     state: &mut ImageViewerState,
     image: Arc<RenderImage>,
@@ -2032,6 +2102,7 @@ impl ReadyImageRenderSource {
     fn kind(&self) -> ReadyImageKind {
         match self {
             Self::Raster(_) => ReadyImageKind::Raster,
+            Self::AnimatedGif(_) => ReadyImageKind::Raster,
             Self::Svg(_) => ReadyImageKind::Svg,
         }
     }
@@ -2698,6 +2769,11 @@ fn image_title(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
+    use std::{
+        env,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn svg_render_selection_uses_exact_target() {
@@ -2834,6 +2910,58 @@ mod tests {
         assert_eq!(
             format!("{} / {}", labels.file_size, labels.decompressed_size),
             "2.0 KB / n/a"
+        );
+    }
+
+    #[test]
+    fn animated_gif_status_labels_use_raster_metadata() {
+        let decoded = animated_gif_decoded_image(
+            PathBuf::from("loop.gif"),
+            "gif-cache-1",
+            400,
+            200,
+            Some(320_000),
+        );
+
+        let labels = image_status_labels(
+            &ImageViewerState::Ready(decoded),
+            Some(2048),
+            Some(ImageFitTarget {
+                pixel_width: 200,
+                pixel_height: 100,
+                display_width: 200.0,
+                display_height: 100.0,
+            }),
+        );
+
+        assert_eq!(labels.resolution, "400 x 200");
+        assert_eq!(labels.rendered_resolution, "200 x 100");
+        assert_eq!(labels.scaling, "50%");
+        assert_eq!(labels.file_size, "2.0 KB");
+        assert_eq!(labels.decompressed_size, "312.5 KB");
+    }
+
+    #[test]
+    fn animated_gif_ready_source_uses_raster_zoom_kind() {
+        let source = ReadyImageRenderSource::AnimatedGif(animated_gif_source(
+            PathBuf::from("loop.gif"),
+            "gif-cache-1",
+            400,
+            200,
+        ));
+
+        assert_eq!(source.kind(), ReadyImageKind::Raster);
+    }
+
+    #[test]
+    fn animated_gif_element_id_changes_with_source_cache_key() {
+        assert_eq!(
+            animated_gif_element_id("gif-cache-1"),
+            animated_gif_element_id("gif-cache-1")
+        );
+        assert_ne!(
+            animated_gif_element_id("gif-cache-1"),
+            animated_gif_element_id("gif-cache-2")
         );
     }
 
@@ -3067,6 +3195,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 60.0,
             last_surface_size: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         });
 
         viewer.update(cx, |viewer, _| {
@@ -3107,6 +3236,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         });
 
         viewer.update(cx, |viewer, _| {
@@ -3283,6 +3413,31 @@ mod tests {
     }
 
     #[gpui::test]
+    fn animated_gif_ready_image_renders_animated_img_element(cx: &mut TestAppContext) {
+        let temp = TestDir::new("image-viewer-animated-gif");
+        let path = temp.path().join("loop.gif");
+        fs::write(&path, animated_gif_bytes(8, 4)).unwrap();
+        let cache_key = "gif-cache-render";
+        let decoded = animated_gif_decoded_image(path.clone(), cache_key, 8, 4, Some(128));
+
+        let (viewer, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            image_viewer_for_test(focus_handle, ImageViewerState::Ready(decoded))
+        });
+
+        cx.run_until_parked();
+
+        cx.debug_bounds("image-viewer-animated-gif")
+            .expect("animated gif wrapper bounds");
+        cx.debug_bounds("image-viewer-animated-gif-image")
+            .expect("animated gif image bounds");
+        viewer.update(cx, |viewer, _| {
+            assert!(viewer.animated_gif_asset_evictions.contains(cache_key));
+        });
+    }
+
+    #[gpui::test]
     fn status_bar_zoom_buttons_render_right_aligned(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
@@ -3311,6 +3466,7 @@ mod tests {
                 horizontal_scrollbar_drag: None,
                 wheel_zoom_delta: 0.0,
                 last_surface_size: None,
+                animated_gif_asset_evictions: BTreeSet::new(),
             }
         });
 
@@ -3661,6 +3817,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         }
     }
 
@@ -3693,6 +3850,37 @@ mod tests {
         }
     }
 
+    fn animated_gif_decoded_image(
+        path: PathBuf,
+        cache_key: &str,
+        width: u32,
+        height: u32,
+        source_decompressed_size_bytes: Option<u64>,
+    ) -> DecodedImage {
+        DecodedImage {
+            width,
+            height,
+            source_decompressed_size_bytes,
+            deferred_icc_correction: None,
+            source: DecodedImageSource::AnimatedGif(animated_gif_source(
+                path, cache_key, width, height,
+            )),
+        }
+    }
+
+    fn animated_gif_source(
+        path: PathBuf,
+        cache_key: &str,
+        width: u32,
+        height: u32,
+    ) -> AnimatedGifSource {
+        AnimatedGifSource {
+            path,
+            cache_key: cache_key.to_owned(),
+            fallback_image: test_render_image(width, height),
+        }
+    }
+
     fn test_render_image(width: u32, height: u32) -> Arc<RenderImage> {
         render_image_from_rgba(image::RgbaImage::new(width.max(1), height.max(1)))
     }
@@ -3712,6 +3900,54 @@ mod tests {
             pixel_height: height,
             display_width: width as f32,
             display_height: height as f32,
+        }
+    }
+
+    fn animated_gif_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            for rgba in [[220, 40, 80, 255], [40, 140, 220, 255]] {
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        bytes
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                env::temp_dir().join(format!("explorer-{name}-{}-{nanos}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
         }
     }
 }
