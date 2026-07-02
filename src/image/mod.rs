@@ -24,6 +24,135 @@ actions!(
 
 pub(crate) use view::open_image_window;
 
+#[cfg(feature = "benchmarks")]
+pub mod benchmark_support {
+    use std::{fs, path::Path};
+
+    use super::{
+        decode::{
+            DecodedImageSource, IccDecodeMode, apply_deferred_icc_correction,
+            decode_image_source_with_options, render_image_from_rgba,
+        },
+        resize::ImageFitTarget,
+        view::render_svg_for_target,
+    };
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ImageViewerBenchmarkIccMode {
+        ApplySynchronously,
+        Defer,
+        Ignore,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ImageViewerOpenBenchmarkResult {
+        pub width: u32,
+        pub height: u32,
+        pub render_bytes: usize,
+        pub source_decompressed_size_bytes: Option<u64>,
+        pub has_deferred_icc: bool,
+    }
+
+    #[derive(Clone)]
+    pub struct ImageViewerDeferredIccBenchmarkInput {
+        correction: super::decode::DeferredIccCorrection,
+    }
+
+    pub fn open_image_viewer_for_benchmark(
+        path: &Path,
+        mode: ImageViewerBenchmarkIccMode,
+    ) -> Result<ImageViewerOpenBenchmarkResult, String> {
+        let decoded =
+            decode_image_source_with_options(path, mode.into_decode_mode(), false).result?;
+        let has_deferred_icc = decoded.deferred_icc_correction.is_some();
+        let render_bytes = match &decoded.source {
+            DecodedImageSource::Raster(image) => image.as_bytes(0).map_or(0, |bytes| bytes.len()),
+            DecodedImageSource::Svg(bytes) => {
+                let image = render_svg_for_target(
+                    bytes,
+                    ImageFitTarget {
+                        pixel_width: decoded.width,
+                        pixel_height: decoded.height,
+                        display_width: decoded.width as f32,
+                        display_height: decoded.height as f32,
+                    },
+                )?;
+                image.as_bytes(0).map_or(0, |bytes| bytes.len())
+            }
+        };
+
+        Ok(ImageViewerOpenBenchmarkResult {
+            width: decoded.width,
+            height: decoded.height,
+            render_bytes,
+            source_decompressed_size_bytes: decoded.source_decompressed_size_bytes,
+            has_deferred_icc,
+        })
+    }
+
+    pub fn apply_deferred_icc_for_benchmark(path: &Path) -> Result<usize, String> {
+        let input = deferred_icc_input_for_benchmark(path)?;
+        apply_deferred_icc_input_for_benchmark(input)
+    }
+
+    pub fn deferred_icc_input_for_benchmark(
+        path: &Path,
+    ) -> Result<ImageViewerDeferredIccBenchmarkInput, String> {
+        let decoded = decode_image_source_with_options(path, IccDecodeMode::Defer, false).result?;
+        let correction = decoded
+            .deferred_icc_correction
+            .ok_or_else(|| "Benchmark fixture did not contain an ICC profile.".to_owned())?;
+
+        Ok(ImageViewerDeferredIccBenchmarkInput { correction })
+    }
+
+    pub fn apply_deferred_icc_input_for_benchmark(
+        input: ImageViewerDeferredIccBenchmarkInput,
+    ) -> Result<usize, String> {
+        let image = apply_deferred_icc_correction(input.correction)?;
+
+        Ok(image.as_bytes(0).map_or(0, |bytes| bytes.len()))
+    }
+
+    pub fn render_image_from_rgba_for_benchmark(image: image::RgbaImage) -> usize {
+        render_image_from_rgba(image)
+            .as_bytes(0)
+            .map_or(0, |bytes| bytes.len())
+    }
+
+    pub fn render_svg_native_for_benchmark(path: &Path) -> Result<usize, String> {
+        let decoded = decode_image_source_with_options(path, IccDecodeMode::Defer, false).result?;
+        let DecodedImageSource::Svg(bytes) = decoded.source else {
+            return Err("Benchmark fixture was not an SVG.".to_owned());
+        };
+        let image = render_svg_for_target(
+            &bytes,
+            ImageFitTarget {
+                pixel_width: decoded.width,
+                pixel_height: decoded.height,
+                display_width: decoded.width as f32,
+                display_height: decoded.height as f32,
+            },
+        )?;
+
+        Ok(image.as_bytes(0).map_or(0, |bytes| bytes.len()))
+    }
+
+    pub fn image_file_len_for_benchmark(path: &Path) -> u64 {
+        fs::metadata(path).map_or(0, |metadata| metadata.len())
+    }
+
+    impl ImageViewerBenchmarkIccMode {
+        fn into_decode_mode(self) -> IccDecodeMode {
+            match self {
+                Self::ApplySynchronously => IccDecodeMode::ApplySynchronously,
+                Self::Defer => IccDecodeMode::Defer,
+                Self::Ignore => IccDecodeMode::Ignore,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ImageNavigationDirection {
     Previous,

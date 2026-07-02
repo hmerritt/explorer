@@ -25,7 +25,10 @@ use crate::{
     image_viewer::{
         ImageNavigationDirection, ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize,
         ImageZoomIn, ImageZoomOut, adjacent_image_path,
-        decode::{DecodedImage, DecodedImageSource, decode_image_source},
+        decode::{
+            DecodedImage, DecodedImageSource, DeferredIccCorrection, apply_deferred_icc_correction,
+            decode_image_source, render_image_from_rgba,
+        },
         resize::{
             ImageFitTarget, native_image_target, raster_initial_native_zoom,
             svg_initial_native_zoom,
@@ -113,6 +116,7 @@ struct ImageViewer {
     state: ImageViewerState,
     decode_generation: u64,
     decode_task: Option<Task<()>>,
+    icc_correction_task: Option<Task<()>>,
     svg_render_generation: u64,
     svg_render_task: Option<Task<()>>,
     svg_render_pending: Option<ImageFitTarget>,
@@ -208,6 +212,7 @@ impl ImageViewer {
             state: ImageViewerState::Loading,
             decode_generation: 0,
             decode_task: None,
+            icc_correction_task: None,
             svg_render_generation: 0,
             svg_render_task: None,
             svg_render_pending: None,
@@ -243,6 +248,7 @@ impl ImageViewer {
                 }
 
                 viewer.decode_task = None;
+                viewer.icc_correction_task = None;
                 viewer.drop_decoded_image(cx);
                 viewer.drop_svg_rendered_image(cx);
                 viewer.svg_render_generation = viewer.svg_render_generation.wrapping_add(1);
@@ -251,10 +257,55 @@ impl ImageViewer {
                 viewer.svg_render_failed = None;
                 viewer.reset_transform();
                 viewer.state = match result {
-                    Ok(decoded) => ImageViewerState::Ready(decoded),
+                    Ok(decoded) => {
+                        let deferred_icc_correction = decoded.deferred_icc_correction.clone();
+                        let state = ImageViewerState::Ready(decoded);
+                        if let Some(correction) = deferred_icc_correction {
+                            viewer.start_icc_correction(generation, correction, cx);
+                        }
+                        state
+                    }
                     Err(error) => ImageViewerState::Failed(error),
                 };
                 cx.notify();
+            });
+        }));
+    }
+
+    fn start_icc_correction(
+        &mut self,
+        decode_generation: u64,
+        correction: DeferredIccCorrection,
+        cx: &mut Context<Self>,
+    ) {
+        self.icc_correction_task = Some(cx.spawn(async move |viewer, cx| {
+            let worker = cx
+                .background_executor()
+                .spawn(async move { apply_deferred_icc_correction(correction) });
+            let result = worker.await;
+            let _ = viewer.update(cx, |viewer, cx| {
+                if viewer.decode_generation != decode_generation {
+                    if let Ok(image) = result {
+                        cx.drop_image(image, None);
+                    }
+                    return;
+                }
+
+                viewer.icc_correction_task = None;
+                let Ok(image) = result else {
+                    clear_ready_deferred_icc_correction(&mut viewer.state);
+                    return;
+                };
+
+                match replace_ready_raster_image_for_icc(&mut viewer.state, image) {
+                    Ok(previous) => {
+                        cx.drop_image(previous, None);
+                        cx.notify();
+                    }
+                    Err(image) => {
+                        cx.drop_image(image, None);
+                    }
+                }
             });
         }));
     }
@@ -432,6 +483,7 @@ impl ImageViewer {
         let title = image_title(&path);
         self.decode_generation = self.decode_generation.wrapping_add(1);
         self.decode_task = None;
+        self.icc_correction_task = None;
         self.drop_decoded_image(cx);
         self.svg_render_generation = self.svg_render_generation.wrapping_add(1);
         self.svg_render_task = None;
@@ -1765,6 +1817,38 @@ fn render_ready_image(
         .into_any_element()
 }
 
+fn replace_ready_raster_image_for_icc(
+    state: &mut ImageViewerState,
+    image: Arc<RenderImage>,
+) -> Result<Arc<RenderImage>, Arc<RenderImage>> {
+    let ImageViewerState::Ready(decoded) = state else {
+        return Err(image);
+    };
+    if decoded.deferred_icc_correction.is_none() {
+        return Err(image);
+    }
+    let replacement_size = image.size(0);
+    if u32::try_from(replacement_size.width.0).ok() != Some(decoded.width)
+        || u32::try_from(replacement_size.height.0).ok() != Some(decoded.height)
+    {
+        decoded.deferred_icc_correction = None;
+        return Err(image);
+    }
+    let DecodedImageSource::Raster(current) = &mut decoded.source else {
+        decoded.deferred_icc_correction = None;
+        return Err(image);
+    };
+
+    decoded.deferred_icc_correction = None;
+    Ok(std::mem::replace(current, image))
+}
+
+fn clear_ready_deferred_icc_correction(state: &mut ImageViewerState) {
+    if let ImageViewerState::Ready(decoded) = state {
+        decoded.deferred_icc_correction = None;
+    }
+}
+
 impl ReadyImageRenderSource {
     fn kind(&self) -> ReadyImageKind {
         match self {
@@ -2158,7 +2242,10 @@ fn svg_render_display_target(
         .then_some(requested_target)
 }
 
-fn render_svg_for_target(bytes: &[u8], target: ImageFitTarget) -> Result<Arc<RenderImage>, String> {
+pub(super) fn render_svg_for_target(
+    bytes: &[u8],
+    target: ImageFitTarget,
+) -> Result<Arc<RenderImage>, String> {
     let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
         .map_err(|error| format!("Failed to parse SVG: {error}"))?;
     let svg_size = tree.size();
@@ -2176,7 +2263,7 @@ fn render_svg_for_target(bytes: &[u8], target: ImageFitTarget) -> Result<Arc<Ren
             .ok_or_else(|| "Failed to create SVG image buffer.".to_owned())?;
     unpremultiply_rgba(&mut image);
 
-    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+    Ok(render_image_from_rgba(image))
 }
 
 fn unpremultiply_rgba(image: &mut image::RgbaImage) {
@@ -2512,6 +2599,7 @@ mod tests {
             width: 400,
             height: 200,
             source_decompressed_size_bytes: None,
+            deferred_icc_correction: None,
             source: DecodedImageSource::Svg(Arc::new(Vec::new())),
         };
 
@@ -2534,6 +2622,84 @@ mod tests {
             format!("{} / {}", labels.file_size, labels.decompressed_size),
             "2.0 KB / n/a"
         );
+    }
+
+    #[test]
+    fn deferred_icc_replacement_preserves_dimensions_and_returns_previous_image() {
+        let initial = test_render_image(4, 2);
+        let corrected = test_render_image(4, 2);
+        let mut state = ImageViewerState::Ready(DecodedImage {
+            width: 4,
+            height: 2,
+            source_decompressed_size_bytes: Some(32),
+            deferred_icc_correction: Some(test_deferred_icc_correction(4, 2)),
+            source: DecodedImageSource::Raster(initial.clone()),
+        });
+
+        let previous = replace_ready_raster_image_for_icc(&mut state, corrected.clone()).unwrap();
+
+        assert!(Arc::ptr_eq(&previous, &initial));
+        let ImageViewerState::Ready(decoded) = state else {
+            panic!("expected ready image");
+        };
+        assert!(decoded.deferred_icc_correction.is_none());
+        let DecodedImageSource::Raster(current) = decoded.source else {
+            panic!("expected raster image");
+        };
+        assert!(Arc::ptr_eq(&current, &corrected));
+        assert_eq!(decoded.width, 4);
+        assert_eq!(decoded.height, 2);
+    }
+
+    #[test]
+    fn deferred_icc_replacement_rejects_dimension_changes() {
+        let initial = test_render_image(4, 2);
+        let mismatched = test_render_image(3, 2);
+        let mut state = ImageViewerState::Ready(DecodedImage {
+            width: 4,
+            height: 2,
+            source_decompressed_size_bytes: Some(32),
+            deferred_icc_correction: Some(test_deferred_icc_correction(4, 2)),
+            source: DecodedImageSource::Raster(initial.clone()),
+        });
+
+        let rejected =
+            replace_ready_raster_image_for_icc(&mut state, mismatched.clone()).unwrap_err();
+
+        assert!(Arc::ptr_eq(&rejected, &mismatched));
+        let ImageViewerState::Ready(decoded) = state else {
+            panic!("expected ready image");
+        };
+        assert!(decoded.deferred_icc_correction.is_none());
+        let DecodedImageSource::Raster(current) = decoded.source else {
+            panic!("expected raster image");
+        };
+        assert!(Arc::ptr_eq(&current, &initial));
+    }
+
+    #[test]
+    fn failed_deferred_icc_correction_leaves_initial_image_intact() {
+        let initial = test_render_image(4, 2);
+        let mut state = ImageViewerState::Ready(DecodedImage {
+            width: 4,
+            height: 2,
+            source_decompressed_size_bytes: Some(32),
+            deferred_icc_correction: Some(test_deferred_icc_correction(4, 2)),
+            source: DecodedImageSource::Raster(initial.clone()),
+        });
+
+        clear_ready_deferred_icc_correction(&mut state);
+
+        let ImageViewerState::Ready(decoded) = state else {
+            panic!("expected ready image");
+        };
+        assert!(decoded.deferred_icc_correction.is_none());
+        let DecodedImageSource::Raster(current) = decoded.source else {
+            panic!("expected raster image");
+        };
+        assert!(Arc::ptr_eq(&current, &initial));
+        assert_eq!(decoded.width, 4);
+        assert_eq!(decoded.height, 2);
     }
 
     #[test]
@@ -2669,6 +2835,7 @@ mod tests {
             state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
             decode_generation: 0,
             decode_task: None,
+            icc_correction_task: None,
             svg_render_generation: 0,
             svg_render_task: None,
             svg_render_pending: None,
@@ -2711,6 +2878,7 @@ mod tests {
             state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
             decode_generation: 0,
             decode_task: None,
+            icc_correction_task: None,
             svg_render_generation: 0,
             svg_render_task: None,
             svg_render_pending: None,
@@ -2784,6 +2952,7 @@ mod tests {
                 state: ImageViewerState::Loading,
                 decode_generation: 0,
                 decode_task: None,
+                icc_correction_task: None,
                 svg_render_generation: 0,
                 svg_render_task: None,
                 svg_render_pending: None,
@@ -2830,6 +2999,7 @@ mod tests {
                 state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, Some(8_000_000))),
                 decode_generation: 0,
                 decode_task: None,
+                icc_correction_task: None,
                 svg_render_generation: 0,
                 svg_render_task: None,
                 svg_render_pending: None,
@@ -3153,9 +3323,23 @@ mod tests {
             width,
             height,
             source_decompressed_size_bytes,
+            deferred_icc_correction: None,
             source: DecodedImageSource::Raster(Arc::new(RenderImage::new(vec![
                 image::Frame::new(image::RgbaImage::new(width.max(1), height.max(1))),
             ]))),
+        }
+    }
+
+    fn test_render_image(width: u32, height: u32) -> Arc<RenderImage> {
+        render_image_from_rgba(image::RgbaImage::new(width.max(1), height.max(1)))
+    }
+
+    fn test_deferred_icc_correction(width: u32, height: u32) -> DeferredIccCorrection {
+        DeferredIccCorrection {
+            source_image: test_render_image(width, height),
+            width: width.max(1),
+            height: height.max(1),
+            icc_profile: Arc::new(Vec::from([1, 2, 3])),
         }
     }
 

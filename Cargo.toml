@@ -98,6 +98,11 @@ harness = false
 required-features = ["benchmarks"]
 
 [[bench]]
+name = "image_viewer"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
 name = "properties"
 harness = false
 required-features = ["benchmarks"]
@@ -117,6 +122,42 @@ debug = 1
 incremental = true
 codegen-units = 256
 lto = "off"
+
+[profile.dev.package.exr]
+opt-level = 3
+
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.image-webp]
+opt-level = 3
+
+[profile.dev.package.moxcms]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.ravif]
+opt-level = 3
+
+[profile.dev.package.resvg]
+opt-level = 3
+
+[profile.dev.package.tiff]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.usvg]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
 
 [profile.bench]
 opt-level = 3

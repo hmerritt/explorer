@@ -26,7 +26,10 @@ pub use settings::{
     feature = "benchmarks",
     any(target_os = "windows", target_os = "macos", target_os = "linux")
 ))]
-pub use explorer::benchmark_support;
+pub mod benchmark_support {
+    pub use crate::explorer::benchmark_support::*;
+    pub use crate::image_viewer::benchmark_support::*;
+}
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn run() {

@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use moxcms::{ColorProfile, Layout, TransformOptions};
 
 pub(super) fn apply_icc_profile_to_srgb(
@@ -11,13 +13,15 @@ pub(super) fn apply_icc_profile_to_srgb(
     convert_rgba_to_srgb(&image, &icc_profile).unwrap_or(image)
 }
 
-fn convert_rgba_to_srgb(image: &image::RgbaImage, icc_profile: &[u8]) -> Option<image::RgbaImage> {
+pub(super) fn convert_rgba_to_srgb(
+    image: &image::RgbaImage,
+    icc_profile: &[u8],
+) -> Option<image::RgbaImage> {
     let source = ColorProfile::new_from_slice(icc_profile).ok()?;
-    let target = ColorProfile::new_srgb();
     let transform = source
         .create_transform_8bit(
             Layout::Rgba,
-            &target,
+            srgb_profile(),
             Layout::Rgba,
             TransformOptions::default(),
         )
@@ -25,6 +29,11 @@ fn convert_rgba_to_srgb(image: &image::RgbaImage, icc_profile: &[u8]) -> Option<
     let mut converted = vec![0; image.as_raw().len()];
     transform.transform(image.as_raw(), &mut converted).ok()?;
     image::RgbaImage::from_raw(image.width(), image.height(), converted)
+}
+
+fn srgb_profile() -> &'static ColorProfile {
+    static SRGB_PROFILE: OnceLock<ColorProfile> = OnceLock::new();
+    SRGB_PROFILE.get_or_init(ColorProfile::new_srgb)
 }
 
 #[cfg(test)]

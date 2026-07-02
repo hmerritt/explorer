@@ -5,8 +5,10 @@ metadata materialization, cached and uncached full searches, and cancellation.
 The navigation-pipeline benchmark measures basic directory entry loading for a
 small Documents-like folder with hidden entries. The image-thumbnail benchmark
 measures cold thumbnail extraction for large raster/SVG/TIFF files and parallel
-JPEG batch extraction. The properties benchmark measures fast directory
-properties snapshots separately from exact recursive totals.
+JPEG batch extraction. The image-viewer benchmark measures native-resolution
+opens, deferred ICC correction, and `RenderImage` construction. The properties
+benchmark measures fast directory properties snapshots separately from exact
+recursive totals.
 
 Run it with:
 
@@ -14,6 +16,7 @@ Run it with:
 cargo bench --features benchmarks --bench recursive_search
 cargo bench --features benchmarks --bench navigation_pipeline
 cargo bench --features benchmarks --bench image_thumbnails
+cargo bench --features benchmarks --bench image_viewer
 cargo bench --features benchmarks --bench properties
 cargo bench --features benchmarks --bench resumable_copy
 ```
@@ -35,6 +38,16 @@ ready-for-display extraction at 128px and 400px, PNG disk-cache decoding, full
 PNG-encoded cache generation, and parallel JPEG batches. Fixtures cover opaque
 and transparent PNG, JPEG (including 12MP), TIFF, WebP, and SVG under
 `target/image-thumbnails-benchmark-v4`.
+
+The image-viewer benchmark compares ICC-tagged native opens with synchronous
+ICC, deferred first-ready opens, and ICC ignored; it also measures no-ICC native
+opens, deferred ICC correction plus corrected `RenderImage` construction, and
+`RenderImage` construction alone. Fixtures cover PNG, JPEG, TIFF, WebP, SVG,
+and Display P3 ICC-tagged PNG/JPEG under `target/image-viewer-benchmark-v1`.
+
+```sh
+cargo bench --features benchmarks --bench image_viewer
+```
 
 Use the release profile when comparing shipped application performance:
 
