@@ -7,11 +7,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use gpui::{App, RenderImage};
 use image::ImageEncoder;
+#[cfg(test)]
+use std::time::UNIX_EPOCH;
 
 use crate::explorer::image_resize::{
     dimensions_for_longest_side, resize_dynamic_to_rgba, resize_rgba_to_longest_side,
@@ -25,6 +27,7 @@ const BIG_TIFF_BIG_ENDIAN_SIGNATURE: &[u8] = b"MM\x00+";
 const TIFF_REDUCED_IMAGE_SUBFILE_BIT: u32 = 1;
 const TIFF_OLD_REDUCED_IMAGE_SUBFILE_TYPE: u16 = 2;
 const TIFF_ASPECT_RATIO_TOLERANCE: f64 = 0.05;
+#[cfg(test)]
 const SVG_IMAGE_RASTER_LONGEST_SIDE: u32 = 500;
 
 #[derive(Clone, Debug)]
@@ -90,6 +93,7 @@ pub(super) fn path_may_have_image_preview(path: &Path) -> bool {
             .is_some_and(|mime| mime.starts_with("image/"))
 }
 
+#[cfg(test)]
 pub(super) fn load_property_image_preview(path: &Path) -> Result<PropertyImagePreview, String> {
     let image = load_image_rgba(path, SVG_IMAGE_RASTER_LONGEST_SIDE)?;
     property_image_preview_from_rgba(image, property_animated_gif_source(path))
@@ -386,11 +390,13 @@ fn load_source_thumbnail_rgba_with_cancel_timed(
     )
 }
 
+#[cfg(test)]
 fn load_image_rgba(path: &Path, svg_longest_side: u32) -> Result<image::RgbaImage, String> {
     let cancel = AtomicBool::new(false);
     load_image_rgba_with_cancel(path, svg_longest_side, &cancel)
 }
 
+#[cfg(test)]
 fn load_image_rgba_with_cancel(
     path: &Path,
     svg_longest_side: u32,
@@ -400,6 +406,7 @@ fn load_image_rgba_with_cancel(
     load_image_rgba_with_cancel_timed(path, svg_longest_side, cancel, false, &mut timings)
 }
 
+#[cfg(test)]
 fn load_image_rgba_with_cancel_timed(
     path: &Path,
     svg_longest_side: u32,
@@ -1266,6 +1273,7 @@ fn check_image_cancelled(cancel: &AtomicBool) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 fn property_image_preview_from_rgba(
     mut image: image::RgbaImage,
     animated_source: Option<AnimatedImageSource>,
@@ -1288,10 +1296,12 @@ fn property_image_preview_from_rgba(
     })
 }
 
+#[cfg(test)]
 fn property_animated_gif_source(path: &Path) -> Option<AnimatedImageSource> {
     animated_gif_source_for_path(path, property_animated_gif_cache_key(path))
 }
 
+#[cfg(test)]
 fn property_animated_gif_cache_key(path: &Path) -> String {
     let mut key = String::from("property-gif:");
     key.push_str(&path.to_string_lossy().replace('\\', "/"));

@@ -18,7 +18,7 @@ use std::os::windows::process::CommandExt;
 
 use filetime::{FileTime, set_file_times};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, FocusHandle,
+    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle,
     Focusable, Global, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent,
     SharedString, StyledImage, Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds,
@@ -29,6 +29,8 @@ use jwalk::WalkDirGeneric;
 use sha2::{Digest, Sha256};
 use thousands::Separable;
 
+#[cfg(test)]
+use crate::explorer::image_preview::load_property_image_preview;
 #[cfg(test)]
 use crate::explorer::image_preview::svg_raster_dimensions;
 use crate::explorer::{
@@ -53,10 +55,7 @@ use crate::explorer::{
         COPY_ICON, NavIcon, copy_file_dialog_icon_sized, directory_shortcut_icon_sized,
         file_icon_for_path_sized, folder_icon_sized, image_icon, nav_icon_font,
     },
-    image_preview::{
-        AnimatedImageSource, PropertyImagePreview, evict_animated_image_source_asset,
-        load_property_image_preview, path_may_have_image_preview,
-    },
+    image_preview::{PropertyImagePreview, path_may_have_image_preview},
     open_with::{DefaultAppChangeOutcome, DefaultApplication, default_application_for_file},
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     tooltip::explorer_tooltip,
@@ -67,6 +66,7 @@ use crate::explorer::{
     },
     view::ExplorerView,
 };
+use crate::image_viewer::{ImageViewerEvent, ImageViewerSurface, new_embedded_image_viewer};
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::SettingsState;
 
@@ -399,13 +399,6 @@ enum PropertyFramesState {
     Failed(String),
 }
 
-enum PropertyImageState {
-    NotStarted,
-    Loading,
-    Ready(PropertyImagePreview),
-    Failed(String),
-}
-
 enum PropertyCoverState {
     NotStarted,
     Loading,
@@ -489,9 +482,8 @@ pub(super) struct PropertiesDialog {
     details_scroll_handle: ScrollHandle,
     details_scrollbar_hovered: bool,
     details_scrollbar_drag: Option<ScrollbarDrag>,
-    image_state: PropertyImageState,
-    image_generation: u64,
-    animated_image_asset_evictions: BTreeSet<String>,
+    image_viewer: Option<Entity<ImageViewerSurface>>,
+    image_viewer_path: Option<PathBuf>,
     cover_state: PropertyCoverState,
     cover_generation: u64,
     cover_index: usize,
@@ -508,7 +500,6 @@ pub(super) struct PropertiesDialog {
     checksum_task: Option<Task<()>>,
     checksum_cancel: Option<Arc<AtomicBool>>,
     code_task: Option<Task<()>>,
-    image_task: Option<Task<()>>,
     cover_task: Option<Task<()>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
@@ -608,9 +599,8 @@ impl PropertiesDialog {
             details_scroll_handle: ScrollHandle::new(),
             details_scrollbar_hovered: false,
             details_scrollbar_drag: None,
-            image_state: PropertyImageState::NotStarted,
-            image_generation: 0,
-            animated_image_asset_evictions: BTreeSet::new(),
+            image_viewer: None,
+            image_viewer_path: None,
             cover_state: PropertyCoverState::NotStarted,
             cover_generation: 0,
             cover_index: 0,
@@ -627,7 +617,6 @@ impl PropertiesDialog {
             checksum_task: None,
             checksum_cancel: None,
             code_task: None,
-            image_task: None,
             cover_task: None,
             frames_task: None,
             apply_task: None,
@@ -722,11 +711,9 @@ impl PropertiesDialog {
     }
 
     fn reset_image_state(&mut self) {
-        self.image_generation = self.image_generation.wrapping_add(1);
-        self.image_state = PropertyImageState::NotStarted;
-        self.image_task = None;
+        self.image_viewer = None;
+        self.image_viewer_path = None;
         self.image_copy_context_menu = None;
-        self.animated_image_asset_evictions.clear();
     }
 
     fn reset_cover_state(&mut self) {
@@ -767,10 +754,9 @@ impl PropertiesDialog {
         match self.active_tab {
             PropertyTab::Details => self.start_details_task(cx),
             PropertyTab::Code => self.start_code_task(cx),
-            PropertyTab::Image => self.start_image_task(cx),
             PropertyTab::Cover => self.start_cover_task(cx),
             PropertyTab::Frames => self.start_frames_task(cx),
-            PropertyTab::General => {}
+            PropertyTab::General | PropertyTab::Image => {}
         }
         self.start_tree_summary_task(cx);
     }
@@ -1096,66 +1082,46 @@ impl PropertiesDialog {
         self.code_task = Some(task);
     }
 
-    fn start_image_task(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.image_state, PropertyImageState::NotStarted) {
-            return;
+    fn ensure_image_viewer(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ImageViewerSurface>> {
+        let path = single_file_image_path(&snapshot.target, snapshot.item_kind)?;
+        if self.image_viewer_path.as_deref() != Some(path) {
+            let path = path.to_path_buf();
+            let viewer = new_embedded_image_viewer(path.clone(), self.focus_handle.clone(), cx);
+            cx.subscribe_in(
+                &viewer,
+                window,
+                |dialog, _, event, window, cx| match event {
+                    ImageViewerEvent::OpenPath(path) => {
+                        dialog.retarget_to_image_path(path.clone(), window, cx);
+                    }
+                },
+            )
+            .detach();
+            self.image_viewer = Some(viewer);
+            self.image_viewer_path = Some(path);
         }
-        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
-            return;
+
+        self.image_viewer.clone()
+    }
+
+    fn retarget_to_image_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.target = PropertyTarget {
+            paths: vec![path.clone()],
         };
-        let Some(path) =
-            single_file_image_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
-        else {
-            self.image_state = PropertyImageState::Failed(
-                "Image preview is not available for this item.".to_owned(),
-            );
-            return;
-        };
-
-        self.image_state = PropertyImageState::Loading;
-        let generation = self.image_generation;
-        let task = cx.spawn(async move |this, cx| {
-            let started = Instant::now();
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { load_property_image_preview(&path) }
-                })
-                .await;
-
-            match &result {
-                Ok(preview) => crate::debug_options::log_property_timing(
-                    started.elapsed(),
-                    format_args!(
-                        "image preview ready path={} dimensions={}x{}",
-                        path.display(),
-                        preview.width,
-                        preview.height
-                    ),
-                ),
-                Err(error) => crate::debug_options::log_property_timing(
-                    started.elapsed(),
-                    format_args!(
-                        "image preview failed path={} error={}",
-                        path.display(),
-                        error
-                    ),
-                ),
-            }
-
-            let _ = this.update(cx, |dialog, cx| {
-                if dialog.image_generation == generation {
-                    dialog.image_task = None;
-                    dialog.image_state = match result {
-                        Ok(preview) => PropertyImageState::Ready(preview),
-                        Err(error) => PropertyImageState::Failed(error),
-                    };
-                    cx.notify();
-                }
-            });
-        });
-        self.image_task = Some(task);
+        self.active_tab = PropertyTab::Image;
+        window.set_window_title(&properties_window_title(&self.target.paths));
+        self.start_snapshot_task(cx);
+        cx.notify();
     }
 
     fn start_cover_task(&mut self, cx: &mut Context<Self>) {
@@ -1795,8 +1761,6 @@ impl PropertiesDialog {
                 self.start_details_task(cx);
             } else if tab == PropertyTab::Code {
                 self.start_code_task(cx);
-            } else if tab == PropertyTab::Image {
-                self.start_image_task(cx);
             } else if tab == PropertyTab::Cover {
                 self.start_cover_task(cx);
             } else if tab == PropertyTab::Frames {
@@ -2875,46 +2839,21 @@ impl PropertiesDialog {
         let body = div()
             .id("properties-image-body")
             .flex()
-            .items_center()
-            .justify_center()
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0))
             .w_full()
-            .p(px(PROPERTIES_PANEL_PADDING))
             .overflow_hidden();
 
-        match &self.image_state {
-            PropertyImageState::NotStarted | PropertyImageState::Loading => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .min_w(px(0.0))
-                .w_full()
-                .overflow_hidden()
-                .child(
-                    body.text_color(rgb(PROPERTIES_MUTED_TEXT))
-                        .child("Loading image..."),
-                )
-                .child(linear_indeterminate(
-                    "properties-image-linear-progress",
-                    LinearProgressStyle::explorer_copy_green(),
-                ))
-                .into_any_element(),
-            PropertyImageState::Failed(error) => body
+        if let Some(viewer) = self.ensure_image_viewer(snapshot, window, cx) {
+            body.child(viewer).into_any_element()
+        } else {
+            body.items_center()
+                .justify_center()
+                .p(px(PROPERTIES_PANEL_PADDING))
                 .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                .child(SharedString::from(error.clone()))
-                .into_any_element(),
-            PropertyImageState::Ready(preview) => {
-                let preview = preview.clone();
-                if let Some(source) = &preview.animated_source {
-                    self.evict_animated_image_source_once(source, cx);
-                }
-                let max_size = property_preview_max_size(window, PropertyPreviewKind::Image);
-                body.child(property_image_preview(&preview, max_size, cx))
-                    .into_any_element()
-            }
+                .child("Image preview is not available for this item.")
+                .into_any_element()
         }
     }
 
@@ -3027,7 +2966,7 @@ impl PropertiesDialog {
                         cx.stop_propagation();
                     }),
                 );
-                let max_size = property_preview_max_size(window, PropertyPreviewKind::Cover);
+                let max_size = property_cover_preview_max_size(window);
 
                 body.child(
                     div()
@@ -3070,19 +3009,6 @@ impl PropertiesDialog {
                 )
                 .into_any_element()
             }
-        }
-    }
-
-    fn evict_animated_image_source_once(
-        &mut self,
-        source: &AnimatedImageSource,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .animated_image_asset_evictions
-            .insert(source.cache_key.clone())
-        {
-            evict_animated_image_source_asset(source, cx);
         }
     }
 
@@ -7800,28 +7726,20 @@ struct PropertyPreviewSize {
     height: f32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PropertyPreviewKind {
-    Image,
-    Cover,
-}
-
-fn property_preview_max_size(window: &Window, kind: PropertyPreviewKind) -> PropertyPreviewSize {
+fn property_cover_preview_max_size(window: &Window) -> PropertyPreviewSize {
     let bounds = window.bounds().size;
     let width = f32::from(bounds.width)
         - (PROPERTIES_PADDING * 2.0)
         - (PROPERTIES_BORDER_WIDTH * 2.0)
         - (PROPERTIES_PANEL_PADDING * 2.0);
-    let mut height = f32::from(bounds.height)
+    let height = f32::from(bounds.height)
         - (PROPERTIES_PADDING * 2.0)
         - PROPERTIES_TAB_HEIGHT
         - PROPERTIES_BORDER_WIDTH
         - PROPERTIES_BORDER_WIDTH
         - property_button_row_height()
-        - (PROPERTIES_PANEL_PADDING * 2.0);
-    if kind == PropertyPreviewKind::Cover {
-        height -= PROPERTIES_COVER_NAVIGATION_HEIGHT;
-    }
+        - (PROPERTIES_PANEL_PADDING * 2.0)
+        - PROPERTIES_COVER_NAVIGATION_HEIGHT;
 
     PropertyPreviewSize {
         width: width.max(0.0),
@@ -9202,7 +9120,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn properties_dialog_image_tab_loads_preview(cx: &mut gpui::TestAppContext) {
+    fn properties_dialog_image_tab_embeds_viewer_and_decodes_image(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().join("image.png");
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 2));
@@ -9212,27 +9130,89 @@ mod tests {
             .unwrap();
         fs::write(&path, bytes).unwrap();
 
-        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
+        let (dialog, cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![path.clone()],
+            },
+        );
         cx.run_until_parked();
 
-        cx.update(|cx| {
+        cx.update(|_, cx| {
             dialog.update(cx, |dialog, cx| {
                 dialog.active_tab = PropertyTab::Image;
-                dialog.start_image_task(cx);
-                assert!(matches!(dialog.image_state, PropertyImageState::Loading));
+                cx.notify();
             });
         });
         cx.run_until_parked();
 
-        cx.update(|cx| {
-            let dialog = dialog.read(cx);
-            let PropertyImageState::Ready(preview) = &dialog.image_state else {
-                panic!("image preview should be ready");
+        cx.update(|_, cx| {
+            let viewer = {
+                let dialog = dialog.read(cx);
+                assert_eq!(dialog.image_viewer_path.as_deref(), Some(path.as_path()));
+                dialog.image_viewer.clone().expect("image viewer")
             };
+            assert_eq!(viewer.read(cx).ready_dimensions_for_test(), Some((4, 2)));
+        });
+    }
 
-            assert_eq!(preview.width, 4);
-            assert_eq!(preview.height, 2);
-            assert_render_image_size(preview, 4, 2);
+    #[gpui::test]
+    fn properties_dialog_image_viewer_open_path_retargets_dialog(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let first = temp.path().join("a.png");
+        let second = temp.path().join("b.png");
+        for (path, width, height) in [(&first, 4, 2), (&second, 6, 3)] {
+            let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, height));
+            let mut bytes = Vec::new();
+            image
+                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+
+        let (dialog, cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![first.clone()],
+            },
+        );
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Image;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let viewer = cx.update(|_, cx| dialog.read(cx).image_viewer.clone().expect("image viewer"));
+        cx.update(|_, cx| {
+            viewer.update(cx, |_, cx| {
+                cx.emit(ImageViewerEvent::OpenPath(second.clone()));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let replacement_viewer = {
+                let dialog = dialog.read(cx);
+                assert_eq!(dialog.target.paths, vec![second.clone()]);
+                assert_eq!(dialog.active_tab, PropertyTab::Image);
+                assert_eq!(dialog.image_viewer_path.as_deref(), Some(second.as_path()));
+                let PropertySnapshotState::Ready(snapshot) = &dialog.snapshot_state else {
+                    panic!("snapshot should be ready");
+                };
+                assert_eq!(snapshot.target.paths, vec![second.clone()]);
+                dialog
+                    .image_viewer
+                    .clone()
+                    .expect("replacement image viewer")
+            };
+            assert_eq!(
+                replacement_viewer.read(cx).ready_dimensions_for_test(),
+                Some((6, 3))
+            );
         });
     }
 
@@ -9291,48 +9271,6 @@ mod tests {
 
         assert_eq!(clipboard_image.format(), ImageFormat::Png);
         assert_png_image_pixels(&clipboard_image, 2, 1, &expected);
-    }
-
-    #[gpui::test]
-    fn properties_dialog_copies_image_preview_to_clipboard(cx: &mut gpui::TestAppContext) {
-        let temp = TempDir::new();
-        let path = temp.path().join("image.png");
-        let expected = vec![10, 20, 30, 255, 50, 60, 70, 128];
-        let image = image::DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(2, 1, expected.clone()).unwrap(),
-        );
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
-        fs::write(&path, bytes).unwrap();
-
-        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
-        cx.run_until_parked();
-
-        cx.update(|cx| {
-            dialog.update(cx, |dialog, cx| {
-                dialog.active_tab = PropertyTab::Image;
-                dialog.start_image_task(cx);
-            });
-        });
-        cx.run_until_parked();
-
-        cx.update(|cx| {
-            dialog.update(cx, |dialog, cx| {
-                let payload = match &dialog.image_state {
-                    PropertyImageState::Ready(preview) => {
-                        property_image_preview_copy_payload(preview)
-                    }
-                    _ => panic!("image preview should be ready"),
-                };
-                dialog.copy_property_image_payload_to_clipboard(payload, cx);
-            });
-
-            let item = cx.read_from_clipboard().expect("clipboard item");
-            let clipboard_image = clipboard_item_image(&item).expect("clipboard image");
-            assert_png_image_pixels(&clipboard_image, 2, 1, &expected);
-        });
     }
 
     #[gpui::test]

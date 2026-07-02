@@ -22,7 +22,9 @@ actions!(
     ]
 );
 
-pub(crate) use view::open_image_window;
+pub(crate) use view::{
+    ImageViewerEvent, ImageViewerSurface, new_embedded_image_viewer, open_image_window,
+};
 
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {

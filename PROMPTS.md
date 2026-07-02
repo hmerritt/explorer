@@ -1,6 +1,7 @@
 ## 1
 
 - Improve readme - add screenshots / branding
+- Properties Image tab has arrow navigation keybinding which changes the whole properties tab to the next/prev file. Currently thr keybinding is only active when on the Image tab. Let's make it a Properties-wide binding, so a user can do that in any tab.
 
 ## 2
 
