@@ -279,10 +279,7 @@ fn settings_json(start_path: &Path, view_mode: &str, sidebar_items: &[PathBuf]) 
     json!({
         "app": {
             "cache_cleanup_interval_days": 30,
-            "start": {
-                "kind": "custom",
-                "path": path_string(start_path)
-            }
+            "start": path_string(start_path)
         },
         "contextmenu": [],
         "sidebar": {

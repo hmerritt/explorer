@@ -58,19 +58,6 @@ enum SidebarItemSetting {
     Legacy(LegacySidebarLocation),
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum StartLocation {
-    Home,
-    Desktop,
-    Documents,
-    Downloads,
-    Pictures,
-    Videos,
-    Music,
-    Custom { path: PathBuf },
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DriveHideKind {
@@ -101,7 +88,7 @@ impl Serialize for ExplorerSettings {
         S: Serializer,
     {
         let mut map = serializer.serialize_map(Some(5))?;
-        map.serialize_entry("app", &self.app)?;
+        map.serialize_entry("app", &SerializableAppSettings::new(self))?;
         map.serialize_entry("contextmenu", &self.contextmenu)?;
         map.serialize_entry("sidebar", &SerializableSidebarSettings::new(self))?;
         map.serialize_entry("tabs", &self.tabs)?;
@@ -156,6 +143,42 @@ impl<'de> Deserialize<'de> for ContextMenuSettings {
                 "contextmenu must be an array of items or a legacy object",
             )),
         }
+    }
+}
+
+struct SerializableAppSettings<'a> {
+    settings: &'a AppSettings,
+    slash: AddressSlash,
+}
+
+impl<'a> SerializableAppSettings<'a> {
+    fn new(settings: &'a ExplorerSettings) -> Self {
+        Self {
+            settings: &settings.app,
+            slash: settings_address_slash(settings),
+        }
+    }
+
+    fn with_slash(settings: &'a AppSettings, slash: AddressSlash) -> Self {
+        Self { settings, slash }
+    }
+}
+
+impl Serialize for SerializableAppSettings<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry(
+            "cache_cleanup_interval_days",
+            &self.settings.cache_cleanup_interval_days,
+        )?;
+        map.serialize_entry(
+            "start",
+            &format_configured_path(&self.settings.start, self.slash),
+        )?;
+        map.end()
     }
 }
 
@@ -345,7 +368,7 @@ fn deserialize_context_menu_args(value: Value) -> Result<Vec<String>, String> {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct AppSettings {
     #[serde(
@@ -353,7 +376,20 @@ pub struct AppSettings {
         deserialize_with = "deserialize_cache_cleanup_interval_days"
     )]
     pub cache_cleanup_interval_days: u32,
-    pub start: StartLocation,
+    #[serde(
+        default = "default_app_start_path",
+        deserialize_with = "deserialize_app_start_path"
+    )]
+    pub start: PathBuf,
+}
+
+impl Serialize for AppSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerializableAppSettings::with_slash(self, AddressSlash::Forward).serialize(serializer)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -478,7 +514,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             cache_cleanup_interval_days: DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS,
-            start: StartLocation::Downloads,
+            start: default_app_start_path(),
         }
     }
 }
@@ -544,10 +580,7 @@ impl Global for SettingsState {}
 
 impl SettingsState {
     pub(crate) fn startup_path(&self) -> PathBuf {
-        self.value
-            .app
-            .start
-            .resolve()
+        expand_configured_path(&self.value.app.start)
             .filter(|path| path.is_dir())
             .unwrap_or_else(crate::explorer::default_start_path)
     }
@@ -597,39 +630,6 @@ impl LegacySidebarLocation {
                 crate::explorer::user_music_dir(home.as_deref())
             }
             Self::Custom { path, .. } => Some(path),
-        }
-    }
-}
-
-impl StartLocation {
-    pub(crate) fn resolve(&self) -> Option<PathBuf> {
-        match self {
-            Self::Home => crate::explorer::user_home_dir(),
-            Self::Desktop => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_desktop_dir(home.as_deref())
-            }
-            Self::Documents => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_documents_dir(home.as_deref())
-            }
-            Self::Downloads => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_downloads_dir(home.as_deref())
-            }
-            Self::Pictures => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_pictures_dir(home.as_deref())
-            }
-            Self::Videos => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_videos_dir(home.as_deref())
-            }
-            Self::Music => {
-                let home = crate::explorer::user_home_dir();
-                crate::explorer::user_music_dir(home.as_deref())
-            }
-            Self::Custom { path } => expand_configured_path(path),
         }
     }
 }
@@ -1102,9 +1102,7 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
     for path in &settings.sidebar.items {
         validate_configured_path(path)?;
     }
-    if let StartLocation::Custom { path } = &settings.app.start {
-        validate_configured_path(path)?;
-    }
+    validate_configured_path(&settings.app.start)?;
     validate_custom_context_menu_items(&settings.contextmenu.items)?;
     Ok(())
 }
@@ -1136,7 +1134,7 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
 }
 
 fn validate_configured_path(path: &Path) -> io::Result<()> {
-    if path.is_absolute() || is_tilde_path(path) {
+    if configured_path_shape_is_valid(path) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -1671,6 +1669,26 @@ fn format_configured_path(path: &Path, slash: AddressSlash) -> String {
     }
 }
 
+fn default_app_start_path() -> PathBuf {
+    let home = crate::explorer::user_home_dir();
+    crate::explorer::user_downloads_dir(home.as_deref())
+        .or_else(|| home.map(|home| home.join("Downloads")))
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(platform_root_path)
+}
+
+fn platform_root_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from(r"C:\")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("/")
+    }
+}
+
 fn default_sidebar_items() -> Vec<PathBuf> {
     let home = crate::explorer::user_home_dir();
     [
@@ -1955,6 +1973,26 @@ where
     u32::deserialize(deserializer).map(normalized_cache_cleanup_interval_days)
 }
 
+fn deserialize_app_start_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(app_start_path_from_value(value))
+}
+
+fn app_start_path_from_value(value: Value) -> PathBuf {
+    value
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|path| configured_path_shape_is_valid(path))
+        .unwrap_or_else(default_app_start_path)
+}
+
+fn configured_path_shape_is_valid(path: &Path) -> bool {
+    path.is_absolute() || is_tilde_path(path)
+}
+
 pub(crate) fn settings_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(SETTINGS_FILE_NAME))
 }
@@ -2036,7 +2074,7 @@ mod tests {
             Some(&default_file_column_width(FileColumnKind::DateModified))
         );
         assert_eq!(settings.view.file_columns.name_width, None);
-        assert_eq!(settings.app.start, StartLocation::Downloads);
+        assert_eq!(settings.app.start, default_app_start_path());
         assert_eq!(
             settings.app.cache_cleanup_interval_days,
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
@@ -2088,6 +2126,7 @@ mod tests {
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.view.sort, default_file_sort());
+        assert_eq!(settings.app.start, default_app_start_path());
         assert!(settings.contextmenu.items.is_empty());
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
@@ -2105,6 +2144,71 @@ mod tests {
             serde_json::from_str(r#"{"app":{"cache_cleanup_interval_days":45}}"#)
                 .expect("deserialize app settings");
         assert_eq!(settings.app.cache_cleanup_interval_days, 45);
+    }
+
+    #[test]
+    fn app_start_deserializes_valid_absolute_and_tilde_paths() {
+        let start = unique_temp_dir("app-start-absolute");
+        let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+            "app": {
+                "start": start.clone()
+            }
+        }))
+        .expect("deserialize absolute app start path");
+
+        assert_eq!(settings.app.start, start);
+
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"app":{"start":"~/Downloads"}}"#)
+            .expect("deserialize tilde app start path");
+
+        assert_eq!(settings.app.start, PathBuf::from("~/Downloads"));
+    }
+
+    #[test]
+    fn app_start_replaces_invalid_values_with_default_downloads_path() {
+        for start in [
+            serde_json::json!({"kind": "downloads"}),
+            serde_json::json!({"kind": "custom", "path": "/tmp/ignored"}),
+            serde_json::json!("relative/path"),
+            serde_json::json!(42),
+            serde_json::json!([]),
+            Value::Null,
+        ] {
+            let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+                "app": {
+                    "start": start
+                }
+            }))
+            .expect("deserialize app start with default fallback");
+
+            assert_eq!(settings.app.start, default_app_start_path());
+        }
+    }
+
+    #[test]
+    fn app_start_load_normalizes_legacy_object_to_default_string() {
+        let path = unique_temp_dir("legacy-app-start").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"app":{"start":{"kind":"custom","path":"/tmp/ignored"}}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        assert_eq!(loaded.value.app.start, default_app_start_path());
+
+        let normalized = fs::read_to_string(&path).unwrap();
+        let document: Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(
+            document["app"]["start"],
+            Value::String(format_configured_path(
+                &loaded.value.app.start,
+                settings_address_slash(&loaded.value),
+            ))
+        );
+        assert!(document["app"]["start"].is_string());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(target_os = "windows")]
@@ -2386,9 +2490,16 @@ mod tests {
         let json = fs::read_to_string(&path).unwrap();
         assert!(!json.ends_with('\n'));
         assert!(json.starts_with("{\n  \"app\": {"));
-        assert!(json.contains("\n    \"start\": {\"kind\": \"downloads\"}"));
         assert!(json.contains("\n  \"contextmenu\": [],"));
         let document: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            document["app"]["start"],
+            Value::String(format_configured_path(
+                &settings.app.start,
+                settings_address_slash(&settings),
+            ))
+        );
+        assert!(document["app"]["start"].is_string());
         assert!(json.contains("\n    \"hide\": [],"));
         let expected_sidebar_items = settings
             .sidebar
@@ -3167,6 +3278,13 @@ mod tests {
             object["app"]["cache_cleanup_interval_days"],
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
         );
+        assert_eq!(
+            object["app"]["start"],
+            Value::String(format_configured_path(
+                &loaded.value.app.start,
+                settings_address_slash(&loaded.value),
+            ))
+        );
         assert!(normalized.find("\"app\"").unwrap() < normalized.find("\"contextmenu\"").unwrap());
         assert!(normalized.find("\"sidebar\"").unwrap() < normalized.find("\"tabs\"").unwrap());
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -3511,7 +3629,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let state = SettingsState::for_test(ExplorerSettings {
             app: AppSettings {
-                start: StartLocation::Custom { path: dir.clone() },
+                start: dir.clone(),
                 ..AppSettings::default()
             },
             ..ExplorerSettings::default()
@@ -3521,9 +3639,7 @@ mod tests {
         let missing = unique_temp_dir("missing-startup");
         let state = SettingsState::for_test(ExplorerSettings {
             app: AppSettings {
-                start: StartLocation::Custom {
-                    path: missing.clone(),
-                },
+                start: missing.clone(),
                 ..AppSettings::default()
             },
             ..ExplorerSettings::default()

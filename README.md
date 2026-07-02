@@ -95,9 +95,7 @@ Minimal example:
 ```json
 {
     "app": {
-        "start": {
-            "kind": "downloads"
-        }
+        "start": "<full path to Downloads>"
     },
     "view": {
         "mode": "details",
