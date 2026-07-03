@@ -1344,7 +1344,7 @@ mod tests {
     }
 
     fn right_click_entry_name(cx: &mut gpui::VisualTestContext, selector: &'static str) {
-        let position = entry_name_position(cx, selector);
+        let position = entry_name_hit_position(cx, selector);
         right_click_position(cx, position);
     }
 
@@ -1366,6 +1366,14 @@ mod tests {
         gpui::point(bounds.left() + gpui::px(10.0), bounds.center().y)
     }
 
+    fn entry_name_hit_position(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        let bounds = cx.debug_bounds(selector).expect("entry bounds");
+        gpui::point(bounds.left() + gpui::px(24.0), bounds.center().y)
+    }
+
     fn entry_other_column_position(
         cx: &mut gpui::VisualTestContext,
         selector: &'static str,
@@ -1375,7 +1383,7 @@ mod tests {
     }
 
     fn click_second_entry(cx: &mut gpui::VisualTestContext) {
-        click_selector(cx, "explorer-entry-1");
+        click_selector(cx, "explorer-entry-name-hit-1");
     }
 
     #[gpui::test]
@@ -1842,6 +1850,57 @@ mod tests {
             assert_eq!(second_menu_origin, second_position);
             assert_eq!(selected_names(view), Vec::<String>::new());
         });
+    }
+
+    #[gpui::test]
+    fn right_click_unselected_name_hit_selects_file_and_opens_entry_menu(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+
+        right_click_entry_name(cx, "explorer-entry-1");
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert_eq!(
+                menu.native_icon_entry
+                    .as_ref()
+                    .map(|entry| entry.name.as_str()),
+                Some("b.txt")
+            );
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    icon: Some(crate::explorer::context_menu::ContextMenuIcon::NativeFile),
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                })
+            ));
+        });
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
+        assert!(cx.debug_bounds("context-menu-paste").is_none());
+    }
+
+    #[gpui::test]
+    fn right_click_selected_name_cell_whitespace_opens_current_folder_context_menu_and_clears_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        click_selector(cx, "explorer-entry-name-hit-1");
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+
+        let position = entry_name_position(cx, "explorer-entry-1");
+        right_click_position(cx, position);
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert_eq!(selected_names(view), Vec::<String>::new());
+        });
+        assert!(cx.debug_bounds("context-menu-paste").is_some());
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_none());
     }
 
     #[gpui::test]
@@ -2428,7 +2487,7 @@ mod tests {
             });
         });
 
-        click_selector(cx, "explorer-entry-1");
+        click_selector(cx, "explorer-entry-name-hit-1");
 
         assert!(temp.path().join("Renamed folder").is_dir());
         cx.read_entity(&view, |view, _| {
@@ -2603,7 +2662,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        right_click_selector(cx, "explorer-entry-1");
+        right_click_entry_name(cx, "explorer-entry-1");
         cx.read_entity(&view, |view, _| {
             let menu = view.context_menu.as_ref().expect("entry context menu");
             assert!(matches!(
@@ -2658,7 +2717,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        right_click_selector(cx, "explorer-entry-0");
+        right_click_entry_name(cx, "explorer-entry-0");
         cx.read_entity(&view, |view, _| {
             let menu = view.context_menu.as_ref().expect("entry context menu");
             assert!(matches!(
@@ -2707,7 +2766,7 @@ mod tests {
             assert!(view.context_menu.is_some());
         });
 
-        click_selector(cx, "explorer-entry-9");
+        click_selector(cx, "explorer-entry-name-hit-9");
 
         cx.read_entity(&view, |view, _| {
             assert!(view.context_menu.is_none());
@@ -2921,8 +2980,8 @@ mod tests {
         });
 
         let bounds = cx
-            .debug_bounds("explorer-entry-1")
-            .expect("second entry bounds");
+            .debug_bounds("explorer-entry-name-hit-1")
+            .expect("second entry name hit bounds");
         cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
 

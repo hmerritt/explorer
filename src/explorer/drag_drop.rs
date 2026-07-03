@@ -299,6 +299,7 @@ impl ExplorerView {
     }
 
     pub(super) fn begin_individual_item_drag(&mut self, dragged: &DraggedEntries) {
+        self.mouse_down_entry_selection = None;
         self.cancel_mouse_selection_drag();
         self.restore_selection_from_paths(&dragged.paths);
     }

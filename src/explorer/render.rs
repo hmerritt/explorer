@@ -85,7 +85,9 @@ use crate::explorer::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
         large_icon_max_tile_height,
     },
-    mouse_selection::{local_point, selection_box_bounds, viewport_size},
+    mouse_selection::{
+        details_name_item_hit_right, local_point, selection_box_bounds, viewport_size,
+    },
     navigation::{DirectoryOpenMode, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
     rename::{ActiveTextInput, rename_text_element},
@@ -2083,7 +2085,6 @@ impl ExplorerView {
             entity.clone(),
             cx,
         );
-        row = add_selected_entry_drag(row, selected_drag_payload, entity.clone());
 
         let non_name_cells = self
             .file_columns
@@ -2098,16 +2099,14 @@ impl ExplorerView {
                     &self.date_format,
                     &self.font,
                     window,
-                );
-                if let Some(drag_payload) = individual_drag_payload.clone() {
-                    add_item_drag(
-                        cell,
-                        (file_column_entry_drag_element_id(kind), ix),
-                        drag_payload,
-                        entity.clone(),
-                    )
+                )
+                .id((file_column_entry_drag_element_id(kind), ix));
+                if let Some(drag_payload) = selected_drag_payload.clone() {
+                    add_selected_entry_drag(cell, Some(drag_payload), entity.clone())
+                        .into_any_element()
                 } else {
-                    cell.into_any_element()
+                    add_individual_entry_drag(cell, individual_drag_payload.clone(), entity.clone())
+                        .into_any_element()
                 }
             })
             .collect::<Vec<_>>();
@@ -2123,26 +2122,50 @@ impl ExplorerView {
             )
             .into_any_element()
         } else {
-            let name_cell = name_cell(
+            let name_hit_target = name_cell_hit_target(
                 &entry,
                 app_icon,
                 self.show_file_name_extensions,
                 self.recursive_search_results_active(),
                 self.name_column_width(window),
-                self.name_column_is_manual_width(),
                 &self.font,
                 window,
             )
-            .id(("explorer-entry-name", ix));
-            let name_cell =
-                add_entry_primary_click(name_cell, entry.clone(), EntryClickTarget::Name, cx);
+            .id(("explorer-entry-name-hit", ix))
+            .debug_selector(move || format!("explorer-entry-name-hit-{ix}"));
+            let name_hit_target =
+                add_entry_mouse_down_selection(name_hit_target, entry.clone(), cx);
+            let name_hit_target =
+                add_entry_primary_click(name_hit_target, entry.clone(), EntryClickTarget::Name, cx);
+            let name_hit_target = add_entry_middle_click(name_hit_target, entry.clone(), cx);
+            let name_hit_target = add_entry_context_menu(
+                name_hit_target,
+                entry.clone(),
+                EntryContextMenuTarget::WholeEntry,
+                cx,
+            );
+            let name_hit_target = add_selected_entry_drag(
+                name_hit_target,
+                selected_drag_payload.clone(),
+                entity.clone(),
+            );
+            let name_hit_target =
+                add_individual_entry_drag(name_hit_target, individual_drag_payload.clone(), entity);
+
+            let name_cell = name_cell_container(
+                self.name_column_width(window),
+                self.name_column_is_manual_width(),
+            )
+            .id(("explorer-entry-name", ix))
+            .debug_selector(move || format!("explorer-entry-name-{ix}"));
+            let name_cell = add_blank_name_cell_click(name_cell, cx);
             let name_cell = add_entry_context_menu(
                 name_cell,
                 entry.clone(),
                 EntryContextMenuTarget::NameCell,
                 cx,
             );
-            add_entry_middle_click(name_cell, entry.clone(), cx).into_any_element()
+            name_cell.child(name_hit_target).into_any_element()
         };
 
         let mut row = row.child(name_cell);
@@ -2477,6 +2500,26 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn details_name_item_hit_rights(&self, viewport_width: f32, window: &Window) -> Vec<f32> {
+        let name_column_width =
+            self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
+        let show_full_path = self.recursive_search_results_active();
+        self.entries
+            .iter()
+            .map(|entry| {
+                let visible_text_width = details_name_visible_text_width(
+                    entry,
+                    self.show_file_name_extensions,
+                    show_full_path,
+                    name_column_width,
+                    &self.font,
+                    window,
+                );
+                details_name_item_hit_right(visible_text_width, name_column_width)
+            })
+            .collect()
+    }
+
     fn render_mouse_selection_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
 
@@ -2500,11 +2543,15 @@ impl ExplorerView {
                                 return;
                             }
 
-                            let outcome = this.begin_mouse_selection_drag_after_menu_dismissal(
+                            let details_name_item_hit_rights = this
+                                .details_name_item_hit_rights(f32::from(viewport_size.width), window);
+                            let outcome = this
+                                .begin_mouse_selection_drag_after_menu_dismissal_with_details_name_hit_targets(
                                 event.button,
                                 local_position,
                                 viewport_size,
                                 modifiers,
+                                &details_name_item_hit_rights,
                             );
                             if outcome.menu_closed || outcome.selection_started {
                                 cx.notify();
@@ -3528,6 +3575,47 @@ fn add_entry_primary_click(
     }))
 }
 
+fn add_entry_mouse_down_selection(
+    element: gpui::Stateful<Div>,
+    entry: FileEntry,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    element.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            this.close_context_menu();
+            if !this.commit_active_rename_before_interaction(window, cx) {
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+
+            this.apply_entry_mouse_down_selection(
+                &entry,
+                SelectionModifiers::from_gpui(event.modifiers),
+            );
+            cx.stop_propagation();
+            cx.notify();
+        }),
+    )
+}
+
+fn add_blank_name_cell_click(
+    element: gpui::Stateful<Div>,
+    cx: &mut Context<ExplorerView>,
+) -> gpui::Stateful<Div> {
+    element.on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+        if !is_normal_entry_click(event) {
+            return;
+        }
+
+        let _ = this.suppress_next_click();
+        this.cancel_pending_click_rename();
+        cx.stop_propagation();
+        cx.notify();
+    }))
+}
+
 fn add_entry_hover_preview(
     element: gpui::Stateful<Div>,
     entry: FileEntry,
@@ -3567,12 +3655,7 @@ fn add_entry_context_menu(
                 open_entry_context_menu_from_event(this, event, &entry, window, cx);
             }
             EntryContextMenuTarget::NameCell => {
-                let clicked_index = this.entry_index_by_path(&entry.path);
-                if clicked_index.is_some_and(|ix| this.entry_is_selected(ix)) {
-                    open_entry_context_menu_from_event(this, event, &entry, window, cx);
-                } else {
-                    open_current_folder_context_menu_from_event(this, event, window, cx);
-                }
+                open_current_folder_context_menu_from_event(this, event, window, cx);
             }
         }),
     )
@@ -3623,9 +3706,8 @@ fn add_selected_entry_drag(
             let entity = entity.clone();
             move |dragged: &DraggedEntries, cursor_offset, _, cx| {
                 entity.update(cx, |this, _| {
-                    if this.mouse_selection_drag.is_none() {
-                        this.cancel_mouse_selection_drag();
-                    }
+                    this.mouse_down_entry_selection = None;
+                    this.cancel_mouse_selection_drag();
                 });
                 let font = entity.read(cx).font.clone();
                 cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
@@ -5499,28 +5581,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
         .into_any_element()
 }
 
-fn name_cell(
-    entry: &FileEntry,
-    app_icon: Option<Arc<Image>>,
-    show_file_name_extensions: bool,
-    show_full_path: bool,
-    name_column_width: f32,
-    manual_width: bool,
-    font: &gpui::Font,
-    window: &Window,
-) -> Div {
-    let text_width = if show_full_path {
-        recursive_result_text_width(name_column_width)
-    } else {
-        available_filename_text_width(name_column_width)
-    };
-    let filename = truncated_text(
-        entry.display_name_with_extensions(show_file_name_extensions),
-        text_width,
-        0x000000,
-        font,
-        window,
-    );
+fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
     let cell = div()
         .flex()
         .items_center()
@@ -5528,13 +5589,49 @@ fn name_cell(
         .min_w(px(COLUMN_NAME_MIN_WIDTH))
         .overflow_hidden()
         .pl(px(NAME_CELL_LEFT_PADDING));
-    let cell = if manual_width {
+    if manual_width {
         cell.w(px(name_column_width)).flex_shrink_0()
     } else {
         cell.flex_1()
-    };
+    }
+}
 
-    cell.child(entry_icon(entry, app_icon))
+fn name_cell_hit_target(
+    entry: &FileEntry,
+    app_icon: Option<Arc<Image>>,
+    show_file_name_extensions: bool,
+    show_full_path: bool,
+    name_column_width: f32,
+    font: &gpui::Font,
+    window: &Window,
+) -> Div {
+    let text_width = details_name_visible_text_width(
+        entry,
+        show_file_name_extensions,
+        show_full_path,
+        name_column_width,
+        font,
+        window,
+    );
+    let filename = truncated_text(
+        entry.display_name_with_extensions(show_file_name_extensions),
+        text_width,
+        0x000000,
+        font,
+        window,
+    );
+    let target = div()
+        .flex()
+        .items_center()
+        .h_full()
+        .w(px(
+            (FILE_ICON_SLOT_WIDTH + NAME_ICON_TEXT_GAP + text_width).max(0.0)
+        ))
+        .flex_shrink_0()
+        .overflow_hidden();
+
+    target
+        .child(entry_icon(entry, app_icon))
         .child(if show_full_path {
             let full_path = truncated_text_with_size(
                 &entry.path.display().to_string(),
@@ -5549,7 +5646,7 @@ fn name_cell(
                 .flex()
                 .flex_col()
                 .justify_center()
-                .flex_1()
+                .w(px(text_width))
                 .min_w(px(0.0))
                 .ml(px(NAME_ICON_TEXT_GAP))
                 .text_size(px(NAME_TEXT_SIZE))
@@ -5571,13 +5668,81 @@ fn name_cell(
                 )
         } else {
             div()
-                .flex_1()
+                .w(px(text_width))
                 .min_w(px(0.0))
                 .ml(px(NAME_ICON_TEXT_GAP))
                 .truncate()
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(filename)
         })
+}
+
+fn details_name_visible_text_width(
+    entry: &FileEntry,
+    show_file_name_extensions: bool,
+    show_full_path: bool,
+    name_column_width: f32,
+    font: &gpui::Font,
+    window: &Window,
+) -> f32 {
+    let available_width = if show_full_path {
+        recursive_result_text_width(name_column_width)
+    } else {
+        available_filename_text_width(name_column_width)
+    };
+    if available_width <= 0.0 {
+        return 0.0;
+    }
+
+    let filename_width = measure_details_name_text_width(
+        entry.display_name_with_extensions(show_file_name_extensions),
+        NAME_TEXT_SIZE,
+        0x000000,
+        font,
+        window,
+    );
+    let natural_width = if show_full_path {
+        let full_path_width = measure_details_name_text_width(
+            &entry.path.display().to_string(),
+            RECURSIVE_SEARCH_PATH_TEXT_SIZE,
+            RECURSIVE_SEARCH_PATH_TEXT_COLOR,
+            font,
+            window,
+        );
+        filename_width.max(full_path_width)
+    } else {
+        filename_width
+    };
+
+    natural_width.min(available_width).max(0.0)
+}
+
+fn measure_details_name_text_width(
+    text: &str,
+    text_size: f32,
+    color: u32,
+    font: &gpui::Font,
+    window: &Window,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+
+    let run = TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color: rgb(color).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    f32::from(
+        window
+            .text_system()
+            .layout_line(text, px(text_size), &[run], None)
+            .width,
+    )
 }
 
 fn rename_name_cell(
@@ -5950,32 +6115,6 @@ fn is_secondary_entry_double_click(event: &ClickEvent, click_count: usize) -> bo
         }
         ClickEvent::Keyboard(_) => false,
     }
-}
-
-fn add_item_drag(
-    cell: Div,
-    id: impl Into<gpui::ElementId>,
-    drag_payload: DraggedEntries,
-    entity: Entity<ExplorerView>,
-) -> AnyElement {
-    let external_paths = drag_payload.external_paths();
-    let completion_callback =
-        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
-
-    cell.id(id)
-        .on_drag_with_external_paths_callback(
-            drag_payload,
-            external_paths,
-            completion_callback,
-            move |dragged: &DraggedEntries, cursor_offset, _, cx| {
-                entity.update(cx, |this, _| {
-                    this.begin_individual_item_drag(dragged);
-                });
-                let font = entity.read(cx).font.clone();
-                cx.new(|_| DragPreview::new(dragged, cursor_offset, font))
-            },
-        )
-        .into_any_element()
 }
 
 fn text_cell(text: String, width: f32, right: bool, font: &gpui::Font, window: &Window) -> Div {
@@ -6353,7 +6492,7 @@ mod tests {
         navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
         sidebar::{SidebarItem, SidebarItemKind, SidebarSections},
-        test_support::{TempDir, test_view_entity_at_path},
+        test_support::{TempDir, selected_names, test_view_entity, test_view_entity_at_path},
         view::{ExplorerView, OperationNoticeKind, ViewModeSelection},
     };
 
@@ -6503,10 +6642,153 @@ mod tests {
         }
     }
 
+    fn secondary_modifiers() -> Modifiers {
+        Modifiers {
+            control: !cfg!(target_os = "macos"),
+            platform: cfg!(target_os = "macos"),
+            ..Modifiers::default()
+        }
+    }
+
     #[test]
     fn nav_button_active_opacity_dims_button() {
         assert_eq!(NAV_BUTTON_ACTIVE_OPACITY, 0.7);
         assert!(NAV_BUTTON_ACTIVE_OPACITY < 1.0);
+    }
+
+    #[gpui::test]
+    fn details_name_hit_mouse_down_selects_immediately_without_rubber_band(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-1").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.mouse_selection_drag.is_none());
+        });
+
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn details_name_hit_drag_selects_unselected_item_without_rubber_band(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let start = run_until_debug_bounds(cx, "explorer-entry-name-hit-1").center();
+        let end = gpui::point(start.x + gpui::px(18.0), start.y + gpui::px(6.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.mouse_selection_drag.is_none());
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn details_blank_name_cell_drag_starts_rubber_band(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_index(0));
+        });
+        let name_bounds = run_until_debug_bounds(cx, "explorer-entry-name-0");
+        let hit_bounds = run_until_debug_bounds(cx, "explorer-entry-name-hit-0");
+        let start = gpui::point(hit_bounds.right() + gpui::px(12.0), hit_bounds.center().y);
+        assert!(start.x < name_bounds.right());
+        let end = gpui::point(start.x + gpui::px(24.0), start.y + gpui::px(8.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            let drag = view
+                .mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag");
+            assert!(!drag.active);
+            assert!(selected_names(view).is_empty());
+        });
+
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            let drag = view
+                .mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag");
+            assert!(drag.active);
+            assert!(drag.visible);
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn ctrl_clicking_details_name_hit_toggles_selection_once(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_index(0));
+        });
+        let modifiers = secondary_modifiers();
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-1").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(position, MouseButton::Left, modifiers);
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
+            assert!(view.mouse_down_entry_selection.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn shift_clicking_details_name_hit_extends_selection_once(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt", "c.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_index(0));
+        });
+        let modifiers = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-2").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(position, MouseButton::Left, modifiers);
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+            assert!(view.mouse_down_entry_selection.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn first_clicking_unselected_details_name_hit_does_not_schedule_rename(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-1").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.pending_click_rename.is_none());
+        });
     }
 
     #[test]

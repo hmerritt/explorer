@@ -613,21 +613,40 @@ impl ExplorerView {
             self.finish_active_rename_on_focus_out(cx);
         }
 
+        let mouse_down_selection = self.take_mouse_down_entry_selection(entry, modifiers);
+        let was_selected_before_mouse_down = mouse_down_selection
+            .as_ref()
+            .is_some_and(|selection| selection.was_selected);
+        let selection_was_applied_on_mouse_down = mouse_down_selection
+            .as_ref()
+            .is_some_and(|selection| selection.selection_applied);
+        let had_mouse_down_selection = mouse_down_selection.is_some();
+
         let ix = self.entry_index_by_path(&entry.path);
         if let Some(ix) = ix
+            && (!had_mouse_down_selection || was_selected_before_mouse_down)
             && self.can_start_rename_from_name_click(ix, click_count, modifiers)
         {
             self.schedule_click_rename_for_entry(entry.clone(), window, cx);
             return None;
         }
 
-        self.handle_entry_click_with_watcher_and_directory_mode(
-            entry,
-            click_count,
-            modifiers,
-            directory_open_mode,
-            cx,
-        )
+        if selection_was_applied_on_mouse_down {
+            self.handle_entry_click_after_mouse_down_selection_with_watcher_and_directory_mode(
+                entry,
+                click_count,
+                directory_open_mode,
+                cx,
+            )
+        } else {
+            self.handle_entry_click_with_watcher_and_directory_mode(
+                entry,
+                click_count,
+                modifiers,
+                directory_open_mode,
+                cx,
+            )
+        }
     }
 
     pub(super) fn commit_active_rename_before_interaction(

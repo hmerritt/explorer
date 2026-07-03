@@ -38,7 +38,7 @@ use crate::explorer::{
     rename::{PendingClickRename, RenameState},
     scrollbar::{HorizontalScrollbarDrag, ScrollbarDrag},
     search::{SearchState, filtered_entries},
-    selection::SelectionState,
+    selection::{SelectionModifiers, SelectionState},
     sorting::sort_entries,
     video_hover_preview::VideoHoverPreviewSession,
     watcher::DirectoryWatcher,
@@ -86,6 +86,7 @@ pub struct ExplorerView {
     pub(super) horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
     pub(super) suppress_next_click: bool,
+    pub(super) mouse_down_entry_selection: Option<MouseDownEntrySelection>,
     pub(super) entry_click_sequence: Option<EntryClickSequence>,
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) file_operation_undo_stack: Vec<FileOperationUndo>,
@@ -205,6 +206,14 @@ pub(super) struct EntryClickSequence {
     pub(super) path: PathBuf,
     pub(super) last_raw_click_count: usize,
     pub(super) effective_click_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MouseDownEntrySelection {
+    pub(super) path: PathBuf,
+    pub(super) modifiers: SelectionModifiers,
+    pub(super) was_selected: bool,
+    pub(super) selection_applied: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -436,6 +445,7 @@ impl ExplorerView {
             horizontal_scrollbar_drag: None,
             mouse_selection_drag: None,
             suppress_next_click: false,
+            mouse_down_entry_selection: None,
             entry_click_sequence: None,
             cut_paths: BTreeSet::new(),
             file_operation_undo_stack: Vec::new(),

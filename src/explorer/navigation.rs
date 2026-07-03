@@ -11,7 +11,9 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{default_start_path, local_drive_roots, path_is_same_or_descendant},
     selection::SelectionModifiers,
-    view::{EntryClickSequence, ExplorerView, ExplorerViewEvent, ReloadMode},
+    view::{
+        EntryClickSequence, ExplorerView, ExplorerViewEvent, MouseDownEntrySelection, ReloadMode,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -463,6 +465,7 @@ impl ExplorerView {
             modifiers,
             DirectoryOpenMode::CurrentTab,
             None,
+            true,
         )
     }
 
@@ -474,7 +477,31 @@ impl ExplorerView {
         directory_open_mode: DirectoryOpenMode,
         cx: &mut Context<Self>,
     ) -> Option<EntryAction> {
-        self.handle_entry_click_inner(entry, click_count, modifiers, directory_open_mode, Some(cx))
+        self.handle_entry_click_inner(
+            entry,
+            click_count,
+            modifiers,
+            directory_open_mode,
+            Some(cx),
+            true,
+        )
+    }
+
+    pub(super) fn handle_entry_click_after_mouse_down_selection_with_watcher_and_directory_mode(
+        &mut self,
+        entry: &FileEntry,
+        click_count: usize,
+        directory_open_mode: DirectoryOpenMode,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryAction> {
+        self.handle_entry_click_inner(
+            entry,
+            click_count,
+            SelectionModifiers::default(),
+            directory_open_mode,
+            Some(cx),
+            false,
+        )
     }
 
     fn handle_entry_click_inner(
@@ -484,8 +511,14 @@ impl ExplorerView {
         modifiers: SelectionModifiers,
         directory_open_mode: DirectoryOpenMode,
         cx: Option<&mut Context<Self>>,
+        apply_selection: bool,
     ) -> Option<EntryAction> {
-        self.apply_entry_click_selection(entry, modifiers);
+        if apply_selection {
+            self.apply_entry_click_selection(entry, modifiers);
+        } else {
+            self.cancel_pending_click_rename();
+            self.clear_operation_notice();
+        }
 
         if click_count != 2 {
             return None;
@@ -524,6 +557,42 @@ impl ExplorerView {
             self.clear_selection();
         }
         self.clear_operation_notice();
+    }
+
+    pub(super) fn apply_entry_mouse_down_selection(
+        &mut self,
+        entry: &FileEntry,
+        modifiers: SelectionModifiers,
+    ) {
+        self.cancel_pending_click_rename();
+
+        if let Some(ix) = self.entry_index_by_path(&entry.path) {
+            let was_selected = self.entry_is_selected(ix);
+            let selection_applied = modifiers.toggle || modifiers.extend || !was_selected;
+            if selection_applied {
+                self.apply_click_selection(ix, modifiers);
+            }
+            self.mouse_down_entry_selection = Some(MouseDownEntrySelection {
+                path: entry.path.clone(),
+                modifiers,
+                was_selected,
+                selection_applied,
+            });
+        } else {
+            self.clear_selection();
+            self.mouse_down_entry_selection = None;
+        }
+
+        self.clear_operation_notice();
+    }
+
+    pub(super) fn take_mouse_down_entry_selection(
+        &mut self,
+        entry: &FileEntry,
+        modifiers: SelectionModifiers,
+    ) -> Option<MouseDownEntrySelection> {
+        let selection = self.mouse_down_entry_selection.take()?;
+        (selection.path == entry.path && selection.modifiers == modifiers).then_some(selection)
     }
 
     pub(super) fn handle_entry_middle_click(

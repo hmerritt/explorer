@@ -4,7 +4,10 @@ use gpui::{Bounds, MouseButton, Pixels, Point, px, size};
 
 use crate::{
     explorer::{
-        constants::{LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, SCROLLBAR_GUTTER_WIDTH},
+        constants::{
+            FILE_ICON_SLOT_WIDTH, LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH,
+            SCROLLBAR_GUTTER_WIDTH,
+        },
         large_icons::LargeIconLayout,
         selection::SelectionModifiers,
         view::ExplorerView,
@@ -14,6 +17,8 @@ use crate::{
 
 const DRAG_ACTIVATION_DISTANCE: f32 = 3.0;
 const DRAG_AUTOSCROLL_MARGIN: f32 = 24.0;
+const DETAILS_NAME_CELL_LEFT_PADDING: f32 = 16.0;
+const DETAILS_NAME_ICON_TEXT_GAP: f32 = 8.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct MouseSelectionDrag {
@@ -70,10 +75,11 @@ impl SelectionBox {
 }
 
 impl ExplorerView {
-    pub(super) fn pointer_drag_intent(
+    pub(super) fn pointer_drag_intent_with_details_name_hit_targets(
         &self,
         local_position: Point<Pixels>,
         viewport_size: gpui::Size<Pixels>,
+        details_name_item_hit_rights: &[f32],
     ) -> Option<PointerDragIntent> {
         let scroll_top = self
             .scrollbar_metrics()
@@ -92,7 +98,7 @@ impl ExplorerView {
 
         let name_column_width =
             self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
-        pointer_drag_intent_at_with_offsets(
+        pointer_drag_intent_at_with_offsets_and_name_hits(
             f32::from(local_position.x),
             f32::from(local_position.y),
             scroll_top,
@@ -102,9 +108,11 @@ impl ExplorerView {
             self.entries.len(),
             &self.selection.selected_indices,
             self.entry_row_height(),
+            details_name_item_hit_rights,
         )
     }
 
+    #[cfg(test)]
     pub(super) fn begin_mouse_selection_drag_for_intent(
         &mut self,
         button: MouseButton,
@@ -112,7 +120,28 @@ impl ExplorerView {
         viewport_size: gpui::Size<Pixels>,
         modifiers: SelectionModifiers,
     ) -> bool {
-        match self.pointer_drag_intent(local_position, viewport_size) {
+        self.begin_mouse_selection_drag_for_intent_with_details_name_hit_targets(
+            button,
+            local_position,
+            viewport_size,
+            modifiers,
+            &[],
+        )
+    }
+
+    pub(super) fn begin_mouse_selection_drag_for_intent_with_details_name_hit_targets(
+        &mut self,
+        button: MouseButton,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+        modifiers: SelectionModifiers,
+        details_name_item_hit_rights: &[f32],
+    ) -> bool {
+        match self.pointer_drag_intent_with_details_name_hit_targets(
+            local_position,
+            viewport_size,
+            details_name_item_hit_rights,
+        ) {
             Some(PointerDragIntent::RubberBand) => {
                 if !modifiers.toggle && !modifiers.extend {
                     self.clear_selection();
@@ -128,6 +157,7 @@ impl ExplorerView {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn begin_mouse_selection_drag_after_menu_dismissal(
         &mut self,
         button: MouseButton,
@@ -148,12 +178,36 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn begin_mouse_selection_drag_after_menu_dismissal_with_details_name_hit_targets(
+        &mut self,
+        button: MouseButton,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+        modifiers: SelectionModifiers,
+        details_name_item_hit_rights: &[f32],
+    ) -> MouseSelectionPointerDownOutcome {
+        let menu_closed = self.close_context_menu();
+        let selection_started = self
+            .begin_mouse_selection_drag_for_intent_with_details_name_hit_targets(
+                button,
+                local_position,
+                viewport_size,
+                modifiers,
+                details_name_item_hit_rights,
+            );
+        MouseSelectionPointerDownOutcome {
+            menu_closed,
+            selection_started,
+        }
+    }
+
     pub(super) fn begin_mouse_selection_drag(
         &mut self,
         button: MouseButton,
         local_position: Point<Pixels>,
         modifiers: SelectionModifiers,
     ) {
+        self.mouse_down_entry_selection = None;
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
@@ -537,6 +591,16 @@ pub(super) fn pointer_drag_intent_at_with_row_height(
     )
 }
 
+pub(super) fn details_name_item_hit_right(visible_text_width: f32, name_column_width: f32) -> f32 {
+    (DETAILS_NAME_CELL_LEFT_PADDING
+        + FILE_ICON_SLOT_WIDTH
+        + DETAILS_NAME_ICON_TEXT_GAP
+        + visible_text_width.max(0.0))
+    .min(name_column_width)
+    .max(0.0)
+}
+
+#[cfg(test)]
 pub(super) fn pointer_drag_intent_at_with_offsets(
     local_x: f32,
     local_y: f32,
@@ -548,6 +612,32 @@ pub(super) fn pointer_drag_intent_at_with_offsets(
     selected_indices: &BTreeSet<usize>,
     row_height: f32,
 ) -> Option<PointerDragIntent> {
+    pointer_drag_intent_at_with_offsets_and_name_hits(
+        local_x,
+        local_y,
+        scroll_top,
+        scroll_left,
+        viewport_width,
+        name_column_width,
+        entry_count,
+        selected_indices,
+        row_height,
+        &[],
+    )
+}
+
+pub(super) fn pointer_drag_intent_at_with_offsets_and_name_hits(
+    local_x: f32,
+    local_y: f32,
+    scroll_top: f32,
+    scroll_left: f32,
+    viewport_width: f32,
+    name_column_width: f32,
+    entry_count: usize,
+    _selected_indices: &BTreeSet<usize>,
+    row_height: f32,
+    details_name_item_hit_rights: &[f32],
+) -> Option<PointerDragIntent> {
     if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
         return None;
     }
@@ -556,10 +646,19 @@ pub(super) fn pointer_drag_intent_at_with_offsets(
         return Some(PointerDragIntent::RubberBand);
     };
 
-    if selected_indices.contains(&ix) {
-        Some(PointerDragIntent::ItemDrag)
-    } else if local_x + scroll_left < name_column_width {
-        Some(PointerDragIntent::RubberBand)
+    let content_x = local_x + scroll_left;
+    if content_x < name_column_width {
+        let hit_right = details_name_item_hit_rights
+            .get(ix)
+            .copied()
+            .unwrap_or(name_column_width)
+            .min(name_column_width)
+            .max(0.0);
+        if content_x >= DETAILS_NAME_CELL_LEFT_PADDING && content_x <= hit_right {
+            Some(PointerDragIntent::ItemDrag)
+        } else {
+            Some(PointerDragIntent::RubberBand)
+        }
     } else {
         Some(PointerDragIntent::ItemDrag)
     }
@@ -666,7 +765,8 @@ pub(super) fn selection_box_bounds(selection_box: SelectionBox) -> Bounds<Pixels
 mod tests {
     use super::*;
     use crate::explorer::constants::{
-        LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, ROW_HEIGHT, effective_name_column_width,
+        FILE_ICON_SLOT_WIDTH, LARGE_ICON_TILE_HEIGHT, LARGE_ICON_TILE_WIDTH, ROW_HEIGHT,
+        effective_name_column_width,
     };
     use crate::explorer::context_menu::ContextMenuState;
     use crate::explorer::large_icons::{LargeIconLayout, large_icon_tile_height_for_rows};
@@ -921,9 +1021,134 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_resolves_to_item_drag_with_scroll_offset() {
+    fn details_name_item_hit_right_includes_icon_gap_and_visible_text() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
         assert_eq!(
-            pointer_drag_intent_at(1.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([2])),
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                DETAILS_NAME_CELL_LEFT_PADDING,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                DETAILS_NAME_CELL_LEFT_PADDING + FILE_ICON_SLOT_WIDTH + 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right - 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn details_name_blank_padding_and_short_name_space_resolve_to_rubber_band() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                DETAILS_NAME_CELL_LEFT_PADDING - 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right + 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn selected_row_blank_name_space_resolves_to_rubber_band() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right + 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::from([0]),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::RubberBand)
+        );
+    }
+
+    #[test]
+    fn selected_row_name_hit_resolves_to_item_drag_with_scroll_offset() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                DETAILS_NAME_CELL_LEFT_PADDING,
+                1.0,
+                ROW_HEIGHT * 2.0,
+                0.0,
+                800.0,
+                name_column_width,
+                5,
+                &BTreeSet::from([2]),
+                ROW_HEIGHT,
+                &[hit_right, hit_right, hit_right],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
@@ -931,15 +1156,40 @@ mod tests {
     #[test]
     fn selected_row_resolves_to_item_drag_outside_name_column() {
         assert_eq!(
-            pointer_drag_intent_at(500.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([2])),
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                500.0,
+                1.0,
+                ROW_HEIGHT * 2.0,
+                0.0,
+                800.0,
+                250.0,
+                5,
+                &BTreeSet::from([2]),
+                ROW_HEIGHT,
+                &[],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
 
     #[test]
-    fn unselected_row_in_name_column_resolves_to_rubber_band() {
+    fn unselected_row_blank_name_column_resolves_to_rubber_band() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
         assert_eq!(
-            pointer_drag_intent_at(1.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([1])),
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right + 1.0,
+                1.0,
+                ROW_HEIGHT * 2.0,
+                0.0,
+                800.0,
+                name_column_width,
+                5,
+                &BTreeSet::from([1]),
+                ROW_HEIGHT,
+                &[hit_right, hit_right, hit_right],
+            ),
             Some(PointerDragIntent::RubberBand)
         );
     }
@@ -947,67 +1197,92 @@ mod tests {
     #[test]
     fn unselected_row_outside_name_column_resolves_to_item_drag() {
         assert_eq!(
-            pointer_drag_intent_at(500.0, 1.0, ROW_HEIGHT * 2.0, 800.0, 5, &BTreeSet::from([1])),
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                500.0,
+                1.0,
+                ROW_HEIGHT * 2.0,
+                0.0,
+                800.0,
+                250.0,
+                5,
+                &BTreeSet::from([1]),
+                ROW_HEIGHT,
+                &[],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
 
     #[test]
-    fn unselected_row_uses_rendered_name_column_boundary() {
+    fn unselected_row_uses_name_item_hit_boundary() {
         let list_width = 800.0;
-        let name_column_right = effective_name_column_width(list_width + SCROLLBAR_GUTTER_WIDTH);
+        let name_column_width = effective_name_column_width(list_width + SCROLLBAR_GUTTER_WIDTH);
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
 
         assert_eq!(
-            pointer_drag_intent_at(
-                name_column_right - 1.0,
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right + 1.0,
                 1.0,
                 0.0,
+                0.0,
                 list_width,
+                name_column_width,
                 5,
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
             ),
             Some(PointerDragIntent::RubberBand)
         );
         assert_eq!(
-            pointer_drag_intent_at(
-                name_column_right + 1.0,
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                name_column_width + 1.0,
                 1.0,
                 0.0,
+                0.0,
                 list_width,
+                name_column_width,
                 5,
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
             ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
 
     #[test]
-    fn unselected_row_name_column_boundary_accounts_for_horizontal_scroll() {
+    fn name_item_hit_boundary_accounts_for_horizontal_scroll() {
+        let name_column_width = 250.0;
+        let hit_right = details_name_item_hit_right(40.0, name_column_width);
+
         assert_eq!(
-            pointer_drag_intent_at_with_offsets(
-                220.0,
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right - 41.0,
                 1.0,
                 0.0,
                 40.0,
                 400.0,
-                210.0,
+                name_column_width,
                 5,
                 &BTreeSet::new(),
                 ROW_HEIGHT,
+                &[hit_right],
             ),
             Some(PointerDragIntent::ItemDrag)
         );
         assert_eq!(
-            pointer_drag_intent_at_with_offsets(
-                200.0,
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                hit_right - 39.0,
                 1.0,
                 0.0,
                 40.0,
                 400.0,
-                250.0,
+                name_column_width,
                 5,
                 &BTreeSet::new(),
                 ROW_HEIGHT,
+                &[hit_right],
             ),
             Some(PointerDragIntent::RubberBand)
         );
@@ -1028,7 +1303,11 @@ mod tests {
         }
 
         assert_eq!(
-            view.pointer_drag_intent(gpui::point(px(1.0), px(1.0)), size(px(400.0), px(100.0))),
+            view.pointer_drag_intent_with_details_name_hit_targets(
+                gpui::point(px(1.0), px(1.0)),
+                size(px(400.0), px(100.0)),
+                &[details_name_item_hit_right(40.0, 250.0)],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
@@ -1037,13 +1316,22 @@ mod tests {
     fn pointer_drag_intent_uses_live_name_column_boundary() {
         let mut view = test_view_with_entries(&["a.txt"]);
         view.file_columns.widths.insert(FileColumnKind::Type, 300);
+        let hit_right = details_name_item_hit_right(40.0, 330.0);
 
         assert_eq!(
-            view.pointer_drag_intent(gpui::point(px(320.0), px(1.0)), size(px(900.0), px(100.0))),
+            view.pointer_drag_intent_with_details_name_hit_targets(
+                gpui::point(px(320.0), px(1.0)),
+                size(px(900.0), px(100.0)),
+                &[hit_right],
+            ),
             Some(PointerDragIntent::RubberBand)
         );
         assert_eq!(
-            view.pointer_drag_intent(gpui::point(px(350.0), px(1.0)), size(px(900.0), px(100.0))),
+            view.pointer_drag_intent_with_details_name_hit_targets(
+                gpui::point(px(350.0), px(1.0)),
+                size(px(900.0), px(100.0)),
+                &[hit_right],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
@@ -1052,13 +1340,45 @@ mod tests {
     fn pointer_drag_intent_uses_manual_name_column_boundary() {
         let mut view = test_view_with_entries(&["a.txt"]);
         view.file_columns.name_width = Some(400);
+        let hit_right = details_name_item_hit_right(40.0, 400.0);
 
         assert_eq!(
-            view.pointer_drag_intent(gpui::point(px(399.0), px(1.0)), size(px(900.0), px(100.0))),
+            view.pointer_drag_intent_with_details_name_hit_targets(
+                gpui::point(px(hit_right + 1.0), px(1.0)),
+                size(px(900.0), px(100.0)),
+                &[hit_right],
+            ),
             Some(PointerDragIntent::RubberBand)
         );
         assert_eq!(
-            view.pointer_drag_intent(gpui::point(px(401.0), px(1.0)), size(px(900.0), px(100.0))),
+            view.pointer_drag_intent_with_details_name_hit_targets(
+                gpui::point(px(401.0), px(1.0)),
+                size(px(900.0), px(100.0)),
+                &[hit_right],
+            ),
+            Some(PointerDragIntent::ItemDrag)
+        );
+    }
+
+    #[test]
+    fn long_details_name_hit_right_is_capped_to_name_column_width() {
+        let name_column_width = 70.0;
+        let hit_right = details_name_item_hit_right(500.0, name_column_width);
+
+        assert_eq!(hit_right, name_column_width);
+        assert_eq!(
+            pointer_drag_intent_at_with_offsets_and_name_hits(
+                name_column_width - 1.0,
+                1.0,
+                0.0,
+                0.0,
+                800.0,
+                name_column_width,
+                1,
+                &BTreeSet::new(),
+                ROW_HEIGHT,
+                &[hit_right],
+            ),
             Some(PointerDragIntent::ItemDrag)
         );
     }
@@ -1102,7 +1422,7 @@ mod tests {
 
         view.begin_mouse_selection_drag_for_intent(
             MouseButton::Left,
-            gpui::point(px(1.0), px(1.0)),
+            gpui::point(px(DETAILS_NAME_CELL_LEFT_PADDING), px(1.0)),
             size(px(800.0), px(100.0)),
             SelectionModifiers::default(),
         );
