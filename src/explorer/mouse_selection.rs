@@ -634,7 +634,7 @@ pub(super) fn pointer_drag_intent_at_with_offsets_and_name_hits(
     viewport_width: f32,
     name_column_width: f32,
     entry_count: usize,
-    _selected_indices: &BTreeSet<usize>,
+    selected_indices: &BTreeSet<usize>,
     row_height: f32,
     details_name_item_hit_rights: &[f32],
 ) -> Option<PointerDragIntent> {
@@ -655,6 +655,8 @@ pub(super) fn pointer_drag_intent_at_with_offsets_and_name_hits(
             .min(name_column_width)
             .max(0.0);
         if content_x >= DETAILS_NAME_CELL_LEFT_PADDING && content_x <= hit_right {
+            Some(PointerDragIntent::ItemDrag)
+        } else if selected_indices.contains(&ix) {
             Some(PointerDragIntent::ItemDrag)
         } else {
             Some(PointerDragIntent::RubberBand)
@@ -1110,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_row_blank_name_space_resolves_to_rubber_band() {
+    fn selected_row_blank_name_space_resolves_to_item_drag() {
         let name_column_width = 250.0;
         let hit_right = details_name_item_hit_right(40.0, name_column_width);
 
@@ -1127,7 +1129,7 @@ mod tests {
                 ROW_HEIGHT,
                 &[hit_right],
             ),
-            Some(PointerDragIntent::RubberBand)
+            Some(PointerDragIntent::ItemDrag)
         );
     }
 

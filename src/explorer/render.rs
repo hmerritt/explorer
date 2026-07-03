@@ -2149,8 +2149,11 @@ impl ExplorerView {
                 selected_drag_payload.clone(),
                 entity.clone(),
             );
-            let name_hit_target =
-                add_individual_entry_drag(name_hit_target, individual_drag_payload.clone(), entity);
+            let name_hit_target = add_individual_entry_drag(
+                name_hit_target,
+                individual_drag_payload.clone(),
+                entity.clone(),
+            );
 
             let name_cell = name_cell_container(
                 self.name_column_width(window),
@@ -2158,7 +2161,8 @@ impl ExplorerView {
             )
             .id(("explorer-entry-name", ix))
             .debug_selector(move || format!("explorer-entry-name-{ix}"));
-            let name_cell = add_blank_name_cell_click(name_cell, cx);
+            let name_cell =
+                add_selected_entry_drag(name_cell, selected_drag_payload.clone(), entity);
             let name_cell = add_entry_context_menu(
                 name_cell,
                 entry.clone(),
@@ -3598,22 +3602,6 @@ fn add_entry_mouse_down_selection(
             cx.notify();
         }),
     )
-}
-
-fn add_blank_name_cell_click(
-    element: gpui::Stateful<Div>,
-    cx: &mut Context<ExplorerView>,
-) -> gpui::Stateful<Div> {
-    element.on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-        if !is_normal_entry_click(event) {
-            return;
-        }
-
-        let _ = this.suppress_next_click();
-        this.cancel_pending_click_rename();
-        cx.stop_propagation();
-        cx.notify();
-    }))
 }
 
 fn add_entry_hover_preview(
@@ -6697,9 +6685,6 @@ mod tests {
     #[gpui::test]
     fn details_blank_name_cell_drag_starts_rubber_band(cx: &mut gpui::TestAppContext) {
         let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
-        cx.update(|_, app| {
-            view.update(app, |view, _| view.select_single_index(0));
-        });
         let name_bounds = run_until_debug_bounds(cx, "explorer-entry-name-0");
         let hit_bounds = run_until_debug_bounds(cx, "explorer-entry-name-hit-0");
         let start = gpui::point(hit_bounds.right() + gpui::px(12.0), hit_bounds.center().y);

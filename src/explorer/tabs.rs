@@ -1794,6 +1794,132 @@ mod tests {
     }
 
     #[gpui::test]
+    fn single_click_name_cell_whitespace_selects_entry_without_rubber_band(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let position = entry_name_position(cx, "explorer-entry-1");
+
+        left_click_position(cx, position, 1, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.mouse_selection_drag.is_none());
+            assert!(view.pending_click_rename.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn double_click_name_cell_whitespace_opens_directory(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let view = active_test_view(&tabs, cx);
+        let position = entry_name_position(cx, "explorer-entry-0");
+
+        left_click_position(cx, position, 1, Modifiers::default());
+        left_click_position(cx, position, 2, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, temp.path().join("a"));
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_name_cell_whitespace_starts_rubber_band_and_suppresses_row_click(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let start = entry_name_position(cx, "explorer-entry-1");
+        let end = gpui::point(start.x + gpui::px(20.0), start.y);
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            let drag = view
+                .mouse_selection_drag
+                .as_ref()
+                .expect("rubber-band drag");
+            assert!(drag.active);
+            assert!(drag.visible);
+            assert!(selected_names(view).is_empty());
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.mouse_selection_drag.is_none());
+            assert!(selected_names(view).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn selected_name_cell_whitespace_mouse_down_preserves_selection_without_rubber_band(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        click_selector(cx, "explorer-entry-name-hit-1");
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+
+        let position = entry_name_position(cx, "explorer-entry-1");
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.mouse_selection_drag.is_none());
+        });
+
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn selected_name_cell_whitespace_drag_preserves_multi_selection_without_rubber_band(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                view.toggle_selection_index(1);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let start = entry_name_position(cx, "explorer-entry-1");
+        let end = gpui::point(start.x + gpui::px(20.0), start.y);
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
+            assert!(view.mouse_selection_drag.is_none());
+            let dragged = view
+                .test_dragged_entries_for_index(1)
+                .expect("selected drag payload");
+            let dragged_names = dragged
+                .paths
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(dragged_names, vec!["a.txt", "b.txt"]);
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
     fn right_click_unselected_name_cell_opens_current_folder_context_menu_and_clears_selection(
         cx: &mut TestAppContext,
     ) {
