@@ -6,8 +6,8 @@ thread_local! {
     static RGBA_RESIZER: RefCell<Resizer> = RefCell::new(Resizer::new());
 }
 
-const BILINEAR_OPTIONS: ResizeOptions = ResizeOptions {
-    algorithm: ResizeAlg::Interpolation(FilterType::Bilinear),
+const CATMULL_ROM_OPTIONS: ResizeOptions = ResizeOptions {
+    algorithm: ResizeAlg::Interpolation(FilterType::CatmullRom),
     cropping: fast_image_resize::SrcCropping::None,
     mul_div_alpha: true,
 };
@@ -31,7 +31,7 @@ pub(super) fn resize_rgba(
     RGBA_RESIZER.with(|resizer| {
         resizer
             .borrow_mut()
-            .resize(&image, &mut resized, &BILINEAR_OPTIONS)
+            .resize(&image, &mut resized, &CATMULL_ROM_OPTIONS)
             .map_err(|error| format!("Failed to resize image: {error}"))
     })?;
     Ok(resized)
@@ -53,7 +53,7 @@ pub(super) fn resize_rgb(
     RGBA_RESIZER.with(|resizer| {
         resizer
             .borrow_mut()
-            .resize(&image, &mut resized, &BILINEAR_OPTIONS)
+            .resize(&image, &mut resized, &CATMULL_ROM_OPTIONS)
             .map_err(|error| format!("Failed to resize image: {error}"))
     })?;
     Ok(resized)
@@ -75,7 +75,7 @@ pub(super) fn resize_luma(
     RGBA_RESIZER.with(|resizer| {
         resizer
             .borrow_mut()
-            .resize(&image, &mut resized, &BILINEAR_OPTIONS)
+            .resize(&image, &mut resized, &CATMULL_ROM_OPTIONS)
             .map_err(|error| format!("Failed to resize image: {error}"))
     })?;
     Ok(resized)
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_resize_interpolates_opaque_pixels() {
+    fn catmull_rom_resize_interpolates_opaque_pixels() {
         let image =
             image::RgbaImage::from_raw(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
 
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_resize_accounts_for_alpha_at_transparent_edges() {
+    fn catmull_rom_resize_accounts_for_alpha_at_transparent_edges() {
         let image = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 0]).unwrap();
 
         let resized = resize_rgba(image, 3, 1).unwrap();
