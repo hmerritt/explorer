@@ -257,7 +257,7 @@ const CONTEXT_MENU_TEXT_SIZE: f32 = 11.0;
 const CONTEXT_MENU_ROW_OUTER_HORIZONTAL_PADDING: f32 = 0.0;
 const CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING: f32 = 18.0;
 const CONTEXT_MENU_ROW_CHILD_GAP: f32 = 10.0;
-const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 14.0;
+const CONTEXT_MENU_TRAILING_SLOT_WIDTH: f32 = 16.0;
 const CONTEXT_MENU_DETAIL_VALUE_LEFT_MARGIN: f32 = 16.0;
 const RECURSIVE_SEARCH_ICON: &str = "\u{E8B7}";
 const RECURSIVE_SEARCH_PATH_TEXT_SIZE: f32 = 11.0;
@@ -4685,8 +4685,9 @@ fn context_menu_trailing_slot(glyph: Option<&'static str>) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .w(px(16.0))
+        .w(px(CONTEXT_MENU_TRAILING_SLOT_WIDTH))
         .h(px(16.0))
+        .flex_shrink_0()
         .font(nav_icon_font())
         .text_size(px(12.0))
         .text_color(rgb(0x1f1f1f))
@@ -6903,7 +6904,7 @@ mod tests {
 
     #[test]
     fn context_menu_action_and_submenu_width_account_for_all_row_chrome() {
-        assert_eq!(context_menu_action_width_for_text_width(80.0), 148.0);
+        assert_eq!(context_menu_action_width_for_text_width(80.0), 150.0);
     }
 
     #[test]
