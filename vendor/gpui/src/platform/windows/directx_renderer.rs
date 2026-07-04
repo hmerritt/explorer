@@ -34,6 +34,8 @@ const PATH_MULTISAMPLE_COUNT: u32 = 4;
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
+    pub clear_type_level: f32,
+    pub pixel_geometry: DWRITE_PIXEL_GEOMETRY,
 }
 
 pub(crate) struct DirectXRenderer {
@@ -614,6 +616,8 @@ impl DirectXRenderer {
             FontInfo {
                 gamma_ratios: Self::get_gamma_ratios(render_params.GetGamma()),
                 grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
+                clear_type_level: render_params.GetClearTypeLevel(),
+                pixel_geometry: render_params.GetPixelGeometry(),
             }
         })
     }
@@ -765,7 +769,7 @@ impl DirectXRenderPipelines {
             "monochrome_sprite_pipeline",
             ShaderModule::MonochromeSprite,
             512,
-            create_blend_state(device)?,
+            create_blend_state_for_cleartype_text(device)?,
         )?;
         let poly_sprites = PipelineState::new(
             device,
@@ -1242,6 +1246,24 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
     desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
     desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+#[inline]
+fn create_blend_state_for_cleartype_text(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC1_COLOR;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC1_COLOR;
     desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
     desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
     unsafe {

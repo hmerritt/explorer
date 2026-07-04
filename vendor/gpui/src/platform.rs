@@ -737,7 +737,14 @@ impl AtlasKey {
                 if params.is_emoji {
                     AtlasTextureKind::Polychrome
                 } else {
-                    AtlasTextureKind::Monochrome
+                    #[cfg(target_os = "windows")]
+                    {
+                        AtlasTextureKind::ClearType
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        AtlasTextureKind::Monochrome
+                    }
                 }
             }
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
@@ -837,6 +844,8 @@ pub(crate) struct AtlasTextureId {
 pub(crate) enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
+    #[cfg(target_os = "windows")]
+    ClearType = 2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

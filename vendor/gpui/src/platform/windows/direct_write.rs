@@ -700,6 +700,7 @@ impl DirectWriteState {
     fn create_glyph_run_analysis(
         &self,
         params: &RenderGlyphParams,
+        antialias_mode: DWRITE_TEXT_ANTIALIAS_MODE,
     ) -> Result<IDWriteGlyphRunAnalysis> {
         let font = &self.fonts[params.font_id.0];
         let glyph_id = [params.glyph_id.0 as u16];
@@ -757,7 +758,7 @@ impl DirectWriteState {
                 rendering_mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 grid_fit_mode,
-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+                antialias_mode,
                 baseline_origin_x,
                 baseline_origin_y,
             )
@@ -766,9 +767,10 @@ impl DirectWriteState {
     }
 
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let glyph_analysis = self.create_glyph_run_analysis(params)?;
+        let texture_type = text_texture_type(params);
+        let glyph_analysis = self.create_glyph_run_analysis(params, text_antialias_mode(params))?;
 
-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)? };
+        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(texture_type)? };
 
         if bounds.right < bounds.left {
             Ok(Bounds {
@@ -812,20 +814,20 @@ impl DirectWriteState {
             if let Ok(color) = self.rasterize_color(params, glyph_bounds) {
                 color
             } else {
-                let monochrome = self.rasterize_monochrome(params, glyph_bounds)?;
+                let monochrome = self.rasterize_grayscale(params, glyph_bounds)?;
                 monochrome
                     .into_iter()
                     .flat_map(|pixel| [0, 0, 0, pixel])
                     .collect::<Vec<_>>()
             }
         } else {
-            self.rasterize_monochrome(params, glyph_bounds)?
+            self.rasterize_text_mask(params, glyph_bounds)?
         };
 
         Ok((glyph_bounds.size, bitmap_data))
     }
 
-    fn rasterize_monochrome(
+    fn rasterize_grayscale(
         &self,
         params: &RenderGlyphParams,
         glyph_bounds: Bounds<DevicePixels>,
@@ -833,7 +835,8 @@ impl DirectWriteState {
         let mut bitmap_data =
             vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
 
-        let glyph_analysis = self.create_glyph_run_analysis(params)?;
+        let glyph_analysis =
+            self.create_glyph_run_analysis(params, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE)?;
         unsafe {
             glyph_analysis.CreateAlphaTexture(
                 DWRITE_TEXTURE_ALIASED_1x1,
@@ -848,6 +851,45 @@ impl DirectWriteState {
         }
 
         Ok(bitmap_data)
+    }
+
+    fn rasterize_text_mask(
+        &self,
+        params: &RenderGlyphParams,
+        glyph_bounds: Bounds<DevicePixels>,
+    ) -> Result<Vec<u8>> {
+        if cleartype_is_enabled() {
+            self.rasterize_cleartype(params, glyph_bounds)
+        } else {
+            let grayscale = self.rasterize_grayscale(params, glyph_bounds)?;
+            Ok(pack_grayscale_as_cleartype(&grayscale))
+        }
+    }
+
+    fn rasterize_cleartype(
+        &self,
+        params: &RenderGlyphParams,
+        glyph_bounds: Bounds<DevicePixels>,
+    ) -> Result<Vec<u8>> {
+        let pixel_count = glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize;
+        let mut alpha_data = vec![0u8; pixel_count * 3];
+
+        let glyph_analysis =
+            self.create_glyph_run_analysis(params, DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE)?;
+        unsafe {
+            glyph_analysis.CreateAlphaTexture(
+                DWRITE_TEXTURE_CLEARTYPE_3x1,
+                &RECT {
+                    left: glyph_bounds.origin.x.0,
+                    top: glyph_bounds.origin.y.0,
+                    right: glyph_bounds.size.width.0 + glyph_bounds.origin.x.0,
+                    bottom: glyph_bounds.size.height.0 + glyph_bounds.origin.y.0,
+                },
+                &mut alpha_data,
+            )?;
+        }
+
+        Ok(pack_cleartype_as_bgra(&alpha_data))
     }
 
     fn rasterize_color(
@@ -1067,6 +1109,7 @@ impl DirectWriteState {
         let crate::FontInfo {
             gamma_ratios,
             grayscale_enhanced_contrast,
+            ..
         } = DirectXRenderer::get_font_info();
 
         for layer in glyph_layers {
@@ -1228,6 +1271,78 @@ impl DirectWriteState {
             },
         );
     }
+}
+
+fn text_texture_type(params: &RenderGlyphParams) -> DWRITE_TEXTURE_TYPE {
+    if !params.is_emoji && cleartype_is_enabled() {
+        DWRITE_TEXTURE_CLEARTYPE_3x1
+    } else {
+        DWRITE_TEXTURE_ALIASED_1x1
+    }
+}
+
+fn text_antialias_mode(params: &RenderGlyphParams) -> DWRITE_TEXT_ANTIALIAS_MODE {
+    if !params.is_emoji && cleartype_is_enabled() {
+        DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE
+    } else {
+        DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE
+    }
+}
+
+fn cleartype_is_enabled() -> bool {
+    let font_info = DirectXRenderer::get_font_info();
+    font_info.clear_type_level > 0.0 && font_info.pixel_geometry != DWRITE_PIXEL_GEOMETRY_FLAT
+}
+
+fn pack_grayscale_as_cleartype(alpha_data: &[u8]) -> Vec<u8> {
+    alpha_data
+        .iter()
+        .flat_map(|&alpha| [alpha, alpha, alpha, alpha])
+        .collect()
+}
+
+fn pack_cleartype_as_bgra(alpha_data: &[u8]) -> Vec<u8> {
+    let font_info = DirectXRenderer::get_font_info();
+    pack_cleartype_as_bgra_with_options(
+        alpha_data,
+        font_info.pixel_geometry == DWRITE_PIXEL_GEOMETRY_BGR,
+        font_info.clear_type_level,
+    )
+}
+
+fn pack_cleartype_as_bgra_with_options(
+    alpha_data: &[u8],
+    reverse_subpixels: bool,
+    clear_type_level: f32,
+) -> Vec<u8> {
+    let clear_type_level = clear_type_level.clamp(0.0, 1.0);
+    let mut packed = Vec::with_capacity(alpha_data.len() / 3 * 4);
+
+    for pixel in alpha_data.chunks_exact(3) {
+        let (mut r, mut g, mut b) = if reverse_subpixels {
+            (pixel[2], pixel[1], pixel[0])
+        } else {
+            (pixel[0], pixel[1], pixel[2])
+        };
+
+        if clear_type_level < 1.0 {
+            let grayscale = ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8;
+            r = blend_coverage(grayscale, r, clear_type_level);
+            g = blend_coverage(grayscale, g, clear_type_level);
+            b = blend_coverage(grayscale, b, clear_type_level);
+        }
+
+        let alpha = r.max(g).max(b);
+        packed.extend_from_slice(&[b, g, r, alpha]);
+    }
+
+    packed
+}
+
+fn blend_coverage(grayscale: u8, subpixel: u8, level: f32) -> u8 {
+    (f32::from(grayscale) + ((f32::from(subpixel) - f32::from(grayscale)) * level))
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 impl Drop for DirectWriteState {
@@ -1882,7 +1997,9 @@ const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::windows::direct_write::ClusterAnalyzer;
+    use super::{
+        ClusterAnalyzer, pack_cleartype_as_bgra_with_options, pack_grayscale_as_cleartype,
+    };
 
     #[test]
     fn test_cluster_map() {
@@ -1919,5 +2036,33 @@ mod tests {
         assert_eq!(next, Some((5, 1)));
         let next = analyzer.next();
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn grayscale_masks_pack_as_equal_bgra_coverage() {
+        assert_eq!(
+            pack_grayscale_as_cleartype(&[0x20, 0x80]),
+            vec![0x20, 0x20, 0x20, 0x20, 0x80, 0x80, 0x80, 0x80]
+        );
+    }
+
+    #[test]
+    fn cleartype_masks_pack_rgb_coverage_as_bgra_storage() {
+        assert_eq!(
+            pack_cleartype_as_bgra_with_options(&[10, 20, 30], false, 1.0),
+            vec![30, 20, 10, 30]
+        );
+        assert_eq!(
+            pack_cleartype_as_bgra_with_options(&[10, 20, 30], true, 1.0),
+            vec![10, 20, 30, 30]
+        );
+    }
+
+    #[test]
+    fn cleartype_level_zero_collapses_to_grayscale_coverage() {
+        assert_eq!(
+            pack_cleartype_as_bgra_with_options(&[10, 20, 30], false, 0.0),
+            vec![20, 20, 20, 20]
+        );
     }
 }

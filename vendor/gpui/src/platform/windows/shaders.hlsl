@@ -1084,6 +1084,7 @@ struct MonochromeSpriteVertexOutput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation uint texture_kind: TEXCOORD0;
     float4 clip_distance: SV_ClipDistance;
 };
 
@@ -1091,7 +1092,13 @@ struct MonochromeSpriteFragmentInput {
     float4 position: SV_Position;
     float2 tile_position: POSITION;
     nointerpolation float4 color: COLOR;
+    nointerpolation uint texture_kind: TEXCOORD0;
     float4 clip_distance: SV_ClipDistance;
+};
+
+struct MonochromeSpriteFragmentOutput {
+    float4 color: SV_Target0;
+    float4 coverage: SV_Target1;
 };
 
 StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
@@ -1109,14 +1116,26 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.position = device_position;
     output.tile_position = tile_position;
     output.color = color;
+    output.texture_kind = sprite.tile.texture_id.kind;
     output.clip_distance = clip_distance;
     return output;
 }
 
-float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
-    float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
-    float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
-    return float4(input.color.rgb, input.color.a * alpha_corrected);
+MonochromeSpriteFragmentOutput monochrome_sprite_fragment(MonochromeSpriteFragmentInput input) {
+    static const uint CLEAR_TYPE_ATLAS_KIND = 2u;
+    float4 sample = t_sprite.Sample(s_sprite, input.tile_position);
+    float3 coverage = input.texture_kind == CLEAR_TYPE_ATLAS_KIND ? sample.rgb : sample.rrr;
+    coverage = float3(
+        apply_contrast_and_gamma_correction(coverage.r, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios),
+        apply_contrast_and_gamma_correction(coverage.g, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios),
+        apply_contrast_and_gamma_correction(coverage.b, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios)
+    );
+    coverage = saturate(coverage * input.color.a);
+
+    MonochromeSpriteFragmentOutput output;
+    output.color = float4(input.color.rgb, max(max(coverage.r, coverage.g), coverage.b));
+    output.coverage = float4(coverage, output.color.a);
+    return output;
 }
 
 /*

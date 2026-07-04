@@ -21,6 +21,7 @@ struct DirectXAtlasState {
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
+    clear_type_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
 }
 
@@ -40,6 +41,7 @@ impl DirectXAtlas {
             device_context: device_context.clone(),
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
+            clear_type_textures: Default::default(),
             tiles_by_key: Default::default(),
         }))
     }
@@ -63,6 +65,7 @@ impl DirectXAtlas {
         lock.device_context = device_context.clone();
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
+        lock.clear_type_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
     }
 }
@@ -102,6 +105,7 @@ impl PlatformAtlas for DirectXAtlas {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
+            AtlasTextureKind::ClearType => &mut lock.clear_type_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -130,6 +134,7 @@ impl DirectXAtlasState {
             let textures = match texture_kind {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+                AtlasTextureKind::ClearType => &mut self.clear_type_textures,
             };
 
             if let Some(tile) = textures
@@ -170,7 +175,7 @@ impl DirectXAtlasState {
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 1;
             }
-            AtlasTextureKind::Polychrome => {
+            AtlasTextureKind::Polychrome | AtlasTextureKind::ClearType => {
                 pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
@@ -204,6 +209,7 @@ impl DirectXAtlasState {
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::ClearType => &mut self.clear_type_textures,
         };
         let index = texture_list.free_list.pop();
         let view = unsafe {
@@ -237,6 +243,7 @@ impl DirectXAtlasState {
         let textures = match id.kind {
             crate::AtlasTextureKind::Monochrome => &self.monochrome_textures,
             crate::AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            crate::AtlasTextureKind::ClearType => &self.clear_type_textures,
         };
         textures[id.index as usize].as_ref().unwrap()
     }
