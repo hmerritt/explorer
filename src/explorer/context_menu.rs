@@ -1577,9 +1577,9 @@ fn copy_repo_relative_path_context_menu_item_with_relative_path(
         id: id.to_owned(),
         icon: Some(ContextMenuIcon::CopyAsPath),
         label: if is_folder {
-            "Copy folder relative repo path".to_owned()
+            "Copy relative folder path".to_owned()
         } else {
-            "Copy file relative repo path".to_owned()
+            "Copy relative file path".to_owned()
         },
         command: ContextMenuCommand::CopyRepoRelativePath { relative_path },
         enabled: true,
@@ -2556,7 +2556,7 @@ mod tests {
             Some(&ContextMenuItem::Action {
                 id: "context-menu-entry-copy-relative-repo-path".to_owned(),
                 icon: Some(ContextMenuIcon::CopyAsPath),
-                label: "Copy file relative repo path".to_owned(),
+                label: "Copy relative file path".to_owned(),
                 command: ContextMenuCommand::CopyRepoRelativePath {
                     relative_path: "src/explorer/context_menu.rs".to_owned()
                 },
@@ -2584,7 +2584,7 @@ mod tests {
             Some(&ContextMenuItem::Action {
                 id: "context-menu-folder-copy-relative-repo-path".to_owned(),
                 icon: Some(ContextMenuIcon::CopyAsPath),
-                label: "Copy folder relative repo path".to_owned(),
+                label: "Copy relative folder path".to_owned(),
                 command: ContextMenuCommand::CopyRepoRelativePath {
                     relative_path: "src/explorer".to_owned()
                 },
