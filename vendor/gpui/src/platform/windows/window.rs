@@ -485,7 +485,12 @@ impl WindowsWindow {
             });
         }
 
-        Ok(Self(this))
+        let window = Self(this);
+        if params.show && params.focus {
+            window.activate();
+        }
+
+        Ok(window)
     }
 }
 
