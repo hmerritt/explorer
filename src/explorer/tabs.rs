@@ -2008,7 +2008,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_click_selected_name_cell_whitespace_opens_current_folder_context_menu_and_clears_selection(
+    fn right_click_selected_name_cell_whitespace_preserves_selection_and_opens_entry_menu(
         cx: &mut TestAppContext,
     ) {
         let (_temp, tabs, cx) = test_tabs_with_two_files(cx);
@@ -2022,11 +2022,68 @@ mod tests {
         right_click_position(cx, position);
 
         cx.read_entity(&view, |view, _| {
-            assert!(view.context_menu.is_some());
-            assert_eq!(selected_names(view), Vec::<String>::new());
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert_eq!(
+                menu.native_icon_entry
+                    .as_ref()
+                    .map(|entry| entry.name.as_str()),
+                Some("b.txt")
+            );
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    icon: Some(crate::explorer::context_menu::ContextMenuIcon::NativeFile),
+                    command: crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                })
+            ));
         });
-        assert!(cx.debug_bounds("context-menu-paste").is_some());
-        assert!(cx.debug_bounds("context-menu-entry-cut").is_none());
+        assert!(cx.debug_bounds("context-menu-entry-cut").is_some());
+        assert!(cx.debug_bounds("context-menu-paste").is_none());
+    }
+
+    #[gpui::test]
+    fn right_click_selected_name_cell_whitespace_preserves_multi_selection_and_opens_selected_menu(
+        cx: &mut TestAppContext,
+    ) {
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                view.toggle_selection_index(1);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let position = entry_name_position(cx, "explorer-entry-1");
+        right_click_position(cx, position);
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["a", "b"]);
+            let menu = view.context_menu.as_ref().expect("entry context menu");
+            assert!(!menu.items.iter().any(|item| matches!(
+                item,
+                crate::explorer::context_menu::ContextMenuItem::Action {
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenDirectory { .. }
+                            | crate::explorer::context_menu::ContextMenuCommand::OpenSelectedFiles,
+                    ..
+                }
+            )));
+            assert!(matches!(
+                menu.items.first(),
+                Some(crate::explorer::context_menu::ContextMenuItem::Action {
+                    label,
+                    command:
+                        crate::explorer::context_menu::ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                    ..
+                }) if label == "Open new tabs (2)"
+            ));
+        });
+        assert!(cx.debug_bounds("context-menu-entry-copy-path").is_none());
     }
 
     #[gpui::test]

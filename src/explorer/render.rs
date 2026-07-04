@@ -3643,7 +3643,12 @@ fn add_entry_context_menu(
                 open_entry_context_menu_from_event(this, event, &entry, window, cx);
             }
             EntryContextMenuTarget::NameCell => {
-                open_current_folder_context_menu_from_event(this, event, window, cx);
+                let clicked_index = this.entry_index_by_path(&entry.path);
+                if clicked_index.is_some_and(|ix| this.entry_is_selected(ix)) {
+                    open_entry_context_menu_from_event(this, event, &entry, window, cx);
+                } else {
+                    open_current_folder_context_menu_from_event(this, event, window, cx);
+                }
             }
         }),
     )
