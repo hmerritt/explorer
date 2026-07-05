@@ -117,6 +117,9 @@ const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP: f32 = 8.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
+const FILE_ENTRY_BG: u32 = 0xffffff;
+const FILE_ENTRY_SELECTED_BG: u32 = 0xcce8ff;
+const FILE_ENTRY_HOVER_BG: u32 = 0xe5f3ff;
 const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_CELL_TEXT_COLOR: u32 = 0x595959;
 const NAME_TRUNCATION_SUFFIX: &str = "…";
@@ -2037,6 +2040,7 @@ impl ExplorerView {
         let entry = self.entries[ix].clone();
         let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::Details, cx);
         let is_selected = self.entry_is_selected(ix);
+        let is_hovered = self.entry_is_hovered(&entry);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
         let selected_drag_payload = self
@@ -2060,15 +2064,11 @@ impl ExplorerView {
             .h(px(self.entry_row_height()))
             .w_full()
             .min_w(px(self.minimum_file_columns_width()))
-            .bg(if is_selected {
-                rgb(0xcce8ff)
-            } else {
-                rgb(0xffffff)
-            })
-            .when(
-                entry_row_hover_enabled(is_selected, context_menu_active),
-                |this| this.hover(|style| style.bg(rgb(0xe5f3ff))),
-            )
+            .bg(rgb(file_entry_background_color(
+                is_selected,
+                is_hovered,
+                context_menu_active,
+            )))
             .border_1()
             .border_color(rgb(0xffffff))
             // .border_color(rgb(0x949494))
@@ -2220,6 +2220,7 @@ impl ExplorerView {
         let image_thumbnail = self.image_thumbnail_for_entry(&entry, cx);
         let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::LargeIcons, cx);
         let is_selected = self.entry_is_selected(ix);
+        let is_hovered = self.entry_is_hovered(&entry);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
         let name_click_entry = entry.clone();
@@ -2264,15 +2265,11 @@ impl ExplorerView {
             } else {
                 rgb(0xffffff)
             })
-            .bg(if is_selected {
-                rgb(0xcce8ff)
-            } else {
-                rgb(0xffffff)
-            })
-            .when(
-                entry_row_hover_enabled(is_selected, context_menu_active),
-                |this| this.hover(|style| style.bg(rgb(0xe5f3ff))),
-            )
+            .bg(rgb(file_entry_background_color(
+                is_selected,
+                is_hovered,
+                context_menu_active,
+            )))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
         tile = add_entry_hover_preview(tile, entry.clone(), cx);
@@ -2524,12 +2521,98 @@ impl ExplorerView {
             .collect()
     }
 
+    fn entry_is_hovered(&self, entry: &FileEntry) -> bool {
+        self.hovered_entry_path
+            .as_deref()
+            .is_some_and(|path| path == entry.path.as_path())
+    }
+
+    fn set_hovered_entry_path(&mut self, path: Option<PathBuf>) -> bool {
+        if self.hovered_entry_path == path {
+            return false;
+        }
+
+        self.hovered_entry_path = path;
+        true
+    }
+
+    fn set_hovered_entry(&mut self, entry: &FileEntry) -> bool {
+        self.set_hovered_entry_path(Some(entry.path.clone()))
+    }
+
+    fn clear_hovered_entry(&mut self) -> bool {
+        self.set_hovered_entry_path(None)
+    }
+
+    fn update_hovered_entry_for_list_position(
+        &mut self,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+    ) -> bool {
+        let hovered_path = self
+            .hovered_entry_index_for_list_position(local_position, viewport_size)
+            .map(|ix| self.entries[ix].path.clone());
+        self.set_hovered_entry_path(hovered_path)
+    }
+
+    fn hovered_entry_index_for_list_position(
+        &self,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+    ) -> Option<usize> {
+        let local_x = f32::from(local_position.x);
+        let local_y = f32::from(local_position.y);
+        let viewport_width = f32::from(viewport_size.width);
+        let viewport_height = f32::from(viewport_size.height);
+        if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width || local_y > viewport_height {
+            return None;
+        }
+
+        let scroll_top = self
+            .scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.scroll_top);
+        let content_y = local_y + scroll_top;
+        if self.view_mode == FileViewMode::LargeIcons {
+            return self.large_icon_layout.as_ref().and_then(|layout| {
+                layout.index_at_content_point(local_x, content_y, self.entries.len())
+            });
+        }
+
+        if content_y < 0.0 || self.entries.is_empty() {
+            return None;
+        }
+
+        let ix = (content_y / self.entry_row_height()).floor() as usize;
+        (ix < self.entries.len()).then_some(ix)
+    }
+
     fn render_mouse_selection_hit_layer(&self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
 
         canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
+                window.on_mouse_event({
+                    let entity = entity.clone();
+                    move |event: &MouseMoveEvent, _, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            let changed =
+                                if event.pressed_button.is_some() || !bounds.contains(&event.position)
+                                {
+                                    this.clear_hovered_entry()
+                                } else {
+                                    this.update_hovered_entry_for_list_position(
+                                        local_point(event.position, &bounds),
+                                        viewport_size(&bounds),
+                                    )
+                                };
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseDownEvent, _, window, cx| {
@@ -3122,6 +3205,20 @@ fn entry_row_hover_enabled(is_selected: bool, context_menu_active: bool) -> bool
     !is_selected && !context_menu_active
 }
 
+fn file_entry_background_color(
+    is_selected: bool,
+    is_hovered: bool,
+    context_menu_active: bool,
+) -> u32 {
+    if is_selected {
+        FILE_ENTRY_SELECTED_BG
+    } else if is_hovered && entry_row_hover_enabled(is_selected, context_menu_active) {
+        FILE_ENTRY_HOVER_BG
+    } else {
+        FILE_ENTRY_BG
+    }
+}
+
 fn sidebar_item_icon(item: &SidebarItem) -> AnyElement {
     sidebar_item_kind_icon_for_path(item.kind, &item.path)
 }
@@ -3469,6 +3566,7 @@ fn open_entry_context_menu_from_event(
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
+    this.set_hovered_entry(entry);
     let origin = local_context_menu_origin(event.position, this.view_origin);
     if this.open_entry_context_menu(origin, entry, window, cx) {
         cx.notify();
@@ -3544,6 +3642,10 @@ fn add_entry_primary_click(
             return;
         }
 
+        if is_mouse_entry_click(event) {
+            this.set_hovered_entry(&entry);
+        }
+
         let click_count = this.normalize_entry_click_count(&entry, event.click_count());
         if is_alt_entry_double_click(event, click_count) {
             this.handle_entry_properties_click(&entry, selection_modifiers_for_click(event));
@@ -3594,6 +3696,7 @@ fn add_entry_mouse_down_selection(
                 return;
             }
 
+            this.set_hovered_entry(&entry);
             this.apply_entry_mouse_down_selection(
                 &entry,
                 SelectionModifiers::from_gpui(event.modifiers),
@@ -3668,6 +3771,7 @@ fn add_entry_middle_click(
                 return;
             }
 
+            this.set_hovered_entry(&entry);
             if let Some(path) = this
                 .handle_entry_middle_click(&entry, SelectionModifiers::from_gpui(event.modifiers))
             {
@@ -3865,12 +3969,14 @@ fn add_current_folder_drop_handlers(
                 }
 
                 this.clear_selection();
+                this.clear_hovered_entry();
                 this.close_context_menu();
             }
             CurrentFolderClickTarget::EmptyFolder => {
                 this.close_context_menu();
                 if this.commit_active_rename_before_interaction(window, cx) {
                     this.clear_selection();
+                    this.clear_hovered_entry();
                 }
             }
         }
@@ -6080,6 +6186,10 @@ fn is_normal_entry_click(event: &ClickEvent) -> bool {
     }
 }
 
+fn is_mouse_entry_click(event: &ClickEvent) -> bool {
+    matches!(event, ClickEvent::Mouse(_))
+}
+
 fn is_alt_entry_double_click(event: &ClickEvent, click_count: usize) -> bool {
     match event {
         ClickEvent::Mouse(event) => {
@@ -6493,7 +6603,8 @@ mod tests {
     use super::{
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
-        DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_SORT_CHEVRON_ICON_SIZE,
+        DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG,
+        FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
         IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
@@ -6502,10 +6613,10 @@ mod tests {
         context_menu_width_for_natural_width, copied_directory_address,
         directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
-        filename_text_width, folder_status_summary, format_address_path, git_branch_tooltip,
-        git_divergence_label, git_divergence_tooltip, image_hover_preview_origin,
-        image_hover_preview_render_size, is_alt_entry_double_click, is_normal_entry_click,
-        is_secondary_entry_double_click, lines_of_code_tooltip,
+        file_entry_background_color, filename_text_width, folder_status_summary,
+        format_address_path, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
+        image_hover_preview_origin, image_hover_preview_render_size, is_alt_entry_double_click,
+        is_normal_entry_click, is_secondary_entry_double_click, lines_of_code_tooltip,
         open_current_folder_context_menu_from_event, operation_notice_style,
         recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
         sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
@@ -6521,6 +6632,45 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect()
+    }
+
+    fn hovered_entry_name(view: &ExplorerView) -> Option<String> {
+        view.hovered_entry_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    fn test_view_entity_with_mode<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        file_names: &[&str],
+        mode: FileViewMode,
+    ) -> (
+        TempDir,
+        gpui::Entity<ExplorerView>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        for file_name in file_names {
+            fs::write(temp.path().join(file_name), b"file").expect("create test file");
+        }
+
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.view.sort = FileSortSettings {
+            column: FileSortColumn::Name,
+            direction: SortDirection::Ascending,
+        };
+        settings.view.mode = mode;
+        settings.view.mode_media = mode;
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings)
+        });
+        (temp, view, cx)
     }
 
     fn add_hover_preview_test_view<'a>(
@@ -6648,6 +6798,112 @@ mod tests {
     fn nav_button_active_opacity_dims_button() {
         assert_eq!(NAV_BUTTON_ACTIVE_OPACITY, 0.7);
         assert!(NAV_BUTTON_ACTIVE_OPACITY < 1.0);
+    }
+
+    #[gpui::test]
+    fn file_item_hover_tracks_only_latest_mouse_moved_entry(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let first = run_until_debug_bounds(cx, "explorer-entry-0").center();
+        let second = run_until_debug_bounds(cx, "explorer-entry-1").center();
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("a.txt"));
+        });
+
+        cx.simulate_mouse_move(second, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("b.txt"));
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_entry_replaces_stale_hover_with_clicked_selection(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let first = run_until_debug_bounds(cx, "explorer-entry-0").center();
+        let second = run_until_debug_bounds(cx, "explorer-entry-1").center();
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.simulate_mouse_down(second, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(second, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("b.txt"));
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn right_clicking_entry_replaces_stale_hover_with_context_menu_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let first = run_until_debug_bounds(cx, "explorer-entry-0").center();
+        let second = run_until_debug_bounds(cx, "explorer-entry-name-hit-1").center();
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.simulate_mouse_down(second, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(second, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("b.txt"));
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.context_menu.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn moving_over_blank_list_space_clears_entry_hover(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let first = run_until_debug_bounds(cx, "explorer-entry-0").center();
+        let second_bounds = run_until_debug_bounds(cx, "explorer-entry-1");
+        let blank = gpui::point(first.x, second_bounds.bottom() + gpui::px(16.0));
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("a.txt"));
+        });
+
+        cx.simulate_mouse_move(blank, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view), None);
+        });
+    }
+
+    #[gpui::test]
+    fn moving_over_large_icon_gap_clears_entry_hover(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) =
+            test_view_entity_with_mode(cx, &["a.txt", "b.txt", "c.txt"], FileViewMode::LargeIcons);
+        let first_bounds = run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
+        let second_bounds = run_until_debug_bounds(cx, "explorer-large-icon-entry-1");
+        let first = first_bounds.center();
+        assert_eq!(first_bounds.top(), second_bounds.top());
+        assert!(first_bounds.right() < second_bounds.left());
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some("a.txt"));
+        });
+
+        let gap = gpui::point(
+            first_bounds.right() + (second_bounds.left() - first_bounds.right()) / 2.0,
+            first.y,
+        );
+        cx.simulate_mouse_move(gap, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view), None);
+        });
     }
 
     #[gpui::test]
@@ -8106,11 +8362,27 @@ mod tests {
     }
 
     #[test]
-    fn entry_hover_is_only_enabled_for_unselected_rows_without_a_context_menu() {
+    fn entry_background_uses_hover_only_for_unselected_rows_without_a_context_menu() {
         assert!(entry_row_hover_enabled(false, false));
         assert!(!entry_row_hover_enabled(true, false));
         assert!(!entry_row_hover_enabled(false, true));
         assert!(!entry_row_hover_enabled(true, true));
+        assert_eq!(
+            file_entry_background_color(false, true, false),
+            FILE_ENTRY_HOVER_BG
+        );
+        assert_eq!(
+            file_entry_background_color(true, true, false),
+            FILE_ENTRY_SELECTED_BG
+        );
+        assert_eq!(
+            file_entry_background_color(false, true, true),
+            FILE_ENTRY_BG
+        );
+        assert_eq!(
+            file_entry_background_color(false, false, false),
+            FILE_ENTRY_BG
+        );
     }
 
     #[test]

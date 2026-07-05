@@ -208,6 +208,7 @@ impl ExplorerView {
         modifiers: SelectionModifiers,
     ) {
         self.mouse_down_entry_selection = None;
+        self.hovered_entry_path = None;
         let scroll_top = self
             .scrollbar_metrics()
             .map_or(0.0, |metrics| metrics.scroll_top);
