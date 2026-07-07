@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     fs::{self, File},
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -27,6 +27,8 @@ const BIG_TIFF_BIG_ENDIAN_SIGNATURE: &[u8] = b"MM\x00+";
 const TIFF_REDUCED_IMAGE_SUBFILE_BIT: u32 = 1;
 const TIFF_OLD_REDUCED_IMAGE_SUBFILE_TYPE: u16 = 2;
 const TIFF_ASPECT_RATIO_TOLERANCE: f64 = 0.05;
+const TIFF_SPARSE_ROW_MIN_BYTES: usize = 1024 * 1024;
+const TIFF_SPARSE_ROW_READ_RATIO: usize = 8;
 #[cfg(test)]
 const SVG_IMAGE_RASTER_LONGEST_SIDE: u32 = 500;
 
@@ -537,6 +539,13 @@ struct TiffDecodedChunk {
     pixels: tiff::decoder::DecodingResult,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TiffChunkSample {
+    output_offset: usize,
+    local_x: u32,
+    local_y: u32,
+}
+
 fn path_should_try_tiff_fast_path(
     path: &Path,
     timings_enabled: bool,
@@ -577,7 +586,7 @@ fn load_tiff_thumbnail_rgba_with_cancel_timed(
 
     check_tiff_cancelled(cancel)?;
     let ifd_started = thumbnail_timing_started(timings_enabled);
-    let result = open_and_select_tiff_image(BufReader::new(file), cancel);
+    let result = open_and_select_tiff_image(BufReader::new(file), thumbnail_longest_side, cancel);
     thumbnail_timing_finished(&mut timings.tiff_ifd_scan, ifd_started);
     let mut decoder = result?;
 
@@ -606,24 +615,30 @@ fn load_tiff_thumbnail_rgba_with_cancel_timed(
 
 fn open_and_select_tiff_image<R: Read + Seek>(
     reader: R,
+    thumbnail_longest_side: u32,
     cancel: &AtomicBool,
 ) -> Result<tiff::decoder::Decoder<R>, TiffFastThumbnailError> {
     let mut decoder =
         tiff::decoder::Decoder::new(reader).map_err(|_| TiffFastThumbnailError::Unsupported)?;
-    select_reduced_tiff_image(&mut decoder, cancel)?;
+    select_reduced_tiff_image(&mut decoder, thumbnail_longest_side, cancel)?;
     Ok(decoder)
 }
 
 fn select_reduced_tiff_image<R: Read + Seek>(
     decoder: &mut tiff::decoder::Decoder<R>,
+    thumbnail_longest_side: u32,
     cancel: &AtomicBool,
 ) -> Result<(), TiffFastThumbnailError> {
     check_tiff_cancelled(cancel)?;
     let primary = decoder
         .dimensions()
         .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+    let target = dimensions_for_longest_side(primary.0, primary.1, thumbnail_longest_side)
+        .ok_or(TiffFastThumbnailError::Unsupported)?;
     let mut best_reduced_index = None;
     let mut best_reduced_area = u64::MAX;
+    let mut best_sufficient_reduced_index = None;
+    let mut best_sufficient_reduced_area = u64::MAX;
     let mut index = 0usize;
 
     loop {
@@ -640,6 +655,12 @@ fn select_reduced_tiff_image<R: Read + Seek>(
                 best_reduced_area = area;
                 best_reduced_index = Some(index);
             }
+            if dimensions.0 >= target.0 && dimensions.1 >= target.1 {
+                if area < best_sufficient_reduced_area {
+                    best_sufficient_reduced_area = area;
+                    best_sufficient_reduced_index = Some(index);
+                }
+            }
         }
 
         if !decoder.more_images() {
@@ -652,7 +673,11 @@ fn select_reduced_tiff_image<R: Read + Seek>(
     }
 
     decoder
-        .seek_to_image(best_reduced_index.unwrap_or(0))
+        .seek_to_image(
+            best_sufficient_reduced_index
+                .or(best_reduced_index)
+                .unwrap_or(0),
+        )
         .map_err(|_| TiffFastThumbnailError::Unsupported)
 }
 
@@ -822,11 +847,25 @@ fn load_uncompressed_stripped_tiff_thumbnail_rgba_result<R: Read + Seek>(
         dimensions_for_longest_side(metadata.width, metadata.height, thumbnail_longest_side)
             .ok_or(TiffFastThumbnailError::Unsupported)?;
     let mut thumbnail = image::RgbaImage::new(thumbnail_width, thumbnail_height);
-    let mut row = vec![0u8; row_len];
+    let source_x_offsets =
+        tiff_sampled_source_x_offsets(thumbnail_width, metadata.width, pixel_bytes)?;
+    let source_ys = tiff_sampled_source_pixels(thumbnail_height, metadata.height);
+    let sampled_row_len = source_x_offsets
+        .len()
+        .checked_mul(pixel_bytes)
+        .ok_or(TiffFastThumbnailError::Unsupported)?;
+    let use_sparse_rows = tiff_should_read_sparse_rows(row_len, sampled_row_len);
+    let mut full_row = (!use_sparse_rows).then(|| vec![0u8; row_len]);
+    let mut sampled_row = use_sparse_rows.then(|| vec![0u8; sampled_row_len]);
+    let mut cached_row_start = None;
+    let thumbnail_stride = usize::try_from(thumbnail_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(TiffFastThumbnailError::Unsupported)?;
+    let thumbnail_pixels: &mut [u8] = thumbnail.as_mut();
 
-    for thumbnail_y in 0..thumbnail_height {
+    for (thumbnail_y, source_y) in source_ys.iter().copied().enumerate() {
         check_tiff_cancelled(cancel)?;
-        let source_y = nearest_source_pixel(thumbnail_y, thumbnail_height, metadata.height);
         let strip_index = (source_y / rows_per_strip) as usize;
         let row_in_strip = source_y % rows_per_strip;
         let row_start = u64::from(row_in_strip)
@@ -840,22 +879,59 @@ fn load_uncompressed_stripped_tiff_thumbnail_rgba_result<R: Read + Seek>(
             return Err(TiffFastThumbnailError::Unsupported);
         }
 
-        let reader = decoder.inner();
-        reader
-            .seek(SeekFrom::Start(row_start))
-            .map_err(|_| TiffFastThumbnailError::Unsupported)?;
-        reader
-            .read_exact(&mut row)
-            .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+        if cached_row_start != Some(row_start) {
+            let reader = decoder.inner();
+            if use_sparse_rows {
+                let row = sampled_row
+                    .as_mut()
+                    .ok_or(TiffFastThumbnailError::Unsupported)?;
+                read_tiff_sparse_row(reader, row_start, &source_x_offsets, pixel_bytes, row)?;
+            } else {
+                let row = full_row
+                    .as_mut()
+                    .ok_or(TiffFastThumbnailError::Unsupported)?;
+                reader
+                    .seek(SeekFrom::Start(row_start))
+                    .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+                reader
+                    .read_exact(row)
+                    .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+            }
+            cached_row_start = Some(row_start);
+        }
 
-        for thumbnail_x in 0..thumbnail_width {
-            let source_x = nearest_source_pixel(thumbnail_x, thumbnail_width, metadata.width);
-            let offset = usize::try_from(source_x)
-                .ok()
-                .and_then(|source_x| source_x.checked_mul(pixel_bytes))
+        let output_row_start = thumbnail_y
+            .checked_mul(thumbnail_stride)
+            .ok_or(TiffFastThumbnailError::Unsupported)?;
+        for (thumbnail_x, source_offset) in source_x_offsets.iter().copied().enumerate() {
+            let sample_offset = if use_sparse_rows {
+                thumbnail_x
+                    .checked_mul(pixel_bytes)
+                    .ok_or(TiffFastThumbnailError::Unsupported)?
+            } else {
+                source_offset
+            };
+            let row = if use_sparse_rows {
+                sampled_row
+                    .as_ref()
+                    .ok_or(TiffFastThumbnailError::Unsupported)?
+            } else {
+                full_row
+                    .as_ref()
+                    .ok_or(TiffFastThumbnailError::Unsupported)?
+            };
+            let pixel = tiff_raw_pixel_to_rgba(row, sample_offset, metadata, byte_order)?;
+            let output_offset = output_row_start
+                .checked_add(
+                    thumbnail_x
+                        .checked_mul(4)
+                        .ok_or(TiffFastThumbnailError::Unsupported)?,
+                )
                 .ok_or(TiffFastThumbnailError::Unsupported)?;
-            let pixel = tiff_raw_pixel_to_rgba(&row, offset, metadata, byte_order)?;
-            thumbnail.put_pixel(thumbnail_x, thumbnail_y, image::Rgba(pixel));
+            thumbnail_pixels
+                .get_mut(output_offset..output_offset + 4)
+                .ok_or(TiffFastThumbnailError::Unsupported)?
+                .copy_from_slice(&pixel);
         }
     }
 
@@ -908,15 +984,15 @@ fn load_chunked_tiff_thumbnail_rgba_result<R: Read + Seek>(
     let (thumbnail_width, thumbnail_height) =
         dimensions_for_longest_side(metadata.width, metadata.height, thumbnail_longest_side)
             .ok_or(TiffFastThumbnailError::Unsupported)?;
-    let mut thumbnail = image::RgbaImage::new(thumbnail_width, thumbnail_height);
-    let mut chunks = HashMap::new();
+    let source_xs = tiff_sampled_source_pixels(thumbnail_width, metadata.width);
+    let source_ys = tiff_sampled_source_pixels(thumbnail_height, metadata.height);
+    let chunk_type = decoder.get_chunk_type();
+    let mut samples_by_chunk: BTreeMap<u32, Vec<TiffChunkSample>> = BTreeMap::new();
 
-    for thumbnail_y in 0..thumbnail_height {
+    for (thumbnail_y, source_y) in source_ys.iter().copied().enumerate() {
         check_tiff_cancelled(cancel)?;
-        let source_y = nearest_source_pixel(thumbnail_y, thumbnail_height, metadata.height);
-        for thumbnail_x in 0..thumbnail_width {
-            let source_x = nearest_source_pixel(thumbnail_x, thumbnail_width, metadata.width);
-            let chunk_index = match decoder.get_chunk_type() {
+        for (thumbnail_x, source_x) in source_xs.iter().copied().enumerate() {
+            let chunk_index = match chunk_type {
                 tiff::decoder::ChunkType::Strip => source_y / chunk_height,
                 tiff::decoder::ChunkType::Tile => (source_y / chunk_height)
                     .checked_mul(chunks_across)
@@ -926,22 +1002,34 @@ fn load_chunked_tiff_thumbnail_rgba_result<R: Read + Seek>(
             if chunk_index >= chunk_count {
                 return Err(TiffFastThumbnailError::Unsupported);
             }
-            if !chunks.contains_key(&chunk_index) {
-                chunks.insert(
-                    chunk_index,
-                    read_tiff_chunk(decoder, chunk_index, timings_enabled, timings)?,
-                );
-            }
-            let chunk = chunks
-                .get(&chunk_index)
-                .ok_or(TiffFastThumbnailError::Unsupported)?;
-            let pixel = tiff_chunk_pixel_to_rgba(
-                chunk,
-                source_x % chunk_width,
-                source_y % chunk_height,
-                metadata.layout,
-            )?;
-            thumbnail.put_pixel(thumbnail_x, thumbnail_y, image::Rgba(pixel));
+            samples_by_chunk
+                .entry(chunk_index)
+                .or_default()
+                .push(TiffChunkSample {
+                    output_offset: thumbnail_rgba_offset(
+                        thumbnail_x,
+                        thumbnail_y,
+                        thumbnail_width,
+                    )?,
+                    local_x: source_x % chunk_width,
+                    local_y: source_y % chunk_height,
+                });
+        }
+    }
+
+    let mut thumbnail = image::RgbaImage::new(thumbnail_width, thumbnail_height);
+    let thumbnail_pixels: &mut [u8] = thumbnail.as_mut();
+
+    for (chunk_index, samples) in samples_by_chunk {
+        check_tiff_cancelled(cancel)?;
+        let chunk = read_tiff_chunk(decoder, chunk_index, timings_enabled, timings)?;
+        for sample in samples {
+            let pixel =
+                tiff_chunk_pixel_to_rgba(&chunk, sample.local_x, sample.local_y, metadata.layout)?;
+            thumbnail_pixels
+                .get_mut(sample.output_offset..sample.output_offset + 4)
+                .ok_or(TiffFastThumbnailError::Unsupported)?
+                .copy_from_slice(&pixel);
         }
     }
 
@@ -1084,6 +1172,76 @@ fn tiff_pixel_bytes(metadata: TiffImageMetadata) -> Result<usize, TiffFastThumbn
         .layout
         .samples
         .checked_mul(usize::from(metadata.layout.bit_depth / 8))
+        .ok_or(TiffFastThumbnailError::Unsupported)
+}
+
+fn tiff_sampled_source_pixels(destination_len: u32, source_len: u32) -> Vec<u32> {
+    (0..destination_len)
+        .map(|destination| nearest_source_pixel(destination, destination_len, source_len))
+        .collect()
+}
+
+fn tiff_sampled_source_x_offsets(
+    destination_width: u32,
+    source_width: u32,
+    pixel_bytes: usize,
+) -> Result<Vec<usize>, TiffFastThumbnailError> {
+    tiff_sampled_source_pixels(destination_width, source_width)
+        .into_iter()
+        .map(|source_x| {
+            usize::try_from(source_x)
+                .ok()
+                .and_then(|source_x| source_x.checked_mul(pixel_bytes))
+                .ok_or(TiffFastThumbnailError::Unsupported)
+        })
+        .collect()
+}
+
+fn tiff_should_read_sparse_rows(row_len: usize, sampled_row_len: usize) -> bool {
+    row_len >= TIFF_SPARSE_ROW_MIN_BYTES
+        && row_len
+            > sampled_row_len
+                .saturating_mul(TIFF_SPARSE_ROW_READ_RATIO)
+                .max(sampled_row_len)
+}
+
+fn read_tiff_sparse_row<R: Read + Seek>(
+    reader: &mut R,
+    row_start: u64,
+    source_x_offsets: &[usize],
+    pixel_bytes: usize,
+    row: &mut [u8],
+) -> Result<(), TiffFastThumbnailError> {
+    for (index, source_offset) in source_x_offsets.iter().copied().enumerate() {
+        let target_start = index
+            .checked_mul(pixel_bytes)
+            .ok_or(TiffFastThumbnailError::Unsupported)?;
+        let target_end = target_start
+            .checked_add(pixel_bytes)
+            .ok_or(TiffFastThumbnailError::Unsupported)?;
+        let source_start = row_start
+            .checked_add(
+                u64::try_from(source_offset).map_err(|_| TiffFastThumbnailError::Unsupported)?,
+            )
+            .ok_or(TiffFastThumbnailError::Unsupported)?;
+        reader
+            .seek(SeekFrom::Start(source_start))
+            .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+        reader
+            .read_exact(
+                row.get_mut(target_start..target_end)
+                    .ok_or(TiffFastThumbnailError::Unsupported)?,
+            )
+            .map_err(|_| TiffFastThumbnailError::Unsupported)?;
+    }
+    Ok(())
+}
+
+fn thumbnail_rgba_offset(x: usize, y: usize, width: u32) -> Result<usize, TiffFastThumbnailError> {
+    let width = usize::try_from(width).map_err(|_| TiffFastThumbnailError::Unsupported)?;
+    y.checked_mul(width)
+        .and_then(|row| row.checked_add(x))
+        .and_then(|pixel| pixel.checked_mul(4))
         .ok_or(TiffFastThumbnailError::Unsupported)
 }
 
@@ -1714,6 +1872,38 @@ mod tests {
     }
 
     #[test]
+    fn tiff_thumbnail_selects_smallest_sufficient_reduced_ifd() {
+        let temp = TempDir::new();
+        let path = temp.path().join("reduced.tif");
+        fs::write(
+            &path,
+            tiff_rgb8_directories_bytes(&[
+                (1024, 768, [220, 30, 30], false),
+                (96, 72, [30, 220, 30], true),
+                (256, 192, [30, 30, 220], true),
+            ]),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let thumbnail = load_image_thumbnail_png_with_cancel_timed(&path, 128, &cancel, true);
+
+        assert!(thumbnail.result.is_ok());
+        assert!(thumbnail.timings.tiff_ifd_scan.is_some());
+        assert!(thumbnail.timings.tiff_raw_sample.is_some());
+        assert!(thumbnail.timings.raster_decode.is_none());
+        let decoded = image::load_from_memory(&thumbnail.result.unwrap())
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (128, 96));
+        let pixel = decoded.get_pixel(64, 48);
+        assert!(
+            pixel[2] > pixel[0] && pixel[2] > pixel[1],
+            "expected sufficient reduced blue IFD to be selected, got {pixel:?}"
+        );
+    }
+
+    #[test]
     fn tiff_thumbnail_decoder_downcasts_16_bit_samples_before_resize() {
         let temp = TempDir::new();
         let path = temp.path().join("rgb16.tif");
@@ -1828,7 +2018,7 @@ mod tests {
             read_count: 0,
             cancel_after_read: usize::MAX,
         };
-        let mut decoder = open_and_select_tiff_image(BufReader::new(reader), cancel.as_ref())
+        let mut decoder = open_and_select_tiff_image(BufReader::new(reader), 128, cancel.as_ref())
             .expect("open test tiff");
         let metadata = tiff_current_image_metadata(&mut decoder).expect("read tiff metadata");
         {
@@ -1848,6 +2038,43 @@ mod tests {
 
         assert!(matches!(result, Err(TiffFastThumbnailError::Cancelled)));
         assert!(timings.tiff_raw_sample.is_some());
+    }
+
+    #[test]
+    fn tiff_fast_decoder_reads_sparse_rows_for_very_wide_uncompressed_strips() {
+        let width = 400_000;
+        let height = 2;
+        let bytes = tiff_rgb8_bytes(width, height, &[30, 140, 220]);
+        let cancel = AtomicBool::new(false);
+        let reader = CountingReader {
+            inner: Cursor::new(bytes),
+            read_bytes: 0,
+        };
+        let mut decoder =
+            open_and_select_tiff_image(BufReader::with_capacity(1, reader), 128, &cancel)
+                .expect("open test tiff");
+        let metadata = tiff_current_image_metadata(&mut decoder).expect("read tiff metadata");
+        let row_bytes = tiff_row_bytes(metadata).unwrap();
+        let read_before_sample = decoder.inner().get_ref().read_bytes;
+        let mut timings = ImageThumbnailExtractionTimings::default();
+
+        let thumbnail = load_uncompressed_stripped_tiff_thumbnail_rgba(
+            &mut decoder,
+            metadata,
+            128,
+            &cancel,
+            true,
+            &mut timings,
+        )
+        .expect("decode sparse thumbnail");
+
+        let sample_read_bytes = decoder.inner().get_ref().read_bytes - read_before_sample;
+        assert_eq!(thumbnail.dimensions(), (128, 1));
+        assert!(timings.tiff_raw_sample.is_some());
+        assert!(
+            sample_read_bytes < row_bytes / 8,
+            "expected sparse sampling to read far less than a full row; read {sample_read_bytes} of {row_bytes} bytes"
+        );
     }
 
     #[test]
@@ -2005,6 +2232,67 @@ mod tests {
         encode_tiff::<tiff::encoder::colortype::CMYK8, u8>(width, height, 16, &data)
     }
 
+    fn tiff_rgb8_directories_bytes(images: &[(u32, u32, [u8; 3], bool)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let cursor = Cursor::new(&mut bytes);
+            let mut encoder = tiff::encoder::TiffEncoder::new(cursor).unwrap();
+            for (width, height, rgb, reduced) in images {
+                let mut data = Vec::with_capacity((*width * *height * 3) as usize);
+                for _ in 0..(*width * *height) {
+                    data.extend_from_slice(rgb);
+                }
+                let mut directory = encoder.image_directory().unwrap();
+                let strip_offset = directory.write_data(&data[..]).unwrap();
+                directory
+                    .write_tag(
+                        tiff::tags::Tag::NewSubfileType,
+                        if *reduced {
+                            TIFF_REDUCED_IMAGE_SUBFILE_BIT
+                        } else {
+                            0
+                        },
+                    )
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::ImageWidth, *width)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::ImageLength, *height)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::BitsPerSample, &[8u16, 8, 8][..])
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::Compression, 1u16)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::PhotometricInterpretation, 2u16)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::StripOffsets, strip_offset as u32)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::RowsPerStrip, *height)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::StripByteCounts, data.len() as u32)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::SamplesPerPixel, 3u16)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::PlanarConfiguration, 1u16)
+                    .unwrap();
+                directory
+                    .write_tag(tiff::tags::Tag::SampleFormat, &[1u16, 1, 1][..])
+                    .unwrap();
+                directory.finish().unwrap();
+            }
+        }
+        bytes
+    }
+
     struct WhiteGray8;
 
     impl tiff::encoder::colortype::ColorType for WhiteGray8 {
@@ -2077,6 +2365,25 @@ mod tests {
     }
 
     impl Seek for CancellingReader {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    struct CountingReader {
+        inner: Cursor<Vec<u8>>,
+        read_bytes: u64,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.read_bytes += read as u64;
+            Ok(read)
+        }
+    }
+
+    impl Seek for CountingReader {
         fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
             self.inner.seek(pos)
         }

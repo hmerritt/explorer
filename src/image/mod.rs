@@ -69,6 +69,10 @@ pub mod benchmark_support {
         let has_deferred_icc = decoded.deferred_icc_correction.is_some();
         let render_bytes = match &decoded.source {
             DecodedImageSource::Raster(image) => image.as_bytes(0).map_or(0, |bytes| bytes.len()),
+            DecodedImageSource::AnimatedGif(source) => source
+                .fallback_image
+                .as_bytes(0)
+                .map_or(0, |bytes| bytes.len()),
             DecodedImageSource::Svg(bytes) => {
                 let image = render_svg_for_target(
                     bytes,

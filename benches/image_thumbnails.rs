@@ -16,10 +16,12 @@ use explorer::benchmark_support::{
     prepare_cached_thumbnail_for_benchmark, resize_rgba_for_benchmark,
 };
 
-const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v4";
+const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v5";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
 const LARGE_HEIGHT: u32 = 1200;
+const WIDE_TIFF_WIDTH: u32 = 400_000;
+const WIDE_TIFF_HEIGHT: u32 = 2;
 const BATCH_COUNT: usize = 32;
 
 struct Fixture {
@@ -28,6 +30,8 @@ struct Fixture {
     large_jpeg: PathBuf,
     photo_jpeg: PathBuf,
     large_tiff: PathBuf,
+    large_deflate_tiff: PathBuf,
+    wide_tiff: PathBuf,
     large_webp: PathBuf,
     large_svg: PathBuf,
     batch_jpegs: Vec<PathBuf>,
@@ -53,6 +57,8 @@ impl Fixture {
             create_jpeg(&root.join("large.jpg"), LARGE_WIDTH, LARGE_HEIGHT, 0);
             create_jpeg(&root.join("photo-12mp.jpg"), 4000, 3000, 1);
             create_tiff(&root.join("large.tif"), LARGE_WIDTH, LARGE_HEIGHT);
+            create_deflate_tiff(&root.join("large-deflate.tif"), LARGE_WIDTH, LARGE_HEIGHT);
+            create_tiff(&root.join("wide.tif"), WIDE_TIFF_WIDTH, WIDE_TIFF_HEIGHT);
             create_webp(&root.join("large.webp"), LARGE_WIDTH, LARGE_HEIGHT);
             create_svg(&root.join("large.svg"));
             for index in 0..BATCH_COUNT {
@@ -72,6 +78,8 @@ impl Fixture {
             large_jpeg: root.join("large.jpg"),
             photo_jpeg: root.join("photo-12mp.jpg"),
             large_tiff: root.join("large.tif"),
+            large_deflate_tiff: root.join("large-deflate.tif"),
+            wide_tiff: root.join("wide.tif"),
             large_webp: root.join("large.webp"),
             large_svg: root.join("large.svg"),
             batch_jpegs: (0..BATCH_COUNT)
@@ -146,6 +154,29 @@ fn create_tiff(path: &Path, width: u32, height: u32) {
             .expect("encode benchmark tiff");
     }
     fs::write(path, bytes).expect("write benchmark tiff");
+}
+
+fn create_deflate_tiff(path: &Path, width: u32, height: u32) {
+    let image = gradient_rgb(width, height, 2);
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let mut encoder = tiff::encoder::TiffEncoder::new(cursor)
+            .expect("create compressed tiff encoder")
+            .with_compression(tiff::encoder::Compression::Deflate(
+                tiff::encoder::DeflateLevel::Fast,
+            ));
+        let mut image_encoder = encoder
+            .new_image::<tiff::encoder::colortype::RGB8>(width, height)
+            .expect("create compressed benchmark tiff image");
+        image_encoder
+            .rows_per_strip(16)
+            .expect("set compressed benchmark tiff strip size");
+        image_encoder
+            .write_data(image.as_raw())
+            .expect("encode compressed benchmark tiff");
+    }
+    fs::write(path, bytes).expect("write compressed benchmark tiff");
 }
 
 fn create_svg(path: &Path) {
@@ -268,6 +299,8 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("jpeg_large", &fixture.large_jpeg),
         ("jpeg_12mp", &fixture.photo_jpeg),
         ("tiff_large_uncompressed", &fixture.large_tiff),
+        ("tiff_large_deflate", &fixture.large_deflate_tiff),
+        ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("webp_large", &fixture.large_webp),
         ("svg_large", &fixture.large_svg),
     ] {
@@ -286,6 +319,8 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("png_large", &fixture.large_png),
         ("jpeg_large", &fixture.large_jpeg),
         ("tiff_large_uncompressed", &fixture.large_tiff),
+        ("tiff_large_deflate", &fixture.large_deflate_tiff),
+        ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("svg_large", &fixture.large_svg),
     ] {
         single.throughput(Throughput::Bytes(
