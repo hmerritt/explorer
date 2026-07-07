@@ -137,7 +137,10 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use crate::explorer::test_support::{TempDir, test_view_entity_at_path};
+    use crate::explorer::{
+        context_menu::ContextMenuState,
+        test_support::{TempDir, test_view_entity_at_path},
+    };
     use futures::channel::mpsc::UnboundedSender;
     use gpui::{AppContext, Entity};
 
@@ -193,6 +196,58 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(1));
         cx.run_until_parked();
         assert!(view_has_entry(cx, &view, "new.txt"));
+    }
+
+    #[gpui::test]
+    fn watcher_refresh_preserves_open_context_menu(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("existing.txt"), b"file").unwrap();
+        let watched_path = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, watched_path.clone());
+        let tx = install_test_watcher(cx, &view, watched_path.clone());
+
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.context_menu = Some(ContextMenuState::new(
+                    gpui::point(gpui::px(20.0), gpui::px(20.0)),
+                    Vec::new(),
+                ));
+            });
+        });
+
+        fs::write(watched_path.join("new.txt"), b"new").unwrap();
+        send_watcher_paths(&tx, vec![watched_path.join("new.txt")]);
+        cx.run_until_parked();
+        cx.executor().advance_clock(WATCH_REFRESH_DEBOUNCE);
+        cx.run_until_parked();
+
+        assert!(view_has_entry(cx, &view, "new.txt"));
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn manual_refresh_closes_open_context_menu(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("existing.txt"), b"file").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.context_menu = Some(ContextMenuState::new(
+                    gpui::point(gpui::px(20.0), gpui::px(20.0)),
+                    Vec::new(),
+                ));
+                view.refresh_with_entry_metadata_resolution(cx);
+                assert!(view.context_menu.is_none());
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+        });
     }
 
     #[gpui::test]

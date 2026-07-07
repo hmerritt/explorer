@@ -868,6 +868,7 @@ impl ExplorerView {
                             crate::explorer::view::ReloadMode {
                                 preserve_selection: true,
                                 rebuild_sidebar: true,
+                                preserve_context_menu: false,
                             },
                             vec![target_path],
                             true,
@@ -880,6 +881,7 @@ impl ExplorerView {
                             crate::explorer::view::ReloadMode {
                                 preserve_selection: true,
                                 rebuild_sidebar: true,
+                                preserve_context_menu: false,
                             },
                             Vec::new(),
                             true,

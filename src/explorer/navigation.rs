@@ -120,6 +120,7 @@ impl ExplorerView {
                     ReloadMode {
                         preserve_selection: true,
                         rebuild_sidebar: true,
+                        preserve_context_menu: false,
                     },
                     Vec::new(),
                     true,
@@ -179,6 +180,7 @@ impl ExplorerView {
                     ReloadMode {
                         preserve_selection: false,
                         rebuild_sidebar: true,
+                        preserve_context_menu: false,
                     },
                     select_entry_after_reload.clone().into_iter().collect(),
                     true,
@@ -741,6 +743,7 @@ mod tests {
 
     use super::*;
     use crate::explorer::{
+        context_menu::ContextMenuState,
         entry::{DirectoryLinkKind, EntryKind, FileEntry, ShellShortcutTargetKind},
         test_support::TempDir,
         view::{ExplorerView, ViewModeSelection},
@@ -798,6 +801,23 @@ mod tests {
         assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].name, "inside.txt");
+    }
+
+    #[test]
+    fn navigation_closes_open_context_menu() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.context_menu = Some(ContextMenuState::new(
+            gpui::point(gpui::px(20.0), gpui::px(20.0)),
+            Vec::new(),
+        ));
+
+        view.navigate_to_directory(child, HistoryMode::Record);
+
+        assert!(view.context_menu.is_none());
     }
 
     #[test]

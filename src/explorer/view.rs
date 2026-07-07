@@ -364,6 +364,7 @@ impl ExplorerView {
             ReloadMode {
                 preserve_selection: false,
                 rebuild_sidebar: true,
+                preserve_context_menu: false,
             },
             Vec::new(),
             true,
@@ -603,6 +604,7 @@ impl ExplorerView {
                 ReloadMode {
                     preserve_selection: true,
                     rebuild_sidebar: true,
+                    preserve_context_menu: false,
                 },
                 Vec::new(),
                 true,
@@ -634,6 +636,7 @@ impl ExplorerView {
         self.reload_inner(ReloadMode {
             preserve_selection: true,
             rebuild_sidebar: true,
+            preserve_context_menu: false,
         });
     }
 
@@ -641,6 +644,7 @@ impl ExplorerView {
         self.reload_inner(ReloadMode {
             preserve_selection: false,
             rebuild_sidebar: false,
+            preserve_context_menu: false,
         });
     }
 
@@ -706,7 +710,9 @@ impl ExplorerView {
         self.directory_is_remote = path_is_remote_drive(&self.path);
         self.thumbnail_source_policy =
             thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
-        self.context_menu = None;
+        if !mode.preserve_context_menu {
+            self.context_menu = None;
+        }
         self.clear_operation_notice();
         self.read_error = None;
         self.details_name_whitespace_press = None;
@@ -817,6 +823,7 @@ impl ExplorerView {
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
+                preserve_context_menu: true,
             },
             Vec::new(),
             true,
@@ -836,6 +843,7 @@ impl ExplorerView {
             ReloadMode {
                 preserve_selection: false,
                 rebuild_sidebar: false,
+                preserve_context_menu: false,
             },
             select_after_load,
             true,
@@ -855,6 +863,7 @@ impl ExplorerView {
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
+                preserve_context_menu: false,
             },
             Vec::new(),
             true,
@@ -927,11 +936,13 @@ impl ExplorerView {
             self.prepare_directory_reload_preserving_live_entries(ReloadMode {
                 preserve_selection: mode.preserve_selection,
                 rebuild_sidebar: false,
+                preserve_context_menu: mode.preserve_context_menu,
             })
         } else {
             self.prepare_directory_reload(ReloadMode {
                 preserve_selection: mode.preserve_selection,
                 rebuild_sidebar: false,
+                preserve_context_menu: mode.preserve_context_menu,
             })
         };
         if mode.rebuild_sidebar {
@@ -1010,6 +1021,7 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(ReloadMode {
             preserve_selection: mode.preserve_selection,
             rebuild_sidebar: false,
+            preserve_context_menu: mode.preserve_context_menu,
         });
         if mode.rebuild_sidebar {
             self.rebuild_fast_sidebar_sections();
@@ -1141,6 +1153,7 @@ impl ExplorerView {
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
+                preserve_context_menu: false,
             },
             Vec::new(),
             true,
@@ -1857,6 +1870,7 @@ fn test_explorer_settings() -> ExplorerSettings {
 pub(super) struct ReloadMode {
     pub(super) preserve_selection: bool,
     pub(super) rebuild_sidebar: bool,
+    pub(super) preserve_context_menu: bool,
 }
 
 pub(super) fn tab_label_for_path(path: &Path) -> String {
@@ -2178,6 +2192,7 @@ mod tests {
             ReloadMode {
                 preserve_selection: false,
                 rebuild_sidebar: false,
+                preserve_context_menu: false,
             },
             Vec::new(),
             Vec::new(),
@@ -3269,6 +3284,7 @@ mod tests {
                     mode: ReloadMode {
                         preserve_selection: false,
                         rebuild_sidebar: false,
+                        preserve_context_menu: false,
                     },
                     schedule_metadata: true,
                     refresh_search: true,
@@ -3325,6 +3341,7 @@ mod tests {
                     mode: ReloadMode {
                         preserve_selection: false,
                         rebuild_sidebar: true,
+                        preserve_context_menu: false,
                     },
                     schedule_metadata: false,
                     refresh_search: false,
