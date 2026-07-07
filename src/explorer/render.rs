@@ -2122,17 +2122,27 @@ impl ExplorerView {
             )
             .into_any_element()
         } else {
-            let name_hit_target = name_cell_hit_target(
+            let show_full_path = self.recursive_search_results_active();
+            let name_widths = details_name_widths(
                 &entry,
-                app_icon,
                 self.show_file_name_extensions,
-                self.recursive_search_results_active(),
+                show_full_path,
                 self.name_column_width(window),
                 &self.font,
                 window,
-            )
-            .id(("explorer-entry-name-hit", ix))
-            .debug_selector(move || format!("explorer-entry-name-hit-{ix}"));
+            );
+            let name_visual = name_cell_visual(
+                &entry,
+                app_icon,
+                self.show_file_name_extensions,
+                show_full_path,
+                name_widths,
+                &self.font,
+                window,
+            );
+            let name_hit_target = name_cell_hit_target(name_widths)
+                .id(("explorer-entry-name-hit", ix))
+                .debug_selector(move || format!("explorer-entry-name-hit-{ix}"));
             let name_hit_target =
                 add_entry_mouse_down_selection(name_hit_target, entry.clone(), cx);
             let name_hit_target =
@@ -2169,7 +2179,14 @@ impl ExplorerView {
                 EntryContextMenuTarget::NameCell,
                 cx,
             );
-            name_cell.child(name_hit_target).into_any_element()
+            let name_content = div()
+                .relative()
+                .h_full()
+                .w(px(details_name_content_width(name_widths.draw_text_width)))
+                .flex_shrink_0()
+                .child(name_visual)
+                .child(name_hit_target);
+            name_cell.child(name_content).into_any_element()
         };
 
         let mut row = row.child(name_cell);
@@ -2508,7 +2525,7 @@ impl ExplorerView {
         self.entries
             .iter()
             .map(|entry| {
-                let visible_text_width = details_name_visible_text_width(
+                let widths = details_name_widths(
                     entry,
                     self.show_file_name_extensions,
                     show_full_path,
@@ -2516,7 +2533,7 @@ impl ExplorerView {
                     &self.font,
                     window,
                 );
-                details_name_item_hit_right(visible_text_width, name_column_width)
+                details_name_item_hit_right(widths.hit_text_width, name_column_width)
             })
             .collect()
     }
@@ -5683,6 +5700,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
 
 fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
     let cell = div()
+        .relative()
         .flex()
         .items_center()
         .h_full()
@@ -5696,46 +5714,42 @@ fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
     }
 }
 
-fn name_cell_hit_target(
+fn name_cell_visual(
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
     show_file_name_extensions: bool,
     show_full_path: bool,
-    name_column_width: f32,
+    widths: DetailsNameWidths,
     font: &gpui::Font,
     window: &Window,
 ) -> Div {
-    let text_width = details_name_visible_text_width(
-        entry,
-        show_file_name_extensions,
-        show_full_path,
-        name_column_width,
-        font,
-        window,
-    );
-    let filename = truncated_text(
-        entry.display_name_with_extensions(show_file_name_extensions),
-        text_width,
+    let filename_text = entry.display_name_with_extensions(show_file_name_extensions);
+    let filename = details_name_text(
+        filename_text,
+        widths.filename_text_width,
+        widths.draw_text_width,
+        NAME_TEXT_SIZE,
         0x000000,
         font,
         window,
     );
-    let target = div()
+
+    let visual = div()
         .flex()
         .items_center()
         .h_full()
-        .w(px(
-            (FILE_ICON_SLOT_WIDTH + NAME_ICON_TEXT_GAP + text_width).max(0.0)
-        ))
+        .w(px(details_name_content_width(widths.draw_text_width)))
         .flex_shrink_0()
         .overflow_hidden();
 
-    target
+    visual
         .child(entry_icon(entry, app_icon))
         .child(if show_full_path {
-            let full_path = truncated_text_with_size(
-                &entry.path.display().to_string(),
-                text_width,
+            let full_path_text = entry.path.display().to_string();
+            let full_path = details_name_text(
+                &full_path_text,
+                widths.full_path_text_width.unwrap_or(0.0),
+                widths.draw_text_width,
                 RECURSIVE_SEARCH_PATH_TEXT_SIZE,
                 RECURSIVE_SEARCH_PATH_TEXT_COLOR,
                 font,
@@ -5746,20 +5760,20 @@ fn name_cell_hit_target(
                 .flex()
                 .flex_col()
                 .justify_center()
-                .w(px(text_width))
+                .w(px(widths.draw_text_width))
                 .min_w(px(0.0))
                 .ml(px(NAME_ICON_TEXT_GAP))
                 .text_size(px(NAME_TEXT_SIZE))
                 .child(
                     div()
-                        .w(px(text_width))
+                        .w(px(widths.draw_text_width))
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .child(filename),
                 )
                 .child(
                     div()
-                        .w(px(text_width))
+                        .w(px(widths.draw_text_width))
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_size(px(RECURSIVE_SEARCH_PATH_TEXT_SIZE))
@@ -5768,7 +5782,7 @@ fn name_cell_hit_target(
                 )
         } else {
             div()
-                .w(px(text_width))
+                .w(px(widths.draw_text_width))
                 .min_w(px(0.0))
                 .ml(px(NAME_ICON_TEXT_GAP))
                 .truncate()
@@ -5777,23 +5791,36 @@ fn name_cell_hit_target(
         })
 }
 
-fn details_name_visible_text_width(
+fn name_cell_hit_target(widths: DetailsNameWidths) -> Div {
+    div()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .h_full()
+        .w(px(details_name_content_width(widths.hit_text_width)))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DetailsNameWidths {
+    draw_text_width: f32,
+    hit_text_width: f32,
+    filename_text_width: f32,
+    full_path_text_width: Option<f32>,
+}
+
+fn details_name_widths(
     entry: &FileEntry,
     show_file_name_extensions: bool,
     show_full_path: bool,
     name_column_width: f32,
     font: &gpui::Font,
     window: &Window,
-) -> f32 {
+) -> DetailsNameWidths {
     let available_width = if show_full_path {
         recursive_result_text_width(name_column_width)
     } else {
         available_filename_text_width(name_column_width)
     };
-    if available_width <= 0.0 {
-        return 0.0;
-    }
-
     let filename_width = measure_details_name_text_width(
         entry.display_name_with_extensions(show_file_name_extensions),
         NAME_TEXT_SIZE,
@@ -5801,20 +5828,42 @@ fn details_name_visible_text_width(
         font,
         window,
     );
-    let natural_width = if show_full_path {
-        let full_path_width = measure_details_name_text_width(
+    let full_path_width = if show_full_path {
+        Some(measure_details_name_text_width(
             &entry.path.display().to_string(),
             RECURSIVE_SEARCH_PATH_TEXT_SIZE,
             RECURSIVE_SEARCH_PATH_TEXT_COLOR,
             font,
             window,
-        );
-        filename_width.max(full_path_width)
+        ))
     } else {
-        filename_width
+        None
     };
 
-    natural_width.min(available_width).max(0.0)
+    details_name_width_policy(available_width, filename_width, full_path_width)
+}
+
+fn details_name_content_width(text_width: f32) -> f32 {
+    (FILE_ICON_SLOT_WIDTH + NAME_ICON_TEXT_GAP + text_width.max(0.0)).max(0.0)
+}
+
+fn details_name_width_policy(
+    available_width: f32,
+    filename_text_width: f32,
+    full_path_text_width: Option<f32>,
+) -> DetailsNameWidths {
+    let available_width = available_width.max(0.0);
+    let natural_width = full_path_text_width
+        .map(|full_path_text_width| filename_text_width.max(full_path_text_width))
+        .unwrap_or(filename_text_width)
+        .max(0.0);
+
+    DetailsNameWidths {
+        draw_text_width: available_width,
+        hit_text_width: natural_width.min(available_width),
+        filename_text_width: filename_text_width.max(0.0),
+        full_path_text_width: full_path_text_width.map(|width| width.max(0.0)),
+    }
 }
 
 fn measure_details_name_text_width(
@@ -5843,6 +5892,22 @@ fn measure_details_name_text_width(
             .layout_line(text, px(text_size), &[run], None)
             .width,
     )
+}
+
+fn details_name_text(
+    text: &str,
+    natural_width: f32,
+    available_width: f32,
+    text_size: f32,
+    text_color: u32,
+    font: &gpui::Font,
+    window: &Window,
+) -> SharedString {
+    if natural_width <= available_width {
+        SharedString::from(text.to_owned())
+    } else {
+        truncated_text_with_size(text, available_width, text_size, text_color, font, window)
+    }
 }
 
 fn rename_name_cell(
@@ -6610,7 +6675,7 @@ mod tests {
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
         codebase_makeup_segments, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
-        context_menu_width_for_natural_width, copied_directory_address,
+        context_menu_width_for_natural_width, copied_directory_address, details_name_width_policy,
         directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         file_entry_background_color, filename_text_width, folder_status_summary,
@@ -9212,6 +9277,42 @@ mod tests {
             );
             assert!(recursive_width > 0.0);
         }
+    }
+
+    #[test]
+    fn details_name_width_policy_uses_available_width_for_short_name_drawing() {
+        let widths = details_name_width_policy(300.0, 64.0, None);
+
+        assert_eq!(widths.draw_text_width, 300.0);
+        assert_eq!(widths.hit_text_width, 64.0);
+        assert_eq!(widths.filename_text_width, 64.0);
+        assert_eq!(widths.full_path_text_width, None);
+    }
+
+    #[test]
+    fn details_name_width_policy_uses_widest_recursive_text_for_hit_target() {
+        let widths = details_name_width_policy(300.0, 64.0, Some(180.0));
+
+        assert_eq!(widths.draw_text_width, 300.0);
+        assert_eq!(widths.hit_text_width, 180.0);
+        assert_eq!(widths.filename_text_width, 64.0);
+        assert_eq!(widths.full_path_text_width, Some(180.0));
+    }
+
+    #[test]
+    fn details_name_width_policy_caps_long_name_hit_target_to_available_width() {
+        let widths = details_name_width_policy(120.0, 500.0, None);
+
+        assert_eq!(widths.draw_text_width, 120.0);
+        assert_eq!(widths.hit_text_width, 120.0);
+    }
+
+    #[test]
+    fn details_name_width_policy_clamps_empty_available_width() {
+        let widths = details_name_width_policy(-10.0, 64.0, Some(180.0));
+
+        assert_eq!(widths.draw_text_width, 0.0);
+        assert_eq!(widths.hit_text_width, 0.0);
     }
 
     #[test]
