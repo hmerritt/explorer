@@ -712,22 +712,34 @@ async fn linux_open_file(
     intent: &OpenFileIntent,
     identifier: Option<ashpd::WindowIdentifier>,
 ) -> io::Result<OpenWithOutcome> {
+    match intent {
+        OpenFileIntent::Default => match linux_default_open_policy_for_path(path) {
+            LinuxDefaultOpenPolicy::SystemLauncher => linux_open_file_with_system_launcher(path),
+            LinuxDefaultOpenPolicy::ChooseApplication => {
+                linux_choose_application_for_file(path, identifier).await
+            }
+        },
+        OpenFileIntent::ChooseApplication => {
+            linux_choose_application_for_file(path, identifier).await
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_choose_application_for_file(
+    path: &Path,
+    identifier: Option<ashpd::WindowIdentifier>,
+) -> io::Result<OpenWithOutcome> {
     use ashpd::{
         Error,
         desktop::{ResponseError, open_uri::OpenFileRequest},
     };
     use std::fs::File;
 
-    let ask = match intent {
-        OpenFileIntent::ChooseApplication => true,
-        OpenFileIntent::Default => {
-            linux_should_ask_for_default(linux_has_default_application(path))
-        }
-    };
     let file = File::open(path)?;
     let result = OpenFileRequest::default()
         .identifier(identifier)
-        .ask(ask)
+        .ask(true)
         .send_file(&file)
         .await
         .and_then(|request| request.response());
@@ -735,13 +747,6 @@ async fn linux_open_file(
     match result {
         Ok(()) => Ok(OpenWithOutcome::opened(false)),
         Err(Error::Response(ResponseError::Cancelled)) => Ok(OpenWithOutcome::Cancelled),
-        Err(error) if matches!(intent, OpenFileIntent::Default) => open::that_detached(path)
-            .map(|_| OpenWithOutcome::opened(false))
-            .map_err(|fallback| {
-                io::Error::other(format!(
-                    "desktop portal failed ({error}); fallback opener failed ({fallback})"
-                ))
-            }),
         Err(error) => Err(io::Error::other(format!(
             "desktop Open With picker is unavailable: {error}"
         ))),
@@ -749,35 +754,128 @@ async fn linux_open_file(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_should_ask_for_default(has_default: Option<bool>) -> bool {
-    matches!(has_default, Some(false))
+fn linux_default_open_policy_for_path(path: &Path) -> LinuxDefaultOpenPolicy {
+    let Some(mime_type) = linux_file_mime_type(path) else {
+        return linux_default_open_policy(None);
+    };
+
+    match linux_default_desktop_id_query_for_mime(&mime_type) {
+        Some(Some(desktop_id)) => linux_default_open_policy(Some(Some(desktop_id.as_str()))),
+        Some(None) => linux_default_open_policy(Some(None)),
+        None => linux_default_open_policy(None),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxDefaultOpenPolicy {
+    SystemLauncher,
+    ChooseApplication,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_default_open_policy(default_query: Option<Option<&str>>) -> LinuxDefaultOpenPolicy {
+    match default_query {
+        Some(Some(desktop_id)) if linux_is_explorer_desktop_id(desktop_id) => {
+            LinuxDefaultOpenPolicy::ChooseApplication
+        }
+        Some(Some(_)) => LinuxDefaultOpenPolicy::SystemLauncher,
+        Some(None) => LinuxDefaultOpenPolicy::ChooseApplication,
+        None => LinuxDefaultOpenPolicy::SystemLauncher,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_is_explorer_desktop_id(desktop_id: &str) -> bool {
+    linux_default_desktop_ids_match(desktop_id, crate::settings::APP_ID)
 }
 
 #[cfg(target_os = "linux")]
-fn linux_has_default_application(path: &Path) -> Option<bool> {
-    use std::process::Command;
+fn linux_open_file_with_system_launcher(path: &Path) -> io::Result<OpenWithOutcome> {
+    let attempts = open::commands(path).into_iter().map(|mut command| {
+        let command_label = linux_launcher_command_label(&command);
+        linux_launcher_attempt_result(command_label, command.output())
+    });
 
-    let mime = Command::new("xdg-mime")
-        .args(["query", "filetype"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !mime.status.success() {
-        return None;
+    linux_checked_launcher_outcome(attempts)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_launcher_attempt_result(
+    command: String,
+    output: io::Result<std::process::Output>,
+) -> Result<(), LinuxLauncherFailure> {
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let detail = if stderr.is_empty() {
+                format!("exited with {}", output.status)
+            } else {
+                format!("exited with {}: {stderr}", output.status)
+            };
+            Err(LinuxLauncherFailure { command, detail })
+        }
+        Err(error) => Err(LinuxLauncherFailure {
+            command,
+            detail: format!("could not start: {error}"),
+        }),
     }
-    let mime = String::from_utf8_lossy(&mime.stdout).trim().to_owned();
-    if mime.is_empty() {
-        return None;
+}
+
+#[cfg(target_os = "linux")]
+fn linux_launcher_command_label(command: &std::process::Command) -> String {
+    std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(linux_launcher_command_part)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_launcher_command_part(part: &std::ffi::OsStr) -> String {
+    let text = part.to_string_lossy();
+    if text.chars().any(char::is_whitespace) {
+        format!("{text:?}")
+    } else {
+        text.into_owned()
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxLauncherFailure {
+    command: String,
+    detail: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_checked_launcher_outcome(
+    attempts: impl IntoIterator<Item = Result<(), LinuxLauncherFailure>>,
+) -> io::Result<OpenWithOutcome> {
+    let mut failures = Vec::new();
+    for attempt in attempts {
+        match attempt {
+            Ok(()) => return Ok(OpenWithOutcome::opened(false)),
+            Err(failure) => failures.push(failure),
+        }
     }
 
-    let default = Command::new("xdg-mime")
-        .args(["query", "default", &mime])
-        .output()
-        .ok()?;
-    default
-        .status
-        .success()
-        .then(|| !String::from_utf8_lossy(&default.stdout).trim().is_empty())
+    Err(io::Error::other(linux_launcher_failures_message(failures)))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_launcher_failures_message(failures: Vec<LinuxLauncherFailure>) -> String {
+    if failures.is_empty() {
+        return "no system launchers are available".to_owned();
+    }
+
+    let details = failures
+        .into_iter()
+        .map(|failure| format!("{} ({})", failure.command, failure.detail))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("system launchers failed: {details}")
 }
 
 #[cfg(target_os = "linux")]
@@ -817,6 +915,11 @@ fn linux_file_mime_type(path: &Path) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn linux_default_desktop_id_for_mime(mime: &str) -> Option<String> {
+    linux_default_desktop_id_query_for_mime(mime).flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_default_desktop_id_query_for_mime(mime: &str) -> Option<Option<String>> {
     use std::process::Command;
 
     let output = Command::new("xdg-mime")
@@ -828,7 +931,7 @@ fn linux_default_desktop_id_for_mime(mime: &str) -> Option<String> {
     }
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!value.is_empty()).then_some(value)
+    Some((!value.is_empty()).then_some(value))
 }
 
 #[cfg(target_os = "linux")]
@@ -2037,12 +2140,92 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_default_open_asks_only_when_default_is_known_missing() {
-        assert!(!linux_should_ask_for_default(Some(true)));
-        assert!(linux_should_ask_for_default(Some(false)));
-        assert!(!linux_should_ask_for_default(None));
+    fn linux_default_open_policy_uses_launcher_for_external_default() {
+        assert_eq!(
+            linux_default_open_policy(Some(Some("org.gnome.TextEditor.desktop"))),
+            LinuxDefaultOpenPolicy::SystemLauncher
+        );
+    }
+
+    #[test]
+    fn linux_default_open_policy_asks_when_default_is_known_missing() {
+        assert_eq!(
+            linux_default_open_policy(Some(None)),
+            LinuxDefaultOpenPolicy::ChooseApplication
+        );
+    }
+
+    #[test]
+    fn linux_default_open_policy_asks_when_default_is_explorer() {
+        assert_eq!(
+            linux_default_open_policy(Some(Some(crate::settings::APP_ID))),
+            LinuxDefaultOpenPolicy::ChooseApplication
+        );
+        assert_eq!(
+            linux_default_open_policy(Some(Some("com.hmerritt.explorer.desktop"))),
+            LinuxDefaultOpenPolicy::ChooseApplication
+        );
+    }
+
+    #[test]
+    fn linux_default_open_policy_uses_launcher_when_default_lookup_is_unknown() {
+        assert_eq!(
+            linux_default_open_policy(None),
+            LinuxDefaultOpenPolicy::SystemLauncher
+        );
+    }
+
+    fn linux_launcher_failure(command: &str, detail: &str) -> LinuxLauncherFailure {
+        LinuxLauncherFailure {
+            command: command.to_owned(),
+            detail: detail.to_owned(),
+        }
+    }
+
+    #[test]
+    fn linux_checked_launcher_outcome_opens_on_first_success() {
+        assert_eq!(
+            linux_checked_launcher_outcome([Ok(())]).unwrap(),
+            OpenWithOutcome::opened(false)
+        );
+    }
+
+    #[test]
+    fn linux_checked_launcher_outcome_tries_later_launchers_after_failures() {
+        let attempts = vec![
+            Err(linux_launcher_failure("xdg-open", "exited with status 3")),
+            Err(linux_launcher_failure(
+                "gio open",
+                "could not start: missing",
+            )),
+            Ok(()),
+        ];
+
+        assert_eq!(
+            linux_checked_launcher_outcome(attempts).unwrap(),
+            OpenWithOutcome::opened(false)
+        );
+    }
+
+    #[test]
+    fn linux_checked_launcher_outcome_reports_all_failures() {
+        let error = linux_checked_launcher_outcome([
+            Err(linux_launcher_failure(
+                "xdg-open",
+                "exited with status 3: no app",
+            )),
+            Err(linux_launcher_failure(
+                "gio open",
+                "could not start: missing",
+            )),
+        ])
+        .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("system launchers failed"));
+        assert!(message.contains("xdg-open (exited with status 3: no app)"));
+        assert!(message.contains("gio open (could not start: missing)"));
     }
 
     #[cfg(target_os = "macos")]
