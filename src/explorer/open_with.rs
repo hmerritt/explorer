@@ -241,26 +241,16 @@ impl ExplorerView {
 
         #[cfg(target_os = "linux")]
         {
-            use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-
-            let window_handle = HasWindowHandle::window_handle(window)
-                .ok()
-                .map(|handle| handle.as_raw());
-            let display_handle = HasDisplayHandle::display_handle(window)
-                .ok()
-                .map(|handle| handle.as_raw());
+            let _ = window;
             let task = cx.spawn(async move |this, cx| {
                 let mut result = Ok(OpenWithOutcome::opened(false));
                 let mut result_path = paths.first().cloned();
                 for path in paths {
                     result_path = Some(path.clone());
-                    let identifier =
-                        linux_window_identifier(window_handle.as_ref(), display_handle.as_ref())
-                            .await;
                     let intent = intent.clone();
                     result = cx
                         .background_executor()
-                        .spawn(async move { linux_open_file(&path, &intent, identifier).await })
+                        .spawn(async move { linux_open_file(&path, &intent, None).await })
                         .await;
                     if !result.as_ref().is_ok_and(|outcome| outcome.is_opened()) {
                         break;
@@ -691,19 +681,6 @@ fn windows_executable_display_name(path: &Path) -> Option<String> {
         .or_else(|| path.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
-}
-
-#[cfg(target_os = "linux")]
-async fn linux_window_identifier(
-    window_handle: Option<&raw_window_handle::RawWindowHandle>,
-    display_handle: Option<&raw_window_handle::RawDisplayHandle>,
-) -> Option<ashpd::WindowIdentifier> {
-    match window_handle {
-        Some(window_handle) => {
-            ashpd::WindowIdentifier::from_raw_handle(window_handle, display_handle).await
-        }
-        None => None,
-    }
 }
 
 #[cfg(target_os = "linux")]
