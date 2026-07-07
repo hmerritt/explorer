@@ -2131,12 +2131,16 @@ impl ExplorerView {
                 &self.font,
                 window,
             );
+            let name_is_manual_width = self.name_column_is_manual_width();
+            let name_physical_text_width =
+                details_name_physical_text_width(name_widths, name_is_manual_width);
             let name_visual = name_cell_visual(
                 &entry,
                 app_icon,
                 self.show_file_name_extensions,
                 show_full_path,
                 name_widths,
+                name_physical_text_width,
                 &self.font,
                 window,
             );
@@ -2165,12 +2169,10 @@ impl ExplorerView {
                 entity.clone(),
             );
 
-            let name_cell = name_cell_container(
-                self.name_column_width(window),
-                self.name_column_is_manual_width(),
-            )
-            .id(("explorer-entry-name", ix))
-            .debug_selector(move || format!("explorer-entry-name-{ix}"));
+            let name_cell =
+                name_cell_container(self.name_column_width(window), name_is_manual_width)
+                    .id(("explorer-entry-name", ix))
+                    .debug_selector(move || format!("explorer-entry-name-{ix}"));
             let name_cell =
                 add_selected_entry_drag(name_cell, selected_drag_payload.clone(), entity);
             let name_cell = add_entry_context_menu(
@@ -2182,7 +2184,7 @@ impl ExplorerView {
             let name_content = div()
                 .relative()
                 .h_full()
-                .w(px(details_name_content_width(name_widths.draw_text_width)))
+                .w(px(details_name_content_width(name_physical_text_width)))
                 .flex_shrink_0()
                 .child(name_visual)
                 .child(name_hit_target);
@@ -5747,6 +5749,7 @@ fn name_cell_visual(
     show_file_name_extensions: bool,
     show_full_path: bool,
     widths: DetailsNameWidths,
+    physical_text_width: f32,
     font: &gpui::Font,
     window: &Window,
 ) -> Div {
@@ -5765,7 +5768,7 @@ fn name_cell_visual(
         .flex()
         .items_center()
         .h_full()
-        .w(px(details_name_content_width(widths.draw_text_width)))
+        .w(px(details_name_content_width(physical_text_width)))
         .flex_shrink_0()
         .overflow_hidden();
 
@@ -5872,6 +5875,14 @@ fn details_name_widths(
 
 fn details_name_content_width(text_width: f32) -> f32 {
     (FILE_ICON_SLOT_WIDTH + NAME_ICON_TEXT_GAP + text_width.max(0.0)).max(0.0)
+}
+
+fn details_name_physical_text_width(widths: DetailsNameWidths, manual_width: bool) -> f32 {
+    if manual_width {
+        widths.draw_text_width
+    } else {
+        widths.hit_text_width
+    }
 }
 
 fn details_name_width_policy(
@@ -6702,7 +6713,8 @@ mod tests {
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
         codebase_makeup_segments, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
-        context_menu_width_for_natural_width, copied_directory_address, details_name_width_policy,
+        context_menu_width_for_natural_width, copied_directory_address,
+        details_name_physical_text_width, details_name_width_policy,
         directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         file_entry_background_color, filename_text_width, folder_status_summary,
@@ -7034,6 +7046,41 @@ mod tests {
         });
 
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn auto_name_column_does_not_show_horizontal_scrollbar_after_details_name_split(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(
+            cx,
+            &[
+                ".cargo",
+                ".github",
+                "assets",
+                "benches",
+                "brew",
+                "docs",
+                "examples",
+                "src",
+                "target",
+                "vendor",
+                "README-development.md",
+            ],
+        );
+        run_until_debug_bounds(cx, "explorer-entry-name-0");
+        for _ in 0..3 {
+            cx.run_until_parked();
+        }
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.file_columns.name_width.is_none());
+            assert!(
+                view.horizontal_scrollbar_metrics().is_none(),
+                "auto Name column should not create horizontal overflow"
+            );
+        });
+        assert!(cx.debug_bounds("explorer-horizontal-scrollbar").is_none());
     }
 
     #[gpui::test]
@@ -9432,6 +9479,27 @@ mod tests {
 
         assert_eq!(widths.draw_text_width, 0.0);
         assert_eq!(widths.hit_text_width, 0.0);
+    }
+
+    #[test]
+    fn details_name_physical_text_width_uses_hit_width_for_auto_short_names() {
+        let widths = details_name_width_policy(300.0, 64.0, None);
+
+        assert_eq!(details_name_physical_text_width(widths, false), 64.0);
+    }
+
+    #[test]
+    fn details_name_physical_text_width_caps_auto_long_names_to_available_width() {
+        let widths = details_name_width_policy(120.0, 500.0, None);
+
+        assert_eq!(details_name_physical_text_width(widths, false), 120.0);
+    }
+
+    #[test]
+    fn details_name_physical_text_width_keeps_manual_name_width() {
+        let widths = details_name_width_policy(300.0, 64.0, None);
+
+        assert_eq!(details_name_physical_text_width(widths, true), 300.0);
     }
 
     #[test]
