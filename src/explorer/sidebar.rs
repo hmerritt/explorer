@@ -262,12 +262,25 @@ fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
 fn sidebar_drive_label(path: &Path) -> String {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        if path == Path::new("/") {
-            return "Filesystem".to_owned();
-        }
+        unix_sidebar_drive_label(path)
     }
 
-    drive_display_label(path)
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        drive_display_label(path)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn unix_sidebar_drive_label(path: &Path) -> String {
+    if path == Path::new("/") {
+        return "Filesystem".to_owned();
+    }
+
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| drive_display_label(path))
 }
 
 fn sidebar_wsl_drive_label(path: &Path) -> String {
@@ -454,6 +467,51 @@ mod tests {
         });
 
         assert_eq!(home_sidebar_label(path), "Home");
+    }
+
+    #[test]
+    fn unix_sidebar_drive_label_uses_filesystem_for_root_and_mount_tail() {
+        assert_eq!(unix_sidebar_drive_label(Path::new("/")), "Filesystem");
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/run/media/hrmer/CDROM")),
+            "CDROM"
+        );
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/run/media/hrmer/Ubuntu 26")),
+            "Ubuntu 26"
+        );
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/media/hrmer/disk")),
+            "disk"
+        );
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/Volumes/Backup Disk")),
+            "Backup Disk"
+        );
+        assert_eq!(unix_sidebar_drive_label(Path::new("/mnt/share")), "share");
+    }
+
+    #[test]
+    fn drive_items_use_final_path_component_for_unix_mounts() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
+        let items = drive_items_from_roots(vec![
+            PathBuf::from("/"),
+            PathBuf::from("/run/media/hrmer/CDROM"),
+            PathBuf::from("/run/media/hrmer/Ubuntu 26"),
+            PathBuf::from("/Volumes/Backup Disk"),
+        ]);
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec!["Filesystem", "CDROM", "Ubuntu 26", "Backup Disk"]
+        );
     }
 
     #[test]
