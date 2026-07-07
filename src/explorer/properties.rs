@@ -95,9 +95,12 @@ const PROPERTIES_CODE_MAKEUP_SEPARATOR_COLOR: u32 = 0xffffff;
 const PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH: f32 = 178.0;
 const PROPERTIES_CODE_LANGUAGE_LOC_WIDTH: f32 = 86.0;
 const PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE: f32 = 10.0;
-const PROPERTIES_SPECTRUM_TIME_BINS: usize = 512;
-const PROPERTIES_SPECTRUM_FREQUENCY_BINS: usize = 256;
+const PROPERTIES_SPECTRUM_INITIAL_TIME_BINS: usize = 512;
+const PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS: usize = 256;
+const PROPERTIES_SPECTRUM_MAX_TIME_BINS: usize = 4096;
+const PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS: usize = 2048;
 const PROPERTIES_SPECTRUM_FFT_SIZE: usize = 4096;
+const PROPERTIES_SPECTRUM_RESIZE_DEBOUNCE_MS: u64 = 300;
 const PROPERTIES_SPECTRUM_DEFAULT_LOW_DB: f32 = -120.0;
 const PROPERTIES_SPECTRUM_DEFAULT_HIGH_DB: f32 = -20.0;
 const PROPERTIES_SPECTRUM_MIN_DB: f32 = -160.0;
@@ -509,8 +512,16 @@ struct PropertySpectrumAnalysis {
     metadata: PropertySpectrumMetadata,
     db_values: Vec<f32>,
     image: Arc<RenderImage>,
+    target: PropertySpectrumTarget,
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PropertySpectrumTarget {
+    time_bins: usize,
+    frequency_bins: usize,
+    fft_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -533,6 +544,39 @@ struct PropertySpectrumRenderCacheKey {
 struct PropertySpectrumRenderCache {
     key: PropertySpectrumRenderCacheKey,
     image: Arc<RenderImage>,
+}
+
+struct PropertySpectrumRefinementState {
+    generation: u64,
+    pending_target: Option<PropertySpectrumTarget>,
+    task: Option<Task<()>>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl PropertySpectrumTarget {
+    fn initial() -> Self {
+        Self {
+            time_bins: PROPERTIES_SPECTRUM_INITIAL_TIME_BINS,
+            frequency_bins: PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS,
+            fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
+        }
+    }
+
+    fn from_render_size(size: PropertySpectrumRenderSize) -> Self {
+        Self {
+            time_bins: (size.width as usize).clamp(1, PROPERTIES_SPECTRUM_MAX_TIME_BINS),
+            frequency_bins: (size.height as usize).clamp(1, PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS),
+            fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
+        }
+    }
+
+    fn width(self) -> u32 {
+        self.time_bins as u32
+    }
+
+    fn height(self) -> u32 {
+        self.frequency_bins as u32
+    }
 }
 
 impl PropertySpectrumRenderSize {
@@ -567,6 +611,17 @@ impl PropertySpectrumRenderCacheKey {
             target,
             low_db_bits: range.low_db.to_bits(),
             high_db_bits: range.high_db.to_bits(),
+        }
+    }
+}
+
+impl Default for PropertySpectrumRefinementState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            pending_target: None,
+            task: None,
+            cancel: None,
         }
     }
 }
@@ -633,6 +688,7 @@ pub(super) struct PropertiesDialog {
     spectrum_range: PropertySpectrumRange,
     spectrum_render_size: Option<PropertySpectrumRenderSize>,
     spectrum_render_cache: Option<PropertySpectrumRenderCache>,
+    spectrum_refinement: PropertySpectrumRefinementState,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -759,6 +815,7 @@ impl PropertiesDialog {
             spectrum_range: PropertySpectrumRange::default(),
             spectrum_render_size: None,
             spectrum_render_cache: None,
+            spectrum_refinement: PropertySpectrumRefinementState::default(),
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -885,6 +942,7 @@ impl PropertiesDialog {
 
     fn reset_spectrum_state(&mut self) {
         self.cancel_spectrum_task();
+        self.cancel_spectrum_refinement_task();
         self.spectrum_generation = self.spectrum_generation.wrapping_add(1);
         self.spectrum_state = PropertySpectrumState::NotStarted;
         self.spectrum_range = PropertySpectrumRange::default();
@@ -897,6 +955,15 @@ impl PropertiesDialog {
             cancel.store(true, Ordering::Relaxed);
         }
         self.spectrum_task = None;
+    }
+
+    fn cancel_spectrum_refinement_task(&mut self) {
+        self.spectrum_refinement.generation = self.spectrum_refinement.generation.wrapping_add(1);
+        if let Some(cancel) = self.spectrum_refinement.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.spectrum_refinement.pending_target = None;
+        self.spectrum_refinement.task = None;
     }
 
     fn clear_spectrum_render_cache(&mut self) {
@@ -1410,12 +1477,15 @@ impl PropertiesDialog {
         self.spectrum_state = PropertySpectrumState::Loading;
         let generation = self.spectrum_generation;
         let range = self.spectrum_range;
+        let target = PropertySpectrumTarget::initial();
         let cancel = Arc::new(AtomicBool::new(false));
         self.spectrum_cancel = Some(cancel.clone());
         crate::debug_options::log_property_marker(format_args!(
-            "spectrum task started path={} generation={}",
+            "spectrum task started path={} generation={} columns={} rows={}",
             path.display(),
-            generation
+            generation,
+            target.time_bins,
+            target.frequency_bins
         ));
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
@@ -1446,7 +1516,7 @@ impl PropertiesDialog {
                 .spawn({
                     let path = path.clone();
                     let cancel = cancel.clone();
-                    async move { load_audio_spectrum_analysis(&path, range, &cancel) }
+                    async move { load_audio_spectrum_analysis(&path, range, target, &cancel) }
                 })
                 .await;
 
@@ -1481,6 +1551,166 @@ impl PropertiesDialog {
             });
         });
         self.spectrum_task = Some(task);
+    }
+
+    fn schedule_spectrum_resize_refinement(&mut self, cx: &mut Context<Self>) {
+        let Some(render_size) = self.spectrum_render_size else {
+            return;
+        };
+        let target = PropertySpectrumTarget::from_render_size(render_size);
+        let PropertySpectrumState::Ready(analysis) = &self.spectrum_state else {
+            return;
+        };
+        if analysis.target == target {
+            if self.spectrum_refinement.pending_target.is_some() {
+                self.cancel_spectrum_refinement_task();
+            }
+            return;
+        }
+        if self.spectrum_refinement.pending_target == Some(target) {
+            return;
+        }
+        let Some(path) = self
+            .ready_snapshot()
+            .and_then(|snapshot| single_file_audio_path(&snapshot.target, snapshot.item_kind))
+            .map(Path::to_path_buf)
+        else {
+            return;
+        };
+
+        if let Some(cancel) = self.spectrum_refinement.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.spectrum_refinement.task = None;
+        self.spectrum_refinement.generation = self.spectrum_refinement.generation.wrapping_add(1);
+        self.spectrum_refinement.pending_target = Some(target);
+        let refinement_generation = self.spectrum_refinement.generation;
+        let spectrum_generation = self.spectrum_generation;
+        let range = self.spectrum_range;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.spectrum_refinement.cancel = Some(cancel.clone());
+        crate::debug_options::log_property_marker(format_args!(
+            "spectrum resize refinement scheduled path={} generation={} refinement={} columns={} rows={}",
+            path.display(),
+            spectrum_generation,
+            refinement_generation,
+            target.time_bins,
+            target.frequency_bins
+        ));
+
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(PROPERTIES_SPECTRUM_RESIZE_DEBOUNCE_MS))
+                .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let started = Instant::now();
+            let media_path = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { property_media_local_path(path) }
+                })
+                .await;
+            let path = match media_path {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = this.update(cx, |dialog, cx| {
+                        if dialog.apply_spectrum_refinement_result(
+                            spectrum_generation,
+                            refinement_generation,
+                            target,
+                            Err(error),
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
+
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    let cancel = cancel.clone();
+                    async move { load_audio_spectrum_analysis(&path, range, target, &cancel) }
+                })
+                .await;
+
+            match &result {
+                Ok(analysis) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "spectrum resize refinement ready path={} duration={:.3}s sample_rate={} columns={} rows={}",
+                        path.display(),
+                        analysis.metadata.duration_seconds,
+                        analysis.metadata.sample_rate,
+                        analysis.width,
+                        analysis.height
+                    ),
+                ),
+                Err(error) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "spectrum resize refinement failed path={} columns={} rows={} error={}",
+                        path.display(),
+                        target.time_bins,
+                        target.frequency_bins,
+                        error
+                    ),
+                ),
+            }
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.apply_spectrum_refinement_result(
+                    spectrum_generation,
+                    refinement_generation,
+                    target,
+                    result,
+                ) {
+                    cx.notify();
+                }
+            });
+        });
+        self.spectrum_refinement.task = Some(task);
+    }
+
+    fn apply_spectrum_refinement_result(
+        &mut self,
+        spectrum_generation: u64,
+        refinement_generation: u64,
+        target: PropertySpectrumTarget,
+        result: Result<PropertySpectrumAnalysis, String>,
+    ) -> bool {
+        if self.spectrum_generation != spectrum_generation
+            || self.spectrum_refinement.generation != refinement_generation
+        {
+            return false;
+        }
+
+        self.spectrum_refinement.task = None;
+        self.spectrum_refinement.cancel = None;
+        if self.spectrum_refinement.pending_target == Some(target) {
+            self.spectrum_refinement.pending_target = None;
+        }
+
+        let Ok(mut analysis) = result else {
+            return true;
+        };
+        if let Some(image) = spectrum_render_image(
+            &analysis.db_values,
+            analysis.width,
+            analysis.height,
+            self.spectrum_range,
+        ) {
+            analysis.image = image;
+        }
+        self.spectrum_state = PropertySpectrumState::Ready(analysis);
+        self.clear_spectrum_render_cache();
+        true
     }
 
     fn start_frames_task(&mut self, cx: &mut Context<Self>) {
@@ -1746,6 +1976,8 @@ impl PropertiesDialog {
         self.completed = true;
         self.cancel_tree_summary_task();
         self.cancel_checksum_task();
+        self.cancel_spectrum_task();
+        self.cancel_spectrum_refinement_task();
         window.remove_window();
     }
 
@@ -1753,6 +1985,8 @@ impl PropertiesDialog {
         self.completed = true;
         self.cancel_tree_summary_task();
         self.cancel_checksum_task();
+        self.cancel_spectrum_task();
+        self.cancel_spectrum_refinement_task();
         #[cfg(target_os = "linux")]
         if let Some(handle) = self.default_app_picker.take() {
             let _ = handle.update(_cx, |_, window, _| window.remove_window());
@@ -3619,6 +3853,7 @@ impl PropertiesDialog {
                             if this.spectrum_render_size != size {
                                 this.spectrum_render_size = size;
                                 this.clear_spectrum_render_cache();
+                                this.schedule_spectrum_resize_refinement(cx);
                                 cx.notify();
                             }
                         });
@@ -5964,6 +6199,7 @@ fn command_error_output_label(stderr: &[u8]) -> String {
 fn load_audio_spectrum_analysis(
     path: &Path,
     range: PropertySpectrumRange,
+    target: PropertySpectrumTarget,
     cancel: &AtomicBool,
 ) -> Result<PropertySpectrumAnalysis, String> {
     if cancel.load(Ordering::Relaxed) {
@@ -6028,26 +6264,22 @@ fn load_audio_spectrum_analysis(
     );
 
     let metadata = audio_spectrum_metadata_from_probe(&probe)?;
-    let windows = decode_audio_spectrum_windows(path, &metadata, cancel)?;
+    let windows = decode_audio_spectrum_windows(path, &metadata, target, cancel)?;
     if cancel.load(Ordering::Relaxed) {
         return Err("Spectrum analysis was cancelled.".to_owned());
     }
 
-    let db_values = spectrum_db_values_from_windows(&windows);
-    let image = spectrum_render_image(
-        &db_values,
-        PROPERTIES_SPECTRUM_TIME_BINS as u32,
-        PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32,
-        range,
-    )
-    .ok_or_else(|| "Spectrum image has invalid dimensions.".to_owned())?;
+    let db_values = spectrum_db_values_from_windows(&windows, target);
+    let image = spectrum_render_image(&db_values, target.width(), target.height(), range)
+        .ok_or_else(|| "Spectrum image has invalid dimensions.".to_owned())?;
 
     Ok(PropertySpectrumAnalysis {
         metadata,
         db_values,
+        target,
         image,
-        width: PROPERTIES_SPECTRUM_TIME_BINS as u32,
-        height: PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32,
+        width: target.width(),
+        height: target.height(),
     })
 }
 
@@ -6197,13 +6429,14 @@ fn audio_spectrum_header(
 fn decode_audio_spectrum_windows(
     path: &Path,
     metadata: &PropertySpectrumMetadata,
+    target: PropertySpectrumTarget,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>, String> {
     let starts = spectrum_window_starts(
         metadata.duration_seconds,
         metadata.sample_rate,
-        PROPERTIES_SPECTRUM_TIME_BINS,
-        PROPERTIES_SPECTRUM_FFT_SIZE,
+        target.time_bins,
+        target.fft_size,
     );
     let mut child = spawn_audio_spectrum_ffmpeg(path, 0)?;
     let stdout = child
@@ -6219,7 +6452,7 @@ fn decode_audio_spectrum_windows(
     });
 
     let mut reader = BufReader::new(stdout);
-    let result = collect_spectrum_windows_from_pcm_reader(&mut reader, &starts, cancel);
+    let result = collect_spectrum_windows_from_pcm_reader(&mut reader, &starts, target, cancel);
     if result.is_err() || cancel.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
@@ -6317,10 +6550,11 @@ fn spectrum_window_starts(
 fn collect_spectrum_windows_from_pcm_reader(
     reader: &mut impl Read,
     starts: &[u64],
+    target: PropertySpectrumTarget,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>, String> {
-    let mut windows = vec![0.0; starts.len() * PROPERTIES_SPECTRUM_FFT_SIZE];
-    let mut ring = vec![0.0; PROPERTIES_SPECTRUM_FFT_SIZE];
+    let mut windows = vec![0.0; starts.len() * target.fft_size];
+    let mut ring = vec![0.0; target.fft_size];
     let mut read_buffer = [0u8; 64 * 1024];
     let mut pending = Vec::new();
     let mut sample_index = 0u64;
@@ -6341,16 +6575,15 @@ fn collect_spectrum_windows_from_pcm_reader(
         let complete_len = (pending.len() / 4) * 4;
         for chunk in pending[..complete_len].chunks_exact(4) {
             let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            ring[(sample_index as usize) % PROPERTIES_SPECTRUM_FFT_SIZE] = sample;
+            ring[(sample_index as usize) % target.fft_size] = sample;
             sample_index = sample_index.saturating_add(1);
 
             while next_window < starts.len()
-                && sample_index
-                    >= starts[next_window].saturating_add(PROPERTIES_SPECTRUM_FFT_SIZE as u64)
+                && sample_index >= starts[next_window].saturating_add(target.fft_size as u64)
             {
                 let start = starts[next_window];
-                let window = spectrum_window_slice_mut(&mut windows, next_window);
-                copy_spectrum_window_from_ring(&ring, start, PROPERTIES_SPECTRUM_FFT_SIZE, window);
+                let window = spectrum_window_slice_mut(&mut windows, next_window, target.fft_size);
+                copy_spectrum_window_from_ring(&ring, start, target.fft_size, window);
                 next_window += 1;
             }
         }
@@ -6365,9 +6598,9 @@ fn collect_spectrum_windows_from_pcm_reader(
         let start = starts[next_window];
         let available = sample_index
             .saturating_sub(start)
-            .min(PROPERTIES_SPECTRUM_FFT_SIZE as u64) as usize;
+            .min(target.fft_size as u64) as usize;
         if available > 0 {
-            let window = spectrum_window_slice_mut(&mut windows, next_window);
+            let window = spectrum_window_slice_mut(&mut windows, next_window, target.fft_size);
             copy_spectrum_window_from_ring(&ring, start, available, window);
         }
         next_window += 1;
@@ -6376,9 +6609,9 @@ fn collect_spectrum_windows_from_pcm_reader(
     Ok(windows)
 }
 
-fn spectrum_window_slice_mut(windows: &mut [f32], column: usize) -> &mut [f32] {
-    let start = column * PROPERTIES_SPECTRUM_FFT_SIZE;
-    &mut windows[start..start + PROPERTIES_SPECTRUM_FFT_SIZE]
+fn spectrum_window_slice_mut(windows: &mut [f32], column: usize, fft_size: usize) -> &mut [f32] {
+    let start = column * fft_size;
+    &mut windows[start..start + fft_size]
 }
 
 fn copy_spectrum_window_from_ring(ring: &[f32], start: u64, available: usize, output: &mut [f32]) {
@@ -6388,39 +6621,39 @@ fn copy_spectrum_window_from_ring(ring: &[f32], start: u64, available: usize, ou
     }
 }
 
-fn spectrum_db_values_from_windows(windows: &[f32]) -> Vec<f32> {
+fn spectrum_db_values_from_windows(windows: &[f32], target: PropertySpectrumTarget) -> Vec<f32> {
     windows
-        .par_chunks_exact(PROPERTIES_SPECTRUM_FFT_SIZE)
-        .flat_map(spectrum_db_column)
+        .par_chunks_exact(target.fft_size)
+        .flat_map(|samples| spectrum_db_column(samples, target))
         .collect()
 }
 
-fn spectrum_db_column(samples: &[f32]) -> Vec<f32> {
+fn spectrum_db_column(samples: &[f32], target: PropertySpectrumTarget) -> Vec<f32> {
     use rustfft::{FftPlanner, num_complex::Complex};
 
     let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(PROPERTIES_SPECTRUM_FFT_SIZE);
+    let fft = planner.plan_fft_forward(target.fft_size);
     let mut buffer: Vec<_> = samples
         .iter()
         .enumerate()
         .map(|(index, sample)| Complex {
-            re: *sample * hann_window_value(index, PROPERTIES_SPECTRUM_FFT_SIZE),
+            re: *sample * hann_window_value(index, target.fft_size),
             im: 0.0,
         })
         .collect();
     fft.process(&mut buffer);
 
-    let nyquist_bin = PROPERTIES_SPECTRUM_FFT_SIZE / 2;
-    (0..PROPERTIES_SPECTRUM_FREQUENCY_BINS)
+    let nyquist_bin = target.fft_size / 2;
+    (0..target.frequency_bins)
         .map(|frequency_bin| {
-            let fft_bin = if PROPERTIES_SPECTRUM_FREQUENCY_BINS <= 1 {
+            let fft_bin = if target.frequency_bins <= 1 {
                 0
             } else {
-                frequency_bin * nyquist_bin / (PROPERTIES_SPECTRUM_FREQUENCY_BINS - 1)
+                frequency_bin * nyquist_bin / (target.frequency_bins - 1)
             };
             let value = buffer[fft_bin];
-            let magnitude = (value.re.mul_add(value.re, value.im * value.im)).sqrt()
-                / PROPERTIES_SPECTRUM_FFT_SIZE as f32;
+            let magnitude =
+                (value.re.mul_add(value.re, value.im * value.im)).sqrt() / target.fft_size as f32;
             20.0 * magnitude.max(1.0e-12).log10()
         })
         .collect()
@@ -6540,7 +6773,7 @@ fn spectrum_render_image_resampled(
 }
 
 fn spectrum_legend_render_image(range: PropertySpectrumRange) -> Option<Arc<RenderImage>> {
-    let height = PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32;
+    let height = PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS as u32;
     let mut bgra = Vec::with_capacity(height as usize * 4);
     for y in 0..height {
         let level = if height <= 1 {
@@ -11408,6 +11641,11 @@ mod tests {
                     },
                     db_values: vec![-120.0, -80.0, -40.0, -20.0],
                     image: render_image_from_bgra(2, 2, vec![0, 0, 0, 255].repeat(4)),
+                    target: PropertySpectrumTarget {
+                        time_bins: 2,
+                        frequency_bins: 2,
+                        fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
+                    },
                     width: 2,
                     height: 2,
                 });
@@ -11540,6 +11778,102 @@ mod tests {
         assert_eq!(resized_cache_target, resized_target);
         assert_eq!(resized_image_width, resized_target.width as i32);
         assert_eq!(resized_image_height, resized_target.height as i32);
+    }
+
+    #[gpui::test]
+    fn spectrum_refinement_result_updates_only_latest_generation(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("song.flac");
+        fs::write(&path, b"not real audio").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, _| {
+                let initial = test_spectrum_analysis(2, 2);
+                let stale = test_spectrum_analysis(4, 3);
+                let refined_target =
+                    PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
+                        width: 1024,
+                        height: 512,
+                    });
+                let refined = test_spectrum_analysis_for_target(refined_target);
+
+                dialog.spectrum_generation = 10;
+                dialog.spectrum_refinement.generation = 3;
+                dialog.spectrum_refinement.pending_target = Some(refined_target);
+                dialog.spectrum_state = PropertySpectrumState::Ready(initial);
+
+                assert!(!dialog.apply_spectrum_refinement_result(10, 2, stale.target, Ok(stale)));
+                let PropertySpectrumState::Ready(analysis) = &dialog.spectrum_state else {
+                    panic!("spectrum should stay ready");
+                };
+                assert_eq!(analysis.width, 2);
+                assert_eq!(analysis.height, 2);
+
+                assert!(dialog.apply_spectrum_refinement_result(
+                    10,
+                    3,
+                    refined_target,
+                    Ok(refined)
+                ));
+                let PropertySpectrumState::Ready(analysis) = &dialog.spectrum_state else {
+                    panic!("spectrum should stay ready");
+                };
+                assert_eq!(analysis.target, refined_target);
+                assert_eq!(analysis.width, refined_target.width());
+                assert_eq!(analysis.height, refined_target.height());
+                assert_ne!(analysis.width, PropertySpectrumTarget::initial().width());
+                assert_eq!(dialog.spectrum_refinement.pending_target, None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn spectrum_refinement_debounce_keeps_latest_pending_target(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("song.flac");
+        fs::write(&path, b"not real audio").unwrap();
+
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.spectrum_state = PropertySpectrumState::Ready(test_spectrum_analysis(2, 2));
+                dialog.spectrum_generation = 1;
+
+                dialog.spectrum_render_size = Some(PropertySpectrumRenderSize {
+                    width: 900,
+                    height: 500,
+                });
+                dialog.schedule_spectrum_resize_refinement(cx);
+                let first_generation = dialog.spectrum_refinement.generation;
+                let first_cancel = dialog
+                    .spectrum_refinement
+                    .cancel
+                    .as_ref()
+                    .expect("first refinement cancel")
+                    .clone();
+
+                dialog.spectrum_render_size = Some(PropertySpectrumRenderSize {
+                    width: 1200,
+                    height: 700,
+                });
+                dialog.schedule_spectrum_resize_refinement(cx);
+
+                let expected =
+                    PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
+                        width: 1200,
+                        height: 700,
+                    });
+                assert!(first_cancel.load(Ordering::Relaxed));
+                assert!(dialog.spectrum_refinement.generation > first_generation);
+                assert_eq!(dialog.spectrum_refinement.pending_target, Some(expected));
+                dialog.cancel_spectrum_refinement_task();
+            });
+        });
     }
 
     #[gpui::test]
@@ -12696,23 +13030,65 @@ mod tests {
     }
 
     #[test]
+    fn spectrum_target_clamps_render_size_to_safe_analysis_bounds() {
+        let initial = PropertySpectrumTarget::initial();
+        assert_eq!(initial.time_bins, PROPERTIES_SPECTRUM_INITIAL_TIME_BINS);
+        assert_eq!(
+            initial.frequency_bins,
+            PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS
+        );
+        assert_eq!(initial.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
+
+        let small = PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
+            width: 0,
+            height: 0,
+        });
+        assert_eq!(small.time_bins, 1);
+        assert_eq!(small.frequency_bins, 1);
+        assert_eq!(small.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
+
+        let large = PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
+            width: u32::MAX,
+            height: u32::MAX,
+        });
+        assert_eq!(large.time_bins, PROPERTIES_SPECTRUM_MAX_TIME_BINS);
+        assert_eq!(large.frequency_bins, PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS);
+        assert_eq!(large.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
+    }
+
+    #[test]
+    fn spectrum_fft_helpers_use_target_dimensions() {
+        let target = PropertySpectrumTarget {
+            time_bins: 3,
+            frequency_bins: 7,
+            fft_size: 64,
+        };
+        let windows = vec![0.0; target.time_bins * target.fft_size];
+        let db_values = spectrum_db_values_from_windows(&windows, target);
+        assert_eq!(db_values.len(), target.time_bins * target.frequency_bins);
+
+        let column = spectrum_db_column(&windows[..target.fft_size], target);
+        assert_eq!(column.len(), target.frequency_bins);
+        assert!(column.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn spectrum_fft_helpers_handle_silence_and_synthetic_sine_peak() {
-        let silence = vec![0.0; PROPERTIES_SPECTRUM_FFT_SIZE];
-        let silence_db = spectrum_db_column(&silence);
-        assert_eq!(silence_db.len(), PROPERTIES_SPECTRUM_FREQUENCY_BINS);
+        let target = PropertySpectrumTarget::initial();
+        let silence = vec![0.0; target.fft_size];
+        let silence_db = spectrum_db_column(&silence, target);
+        assert_eq!(silence_db.len(), target.frequency_bins);
         assert!(silence_db.iter().all(|value| value.is_finite()));
         let silence_max = silence_db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(silence_max < -200.0);
 
         let sine_bin = 512.0;
-        let sine: Vec<_> = (0..PROPERTIES_SPECTRUM_FFT_SIZE)
+        let sine: Vec<_> = (0..target.fft_size)
             .map(|index| {
-                (std::f32::consts::TAU * sine_bin * index as f32
-                    / PROPERTIES_SPECTRUM_FFT_SIZE as f32)
-                    .sin()
+                (std::f32::consts::TAU * sine_bin * index as f32 / target.fft_size as f32).sin()
             })
             .collect();
-        let sine_db = spectrum_db_column(&sine);
+        let sine_db = spectrum_db_column(&sine, target);
         let (peak_index, peak_db) = sine_db
             .iter()
             .copied()
@@ -13903,10 +14279,19 @@ mod tests {
     }
 
     fn test_spectrum_analysis(width: u32, height: u32) -> PropertySpectrumAnalysis {
-        let value_count = usize::try_from(width)
-            .unwrap()
-            .checked_mul(usize::try_from(height).unwrap())
-            .unwrap();
+        test_spectrum_analysis_for_target(PropertySpectrumTarget {
+            time_bins: width as usize,
+            frequency_bins: height as usize,
+            fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
+        })
+    }
+
+    fn test_spectrum_analysis_for_target(
+        target: PropertySpectrumTarget,
+    ) -> PropertySpectrumAnalysis {
+        let width = target.width();
+        let height = target.height();
+        let value_count = target.time_bins.checked_mul(target.frequency_bins).unwrap();
         let db_values: Vec<_> = (0..value_count)
             .map(|index| {
                 let level = index as f32 / value_count.max(1) as f32;
@@ -13927,6 +14312,7 @@ mod tests {
             },
             db_values,
             image,
+            target,
             width,
             height,
         }
