@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap},
+    ffi::OsString,
     fmt, fs,
     io::{self, BufReader, Read},
     path::{Path, PathBuf},
@@ -28,6 +29,7 @@ use gpui::{
 };
 use image::ImageEncoder;
 use jwalk::WalkDirGeneric;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use thousands::Separable;
 
@@ -93,6 +95,26 @@ const PROPERTIES_CODE_MAKEUP_SEPARATOR_COLOR: u32 = 0xffffff;
 const PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH: f32 = 178.0;
 const PROPERTIES_CODE_LANGUAGE_LOC_WIDTH: f32 = 86.0;
 const PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE: f32 = 10.0;
+const PROPERTIES_SPECTRUM_TIME_BINS: usize = 512;
+const PROPERTIES_SPECTRUM_FREQUENCY_BINS: usize = 256;
+const PROPERTIES_SPECTRUM_FFT_SIZE: usize = 4096;
+const PROPERTIES_SPECTRUM_DEFAULT_LOW_DB: f32 = -120.0;
+const PROPERTIES_SPECTRUM_DEFAULT_HIGH_DB: f32 = -20.0;
+const PROPERTIES_SPECTRUM_MIN_DB: f32 = -160.0;
+const PROPERTIES_SPECTRUM_MAX_DB: f32 = 0.0;
+const PROPERTIES_SPECTRUM_MIN_RANGE_DB: f32 = 10.0;
+const PROPERTIES_SPECTRUM_RANGE_STEP_DB: f32 = 10.0;
+const PROPERTIES_SPECTRUM_HEADER_HEIGHT: f32 = 18.0;
+const PROPERTIES_SPECTRUM_TIME_RULER_HEIGHT: f32 = 16.0;
+const PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH: f32 = 38.0;
+const PROPERTIES_SPECTRUM_DB_RULER_WIDTH: f32 = 46.0;
+const PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH: f32 = 10.0;
+const PROPERTIES_SPECTRUM_CONTROL_HEIGHT: f32 = 34.0;
+const PROPERTIES_SPECTRUM_CONTROL_BUTTON_SIZE: f32 = 20.0;
+const PROPERTIES_SPECTRUM_AXIS_TEXT: u32 = 0xffffff;
+const PROPERTIES_SPECTRUM_PANEL_BG: u32 = 0x000000;
+const PROPERTIES_SPECTRUM_BORDER: u32 = 0xffffff;
+const PROPERTIES_SPECTRUM_CONTROL_BORDER: u32 = 0x4c4c4c;
 const PROPERTIES_FRAME_LIST_GAP: f32 = 16.0;
 const PROPERTIES_FRAME_LABEL_GAP: f32 = 4.0;
 const PROPERTIES_IMAGE_CONTEXT_MENU_WIDTH: f32 = 170.0;
@@ -323,6 +345,7 @@ enum PropertyTab {
     General,
     Details,
     Cover,
+    Spectrum,
     Code,
     Image,
     Frames,
@@ -338,6 +361,7 @@ const PROPERTY_TABS: &[(PropertyTab, &str)] = &[
     (PropertyTab::General, "General"),
     (PropertyTab::Details, "Details"),
     (PropertyTab::Cover, "Cover"),
+    (PropertyTab::Spectrum, "Spectrum"),
     (PropertyTab::Code, "Code"),
     (PropertyTab::Image, "Image"),
     (PropertyTab::Frames, "Frames"),
@@ -414,12 +438,28 @@ enum PropertyCoverState {
     Failed(String),
 }
 
+enum PropertySpectrumState {
+    NotStarted,
+    Loading,
+    Ready(PropertySpectrumAnalysis),
+    Failed(String),
+}
+
 fn property_frames_state_label(state: &PropertyFramesState) -> &'static str {
     match state {
         PropertyFramesState::NotStarted => "not-started",
         PropertyFramesState::Loading(_) => "loading",
         PropertyFramesState::Ready(_) => "ready",
         PropertyFramesState::Failed(_) => "failed",
+    }
+}
+
+fn property_spectrum_state_label(state: &PropertySpectrumState) -> &'static str {
+    match state {
+        PropertySpectrumState::NotStarted => "not-started",
+        PropertySpectrumState::Loading => "loading",
+        PropertySpectrumState::Ready(_) => "ready",
+        PropertySpectrumState::Failed(_) => "failed",
     }
 }
 
@@ -436,6 +476,37 @@ struct PropertyFrameThumbnail {
 struct PropertyCoverImage {
     label: String,
     preview: PropertyImagePreview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PropertySpectrumRange {
+    low_db: f32,
+    high_db: f32,
+}
+
+impl Default for PropertySpectrumRange {
+    fn default() -> Self {
+        Self {
+            low_db: PROPERTIES_SPECTRUM_DEFAULT_LOW_DB,
+            high_db: PROPERTIES_SPECTRUM_DEFAULT_HIGH_DB,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PropertySpectrumMetadata {
+    header: String,
+    sample_rate: u32,
+    duration_seconds: f64,
+}
+
+#[derive(Clone, Debug)]
+struct PropertySpectrumAnalysis {
+    metadata: PropertySpectrumMetadata,
+    db_values: Vec<f32>,
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone)]
@@ -495,6 +566,9 @@ pub(super) struct PropertiesDialog {
     cover_state: PropertyCoverState,
     cover_generation: u64,
     cover_index: usize,
+    spectrum_state: PropertySpectrumState,
+    spectrum_generation: u64,
+    spectrum_range: PropertySpectrumRange,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -509,6 +583,8 @@ pub(super) struct PropertiesDialog {
     checksum_cancel: Option<Arc<AtomicBool>>,
     code_task: Option<Task<()>>,
     cover_task: Option<Task<()>>,
+    spectrum_task: Option<Task<()>>,
+    spectrum_cancel: Option<Arc<AtomicBool>>,
     frames_task: Option<Task<()>>,
     apply_task: Option<Task<()>>,
     default_app_task: Option<Task<()>>,
@@ -614,6 +690,9 @@ impl PropertiesDialog {
             cover_state: PropertyCoverState::NotStarted,
             cover_generation: 0,
             cover_index: 0,
+            spectrum_state: PropertySpectrumState::NotStarted,
+            spectrum_generation: 0,
+            spectrum_range: PropertySpectrumRange::default(),
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -628,6 +707,8 @@ impl PropertiesDialog {
             checksum_cancel: None,
             code_task: None,
             cover_task: None,
+            spectrum_task: None,
+            spectrum_cancel: None,
             frames_task: None,
             apply_task: None,
             default_app_task: None,
@@ -654,6 +735,8 @@ impl PropertiesDialog {
         self.reset_checksum_state();
         self.reset_code_state();
         self.reset_image_state();
+        self.reset_cover_state();
+        self.reset_spectrum_state();
         self.reset_frames_state();
         let target = self.target.clone();
         let date_format = self.date_format.clone();
@@ -734,6 +817,20 @@ impl PropertiesDialog {
         self.image_copy_context_menu = None;
     }
 
+    fn reset_spectrum_state(&mut self) {
+        self.cancel_spectrum_task();
+        self.spectrum_generation = self.spectrum_generation.wrapping_add(1);
+        self.spectrum_state = PropertySpectrumState::NotStarted;
+        self.spectrum_range = PropertySpectrumRange::default();
+    }
+
+    fn cancel_spectrum_task(&mut self) {
+        if let Some(cancel) = self.spectrum_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.spectrum_task = None;
+    }
+
     fn reset_frames_state(&mut self) {
         self.frames_generation = self.frames_generation.wrapping_add(1);
         self.frames_state = PropertyFramesState::NotStarted;
@@ -755,6 +852,7 @@ impl PropertiesDialog {
         self.reset_code_state();
         self.reset_image_state();
         self.reset_cover_state();
+        self.reset_spectrum_state();
         self.reset_frames_state();
         if let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state {
             if !property_tab_is_visible(self.active_tab, Some(snapshot)) {
@@ -765,6 +863,7 @@ impl PropertiesDialog {
             PropertyTab::Details => self.start_details_task(cx),
             PropertyTab::Code => self.start_code_task(cx),
             PropertyTab::Cover => self.start_cover_task(cx),
+            PropertyTab::Spectrum => self.start_spectrum_task(cx),
             PropertyTab::Frames => self.start_frames_task(cx),
             PropertyTab::General | PropertyTab::Image => {}
         }
@@ -1211,6 +1310,105 @@ impl PropertiesDialog {
             });
         });
         self.cover_task = Some(task);
+    }
+
+    fn start_spectrum_task(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.spectrum_state, PropertySpectrumState::NotStarted) {
+            crate::debug_options::log_property_marker(format_args!(
+                "spectrum start skipped state={}",
+                property_spectrum_state_label(&self.spectrum_state)
+            ));
+            return;
+        }
+        let PropertySnapshotState::Ready(snapshot) = &self.snapshot_state else {
+            crate::debug_options::log_property_marker(format_args!(
+                "spectrum start skipped state=snapshot-not-ready"
+            ));
+            return;
+        };
+        let Some(path) =
+            single_file_audio_path(&snapshot.target, snapshot.item_kind).map(Path::to_path_buf)
+        else {
+            self.spectrum_state = PropertySpectrumState::Failed(
+                "Audio spectrum is not available for this item.".to_owned(),
+            );
+            return;
+        };
+
+        self.spectrum_state = PropertySpectrumState::Loading;
+        let generation = self.spectrum_generation;
+        let range = self.spectrum_range;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.spectrum_cancel = Some(cancel.clone());
+        crate::debug_options::log_property_marker(format_args!(
+            "spectrum task started path={} generation={}",
+            path.display(),
+            generation
+        ));
+        let task = cx.spawn(async move |this, cx| {
+            let started = Instant::now();
+            let media_path = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { property_media_local_path(path) }
+                })
+                .await;
+            let path = match media_path {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = this.update(cx, |dialog, cx| {
+                        if dialog.spectrum_generation == generation {
+                            dialog.spectrum_task = None;
+                            dialog.spectrum_cancel = None;
+                            dialog.spectrum_state = PropertySpectrumState::Failed(error);
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+            };
+
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    let cancel = cancel.clone();
+                    async move { load_audio_spectrum_analysis(&path, range, &cancel) }
+                })
+                .await;
+
+            match &result {
+                Ok(analysis) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!(
+                        "spectrum ready path={} duration={:.3}s sample_rate={} columns={} rows={}",
+                        path.display(),
+                        analysis.metadata.duration_seconds,
+                        analysis.metadata.sample_rate,
+                        analysis.width,
+                        analysis.height
+                    ),
+                ),
+                Err(error) => crate::debug_options::log_property_timing(
+                    started.elapsed(),
+                    format_args!("spectrum failed path={} error={}", path.display(), error),
+                ),
+            }
+
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.spectrum_generation == generation {
+                    dialog.spectrum_task = None;
+                    dialog.spectrum_cancel = None;
+                    dialog.spectrum_state = match result {
+                        Ok(analysis) => PropertySpectrumState::Ready(analysis),
+                        Err(error) => PropertySpectrumState::Failed(error),
+                    };
+                    cx.notify();
+                }
+            });
+        });
+        self.spectrum_task = Some(task);
     }
 
     fn start_frames_task(&mut self, cx: &mut Context<Self>) {
@@ -1820,6 +2018,17 @@ impl PropertiesDialog {
                 self.start_code_task(cx);
             } else if tab == PropertyTab::Cover {
                 self.start_cover_task(cx);
+            } else if tab == PropertyTab::Spectrum {
+                if let Some(snapshot) = snapshot {
+                    if let Some(path) = single_file_audio_path(&snapshot.target, snapshot.item_kind)
+                    {
+                        crate::debug_options::log_property_marker(format_args!(
+                            "spectrum tab selected path={}",
+                            path.display()
+                        ));
+                    }
+                }
+                self.start_spectrum_task(cx);
             } else if tab == PropertyTab::Frames {
                 if let Some(snapshot) = snapshot {
                     if let Some(path) = single_file_video_path(&snapshot.target, snapshot.item_kind)
@@ -1856,6 +2065,38 @@ impl PropertiesDialog {
             self.image_copy_context_menu = None;
             cx.notify();
         }
+    }
+
+    fn adjust_spectrum_low_db(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let mut range = self.spectrum_range;
+        range.low_db = (range.low_db + delta).clamp(
+            PROPERTIES_SPECTRUM_MIN_DB,
+            range.high_db - PROPERTIES_SPECTRUM_MIN_RANGE_DB,
+        );
+        self.set_spectrum_range(range, cx);
+    }
+
+    fn adjust_spectrum_high_db(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let mut range = self.spectrum_range;
+        range.high_db = (range.high_db + delta).clamp(
+            range.low_db + PROPERTIES_SPECTRUM_MIN_RANGE_DB,
+            PROPERTIES_SPECTRUM_MAX_DB,
+        );
+        self.set_spectrum_range(range, cx);
+    }
+
+    fn set_spectrum_range(&mut self, range: PropertySpectrumRange, cx: &mut Context<Self>) {
+        if self.spectrum_range == range {
+            return;
+        }
+        self.spectrum_range = range;
+        if let PropertySpectrumState::Ready(analysis) = &mut self.spectrum_state
+            && let Some(image) =
+                spectrum_render_image(&analysis.db_values, analysis.width, analysis.height, range)
+        {
+            analysis.image = image;
+        }
+        cx.notify();
     }
 
     fn toggle_readonly(&mut self, cx: &mut Context<Self>) {
@@ -2290,6 +2531,7 @@ impl PropertiesDialog {
                 PropertyTab::Code => self.render_code(&snapshot, cx),
                 PropertyTab::Image => self.render_image(&snapshot, window, cx),
                 PropertyTab::Cover => self.render_cover(&snapshot, window, cx),
+                PropertyTab::Spectrum => self.render_spectrum(&snapshot, cx),
                 PropertyTab::Frames => self.render_frames(&snapshot, cx),
             },
         };
@@ -3069,6 +3311,200 @@ impl PropertiesDialog {
                 .into_any_element()
             }
         }
+    }
+
+    fn render_spectrum(
+        &mut self,
+        snapshot: &PropertySnapshot,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if single_file_audio_path(&snapshot.target, snapshot.item_kind).is_none() {
+            return centered_message("Audio spectrum is not available for this item.");
+        }
+
+        let body = div()
+            .id("properties-spectrum-body")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .overflow_hidden()
+            .bg(rgb(PROPERTIES_SPECTRUM_PANEL_BG));
+
+        match &self.spectrum_state {
+            PropertySpectrumState::NotStarted | PropertySpectrumState::Loading => body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT))
+                        .child("Analysing spectrum..."),
+                )
+                .child(linear_indeterminate(
+                    "properties-spectrum-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
+                .into_any_element(),
+            PropertySpectrumState::Failed(error) => body
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .min_w(px(0.0))
+                        .w_full()
+                        .p(px(PROPERTIES_PANEL_PADDING))
+                        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT))
+                        .child(SharedString::from(error.clone())),
+                )
+                .into_any_element(),
+            PropertySpectrumState::Ready(analysis) => body
+                .child(self.render_spectrum_analysis(analysis, cx))
+                .child(self.render_spectrum_controls(cx))
+                .into_any_element(),
+        }
+    }
+
+    fn render_spectrum_analysis(
+        &self,
+        analysis: &PropertySpectrumAnalysis,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let frequency_labels = spectrum_frequency_ruler_labels(analysis.metadata.sample_rate);
+        let time_labels = spectrum_time_ruler_labels(analysis.metadata.duration_seconds);
+        let db_labels = spectrum_density_ruler_labels(self.spectrum_range);
+        let legend_image =
+            spectrum_legend_render_image(self.spectrum_range).unwrap_or_else(empty_render_image);
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
+            .p(px(6.0))
+            .gap(px(3.0))
+            .child(
+                div()
+                    .h(px(PROPERTIES_SPECTRUM_HEADER_HEIGHT))
+                    .min_w(px(0.0))
+                    .w_full()
+                    .text_center()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT))
+                    .child(SharedString::from(analysis.metadata.header.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .min_w(px(0.0))
+                    .w_full()
+                    .gap(px(4.0))
+                    .child(spectrum_vertical_ruler(
+                        frequency_labels,
+                        PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .min_w(px(0.0))
+                                    .w_full()
+                                    .border_1()
+                                    .border_color(rgb(PROPERTIES_SPECTRUM_BORDER))
+                                    .overflow_hidden()
+                                    .child(
+                                        gpui::img(analysis.image.clone())
+                                            .size_full()
+                                            .object_fit(ObjectFit::Fill),
+                                    ),
+                            )
+                            .child(spectrum_horizontal_ruler(time_labels)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .h_full()
+                            .w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                            .gap(px(4.0))
+                            .child(
+                                gpui::img(legend_image)
+                                    .w(px(PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH))
+                                    .h_full()
+                                    .object_fit(ObjectFit::Fill),
+                            )
+                            .child(spectrum_vertical_ruler(
+                                db_labels,
+                                PROPERTIES_SPECTRUM_DB_RULER_WIDTH
+                                    - PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH
+                                    - 4.0,
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_spectrum_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .h(px(PROPERTIES_SPECTRUM_CONTROL_HEIGHT))
+            .w_full()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(PROPERTIES_SPECTRUM_CONTROL_BORDER))
+            .px(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .child(spectrum_range_control_group(
+                "Low",
+                self.spectrum_range.low_db,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.adjust_spectrum_low_db(-PROPERTIES_SPECTRUM_RANGE_STEP_DB, cx);
+                    cx.stop_propagation();
+                }),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.adjust_spectrum_low_db(PROPERTIES_SPECTRUM_RANGE_STEP_DB, cx);
+                    cx.stop_propagation();
+                }),
+            ))
+            .child(spectrum_range_control_group(
+                "High",
+                self.spectrum_range.high_db,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.adjust_spectrum_high_db(-PROPERTIES_SPECTRUM_RANGE_STEP_DB, cx);
+                    cx.stop_propagation();
+                }),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.adjust_spectrum_high_db(PROPERTIES_SPECTRUM_RANGE_STEP_DB, cx);
+                    cx.stop_propagation();
+                }),
+            ))
+            .into_any_element()
     }
 
     fn render_frames(&mut self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
@@ -5360,6 +5796,797 @@ fn command_error_output_label(stderr: &[u8]) -> String {
         truncated.push_str("...");
         truncated
     }
+}
+
+fn load_audio_spectrum_analysis(
+    path: &Path,
+    range: PropertySpectrumRange,
+    cancel: &AtomicBool,
+) -> Result<PropertySpectrumAnalysis, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Spectrum analysis was cancelled.".to_owned());
+    }
+
+    let availability_started = Instant::now();
+    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "spectrum ffprobe availability path={} installed={}",
+            path.display(),
+            ffprobe_installed
+        ),
+    );
+    if !ffprobe_installed {
+        return Err(
+            "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
+                .to_owned(),
+        );
+    }
+
+    let availability_started = Instant::now();
+    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    crate::debug_options::log_property_timing(
+        availability_started.elapsed(),
+        format_args!(
+            "spectrum ffmpeg availability path={} installed={}",
+            path.display(),
+            ffmpeg_installed
+        ),
+    );
+    if !ffmpeg_installed {
+        return Err(
+            "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
+                .to_owned(),
+        );
+    }
+
+    let output = ffprobe_json_output(path).map_err(|error| format!("ffprobe failed: {error}"))?;
+    let parse_started = Instant::now();
+    let probe: serde_json::Value = serde_json::from_slice(&output).map_err(|error| {
+        crate::debug_options::log_property_timing(
+            parse_started.elapsed(),
+            format_args!(
+                "spectrum ffprobe json parse failed path={} stdout_bytes={} error={}",
+                path.display(),
+                output.len(),
+                error
+            ),
+        );
+        format!("ffprobe returned unreadable metadata: {error}")
+    })?;
+    crate::debug_options::log_property_timing(
+        parse_started.elapsed(),
+        format_args!(
+            "spectrum ffprobe json parsed path={} stdout_bytes={}",
+            path.display(),
+            output.len()
+        ),
+    );
+
+    let metadata = audio_spectrum_metadata_from_probe(&probe)?;
+    let windows = decode_audio_spectrum_windows(path, &metadata, cancel)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Spectrum analysis was cancelled.".to_owned());
+    }
+
+    let db_values = spectrum_db_values_from_windows(&windows);
+    let image = spectrum_render_image(
+        &db_values,
+        PROPERTIES_SPECTRUM_TIME_BINS as u32,
+        PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32,
+        range,
+    )
+    .ok_or_else(|| "Spectrum image has invalid dimensions.".to_owned())?;
+
+    Ok(PropertySpectrumAnalysis {
+        metadata,
+        db_values,
+        image,
+        width: PROPERTIES_SPECTRUM_TIME_BINS as u32,
+        height: PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32,
+    })
+}
+
+fn audio_spectrum_metadata_from_probe(
+    probe: &serde_json::Value,
+) -> Result<PropertySpectrumMetadata, String> {
+    let stream = first_audio_stream(probe)
+        .ok_or_else(|| "No audio stream was reported by ffprobe.".to_owned())?;
+    let sample_rate = stream
+        .get("sample_rate")
+        .and_then(ffprobe_scalar_value_label)
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|sample_rate| *sample_rate > 0)
+        .ok_or_else(|| "Audio sample rate is not available.".to_owned())?;
+    let duration_seconds = ffprobe_audio_duration_seconds_from_probe(probe, stream)
+        .ok_or_else(|| "Audio duration is not available.".to_owned())?;
+    let codec = audio_spectrum_codec_label(stream);
+    let bit_depth = audio_spectrum_bit_depth(stream);
+    let channels = stream
+        .get("channels")
+        .and_then(ffprobe_integer_value)
+        .and_then(|channels| u32::try_from(channels).ok())
+        .filter(|channels| *channels > 0);
+    let header = audio_spectrum_header(&codec, sample_rate, bit_depth, channels);
+
+    Ok(PropertySpectrumMetadata {
+        header,
+        sample_rate,
+        duration_seconds,
+    })
+}
+
+fn first_audio_stream(
+    probe: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    probe
+        .get("streams")
+        .and_then(|streams| streams.as_array())
+        .and_then(|streams| {
+            streams.iter().find_map(|stream| {
+                let stream = stream.as_object()?;
+                let codec_type = stream
+                    .get("codec_type")
+                    .and_then(ffprobe_scalar_value_label);
+                (codec_type.as_deref() == Some("audio")).then_some(stream)
+            })
+        })
+}
+
+fn ffprobe_audio_duration_seconds_from_probe(
+    probe: &serde_json::Value,
+    stream: &serde_json::Map<String, serde_json::Value>,
+) -> Option<f64> {
+    let format_duration = probe
+        .get("format")
+        .and_then(|format| format.as_object())
+        .and_then(|format| format.get("duration"))
+        .and_then(|duration| {
+            ffprobe_scalar_value_label(duration)
+                .as_deref()
+                .and_then(parse_positive_f64)
+        });
+    if format_duration.is_some() {
+        return format_duration;
+    }
+
+    stream.get("duration").and_then(|duration| {
+        ffprobe_scalar_value_label(duration)
+            .as_deref()
+            .and_then(parse_positive_f64)
+    })
+}
+
+fn audio_spectrum_codec_label(stream: &serde_json::Map<String, serde_json::Value>) -> String {
+    if let Some(codec) = stream
+        .get("codec_long_name")
+        .and_then(ffprobe_scalar_value_label)
+    {
+        return codec;
+    }
+
+    stream
+        .get("codec_name")
+        .and_then(ffprobe_scalar_value_label)
+        .map(|codec| codec.to_ascii_uppercase())
+        .unwrap_or_else(|| "Audio".to_owned())
+}
+
+fn audio_spectrum_bit_depth(stream: &serde_json::Map<String, serde_json::Value>) -> Option<u32> {
+    for key in [
+        "bits_per_raw_sample",
+        "bits_per_sample",
+        "bits_per_coded_sample",
+    ] {
+        if let Some(bits) = stream
+            .get(key)
+            .and_then(ffprobe_integer_value)
+            .and_then(|bits| u32::try_from(bits).ok())
+            .filter(|bits| *bits > 0)
+        {
+            return Some(bits);
+        }
+    }
+
+    stream
+        .get("sample_fmt")
+        .and_then(ffprobe_scalar_value_label)
+        .as_deref()
+        .and_then(audio_spectrum_bit_depth_from_sample_format)
+}
+
+fn audio_spectrum_bit_depth_from_sample_format(format: &str) -> Option<u32> {
+    let format = format.trim().to_ascii_lowercase();
+    if format.contains("64") {
+        Some(64)
+    } else if format.contains("32") || format == "flt" || format == "fltp" {
+        Some(32)
+    } else if format.contains("24") {
+        Some(24)
+    } else if format.contains("16") || format == "s16" || format == "s16p" {
+        Some(16)
+    } else if format.contains('8') {
+        Some(8)
+    } else {
+        None
+    }
+}
+
+fn audio_spectrum_header(
+    codec: &str,
+    sample_rate: u32,
+    bit_depth: Option<u32>,
+    channels: Option<u32>,
+) -> String {
+    let mut parts = vec![codec.to_owned(), format!("{sample_rate} Hz")];
+    if let Some(bit_depth) = bit_depth {
+        parts.push(format!("{bit_depth} bits"));
+    }
+    if let Some(channels) = channels {
+        let suffix = if channels == 1 { "channel" } else { "channels" };
+        parts.push(format!("{channels} {suffix}"));
+    }
+    parts.join(", ")
+}
+
+fn decode_audio_spectrum_windows(
+    path: &Path,
+    metadata: &PropertySpectrumMetadata,
+    cancel: &AtomicBool,
+) -> Result<Vec<f32>, String> {
+    let starts = spectrum_window_starts(
+        metadata.duration_seconds,
+        metadata.sample_rate,
+        PROPERTIES_SPECTRUM_TIME_BINS,
+        PROPERTIES_SPECTRUM_FFT_SIZE,
+    );
+    let mut child = spawn_audio_spectrum_ffmpeg(path, 0)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ffmpeg did not provide decoded audio.".to_owned())?;
+    let stderr_handle = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+
+    let mut reader = BufReader::new(stdout);
+    let result = collect_spectrum_windows_from_pcm_reader(&mut reader, &starts, cancel);
+    if result.is_err() || cancel.load(Ordering::Relaxed) {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not wait for ffmpeg: {error}"))?;
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Spectrum analysis was cancelled.".to_owned());
+    }
+    let windows = result?;
+    if !status.success() {
+        let stderr = command_error_output_label(&stderr);
+        return if stderr.is_empty() {
+            Err(format!("ffmpeg exited with {status}"))
+        } else {
+            Err(format!("ffmpeg exited with {status}: {stderr}"))
+        };
+    }
+
+    Ok(windows)
+}
+
+fn spawn_audio_spectrum_ffmpeg(
+    path: &Path,
+    audio_stream_index: usize,
+) -> Result<std::process::Child, String> {
+    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    for arg in ffmpeg_audio_spectrum_args(path, audio_stream_index) {
+        command.arg(arg);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .spawn()
+        .map_err(|error| format!("could not start ffmpeg: {error}"))
+}
+
+fn ffmpeg_audio_spectrum_args(path: &Path, audio_stream_index: usize) -> Vec<OsString> {
+    vec![
+        OsString::from("-v"),
+        OsString::from("error"),
+        OsString::from("-nostdin"),
+        OsString::from("-i"),
+        path.as_os_str().to_os_string(),
+        OsString::from("-map"),
+        OsString::from(format!("0:a:{audio_stream_index}")),
+        OsString::from("-vn"),
+        OsString::from("-ac"),
+        OsString::from("1"),
+        OsString::from("-f"),
+        OsString::from("f32le"),
+        OsString::from("-acodec"),
+        OsString::from("pcm_f32le"),
+        OsString::from("-"),
+    ]
+}
+
+fn spectrum_window_starts(
+    duration_seconds: f64,
+    sample_rate: u32,
+    columns: usize,
+    fft_size: usize,
+) -> Vec<u64> {
+    if columns == 0 {
+        return Vec::new();
+    }
+    let total_samples = (duration_seconds.max(0.0) * f64::from(sample_rate))
+        .round()
+        .max(0.0) as u64;
+    let max_start = total_samples.saturating_sub(fft_size as u64);
+    if columns == 1 {
+        return vec![0];
+    }
+
+    (0..columns)
+        .map(|column| {
+            let position = column as f64 / (columns - 1) as f64;
+            (position * max_start as f64).round() as u64
+        })
+        .collect()
+}
+
+fn collect_spectrum_windows_from_pcm_reader(
+    reader: &mut impl Read,
+    starts: &[u64],
+    cancel: &AtomicBool,
+) -> Result<Vec<f32>, String> {
+    let mut windows = vec![0.0; starts.len() * PROPERTIES_SPECTRUM_FFT_SIZE];
+    let mut ring = vec![0.0; PROPERTIES_SPECTRUM_FFT_SIZE];
+    let mut read_buffer = [0u8; 64 * 1024];
+    let mut pending = Vec::new();
+    let mut sample_index = 0u64;
+    let mut next_window = 0usize;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Spectrum analysis was cancelled.".to_owned());
+        }
+        let count = reader
+            .read(&mut read_buffer)
+            .map_err(|error| format!("could not read decoded audio: {error}"))?;
+        if count == 0 {
+            break;
+        }
+
+        pending.extend_from_slice(&read_buffer[..count]);
+        let complete_len = (pending.len() / 4) * 4;
+        for chunk in pending[..complete_len].chunks_exact(4) {
+            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            ring[(sample_index as usize) % PROPERTIES_SPECTRUM_FFT_SIZE] = sample;
+            sample_index = sample_index.saturating_add(1);
+
+            while next_window < starts.len()
+                && sample_index
+                    >= starts[next_window].saturating_add(PROPERTIES_SPECTRUM_FFT_SIZE as u64)
+            {
+                let start = starts[next_window];
+                let window = spectrum_window_slice_mut(&mut windows, next_window);
+                copy_spectrum_window_from_ring(&ring, start, PROPERTIES_SPECTRUM_FFT_SIZE, window);
+                next_window += 1;
+            }
+        }
+        pending.drain(..complete_len);
+    }
+
+    if sample_index == 0 {
+        return Err("ffmpeg returned no decoded audio samples.".to_owned());
+    }
+
+    while next_window < starts.len() {
+        let start = starts[next_window];
+        let available = sample_index
+            .saturating_sub(start)
+            .min(PROPERTIES_SPECTRUM_FFT_SIZE as u64) as usize;
+        if available > 0 {
+            let window = spectrum_window_slice_mut(&mut windows, next_window);
+            copy_spectrum_window_from_ring(&ring, start, available, window);
+        }
+        next_window += 1;
+    }
+
+    Ok(windows)
+}
+
+fn spectrum_window_slice_mut(windows: &mut [f32], column: usize) -> &mut [f32] {
+    let start = column * PROPERTIES_SPECTRUM_FFT_SIZE;
+    &mut windows[start..start + PROPERTIES_SPECTRUM_FFT_SIZE]
+}
+
+fn copy_spectrum_window_from_ring(ring: &[f32], start: u64, available: usize, output: &mut [f32]) {
+    output.fill(0.0);
+    for (index, sample) in output.iter_mut().take(available).enumerate() {
+        *sample = ring[((start + index as u64) as usize) % ring.len()];
+    }
+}
+
+fn spectrum_db_values_from_windows(windows: &[f32]) -> Vec<f32> {
+    windows
+        .par_chunks_exact(PROPERTIES_SPECTRUM_FFT_SIZE)
+        .flat_map(spectrum_db_column)
+        .collect()
+}
+
+fn spectrum_db_column(samples: &[f32]) -> Vec<f32> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(PROPERTIES_SPECTRUM_FFT_SIZE);
+    let mut buffer: Vec<_> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| Complex {
+            re: *sample * hann_window_value(index, PROPERTIES_SPECTRUM_FFT_SIZE),
+            im: 0.0,
+        })
+        .collect();
+    fft.process(&mut buffer);
+
+    let nyquist_bin = PROPERTIES_SPECTRUM_FFT_SIZE / 2;
+    (0..PROPERTIES_SPECTRUM_FREQUENCY_BINS)
+        .map(|frequency_bin| {
+            let fft_bin = if PROPERTIES_SPECTRUM_FREQUENCY_BINS <= 1 {
+                0
+            } else {
+                frequency_bin * nyquist_bin / (PROPERTIES_SPECTRUM_FREQUENCY_BINS - 1)
+            };
+            let value = buffer[fft_bin];
+            let magnitude = (value.re.mul_add(value.re, value.im * value.im)).sqrt()
+                / PROPERTIES_SPECTRUM_FFT_SIZE as f32;
+            20.0 * magnitude.max(1.0e-12).log10()
+        })
+        .collect()
+}
+
+fn hann_window_value(index: usize, len: usize) -> f32 {
+    if len <= 1 {
+        return 1.0;
+    }
+    let phase = (std::f32::consts::TAU * index as f32) / (len - 1) as f32;
+    0.5 - 0.5 * phase.cos()
+}
+
+fn spectrum_render_image(
+    db_values: &[f32],
+    width: u32,
+    height: u32,
+    range: PropertySpectrumRange,
+) -> Option<Arc<RenderImage>> {
+    let width_usize = usize::try_from(width).ok()?;
+    let height_usize = usize::try_from(height).ok()?;
+    if width_usize == 0
+        || height_usize == 0
+        || db_values.len() != width_usize.checked_mul(height_usize)?
+    {
+        return None;
+    }
+
+    let mut bgra = Vec::with_capacity(width_usize * height_usize * 4);
+    for y in 0..height_usize {
+        let frequency_bin = height_usize - y - 1;
+        for x in 0..width_usize {
+            let db = db_values[x * height_usize + frequency_bin];
+            bgra.extend_from_slice(&spectrum_density_bgra(db, range));
+        }
+    }
+
+    render_image_from_bgra_bytes(width, height, bgra)
+}
+
+fn spectrum_legend_render_image(range: PropertySpectrumRange) -> Option<Arc<RenderImage>> {
+    let height = PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32;
+    let mut bgra = Vec::with_capacity(height as usize * 4);
+    for y in 0..height {
+        let level = if height <= 1 {
+            1.0
+        } else {
+            1.0 - (y as f32 / (height - 1) as f32)
+        };
+        let db = range.low_db + (range.high_db - range.low_db) * level;
+        bgra.extend_from_slice(&spectrum_density_bgra(db, range));
+    }
+    render_image_from_bgra_bytes(1, height, bgra)
+}
+
+fn empty_render_image() -> Arc<RenderImage> {
+    render_image_from_bgra_bytes(1, 1, vec![0, 0, 0, 255]).expect("static one-pixel image is valid")
+}
+
+fn render_image_from_bgra_bytes(
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
+) -> Option<Arc<RenderImage>> {
+    let image = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+}
+
+fn spectrum_density_bgra(db: f32, range: PropertySpectrumRange) -> [u8; 4] {
+    let span = (range.high_db - range.low_db).max(PROPERTIES_SPECTRUM_MIN_RANGE_DB);
+    let level = ((db - range.low_db) / span).clamp(0.0, 1.0);
+    spectrum_palette_bgra(level)
+}
+
+fn spectrum_palette_bgra(level: f32) -> [u8; 4] {
+    let level = level.clamp(0.0, 1.0);
+    let stops = [
+        (0.0, [0x00, 0x00, 0x00]),
+        (0.14, [0x35, 0x00, 0x7a]),
+        (0.28, [0x00, 0x12, 0xff]),
+        (0.43, [0x00, 0xd8, 0xff]),
+        (0.58, [0x00, 0xff, 0x3b]),
+        (0.74, [0xff, 0xf0, 0x00]),
+        (0.88, [0xff, 0x7a, 0x00]),
+        (1.0, [0xff, 0x00, 0x00]),
+    ];
+
+    let mut lower = stops[0];
+    let mut upper = stops[stops.len() - 1];
+    for pair in stops.windows(2) {
+        if level >= pair[0].0 && level <= pair[1].0 {
+            lower = pair[0];
+            upper = pair[1];
+            break;
+        }
+    }
+
+    let local = if upper.0 <= lower.0 {
+        0.0
+    } else {
+        (level - lower.0) / (upper.0 - lower.0)
+    };
+    let channel = |index: usize| {
+        (lower.1[index] as f32 + (upper.1[index] as f32 - lower.1[index] as f32) * local)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [channel(2), channel(1), channel(0), 255]
+}
+
+fn spectrum_frequency_ruler_labels(sample_rate: u32) -> Vec<String> {
+    let nyquist_hz = f64::from(sample_rate) / 2.0;
+    if nyquist_hz <= 0.0 {
+        return vec!["0 kHz".to_owned()];
+    }
+
+    let mut labels = vec![frequency_ruler_label(nyquist_hz)];
+    let step_hz = if nyquist_hz <= 5_000.0 {
+        1_000.0
+    } else if nyquist_hz <= 12_000.0 {
+        2_000.0
+    } else {
+        5_000.0
+    };
+    let mut tick_hz = (nyquist_hz / step_hz).floor() * step_hz;
+    if (nyquist_hz - tick_hz).abs() < 1.0 {
+        tick_hz -= step_hz;
+    }
+    while tick_hz > 0.0 {
+        labels.push(frequency_ruler_label(tick_hz));
+        tick_hz -= step_hz;
+    }
+    labels.push("0 kHz".to_owned());
+    labels
+}
+
+fn frequency_ruler_label(hz: f64) -> String {
+    if hz >= 1000.0 {
+        let khz = hz / 1000.0;
+        if (khz - khz.round()).abs() < 0.05 {
+            format!("{khz:.0} kHz")
+        } else {
+            format!("{khz:.1} kHz")
+        }
+    } else {
+        format!("{:.0} Hz", hz.round())
+    }
+}
+
+fn spectrum_time_ruler_labels(duration_seconds: f64) -> Vec<String> {
+    let duration_seconds = duration_seconds.max(0.0);
+    if duration_seconds <= 0.0 {
+        return vec!["0:00".to_owned()];
+    }
+
+    let step = nice_spectrum_time_step(duration_seconds / 8.0);
+    let mut labels = vec!["0:00".to_owned()];
+    let mut tick = step;
+    while tick < duration_seconds - 0.5 {
+        labels.push(spectrum_time_label(tick));
+        tick += step;
+    }
+    let end = spectrum_time_label(duration_seconds);
+    if labels.last().is_none_or(|label| *label != end) {
+        labels.push(end);
+    }
+    labels
+}
+
+fn nice_spectrum_time_step(target_seconds: f64) -> f64 {
+    for step in [
+        1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0,
+    ] {
+        if target_seconds <= step {
+            return step;
+        }
+    }
+    let hours = (target_seconds / 3600.0).ceil().max(1.0);
+    hours * 3600.0
+}
+
+fn spectrum_time_label(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).round() as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn spectrum_density_ruler_labels(range: PropertySpectrumRange) -> Vec<String> {
+    let high = (range.high_db / 10.0).round() * 10.0;
+    let low = (range.low_db / 10.0).round() * 10.0;
+    let mut labels = Vec::new();
+    let mut tick = high;
+    while tick >= low {
+        labels.push(format!("{tick:.0} dB"));
+        tick -= 20.0;
+    }
+    let low_label = format!("{low:.0} dB");
+    if labels.last().is_none_or(|label| *label != low_label) {
+        labels.push(low_label);
+    }
+    labels
+}
+
+fn spectrum_vertical_ruler(labels: Vec<String>, width: f32) -> AnyElement {
+    let mut ruler = div()
+        .w(px(width))
+        .h_full()
+        .flex()
+        .flex_col()
+        .justify_between()
+        .text_size(px(10.0))
+        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT));
+    for label in labels {
+        ruler = ruler.child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .text_align(gpui::TextAlign::Right)
+                .truncate()
+                .child(SharedString::from(label)),
+        );
+    }
+    ruler.into_any_element()
+}
+
+fn spectrum_horizontal_ruler(labels: Vec<String>) -> AnyElement {
+    let mut ruler = div()
+        .h(px(PROPERTIES_SPECTRUM_TIME_RULER_HEIGHT))
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .text_size(px(10.0))
+        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT));
+    for label in labels {
+        ruler = ruler.child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .child(SharedString::from(label)),
+        );
+    }
+    ruler.into_any_element()
+}
+
+fn spectrum_range_control_group(
+    label: &'static str,
+    value: f32,
+    on_decrement: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_increment: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (decrement_id, increment_id, decrement_tooltip, increment_tooltip) = match label {
+        "Low" => (
+            "properties-spectrum-low-db-decrement",
+            "properties-spectrum-low-db-increment",
+            "Lower minimum spectral density",
+            "Raise minimum spectral density",
+        ),
+        "High" => (
+            "properties-spectrum-high-db-decrement",
+            "properties-spectrum-high-db-increment",
+            "Lower maximum spectral density",
+            "Raise maximum spectral density",
+        ),
+        _ => (
+            "properties-spectrum-db-decrement",
+            "properties-spectrum-db-increment",
+            "Lower spectral density",
+            "Raise spectral density",
+        ),
+    };
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.0))
+        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT))
+        .child(SharedString::from(format!("{label} {:.0} dB", value)))
+        .child(spectrum_range_button(
+            decrement_id,
+            "-",
+            decrement_tooltip,
+            on_decrement,
+        ))
+        .child(spectrum_range_button(
+            increment_id,
+            "+",
+            increment_tooltip,
+            on_increment,
+        ))
+        .into_any_element()
+}
+
+fn spectrum_range_button(
+    id: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .w(px(PROPERTIES_SPECTRUM_CONTROL_BUTTON_SIZE))
+        .h(px(PROPERTIES_SPECTRUM_CONTROL_BUTTON_SIZE))
+        .border_1()
+        .border_color(rgb(PROPERTIES_SPECTRUM_CONTROL_BORDER))
+        .bg(rgb(0x161616))
+        .hover(|style| style.bg(rgb(0x2b2b2b)))
+        .active(|style| style.bg(rgb(0x3a3a3a)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(13.0))
+        .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT))
+        .cursor_default()
+        .tooltip(explorer_tooltip(tooltip))
+        .on_click(on_click)
+        .child(label)
+        .into_any_element()
 }
 
 fn frame_extraction_error_summary(errors: &[String]) -> String {
@@ -7840,6 +9067,7 @@ fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>
     match tab {
         PropertyTab::General | PropertyTab::Details => true,
         PropertyTab::Cover => snapshot.is_some_and(snapshot_has_cover_tab),
+        PropertyTab::Spectrum => snapshot.is_some_and(snapshot_has_spectrum_tab),
         PropertyTab::Code => snapshot.is_some_and(snapshot_has_code_tab),
         PropertyTab::Image => snapshot.is_some_and(snapshot_has_image_tab),
         PropertyTab::Frames => snapshot.is_some_and(snapshot_has_frames_tab),
@@ -7855,6 +9083,10 @@ fn snapshot_has_image_tab(snapshot: &PropertySnapshot) -> bool {
 }
 
 fn snapshot_has_cover_tab(snapshot: &PropertySnapshot) -> bool {
+    single_file_audio_path(&snapshot.target, snapshot.item_kind).is_some()
+}
+
+fn snapshot_has_spectrum_tab(snapshot: &PropertySnapshot) -> bool {
     single_file_audio_path(&snapshot.target, snapshot.item_kind).is_some()
 }
 
@@ -8366,6 +9598,7 @@ fn tab_button(
         PropertyTab::General => "properties-tab-general",
         PropertyTab::Details => "properties-tab-details",
         PropertyTab::Cover => "properties-tab-cover",
+        PropertyTab::Spectrum => "properties-tab-spectrum",
         PropertyTab::Code => "properties-tab-code",
         PropertyTab::Image => "properties-tab-image",
         PropertyTab::Frames => "properties-tab-frames",
@@ -9150,13 +10383,14 @@ mod tests {
     }
 
     #[test]
-    fn properties_dialog_defines_general_details_cover_code_image_and_frames_tabs() {
+    fn properties_dialog_defines_general_details_cover_spectrum_code_image_and_frames_tabs() {
         assert_eq!(
             PROPERTY_TABS,
             &[
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details"),
                 (PropertyTab::Cover, "Cover"),
+                (PropertyTab::Spectrum, "Spectrum"),
                 (PropertyTab::Code, "Code"),
                 (PropertyTab::Image, "Image"),
                 (PropertyTab::Frames, "Frames")
@@ -10105,7 +11339,8 @@ mod tests {
             vec![
                 (PropertyTab::General, "General"),
                 (PropertyTab::Details, "Details"),
-                (PropertyTab::Cover, "Cover")
+                (PropertyTab::Cover, "Cover"),
+                (PropertyTab::Spectrum, "Spectrum")
             ]
         );
         assert_eq!(
@@ -10145,6 +11380,51 @@ mod tests {
                 (PropertyTab::Details, "Details")
             ]
         );
+    }
+
+    #[test]
+    fn spectrum_tab_is_visible_only_for_single_audio_files() {
+        let temp = TempDir::new();
+        let audio = temp.path().join("song.flac");
+        let video = temp.path().join("movie.mp4");
+        let image = temp.path().join("photo.jpg");
+        let folder = temp.path().join("folder");
+        let other = temp.path().join("other.txt");
+        let missing_path = temp.path().join("missing.flac");
+        fs::write(&audio, b"not real audio").unwrap();
+        fs::write(&video, b"not real video").unwrap();
+        fs::write(&image, b"not real image").unwrap();
+        fs::write(&other, b"other").unwrap();
+        fs::create_dir(&folder).unwrap();
+
+        let audio = collect_property_snapshot(PropertyTarget { paths: vec![audio] }).unwrap();
+        let video = collect_property_snapshot(PropertyTarget { paths: vec![video] }).unwrap();
+        let image = collect_property_snapshot(PropertyTarget { paths: vec![image] }).unwrap();
+        let folder = collect_property_snapshot(PropertyTarget {
+            paths: vec![folder],
+        })
+        .unwrap();
+        let missing = collect_property_snapshot(PropertyTarget {
+            paths: vec![missing_path],
+        })
+        .unwrap();
+        let mixed = collect_property_snapshot(PropertyTarget {
+            paths: vec![audio.target.paths[0].clone(), other],
+        })
+        .unwrap();
+
+        assert!(
+            property_tabs_for_snapshot(Some(&audio))
+                .iter()
+                .any(|(tab, label)| *tab == PropertyTab::Spectrum && *label == "Spectrum")
+        );
+        for snapshot in [&video, &image, &folder, &missing, &mixed] {
+            assert!(
+                !property_tabs_for_snapshot(Some(snapshot))
+                    .iter()
+                    .any(|(tab, _)| *tab == PropertyTab::Spectrum)
+            );
+        }
     }
 
     #[test]
@@ -10871,6 +12151,153 @@ mod tests {
         assert!(
             audio_cover_requests_from_probe(&sample_audio_ffprobe_json_with_cover_count(0))
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn audio_spectrum_headers_are_formatted_from_ffprobe_json() {
+        let flac =
+            audio_spectrum_metadata_from_probe(&sample_audio_ffprobe_json_with_cover_count(2))
+                .unwrap();
+        assert_eq!(
+            flac.header,
+            "FLAC (Free Lossless Audio Codec), 44100 Hz, 24 bits, 2 channels"
+        );
+        assert_eq!(flac.sample_rate, 44_100);
+        assert_seconds(flac.duration_seconds, 192.5);
+
+        let aac_probe = serde_json::json!({
+            "format": {
+                "duration": "9.250"
+            },
+            "streams": [
+                {
+                    "codec_name": "aac",
+                    "codec_long_name": "AAC (Advanced Audio Coding)",
+                    "codec_type": "audio",
+                    "sample_rate": "48000",
+                    "channels": 1,
+                    "sample_fmt": "fltp"
+                }
+            ]
+        });
+        let aac = audio_spectrum_metadata_from_probe(&aac_probe).unwrap();
+        assert_eq!(
+            aac.header,
+            "AAC (Advanced Audio Coding), 48000 Hz, 32 bits, 1 channel"
+        );
+        assert_eq!(aac.sample_rate, 48_000);
+        assert_seconds(aac.duration_seconds, 9.25);
+    }
+
+    #[test]
+    fn ffmpeg_audio_spectrum_args_decode_first_audio_stream_to_mono_f32le() {
+        let args: Vec<_> = ffmpeg_audio_spectrum_args(Path::new("song.flac"), 0)
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-map" && window[1] == "0:a:0")
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-ac" && window[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-f" && window[1] == "f32le")
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-acodec" && window[1] == "pcm_f32le")
+        );
+        assert_eq!(args.first().map(String::as_str), Some("-v"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn media_process_hidden_window_flag_stays_at_windows_create_no_window() {
+        assert_eq!(CREATE_NO_WINDOW, 0x08000000);
+    }
+
+    #[test]
+    fn spectrum_ruler_helpers_auto_fit_time_frequency_and_density_labels() {
+        assert_eq!(
+            spectrum_frequency_ruler_labels(48_000),
+            vec!["24 kHz", "20 kHz", "15 kHz", "10 kHz", "5 kHz", "0 kHz"]
+        );
+        assert_eq!(
+            spectrum_time_ruler_labels(145.0),
+            vec![
+                "0:00", "0:20", "0:40", "1:00", "1:20", "1:40", "2:00", "2:20", "2:25"
+            ]
+        );
+        assert_eq!(
+            spectrum_density_ruler_labels(PropertySpectrumRange::default()),
+            vec!["-20 dB", "-40 dB", "-60 dB", "-80 dB", "-100 dB", "-120 dB"]
+        );
+    }
+
+    #[test]
+    fn spectrum_palette_clamps_and_range_remaps_existing_db_values() {
+        let default_range = PropertySpectrumRange::default();
+        assert_eq!(
+            spectrum_density_bgra(-200.0, default_range),
+            spectrum_density_bgra(default_range.low_db, default_range)
+        );
+        assert_eq!(
+            spectrum_density_bgra(20.0, default_range),
+            spectrum_density_bgra(default_range.high_db, default_range)
+        );
+
+        let db = -100.0;
+        let remapped_range = PropertySpectrumRange {
+            low_db: -80.0,
+            high_db: -20.0,
+        };
+        assert_ne!(
+            spectrum_density_bgra(db, default_range),
+            spectrum_density_bgra(db, remapped_range)
+        );
+
+        let db_values = vec![-120.0, -80.0, -40.0, -20.0];
+        assert!(spectrum_render_image(&db_values, 2, 2, default_range).is_some());
+        assert!(spectrum_render_image(&db_values, 2, 2, remapped_range).is_some());
+        assert!(spectrum_render_image(&db_values[..3], 2, 2, default_range).is_none());
+    }
+
+    #[test]
+    fn spectrum_fft_helpers_handle_silence_and_synthetic_sine_peak() {
+        let silence = vec![0.0; PROPERTIES_SPECTRUM_FFT_SIZE];
+        let silence_db = spectrum_db_column(&silence);
+        assert_eq!(silence_db.len(), PROPERTIES_SPECTRUM_FREQUENCY_BINS);
+        assert!(silence_db.iter().all(|value| value.is_finite()));
+        let silence_max = silence_db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(silence_max < -200.0);
+
+        let sine_bin = 512.0;
+        let sine: Vec<_> = (0..PROPERTIES_SPECTRUM_FFT_SIZE)
+            .map(|index| {
+                (std::f32::consts::TAU * sine_bin * index as f32
+                    / PROPERTIES_SPECTRUM_FFT_SIZE as f32)
+                    .sin()
+            })
+            .collect();
+        let sine_db = spectrum_db_column(&sine);
+        let (peak_index, peak_db) = sine_db
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .unwrap();
+
+        assert!(peak_db > silence_max + 80.0);
+        assert!(
+            (55..=75).contains(&peak_index),
+            "expected sine peak near frequency bin 64, got {peak_index}"
         );
     }
 

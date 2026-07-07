@@ -32,6 +32,7 @@ libc = "0.2.177"
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
 raw-window-handle = "0.6.2"
 rayon = "1.11.0"
+rustfft = "6.4.1"
 notify = "8.2.0"
 reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = ["http2", "rustls-tls-native-roots"] }
 serde = { version = "1.0.228", features = ["derive"] }

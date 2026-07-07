@@ -4,7 +4,6 @@
 
 ## 2
 
-- Image viewer tweaks
 - Drive total size + used, GB and percentages
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
@@ -45,6 +44,5 @@ Major remaining Windows Explorer parity areas:
     - Blanks
 - CSV
 - JSON
-- Spectrum analyser https://www.spek.cc/about
 - PDF view: https://crates.io/crates/pdf_oxide
 - EPUB: https://crates.io/crates/rbook
