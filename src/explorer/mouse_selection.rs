@@ -143,6 +143,12 @@ impl ExplorerView {
             details_name_item_hit_rights,
         ) {
             Some(PointerDragIntent::RubberBand) => {
+                self.capture_details_name_whitespace_press(
+                    button,
+                    local_position,
+                    viewport_size,
+                    details_name_item_hit_rights,
+                );
                 if !modifiers.toggle && !modifiers.extend {
                     self.clear_selection();
                 }
@@ -151,9 +157,13 @@ impl ExplorerView {
             }
             Some(PointerDragIntent::ItemDrag) => {
                 self.cancel_mouse_selection_drag();
+                self.clear_details_name_whitespace_press();
                 false
             }
-            None => false,
+            None => {
+                self.clear_details_name_whitespace_press();
+                false
+            }
         }
     }
 
@@ -226,7 +236,9 @@ impl ExplorerView {
     }
 
     pub(super) fn cancel_mouse_selection_drag(&mut self) -> bool {
-        self.mouse_selection_drag.take().is_some()
+        let cleared_drag = self.mouse_selection_drag.take().is_some();
+        let cleared_press = self.clear_details_name_whitespace_press();
+        cleared_drag || cleared_press
     }
 
     pub(super) fn update_mouse_selection_drag(
@@ -242,6 +254,7 @@ impl ExplorerView {
         if !drag.active && drag_distance(drag.start, drag.current) >= DRAG_ACTIVATION_DISTANCE {
             drag.active = true;
             drag.visible = true;
+            self.clear_details_name_whitespace_press();
         }
 
         if drag.active {
@@ -257,6 +270,7 @@ impl ExplorerView {
 
     pub(super) fn end_mouse_selection_drag(&mut self, button: MouseButton) -> bool {
         let Some(drag) = self.mouse_selection_drag.take() else {
+            self.clear_details_name_whitespace_press();
             return false;
         };
         if drag.button != button {
@@ -267,7 +281,72 @@ impl ExplorerView {
         if drag.active && button == MouseButton::Left {
             self.suppress_next_click = true;
         }
+        self.clear_details_name_whitespace_press();
         drag.active
+    }
+
+    fn capture_details_name_whitespace_press(
+        &mut self,
+        button: MouseButton,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+        details_name_item_hit_rights: &[f32],
+    ) {
+        if self.details_name_whitespace_press.is_some() {
+            return;
+        }
+
+        if button != MouseButton::Left || self.view_mode == FileViewMode::LargeIcons {
+            return;
+        }
+
+        let local_x = f32::from(local_position.x);
+        let local_y = f32::from(local_position.y);
+        let viewport_width = f32::from(viewport_size.width);
+        if local_x < 0.0 || local_y < 0.0 || local_x > viewport_width {
+            return;
+        }
+
+        let scroll_top = self
+            .scrollbar_metrics()
+            .map_or(0.0, |metrics| metrics.scroll_top);
+        let Some(ix) = row_index_at_content_y(
+            local_y + scroll_top,
+            self.entries.len(),
+            self.entry_row_height(),
+        ) else {
+            return;
+        };
+
+        let name_column_width =
+            self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
+        let content_x = local_x + self.visible_horizontal_scroll_offset();
+        if content_x >= name_column_width {
+            return;
+        }
+
+        let hit_right = details_name_item_hit_rights
+            .get(ix)
+            .copied()
+            .unwrap_or(name_column_width)
+            .min(name_column_width)
+            .max(0.0);
+        if content_x >= DETAILS_NAME_CELL_LEFT_PADDING && content_x <= hit_right {
+            return;
+        }
+
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
+        self.details_name_whitespace_press =
+            Some(crate::explorer::view::DetailsNameWhitespacePress {
+                path: entry.path.clone(),
+                selected_indices: self.selection.selected_indices.clone(),
+            });
+    }
+
+    pub(super) fn clear_details_name_whitespace_press(&mut self) -> bool {
+        self.details_name_whitespace_press.take().is_some()
     }
 
     pub(super) fn suppress_next_click(&mut self) -> bool {

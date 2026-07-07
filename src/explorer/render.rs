@@ -2039,8 +2039,8 @@ impl ExplorerView {
     fn render_row(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
         let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::Details, cx);
-        let is_selected = self.entry_is_selected(ix);
-        let is_hovered = self.entry_is_hovered(&entry);
+        let is_visually_selected = self.entry_is_visually_selected(ix);
+        let is_visually_hovered = self.entry_is_visually_hovered(&entry);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
         let selected_drag_payload = self
@@ -2065,8 +2065,8 @@ impl ExplorerView {
             .w_full()
             .min_w(px(self.minimum_file_columns_width()))
             .bg(rgb(file_entry_background_color(
-                is_selected,
-                is_hovered,
+                is_visually_selected,
+                is_visually_hovered,
                 context_menu_active,
             )))
             .border_1()
@@ -2542,6 +2542,32 @@ impl ExplorerView {
         self.hovered_entry_path
             .as_deref()
             .is_some_and(|path| path == entry.path.as_path())
+    }
+
+    fn details_name_whitespace_press_is_visible(&self) -> bool {
+        self.details_name_whitespace_press.is_some()
+            && self
+                .mouse_selection_drag
+                .as_ref()
+                .is_none_or(|drag| !drag.active)
+    }
+
+    fn entry_is_visually_selected(&self, ix: usize) -> bool {
+        self.entry_is_selected(ix)
+            || (self.details_name_whitespace_press_is_visible()
+                && self
+                    .details_name_whitespace_press
+                    .as_ref()
+                    .is_some_and(|press| press.selected_indices.contains(&ix)))
+    }
+
+    fn entry_is_visually_hovered(&self, entry: &FileEntry) -> bool {
+        self.entry_is_hovered(entry)
+            || (self.details_name_whitespace_press_is_visible()
+                && self
+                    .details_name_whitespace_press
+                    .as_ref()
+                    .is_some_and(|press| press.path == entry.path))
     }
 
     fn set_hovered_entry_path(&mut self, path: Option<PathBuf>) -> bool {
@@ -3644,6 +3670,7 @@ fn add_entry_primary_click(
         }
 
         this.close_context_menu();
+        this.clear_details_name_whitespace_press();
         if this.suppress_next_click() {
             this.cancel_pending_click_rename();
             cx.stop_propagation();
@@ -6668,8 +6695,8 @@ mod tests {
     use super::{
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
-        DROP_INDICATOR_TARGET_MAX_WIDTH, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG,
-        FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
+        DROP_INDICATOR_TARGET_MAX_WIDTH, DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG,
+        FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
         IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
@@ -7040,6 +7067,98 @@ mod tests {
                 .expect("rubber-band drag");
             assert!(drag.active);
             assert!(drag.visible);
+        });
+
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn details_name_whitespace_press_preserves_previous_visual_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_index(0));
+        });
+
+        let name_bounds = run_until_debug_bounds(cx, "explorer-entry-name-1");
+        let hit_bounds = run_until_debug_bounds(cx, "explorer-entry-name-hit-1");
+        let start = gpui::point(hit_bounds.right() + gpui::px(12.0), hit_bounds.center().y);
+        assert!(start.x < name_bounds.right());
+
+        cx.simulate_mouse_move(start, Option::<MouseButton>::None, Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(selected_names(view).is_empty());
+            assert_eq!(
+                view.details_name_whitespace_press
+                    .as_ref()
+                    .map(|press| press.selected_indices.clone()),
+                Some(BTreeSet::from([0]))
+            );
+            assert!(view.entry_is_visually_selected(0));
+            assert!(!view.entry_is_selected(0));
+            assert!(view.entry_is_visually_hovered(&view.entries[1]));
+            assert_eq!(
+                file_entry_background_color(
+                    view.entry_is_visually_selected(1),
+                    view.entry_is_visually_hovered(&view.entries[1]),
+                    false,
+                ),
+                FILE_ENTRY_HOVER_BG
+            );
+        });
+
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["b.txt"]);
+            assert!(view.details_name_whitespace_press.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn details_name_whitespace_drag_activation_clears_pressed_visual_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.select_single_index(0));
+        });
+
+        let name_bounds = run_until_debug_bounds(cx, "explorer-entry-name-1");
+        let hit_bounds = run_until_debug_bounds(cx, "explorer-entry-name-hit-1");
+        let start = gpui::point(hit_bounds.right() + gpui::px(12.0), hit_bounds.center().y);
+        assert!(start.x < name_bounds.right());
+        let end = gpui::point(start.x + gpui::px(24.0), start.y + gpui::px(8.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.details_name_whitespace_press
+                    .as_ref()
+                    .map(|press| press.selected_indices.clone()),
+                Some(BTreeSet::from([0]))
+            );
+            assert!(view.entry_is_visually_selected(0));
+        });
+
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.details_name_whitespace_press.is_none());
+            assert!(!view.entry_is_visually_selected(0));
+            assert!(!view.entry_is_visually_hovered(&view.entries[1]));
+            assert!(
+                view.mouse_selection_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.active)
+            );
         });
 
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
@@ -9318,6 +9437,45 @@ mod tests {
     #[test]
     fn name_text_width_clamps_when_chrome_consumes_column() {
         assert_eq!(filename_text_width(10.0), 0.0);
+    }
+
+    #[test]
+    fn details_name_width_policy_draws_to_available_width_but_hits_natural_width() {
+        assert_eq!(
+            details_name_width_policy(120.0, 48.0, None),
+            DetailsNameWidths {
+                draw_text_width: 120.0,
+                hit_text_width: 48.0,
+                filename_text_width: 48.0,
+                full_path_text_width: None,
+            }
+        );
+    }
+
+    #[test]
+    fn details_name_width_policy_caps_hit_width_to_available_width() {
+        assert_eq!(
+            details_name_width_policy(80.0, 140.0, None),
+            DetailsNameWidths {
+                draw_text_width: 80.0,
+                hit_text_width: 80.0,
+                filename_text_width: 140.0,
+                full_path_text_width: None,
+            }
+        );
+    }
+
+    #[test]
+    fn details_name_width_policy_uses_larger_recursive_path_width_for_hit_target() {
+        assert_eq!(
+            details_name_width_policy(160.0, 60.0, Some(140.0)),
+            DetailsNameWidths {
+                draw_text_width: 160.0,
+                hit_text_width: 140.0,
+                filename_text_width: 60.0,
+                full_path_text_width: Some(140.0),
+            }
+        );
     }
 
     #[test]

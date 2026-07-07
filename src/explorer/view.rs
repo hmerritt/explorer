@@ -86,6 +86,7 @@ pub struct ExplorerView {
     pub(super) horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     pub(super) mouse_selection_drag: Option<MouseSelectionDrag>,
     pub(super) hovered_entry_path: Option<PathBuf>,
+    pub(super) details_name_whitespace_press: Option<DetailsNameWhitespacePress>,
     pub(super) suppress_next_click: bool,
     pub(super) mouse_down_entry_selection: Option<MouseDownEntrySelection>,
     pub(super) entry_click_sequence: Option<EntryClickSequence>,
@@ -215,6 +216,12 @@ pub(super) struct MouseDownEntrySelection {
     pub(super) modifiers: SelectionModifiers,
     pub(super) was_selected: bool,
     pub(super) selection_applied: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DetailsNameWhitespacePress {
+    pub(super) path: PathBuf,
+    pub(super) selected_indices: BTreeSet<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -446,6 +453,7 @@ impl ExplorerView {
             horizontal_scrollbar_drag: None,
             mouse_selection_drag: None,
             hovered_entry_path: None,
+            details_name_whitespace_press: None,
             suppress_next_click: false,
             mouse_down_entry_selection: None,
             entry_click_sequence: None,
@@ -701,6 +709,7 @@ impl ExplorerView {
         self.context_menu = None;
         self.clear_operation_notice();
         self.read_error = None;
+        self.details_name_whitespace_press = None;
         let selected_paths_started = Instant::now();
         let selected_paths = if mode.preserve_selection {
             self.selected_paths()
