@@ -27,9 +27,13 @@ pub(super) enum SidebarItemKind {
     DriveWsl,
 }
 
-pub(super) fn sidebar_sections(settings: &SidebarSettings) -> SidebarSections {
+pub(super) fn sidebar_sections(
+    settings: &SidebarSettings,
+    filesystem_name: &str,
+) -> SidebarSections {
     sidebar_sections_from_roots_internal(
         settings,
+        filesystem_name,
         local_drive_roots(),
         sshfs_mounts(),
         wsl_drive_roots(),
@@ -38,16 +42,17 @@ pub(super) fn sidebar_sections(settings: &SidebarSettings) -> SidebarSections {
 
 fn sidebar_sections_from_roots_internal(
     settings: &SidebarSettings,
+    filesystem_name: &str,
     drive_roots: Vec<PathBuf>,
     sshfs_mounts: Vec<SshfsMount>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     let home_dir = user_home_dir();
     let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
-    let mut drives = drive_items_from_roots(drive_roots);
+    let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
     drives.extend(sshfs_drive_items(sshfs_mounts));
     SidebarSections {
-        user_directories: configured_sidebar_items(&settings.items),
+        user_directories: configured_sidebar_items(&settings.items, filesystem_name),
         macos_system_locations: macos_system_location_items(home_dir.as_deref()),
         drives,
         wsl_drives: if hide_wsl_drives {
@@ -61,20 +66,34 @@ fn sidebar_sections_from_roots_internal(
 #[cfg(test)]
 fn sidebar_sections_from_roots(
     settings: &SidebarSettings,
+    filesystem_name: &str,
     drive_roots: Vec<PathBuf>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    sidebar_sections_from_roots_internal(settings, drive_roots, Vec::new(), wsl_roots)
+    sidebar_sections_from_roots_internal(
+        settings,
+        filesystem_name,
+        drive_roots,
+        Vec::new(),
+        wsl_roots,
+    )
 }
 
 #[cfg(test)]
 fn sidebar_sections_from_sources(
     settings: &SidebarSettings,
+    filesystem_name: &str,
     drive_roots: Vec<PathBuf>,
     sshfs_mounts: Vec<SshfsMount>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    sidebar_sections_from_roots_internal(settings, drive_roots, sshfs_mounts, wsl_roots)
+    sidebar_sections_from_roots_internal(
+        settings,
+        filesystem_name,
+        drive_roots,
+        sshfs_mounts,
+        wsl_roots,
+    )
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -116,7 +135,10 @@ fn user_directory_items_from_paths(
     .collect()
 }
 
-fn configured_sidebar_items(configured_items: &[PathBuf]) -> Vec<SidebarItem> {
+fn configured_sidebar_items(
+    configured_items: &[PathBuf],
+    filesystem_name: &str,
+) -> Vec<SidebarItem> {
     configured_items
         .iter()
         .enumerate()
@@ -126,7 +148,7 @@ fn configured_sidebar_items(configured_items: &[PathBuf]) -> Vec<SidebarItem> {
                 return None;
             }
             let kind = sidebar_item_kind_for_path(&path);
-            let label = sidebar_item_label_for_path(&path, kind);
+            let label = sidebar_item_label_for_path(&path, kind, filesystem_name);
             Some(SidebarItem {
                 label,
                 path,
@@ -147,7 +169,11 @@ fn sidebar_item_kind_for_path(path: &Path) -> SidebarItemKind {
     }
 }
 
-fn sidebar_item_label_for_path(path: &Path, kind: SidebarItemKind) -> String {
+fn sidebar_item_label_for_path(
+    path: &Path,
+    kind: SidebarItemKind,
+    filesystem_name: &str,
+) -> String {
     match kind {
         SidebarItemKind::Directory(DirectoryKind::Home) => home_sidebar_label(path),
         SidebarItemKind::Directory(DirectoryKind::Desktop) => "Desktop".to_owned(),
@@ -159,10 +185,12 @@ fn sidebar_item_label_for_path(path: &Path, kind: SidebarItemKind) -> String {
         SidebarItemKind::Directory(DirectoryKind::Applications) => "Applications".to_owned(),
         SidebarItemKind::Directory(DirectoryKind::Bin) => "Bin".to_owned(),
         SidebarItemKind::Directory(DirectoryKind::Drive | DirectoryKind::DriveWindows) => {
-            sidebar_drive_label(path)
+            sidebar_drive_label(path, filesystem_name)
         }
         SidebarItemKind::Directory(DirectoryKind::DriveWsl) => sidebar_wsl_drive_label(path),
-        SidebarItemKind::Drive | SidebarItemKind::DriveWindows => sidebar_drive_label(path),
+        SidebarItemKind::Drive | SidebarItemKind::DriveWindows => {
+            sidebar_drive_label(path, filesystem_name)
+        }
         SidebarItemKind::DriveSshfs(_) => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
@@ -215,7 +243,7 @@ fn macos_system_location_items_from_paths(
     .collect()
 }
 
-fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
+fn drive_items_from_roots(roots: Vec<PathBuf>, filesystem_name: &str) -> Vec<SidebarItem> {
     roots
         .into_iter()
         .map(|path| {
@@ -226,7 +254,7 @@ fn drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
             };
 
             SidebarItem {
-                label: sidebar_drive_label(&path),
+                label: sidebar_drive_label(&path, filesystem_name),
                 path,
                 kind,
                 configured_index: None,
@@ -259,22 +287,23 @@ fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
         .collect()
 }
 
-fn sidebar_drive_label(path: &Path) -> String {
+fn sidebar_drive_label(path: &Path, filesystem_name: &str) -> String {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        unix_sidebar_drive_label(path)
+        unix_sidebar_drive_label(path, filesystem_name)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        let _ = filesystem_name;
         drive_display_label(path)
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
-fn unix_sidebar_drive_label(path: &Path) -> String {
+fn unix_sidebar_drive_label(path: &Path, filesystem_name: &str) -> String {
     if path == Path::new("/") {
-        return "Filesystem".to_owned();
+        return filesystem_name.to_owned();
     }
 
     path.file_name()
@@ -378,8 +407,10 @@ mod tests {
         fs::create_dir_all(&first).expect("create first");
         fs::create_dir_all(&second).expect("create second");
 
-        let items =
-            configured_sidebar_items(&[second.clone(), temp.path().join("missing"), first.clone()]);
+        let items = configured_sidebar_items(
+            &[second.clone(), temp.path().join("missing"), first.clone()],
+            "Filesystem",
+        );
 
         assert_eq!(
             items,
@@ -471,24 +502,34 @@ mod tests {
 
     #[test]
     fn unix_sidebar_drive_label_uses_filesystem_for_root_and_mount_tail() {
-        assert_eq!(unix_sidebar_drive_label(Path::new("/")), "Filesystem");
         assert_eq!(
-            unix_sidebar_drive_label(Path::new("/run/media/hrmer/CDROM")),
+            unix_sidebar_drive_label(Path::new("/"), "Filesystem"),
+            "Filesystem"
+        );
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/"), "System Root"),
+            "System Root"
+        );
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/run/media/hrmer/CDROM"), "Filesystem"),
             "CDROM"
         );
         assert_eq!(
-            unix_sidebar_drive_label(Path::new("/run/media/hrmer/Ubuntu 26")),
+            unix_sidebar_drive_label(Path::new("/run/media/hrmer/Ubuntu 26"), "Filesystem"),
             "Ubuntu 26"
         );
         assert_eq!(
-            unix_sidebar_drive_label(Path::new("/media/hrmer/disk")),
+            unix_sidebar_drive_label(Path::new("/media/hrmer/disk"), "Filesystem"),
             "disk"
         );
         assert_eq!(
-            unix_sidebar_drive_label(Path::new("/Volumes/Backup Disk")),
+            unix_sidebar_drive_label(Path::new("/Volumes/Backup Disk"), "Filesystem"),
             "Backup Disk"
         );
-        assert_eq!(unix_sidebar_drive_label(Path::new("/mnt/share")), "share");
+        assert_eq!(
+            unix_sidebar_drive_label(Path::new("/mnt/share"), "Filesystem"),
+            "share"
+        );
     }
 
     #[test]
@@ -497,12 +538,15 @@ mod tests {
             return;
         }
 
-        let items = drive_items_from_roots(vec![
-            PathBuf::from("/"),
-            PathBuf::from("/run/media/hrmer/CDROM"),
-            PathBuf::from("/run/media/hrmer/Ubuntu 26"),
-            PathBuf::from("/Volumes/Backup Disk"),
-        ]);
+        let items = drive_items_from_roots(
+            vec![
+                PathBuf::from("/"),
+                PathBuf::from("/run/media/hrmer/CDROM"),
+                PathBuf::from("/run/media/hrmer/Ubuntu 26"),
+                PathBuf::from("/Volumes/Backup Disk"),
+            ],
+            "Filesystem",
+        );
         let labels = items
             .iter()
             .map(|item| item.label.as_str())
@@ -512,15 +556,21 @@ mod tests {
             labels,
             vec!["Filesystem", "CDROM", "Ubuntu 26", "Backup Disk"]
         );
+
+        let custom_root = drive_items_from_roots(vec![PathBuf::from("/")], "System Root");
+        assert_eq!(custom_root[0].label, "System Root");
     }
 
     #[test]
     fn drive_items_use_local_disk_labels_on_windows_and_filesystem_for_unix_root_elsewhere() {
-        let items = drive_items_from_roots(vec![PathBuf::from(if cfg!(target_os = "windows") {
-            r"C:\"
-        } else {
-            "/"
-        })]);
+        let items = drive_items_from_roots(
+            vec![PathBuf::from(if cfg!(target_os = "windows") {
+                r"C:\"
+            } else {
+                "/"
+            })],
+            "Filesystem",
+        );
 
         assert_eq!(items.len(), 1);
         if cfg!(target_os = "windows") {
@@ -530,7 +580,7 @@ mod tests {
         }
 
         if cfg!(target_os = "windows") {
-            let fallback_items = drive_items_from_roots(vec![PathBuf::from(r"?:\")]);
+            let fallback_items = drive_items_from_roots(vec![PathBuf::from(r"?:\")], "Filesystem");
             assert_eq!(fallback_items[0].label, "Local Disk (?:)");
         } else {
             assert_eq!(items[0].label, "Filesystem");
@@ -572,6 +622,7 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
+            "Filesystem",
             vec![PathBuf::from("X:\\")],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
@@ -590,6 +641,7 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
+            "Filesystem",
             vec![PathBuf::from("X:\\")],
             vec![SshfsMount {
                 label: "hbox".to_owned(),
@@ -624,6 +676,7 @@ mod tests {
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
+            "Filesystem",
             vec![PathBuf::from("X:\\")],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );

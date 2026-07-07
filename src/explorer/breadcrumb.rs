@@ -27,7 +27,10 @@ pub(super) struct BreadcrumbVisibility {
     pub(super) show_ellipsis: bool,
 }
 
-pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
+pub(super) fn path_breadcrumb_segments(
+    path: &Path,
+    filesystem_name: &str,
+) -> Vec<BreadcrumbSegment> {
     let mut segments = Vec::new();
     let mut saw_prefix = false;
     let mut target = PathBuf::new();
@@ -54,7 +57,7 @@ pub(super) fn path_breadcrumb_segments(path: &Path) -> Vec<BreadcrumbSegment> {
                 target.push(component.as_os_str());
                 if !saw_prefix {
                     segments.push(BreadcrumbSegment {
-                        label: root_breadcrumb_label().to_owned(),
+                        label: root_breadcrumb_label(filesystem_name).to_owned(),
                         target: target.clone(),
                     });
                 }
@@ -107,14 +110,15 @@ fn prefix_breadcrumb_label(prefix: std::path::PrefixComponent<'_>) -> String {
     prefix.as_os_str().to_string_lossy().into_owned()
 }
 
-fn root_breadcrumb_label() -> &'static str {
+fn root_breadcrumb_label<'a>(filesystem_name: &'a str) -> &'a str {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        "Filesystem"
+        filesystem_name
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        let _ = filesystem_name;
         "/"
     }
 }
@@ -138,11 +142,12 @@ pub(super) fn directory_bar_available_width(window_width: f32) -> f32 {
 
 pub(super) fn visible_breadcrumb_for_path(
     path: &Path,
+    filesystem_name: &str,
     available_width: f32,
     font: &Font,
     window: &Window,
 ) -> VisibleBreadcrumb {
-    let segments = path_breadcrumb_segments(path);
+    let segments = path_breadcrumb_segments(path, filesystem_name);
     let segment_widths = segments
         .iter()
         .map(|segment| {
@@ -242,7 +247,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_paths_render_drive_as_first_breadcrumb_segment() {
-        let segments = path_breadcrumb_segments(Path::new(r"C:\Users\Ada\Documents"));
+        let segments = path_breadcrumb_segments(Path::new(r"C:\Users\Ada\Documents"), "Filesystem");
 
         assert_eq!(
             breadcrumb_labels(&segments),
@@ -265,7 +270,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_unc_paths_keep_full_prefix_label() {
-        let segments = path_breadcrumb_segments(Path::new(r"\\server\share\Folder"));
+        let segments = path_breadcrumb_segments(Path::new(r"\\server\share\Folder"), "Filesystem");
 
         assert_eq!(
             breadcrumb_labels(&segments),
@@ -276,11 +281,11 @@ mod tests {
 
     #[test]
     fn absolute_paths_render_root_as_breadcrumb_segment() {
-        let segments = path_breadcrumb_segments(Path::new("/usr/local/bin"));
+        let segments = path_breadcrumb_segments(Path::new("/usr/local/bin"), "Filesystem");
 
         assert_eq!(
             breadcrumb_labels(&segments),
-            vec![root_breadcrumb_label(), "usr", "local", "bin"]
+            vec![root_breadcrumb_label("Filesystem"), "usr", "local", "bin"]
         );
         assert_eq!(
             segments
@@ -296,9 +301,20 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn absolute_paths_use_configured_filesystem_name() {
+        let segments = path_breadcrumb_segments(Path::new("/usr/local/bin"), "System Root");
+
+        assert_eq!(
+            breadcrumb_labels(&segments),
+            vec!["System Root", "usr", "local", "bin"]
+        );
+    }
+
     #[test]
     fn relative_paths_keep_relative_breadcrumb_components() {
-        let segments = path_breadcrumb_segments(Path::new("../project/src"));
+        let segments = path_breadcrumb_segments(Path::new("../project/src"), "Filesystem");
 
         assert_eq!(breadcrumb_labels(&segments), vec!["..", "project", "src"]);
         assert_eq!(
@@ -313,14 +329,14 @@ mod tests {
             ]
         );
 
-        let current_dir_segments = path_breadcrumb_segments(Path::new("."));
+        let current_dir_segments = path_breadcrumb_segments(Path::new("."), "Filesystem");
         assert_eq!(breadcrumb_labels(&current_dir_segments), vec!["."]);
         assert_eq!(current_dir_segments[0].target, PathBuf::from("."));
     }
 
     #[test]
     fn empty_paths_fall_back_to_current_directory_breadcrumb() {
-        let segments = path_breadcrumb_segments(Path::new(""));
+        let segments = path_breadcrumb_segments(Path::new(""), "Filesystem");
 
         assert_eq!(breadcrumb_labels(&segments), vec!["."]);
         assert_eq!(segments[0].target, PathBuf::from("."));

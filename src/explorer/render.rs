@@ -338,6 +338,7 @@ impl ExplorerView {
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let breadcrumb = visible_breadcrumb_for_path(
             &self.path,
+            &self.filesystem_name,
             directory_bar_available_width(f32::from(window.bounds().size.width)),
             &self.font,
             window,

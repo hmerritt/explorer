@@ -124,6 +124,7 @@ pub struct ExplorerView {
     pub(super) pending_click_rename: Option<PendingClickRename>,
     pub(super) next_pending_click_rename_id: u64,
     pub(super) date_format: String,
+    pub(super) filesystem_name: String,
     pub(super) font: Font,
     pub(super) show_dotfiles: bool,
     pub(super) show_hidden_files: bool,
@@ -424,6 +425,7 @@ impl ExplorerView {
             directory_is_remote,
             settings.view.remote_thumbnails,
         );
+        let filesystem_name = crate::settings::filesystem_name(settings);
         Self {
             path: initial_path,
             entries: Vec::new(),
@@ -492,6 +494,7 @@ impl ExplorerView {
             pending_click_rename: None,
             next_pending_click_rename_id: 0,
             date_format: settings.view.date_format.clone(),
+            filesystem_name: filesystem_name.clone(),
             font: crate::settings::app_font(settings),
             show_dotfiles: settings.view.show_dotfiles,
             show_hidden_files: settings.view.show_hidden,
@@ -511,7 +514,7 @@ impl ExplorerView {
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
             sidebar_settings: settings.sidebar.clone(),
-            sidebar_sections: sidebar_sections(&settings.sidebar),
+            sidebar_sections: sidebar_sections(&settings.sidebar, &filesystem_name),
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
             folder_size_generation: 0,
@@ -530,9 +533,12 @@ impl ExplorerView {
         let visibility_changed = self.show_dotfiles != settings.view.show_dotfiles
             || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
+        let filesystem_name = crate::settings::filesystem_name(settings);
+        let filesystem_name_changed = self.filesystem_name != filesystem_name;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
         let file_sort_changed = self.file_sort != settings.view.sort;
         self.date_format.clone_from(&settings.view.date_format);
+        self.filesystem_name = filesystem_name;
         self.font = crate::settings::app_font(settings);
         self.show_dotfiles = settings.view.show_dotfiles;
         self.show_hidden_files = settings.view.show_hidden;
@@ -624,7 +630,7 @@ impl ExplorerView {
             if file_sort_changed {
                 self.apply_file_sort_preserving_selection();
             }
-            if sidebar_changed || !folder_size_changed {
+            if sidebar_changed || filesystem_name_changed || !folder_size_changed {
                 self.rebuild_fast_sidebar_sections();
             }
         }
@@ -733,7 +739,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -1082,7 +1088,7 @@ impl ExplorerView {
     }
 
     fn rebuild_fast_sidebar_sections(&mut self) {
-        self.sidebar_sections = sidebar_sections(&self.sidebar_settings);
+        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
     }
 
     fn apply_directory_load_result(
@@ -2098,6 +2104,7 @@ mod tests {
         assert!(view.show_dotfiles);
         assert!(!view.show_hidden_files);
         assert_eq!(view.date_format, crate::settings::DEFAULT_DATE_FORMAT);
+        assert_eq!(view.filesystem_name, "Filesystem");
         assert_eq!(view.font.family, ".SystemUIFont");
         assert!(view.show_file_name_extensions);
         assert!(!view.show_folder_size);
@@ -2593,6 +2600,43 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert!(view.sidebar_sections.wsl_drives.is_empty());
+        });
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn apply_settings_recomputes_sidebar_sections_when_filesystem_name_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            filesystem_name: "System Root".to_owned(),
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.filesystem_name, "System Root");
+            assert!(
+                view.sidebar_sections
+                    .drives
+                    .iter()
+                    .any(|item| item.path == Path::new("/") && item.label == "System Root")
+            );
         });
     }
 

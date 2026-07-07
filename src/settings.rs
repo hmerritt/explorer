@@ -15,6 +15,8 @@ use serde_json::Value;
 
 pub(crate) const APP_ID: &str = "com.hmerritt.explorer";
 pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) const DEFAULT_FILESYSTEM_NAME: &str = "Filesystem";
 pub(crate) const DEFAULT_FONT: &str = "default";
 pub(crate) const DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS: u32 = 30;
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
@@ -428,6 +430,9 @@ pub struct ViewSettings {
         deserialize_with = "deserialize_file_column_settings"
     )]
     pub file_columns: FileColumnSettings,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[serde(default = "default_filesystem_name")]
+    pub filesystem_name: String,
     #[serde(default = "default_font")]
     pub font: String,
     pub mode: FileViewMode,
@@ -542,6 +547,8 @@ impl Default for ViewSettings {
             address_slash: AddressSlash::Forward,
             date_format: default_date_format(),
             file_columns: default_file_columns(),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            filesystem_name: default_filesystem_name(),
             font: default_font(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
@@ -1089,6 +1096,13 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "font must not be empty",
+        ));
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if settings.view.filesystem_name.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "filesystem_name must not be empty",
         ));
     }
     chrono::format::StrftimeItems::new(&settings.view.date_format)
@@ -1651,6 +1665,19 @@ fn settings_address_slash(settings: &ExplorerSettings) -> AddressSlash {
     }
 }
 
+pub(crate) fn filesystem_name(settings: &ExplorerSettings) -> String {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        settings.view.filesystem_name.clone()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = settings;
+        "Filesystem".to_owned()
+    }
+}
+
 fn format_configured_path(path: &Path, slash: AddressSlash) -> String {
     let text = path.display().to_string();
 
@@ -1708,6 +1735,11 @@ fn default_sidebar_width() -> u32 {
 
 fn default_date_format() -> String {
     DEFAULT_DATE_FORMAT.to_owned()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn default_filesystem_name() -> String {
+    DEFAULT_FILESYSTEM_NAME.to_owned()
 }
 
 fn default_font() -> String {
@@ -2050,6 +2082,8 @@ mod tests {
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
         #[cfg(target_os = "windows")]
         assert_eq!(settings.view.address_slash, AddressSlash::Forward);
         assert!(settings.view.show_extensions);
@@ -2113,6 +2147,8 @@ mod tests {
         assert!(settings.view.show_dotfiles);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
         #[cfg(target_os = "windows")]
         assert_eq!(settings.view.address_slash, AddressSlash::Forward);
         assert!(settings.view.show_extensions);
@@ -2131,6 +2167,29 @@ mod tests {
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn filesystem_name_deserializes_and_serializes_on_unix() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{"filesystem_name":"System Root"}}"#)
+                .expect("deserialize settings");
+
+        assert_eq!(settings.view.filesystem_name, "System Root");
+        let value = serde_json::to_value(settings).expect("serialize settings");
+        assert_eq!(value["view"]["filesystem_name"], "System Root");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn filesystem_name_is_omitted_on_windows() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{"filesystem_name":"System Root"}}"#)
+                .expect("deserialize settings");
+
+        let value = serde_json::to_value(settings).expect("serialize settings");
+        assert!(value["view"].get("filesystem_name").is_none());
     }
 
     #[test]
@@ -2523,6 +2582,16 @@ mod tests {
         ));
         assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert_eq!(document["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);
+            assert!(json.contains("\n    \"filesystem_name\": \"Filesystem\","));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(document["view"].get("filesystem_name").is_none());
+            assert!(!json.contains("filesystem_name"));
+        }
         assert!(json.contains("\n    \"native_icons\": true"));
         assert!(json.contains("\n    \"remote_mode_media\": \"details\""));
         assert!(json.contains("\n    \"remote_thumbnails\": false"));
@@ -3164,6 +3233,21 @@ mod tests {
         assert!(validate_settings(&settings).is_ok());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn empty_filesystem_name_values_are_rejected() {
+        for filesystem_name in ["", " ", "\t\r\n"] {
+            let settings = ExplorerSettings {
+                view: ViewSettings {
+                    filesystem_name: filesystem_name.to_owned(),
+                    ..ViewSettings::default()
+                },
+                ..ExplorerSettings::default()
+            };
+            assert!(validate_settings(&settings).is_err());
+        }
+    }
+
     #[test]
     fn empty_and_literal_date_formats_are_valid() {
         for date_format in ["", "Modified today"] {
@@ -3268,6 +3352,10 @@ mod tests {
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
         assert_eq!(object["view"]["native_icons"], true);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_eq!(object["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);
+        #[cfg(target_os = "windows")]
+        assert!(object["view"].get("filesystem_name").is_none());
         assert_eq!(object["view"]["remote_mode_media"], "details");
         assert_eq!(object["view"]["remote_thumbnails"], false);
         assert_eq!(object["view"]["show_extensions"], true);
