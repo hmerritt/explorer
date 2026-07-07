@@ -106,9 +106,13 @@ const PROPERTIES_SPECTRUM_MIN_RANGE_DB: f32 = 10.0;
 const PROPERTIES_SPECTRUM_RANGE_STEP_DB: f32 = 10.0;
 const PROPERTIES_SPECTRUM_HEADER_HEIGHT: f32 = 18.0;
 const PROPERTIES_SPECTRUM_TIME_RULER_HEIGHT: f32 = 16.0;
-const PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH: f32 = 38.0;
-const PROPERTIES_SPECTRUM_DB_RULER_WIDTH: f32 = 46.0;
+const PROPERTIES_SPECTRUM_AXIS_GAP: f32 = 4.0;
+const PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH: f32 = 54.0;
 const PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH: f32 = 10.0;
+const PROPERTIES_SPECTRUM_DB_LABEL_WIDTH: f32 = 54.0;
+const PROPERTIES_SPECTRUM_DB_RULER_WIDTH: f32 = PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH
+    + PROPERTIES_SPECTRUM_AXIS_GAP
+    + PROPERTIES_SPECTRUM_DB_LABEL_WIDTH;
 const PROPERTIES_SPECTRUM_CONTROL_HEIGHT: f32 = 34.0;
 const PROPERTIES_SPECTRUM_CONTROL_BUTTON_SIZE: f32 = 20.0;
 const PROPERTIES_SPECTRUM_AXIS_TEXT: u32 = 0xffffff;
@@ -3409,25 +3413,30 @@ impl PropertiesDialog {
             .child(
                 div()
                     .flex()
-                    .flex_row()
+                    .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
                     .min_w(px(0.0))
                     .w_full()
-                    .gap(px(4.0))
-                    .child(spectrum_vertical_ruler(
-                        frequency_labels,
-                        PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
-                    ))
                     .child(
                         div()
+                            .debug_selector(|| "properties-spectrum-plot-row".to_owned())
                             .flex()
-                            .flex_col()
+                            .flex_row()
                             .flex_1()
                             .min_h(px(0.0))
                             .min_w(px(0.0))
+                            .w_full()
+                            .gap(px(PROPERTIES_SPECTRUM_AXIS_GAP))
+                            .child(spectrum_vertical_ruler(
+                                "properties-spectrum-frequency-ruler",
+                                frequency_labels,
+                                PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
+                                gpui::TextAlign::Right,
+                            ))
                             .child(
                                 div()
+                                    .debug_selector(|| "properties-spectrum-image".to_owned())
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .min_w(px(0.0))
@@ -3441,27 +3450,64 @@ impl PropertiesDialog {
                                             .object_fit(ObjectFit::Fill),
                                     ),
                             )
-                            .child(spectrum_horizontal_ruler(time_labels)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .h_full()
+                                    .w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .min_w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .max_w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .flex_shrink_0()
+                                    .gap(px(PROPERTIES_SPECTRUM_AXIS_GAP))
+                                    .child(
+                                        div()
+                                            .debug_selector(|| {
+                                                "properties-spectrum-db-legend".to_owned()
+                                            })
+                                            .w(px(PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH))
+                                            .min_w(px(PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH))
+                                            .max_w(px(PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH))
+                                            .h_full()
+                                            .flex_shrink_0()
+                                            .overflow_hidden()
+                                            .child(
+                                                gpui::img(legend_image)
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Fill),
+                                            ),
+                                    )
+                                    .child(spectrum_vertical_ruler(
+                                        "properties-spectrum-db-ruler",
+                                        db_labels,
+                                        PROPERTIES_SPECTRUM_DB_LABEL_WIDTH,
+                                        gpui::TextAlign::Left,
+                                    )),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .h_full()
-                            .w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
-                            .gap(px(4.0))
+                            .h(px(PROPERTIES_SPECTRUM_TIME_RULER_HEIGHT))
+                            .min_w(px(0.0))
+                            .w_full()
+                            .gap(px(PROPERTIES_SPECTRUM_AXIS_GAP))
                             .child(
-                                gpui::img(legend_image)
-                                    .w(px(PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH))
-                                    .h_full()
-                                    .object_fit(ObjectFit::Fill),
+                                div()
+                                    .w(px(PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH))
+                                    .min_w(px(PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH))
+                                    .max_w(px(PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH))
+                                    .flex_shrink_0(),
                             )
-                            .child(spectrum_vertical_ruler(
-                                db_labels,
-                                PROPERTIES_SPECTRUM_DB_RULER_WIDTH
-                                    - PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH
-                                    - 4.0,
-                            )),
+                            .child(spectrum_horizontal_ruler(time_labels))
+                            .child(
+                                div()
+                                    .w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .min_w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .max_w(px(PROPERTIES_SPECTRUM_DB_RULER_WIDTH))
+                                    .flex_shrink_0(),
+                            ),
                     ),
             )
             .into_any_element()
@@ -6467,22 +6513,35 @@ fn spectrum_density_ruler_labels(range: PropertySpectrumRange) -> Vec<String> {
     labels
 }
 
-fn spectrum_vertical_ruler(labels: Vec<String>, width: f32) -> AnyElement {
+fn spectrum_vertical_ruler(
+    debug_selector: &'static str,
+    labels: Vec<String>,
+    width: f32,
+    text_align: gpui::TextAlign,
+) -> AnyElement {
     let mut ruler = div()
+        .debug_selector(move || debug_selector.to_owned())
         .w(px(width))
+        .min_w(px(width))
+        .max_w(px(width))
         .h_full()
         .flex()
         .flex_col()
+        .flex_shrink_0()
         .justify_between()
         .text_size(px(10.0))
+        .line_height(px(12.0))
         .text_color(rgb(PROPERTIES_SPECTRUM_AXIS_TEXT));
-    for label in labels {
+    for (index, label) in labels.into_iter().enumerate() {
         ruler = ruler.child(
             div()
-                .w_full()
-                .min_w(px(0.0))
-                .text_align(gpui::TextAlign::Right)
-                .truncate()
+                .debug_selector(move || format!("{debug_selector}-label-{index}"))
+                .w(px(width))
+                .min_w(px(width))
+                .max_w(px(width))
+                .flex_shrink_0()
+                .line_height(px(12.0))
+                .text_align(text_align)
                 .child(SharedString::from(label)),
         );
     }
@@ -11133,6 +11192,91 @@ mod tests {
     }
 
     #[gpui::test]
+    fn properties_dialog_spectrum_y_axis_labels_render_and_align(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("song.flac");
+        fs::write(&path, b"not real audio").unwrap();
+
+        let (dialog, cx) = test_properties_dialog_window(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Spectrum;
+                dialog.spectrum_range = PropertySpectrumRange::default();
+                dialog.spectrum_state = PropertySpectrumState::Ready(PropertySpectrumAnalysis {
+                    metadata: PropertySpectrumMetadata {
+                        header: "FLAC (Free Lossless Audio Codec), 192000 Hz, 24 bits, 2 channels"
+                            .to_owned(),
+                        sample_rate: 192_000,
+                        duration_seconds: 267.0,
+                    },
+                    db_values: vec![-120.0, -80.0, -40.0, -20.0],
+                    image: render_image_from_bgra(2, 2, vec![0, 0, 0, 255].repeat(4)),
+                    width: 2,
+                    height: 2,
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(spectrum_frequency_ruler_labels(192_000).len(), 21);
+
+        let image = visible_debug_bounds(cx, "properties-spectrum-image");
+        let frequency_ruler = visible_debug_bounds(cx, "properties-spectrum-frequency-ruler");
+        let first_frequency_label =
+            visible_debug_bounds(cx, "properties-spectrum-frequency-ruler-label-0");
+        let last_frequency_label =
+            visible_debug_bounds(cx, "properties-spectrum-frequency-ruler-label-20");
+        let db_ruler = visible_debug_bounds(cx, "properties-spectrum-db-ruler");
+        let first_db_label = visible_debug_bounds(cx, "properties-spectrum-db-ruler-label-0");
+        let last_db_label = visible_debug_bounds(cx, "properties-spectrum-db-ruler-label-5");
+        let db_legend = visible_debug_bounds(cx, "properties-spectrum-db-legend");
+
+        assert_min_debug_width(
+            &frequency_ruler,
+            PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
+            "properties-spectrum-frequency-ruler",
+        );
+        assert_min_debug_width(
+            &first_frequency_label,
+            PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
+            "properties-spectrum-frequency-ruler-label-0",
+        );
+        assert_min_debug_width(
+            &last_frequency_label,
+            PROPERTIES_SPECTRUM_FREQUENCY_RULER_WIDTH,
+            "properties-spectrum-frequency-ruler-label-20",
+        );
+        assert_min_debug_width(
+            &db_ruler,
+            PROPERTIES_SPECTRUM_DB_LABEL_WIDTH,
+            "properties-spectrum-db-ruler",
+        );
+        assert_min_debug_width(
+            &first_db_label,
+            PROPERTIES_SPECTRUM_DB_LABEL_WIDTH,
+            "properties-spectrum-db-ruler-label-0",
+        );
+        assert_min_debug_width(
+            &last_db_label,
+            PROPERTIES_SPECTRUM_DB_LABEL_WIDTH,
+            "properties-spectrum-db-ruler-label-5",
+        );
+        assert_debug_width_near(
+            &db_legend,
+            PROPERTIES_SPECTRUM_DB_LEGEND_WIDTH,
+            "properties-spectrum-db-legend",
+        );
+
+        assert_eq!(frequency_ruler.top(), image.top());
+        assert_eq!(frequency_ruler.bottom(), image.bottom());
+        assert_eq!(db_ruler.top(), image.top());
+        assert_eq!(db_ruler.bottom(), image.bottom());
+    }
+
+    #[gpui::test]
     fn properties_dialog_code_tab_loads_git_and_language_summary(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let repo = init_property_test_repo(temp.path());
@@ -13468,6 +13612,40 @@ mod tests {
         let position = cx.debug_bounds(selector).expect("element bounds").center();
         cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
+    }
+
+    fn visible_debug_bounds(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> Bounds<Pixels> {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be visible"));
+        assert!(
+            f32::from(bounds.size.width) > 0.0,
+            "{selector} should have nonzero width"
+        );
+        assert!(
+            f32::from(bounds.size.height) > 0.0,
+            "{selector} should have nonzero height"
+        );
+        bounds
+    }
+
+    fn assert_min_debug_width(bounds: &Bounds<Pixels>, min_width: f32, selector: &str) {
+        let width = f32::from(bounds.size.width);
+        assert!(
+            width >= min_width,
+            "{selector} should be at least {min_width}px wide, got {width}px"
+        );
+    }
+
+    fn assert_debug_width_near(bounds: &Bounds<Pixels>, expected_width: f32, selector: &str) {
+        let width = f32::from(bounds.size.width);
+        assert!(
+            (width - expected_width).abs() <= 0.5,
+            "{selector} should be {expected_width}px wide, got {width}px"
+        );
     }
 
     #[cfg(unix)]
