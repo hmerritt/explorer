@@ -513,6 +513,64 @@ struct PropertySpectrumAnalysis {
     height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PropertySpectrumRenderSize {
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PropertySpectrumRenderCacheKey {
+    generation: u64,
+    source_width: u32,
+    source_height: u32,
+    target: PropertySpectrumRenderSize,
+    low_db_bits: u32,
+    high_db_bits: u32,
+}
+
+#[derive(Clone)]
+struct PropertySpectrumRenderCache {
+    key: PropertySpectrumRenderCacheKey,
+    image: Arc<RenderImage>,
+}
+
+impl PropertySpectrumRenderSize {
+    fn from_bounds(bounds: Bounds<Pixels>, scale_factor: f32) -> Option<Self> {
+        fn dimension(logical_pixels: Pixels, scale_factor: f32) -> Option<u32> {
+            let device_pixels = f32::from(logical_pixels) * scale_factor;
+            if !device_pixels.is_finite() || device_pixels <= 0.0 {
+                return None;
+            }
+            Some(device_pixels.round().clamp(1.0, u32::MAX as f32) as u32)
+        }
+
+        Some(Self {
+            width: dimension(bounds.size.width, scale_factor)?,
+            height: dimension(bounds.size.height, scale_factor)?,
+        })
+    }
+}
+
+impl PropertySpectrumRenderCacheKey {
+    fn new(
+        generation: u64,
+        source_width: u32,
+        source_height: u32,
+        target: PropertySpectrumRenderSize,
+        range: PropertySpectrumRange,
+    ) -> Self {
+        Self {
+            generation,
+            source_width,
+            source_height,
+            target,
+            low_db_bits: range.low_db.to_bits(),
+            high_db_bits: range.high_db.to_bits(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct PropertyImageCopyPayload {
     image: Arc<RenderImage>,
@@ -573,6 +631,8 @@ pub(super) struct PropertiesDialog {
     spectrum_state: PropertySpectrumState,
     spectrum_generation: u64,
     spectrum_range: PropertySpectrumRange,
+    spectrum_render_size: Option<PropertySpectrumRenderSize>,
+    spectrum_render_cache: Option<PropertySpectrumRenderCache>,
     frames_state: PropertyFramesState,
     frames_generation: u64,
     frames_scroll_handle: ScrollHandle,
@@ -697,6 +757,8 @@ impl PropertiesDialog {
             spectrum_state: PropertySpectrumState::NotStarted,
             spectrum_generation: 0,
             spectrum_range: PropertySpectrumRange::default(),
+            spectrum_render_size: None,
+            spectrum_render_cache: None,
             frames_state: PropertyFramesState::NotStarted,
             frames_generation: 0,
             frames_scroll_handle: ScrollHandle::new(),
@@ -826,6 +888,8 @@ impl PropertiesDialog {
         self.spectrum_generation = self.spectrum_generation.wrapping_add(1);
         self.spectrum_state = PropertySpectrumState::NotStarted;
         self.spectrum_range = PropertySpectrumRange::default();
+        self.spectrum_render_size = None;
+        self.clear_spectrum_render_cache();
     }
 
     fn cancel_spectrum_task(&mut self) {
@@ -833,6 +897,10 @@ impl PropertiesDialog {
             cancel.store(true, Ordering::Relaxed);
         }
         self.spectrum_task = None;
+    }
+
+    fn clear_spectrum_render_cache(&mut self) {
+        self.spectrum_render_cache = None;
     }
 
     fn reset_frames_state(&mut self) {
@@ -2100,6 +2168,7 @@ impl PropertiesDialog {
         {
             analysis.image = image;
         }
+        self.clear_spectrum_render_cache();
         cx.notify();
     }
 
@@ -3372,23 +3441,41 @@ impl PropertiesDialog {
                         .child(SharedString::from(error.clone())),
                 )
                 .into_any_element(),
-            PropertySpectrumState::Ready(analysis) => body
-                .child(self.render_spectrum_analysis(analysis, cx))
-                .child(self.render_spectrum_controls(cx))
-                .into_any_element(),
+            PropertySpectrumState::Ready(analysis) => {
+                let analysis = Self::render_spectrum_analysis(
+                    analysis,
+                    self.spectrum_range,
+                    self.spectrum_generation,
+                    self.spectrum_render_size,
+                    &mut self.spectrum_render_cache,
+                    cx,
+                );
+                body.child(analysis)
+                    .child(self.render_spectrum_controls(cx))
+                    .into_any_element()
+            }
         }
     }
 
     fn render_spectrum_analysis(
-        &self,
         analysis: &PropertySpectrumAnalysis,
-        _cx: &mut Context<Self>,
+        range: PropertySpectrumRange,
+        generation: u64,
+        render_size: Option<PropertySpectrumRenderSize>,
+        render_cache: &mut Option<PropertySpectrumRenderCache>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let frequency_labels = spectrum_frequency_ruler_labels(analysis.metadata.sample_rate);
         let time_labels = spectrum_time_ruler_labels(analysis.metadata.duration_seconds);
-        let db_labels = spectrum_density_ruler_labels(self.spectrum_range);
-        let legend_image =
-            spectrum_legend_render_image(self.spectrum_range).unwrap_or_else(empty_render_image);
+        let db_labels = spectrum_density_ruler_labels(range);
+        let legend_image = spectrum_legend_render_image(range).unwrap_or_else(empty_render_image);
+        let spectrum_image = spectrum_render_image_for_target(
+            analysis,
+            generation,
+            range,
+            render_size,
+            render_cache,
+        );
 
         div()
             .flex()
@@ -3444,11 +3531,13 @@ impl PropertiesDialog {
                                     .border_1()
                                     .border_color(rgb(PROPERTIES_SPECTRUM_BORDER))
                                     .overflow_hidden()
+                                    .relative()
                                     .child(
-                                        gpui::img(analysis.image.clone())
+                                        gpui::img(spectrum_image)
                                             .size_full()
                                             .object_fit(ObjectFit::Fill),
-                                    ),
+                                    )
+                                    .child(Self::render_spectrum_image_bounds_observer(cx)),
                             )
                             .child(
                                 div()
@@ -3509,6 +3598,34 @@ impl PropertiesDialog {
                                     .flex_shrink_0(),
                             ),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_spectrum_image_bounds_observer(cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+        div()
+            .debug_selector(|| "properties-spectrum-render-target".to_owned())
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .size_full()
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let size =
+                            PropertySpectrumRenderSize::from_bounds(bounds, window.scale_factor());
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.spectrum_render_size != size {
+                                this.spectrum_render_size = size;
+                                this.clear_spectrum_render_cache();
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
             )
             .into_any_element()
     }
@@ -6317,6 +6434,48 @@ fn hann_window_value(index: usize, len: usize) -> f32 {
     0.5 - 0.5 * phase.cos()
 }
 
+fn spectrum_render_image_for_target(
+    analysis: &PropertySpectrumAnalysis,
+    generation: u64,
+    range: PropertySpectrumRange,
+    target: Option<PropertySpectrumRenderSize>,
+    render_cache: &mut Option<PropertySpectrumRenderCache>,
+) -> Arc<RenderImage> {
+    let Some(target) = target else {
+        return analysis.image.clone();
+    };
+    let key = PropertySpectrumRenderCacheKey::new(
+        generation,
+        analysis.width,
+        analysis.height,
+        target,
+        range,
+    );
+    if let Some(cache) = render_cache.as_ref()
+        && cache.key == key
+    {
+        return cache.image.clone();
+    }
+
+    let Some(image) = spectrum_render_image_resampled(
+        &analysis.db_values,
+        analysis.width,
+        analysis.height,
+        target.width,
+        target.height,
+        range,
+    ) else {
+        *render_cache = None;
+        return analysis.image.clone();
+    };
+
+    *render_cache = Some(PropertySpectrumRenderCache {
+        key,
+        image: image.clone(),
+    });
+    image
+}
+
 fn spectrum_render_image(
     db_values: &[f32],
     width: u32,
@@ -6342,6 +6501,42 @@ fn spectrum_render_image(
     }
 
     render_image_from_bgra_bytes(width, height, bgra)
+}
+
+fn spectrum_render_image_resampled(
+    db_values: &[f32],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    range: PropertySpectrumRange,
+) -> Option<Arc<RenderImage>> {
+    let source_width = usize::try_from(source_width).ok()?;
+    let source_height = usize::try_from(source_height).ok()?;
+    let target_width = usize::try_from(target_width).ok()?;
+    let target_height = usize::try_from(target_height).ok()?;
+    if source_width == 0
+        || source_height == 0
+        || target_width == 0
+        || target_height == 0
+        || db_values.len() != source_width.checked_mul(source_height)?
+    {
+        return None;
+    }
+
+    let pixel_count = target_width.checked_mul(target_height)?;
+    let mut bgra = Vec::with_capacity(pixel_count.checked_mul(4)?);
+    for y in 0..target_height {
+        let source_y_from_top = y * source_height / target_height;
+        let frequency_bin = source_height - source_y_from_top - 1;
+        for x in 0..target_width {
+            let source_x = x * source_width / target_width;
+            let db = db_values[source_x * source_height + frequency_bin];
+            bgra.extend_from_slice(&spectrum_density_bgra(db, range));
+        }
+    }
+
+    render_image_from_bgra_bytes(target_width as u32, target_height as u32, bgra)
 }
 
 fn spectrum_legend_render_image(range: PropertySpectrumRange) -> Option<Arc<RenderImage>> {
@@ -11277,6 +11472,77 @@ mod tests {
     }
 
     #[gpui::test]
+    fn properties_dialog_spectrum_redraws_cached_image_on_resize(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("song.flac");
+        fs::write(&path, b"not real audio").unwrap();
+
+        let (dialog, cx) = test_properties_dialog_window(cx, PropertyTarget { paths: vec![path] });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.active_tab = PropertyTab::Spectrum;
+                dialog.spectrum_range = PropertySpectrumRange::default();
+                dialog.spectrum_state = PropertySpectrumState::Ready(test_spectrum_analysis(8, 4));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let initial_bounds = visible_debug_bounds(cx, "properties-spectrum-render-target");
+        let initial_target = spectrum_render_size_for_visual_bounds(cx, initial_bounds);
+        let (initial_cache_target, initial_image_width, initial_image_height) =
+            cx.read_entity(&dialog, |dialog, _| {
+                let cache = dialog
+                    .spectrum_render_cache
+                    .as_ref()
+                    .expect("initial spectrum render cache");
+                (
+                    cache.key.target,
+                    cache.image.size(0).width.0,
+                    cache.image.size(0).height.0,
+                )
+            });
+        assert_eq!(initial_cache_target, initial_target);
+        assert_eq!(initial_image_width, initial_target.width as i32);
+        assert_eq!(initial_image_height, initial_target.height as i32);
+
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        cx.run_until_parked();
+        cx.run_until_parked();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let resized_bounds = visible_debug_bounds(cx, "properties-spectrum-render-target");
+        let resized_target = spectrum_render_size_for_visual_bounds(cx, resized_bounds);
+        let (resized_cache_target, resized_image_width, resized_image_height) =
+            cx.read_entity(&dialog, |dialog, _| {
+                let cache = dialog
+                    .spectrum_render_cache
+                    .as_ref()
+                    .expect("resized spectrum render cache");
+                (
+                    cache.key.target,
+                    cache.image.size(0).width.0,
+                    cache.image.size(0).height.0,
+                )
+            });
+
+        assert_ne!(resized_target, initial_target);
+        assert_eq!(resized_cache_target, resized_target);
+        assert_eq!(resized_image_width, resized_target.width as i32);
+        assert_eq!(resized_image_height, resized_target.height as i32);
+    }
+
+    #[gpui::test]
     fn properties_dialog_code_tab_loads_git_and_language_summary(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let repo = init_property_test_repo(temp.path());
@@ -12411,6 +12677,22 @@ mod tests {
         assert!(spectrum_render_image(&db_values, 2, 2, default_range).is_some());
         assert!(spectrum_render_image(&db_values, 2, 2, remapped_range).is_some());
         assert!(spectrum_render_image(&db_values[..3], 2, 2, default_range).is_none());
+    }
+
+    #[test]
+    fn spectrum_resampled_render_image_matches_target_size_and_validates_input() {
+        let range = PropertySpectrumRange::default();
+        let db_values = vec![-120.0, -80.0, -40.0, -20.0];
+
+        let base = spectrum_render_image(&db_values, 2, 2, range).unwrap();
+        assert_render_image_pixel_size(&base, 2, 2);
+
+        let resized = spectrum_render_image_resampled(&db_values, 2, 2, 5, 3, range).unwrap();
+        assert_render_image_pixel_size(&resized, 5, 3);
+
+        assert!(spectrum_render_image_resampled(&db_values, 2, 2, 0, 3, range).is_none());
+        assert!(spectrum_render_image_resampled(&db_values, 2, 2, 5, 0, range).is_none());
+        assert!(spectrum_render_image_resampled(&db_values[..3], 2, 2, 5, 3, range).is_none());
     }
 
     #[test]
@@ -13553,6 +13835,12 @@ mod tests {
         assert_eq!(decoded.as_raw(), expected_rgba);
     }
 
+    fn assert_render_image_pixel_size(image: &Arc<RenderImage>, width: u32, height: u32) {
+        let size = image.size(0);
+        assert_eq!(size.width.0, width as i32);
+        assert_eq!(size.height.0, height as i32);
+    }
+
     fn test_properties_dialog(
         cx: &mut gpui::TestAppContext,
         target: PropertyTarget,
@@ -13614,6 +13902,36 @@ mod tests {
         cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
     }
 
+    fn test_spectrum_analysis(width: u32, height: u32) -> PropertySpectrumAnalysis {
+        let value_count = usize::try_from(width)
+            .unwrap()
+            .checked_mul(usize::try_from(height).unwrap())
+            .unwrap();
+        let db_values: Vec<_> = (0..value_count)
+            .map(|index| {
+                let level = index as f32 / value_count.max(1) as f32;
+                PROPERTIES_SPECTRUM_DEFAULT_LOW_DB
+                    + (PROPERTIES_SPECTRUM_DEFAULT_HIGH_DB - PROPERTIES_SPECTRUM_DEFAULT_LOW_DB)
+                        * level
+            })
+            .collect();
+        let image =
+            spectrum_render_image(&db_values, width, height, PropertySpectrumRange::default())
+                .expect("test spectrum image");
+        PropertySpectrumAnalysis {
+            metadata: PropertySpectrumMetadata {
+                header: "FLAC (Free Lossless Audio Codec), 48000 Hz, 16 bits, 2 channels"
+                    .to_owned(),
+                sample_rate: 48_000,
+                duration_seconds: 207.0,
+            },
+            db_values,
+            image,
+            width,
+            height,
+        }
+    }
+
     fn visible_debug_bounds(
         cx: &mut gpui::VisualTestContext,
         selector: &'static str,
@@ -13630,6 +13948,15 @@ mod tests {
             "{selector} should have nonzero height"
         );
         bounds
+    }
+
+    fn spectrum_render_size_for_visual_bounds(
+        cx: &mut gpui::VisualTestContext,
+        bounds: Bounds<Pixels>,
+    ) -> PropertySpectrumRenderSize {
+        let scale_factor = cx.update(|window, _| window.scale_factor());
+        PropertySpectrumRenderSize::from_bounds(bounds, scale_factor)
+            .expect("visible spectrum bounds should produce a render size")
     }
 
     fn assert_min_debug_width(bounds: &Bounds<Pixels>, min_width: f32, selector: &str) {
