@@ -19,11 +19,12 @@ use std::os::windows::process::CommandExt;
 
 use filetime::{FileTime, set_file_times};
 use gpui::{
-    AnyElement, AnyWindowHandle, App, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle,
-    Focusable, Global, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, Render, RenderImage, ScrollHandle, ScrollWheelEvent,
-    SharedString, StyledImage, Task, TextRun, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions, canvas, div, point, prelude::*, px, rgb, size,
+    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity,
+    FocusHandle, Focusable, Global, Image, ImageFormat, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, Render, RenderImage, ScrollHandle,
+    ScrollWheelEvent, SharedString, StyledImage, Task, TextRun, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, point,
+    prelude::*, px, rgb, size,
 };
 use image::ImageEncoder;
 use jwalk::WalkDirGeneric;
@@ -530,7 +531,7 @@ impl ExplorerView {
             return;
         }
 
-        self.open_properties_for_paths(paths, cx);
+        self.open_properties_for_paths(paths, window, cx);
     }
 
     pub(super) fn handle_open_properties(
@@ -544,7 +545,7 @@ impl ExplorerView {
         }
 
         let paths = self.selected_or_current_property_paths();
-        self.open_properties_for_paths(paths, cx);
+        self.open_properties_for_paths(paths, window, cx);
         cx.notify();
     }
 
@@ -560,6 +561,7 @@ impl ExplorerView {
     pub(super) fn open_properties_for_paths(
         &mut self,
         paths: Vec<PathBuf>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         self.close_context_menu();
@@ -568,6 +570,7 @@ impl ExplorerView {
             PropertyTarget { paths },
             cx.entity(),
             self.date_format.clone(),
+            window,
             cx,
         ) {
             Ok(_) => self.clear_operation_notice(),
@@ -3479,10 +3482,11 @@ fn open_properties_window(
     target: PropertyTarget,
     explorer: gpui::Entity<ExplorerView>,
     date_format: String,
+    parent_window: &Window,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let title = properties_window_title(&target.paths);
-    let options = properties_window_options(title, cx);
+    let options = properties_window_options(title, parent_window, cx);
     let handle = cx
         .open_window(options, |window, cx| {
             let focus_handle = cx.focus_handle();
@@ -3554,12 +3558,16 @@ fn linux_default_app_picker_window_options(title: String, cx: &App) -> WindowOpt
     }
 }
 
-fn properties_window_options(title: String, cx: &App) -> WindowOptions {
+fn properties_window_bounds(parent_bounds: Bounds<Pixels>) -> WindowBounds {
+    WindowBounds::Windowed(Bounds::centered_at(
+        parent_bounds.center(),
+        size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT)),
+    ))
+}
+
+fn properties_window_options(title: String, parent_window: &Window, cx: &App) -> WindowOptions {
     WindowOptions {
-        window_bounds: Some(WindowBounds::centered(
-            size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT)),
-            cx,
-        )),
+        window_bounds: Some(properties_window_bounds(parent_window.bounds())),
         window_min_size: Some(size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from(title)),
@@ -3569,6 +3577,7 @@ fn properties_window_options(title: String, cx: &App) -> WindowOptions {
         is_movable: true,
         is_resizable: true,
         is_minimizable: false,
+        display_id: parent_window.display(cx).map(|display| display.id()),
         window_decorations: Some(WindowDecorations::Server),
         ..Default::default()
     }
@@ -8866,6 +8875,20 @@ mod tests {
         let view = ExplorerView::new(path.clone());
 
         assert_eq!(view.selected_or_current_property_paths(), vec![path]);
+    }
+
+    #[test]
+    fn properties_window_bounds_centers_on_parent_window() {
+        let parent_bounds = Bounds::new(point(px(100.0), px(80.0)), size(px(1000.0), px(700.0)));
+        let expected = Bounds::new(
+            point(px(396.0), px(170.0)),
+            size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT)),
+        );
+
+        assert_eq!(
+            properties_window_bounds(parent_bounds),
+            WindowBounds::Windowed(expected)
+        );
     }
 
     #[test]

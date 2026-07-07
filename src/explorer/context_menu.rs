@@ -415,7 +415,7 @@ impl ExplorerView {
                 self.open_selected_properties(window, cx);
             }
             ContextMenuCommand::PropertiesForPath { path } => {
-                self.open_properties_for_paths(vec![path], cx);
+                self.open_properties_for_paths(vec![path], window, cx);
             }
             ContextMenuCommand::RunSelectedElevated { paths } => {
                 self.run_selected_paths_elevated(paths, window, cx);
