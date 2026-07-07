@@ -623,7 +623,7 @@ impl ExplorerView {
         self.clear_operation_notice();
         self.record_file_operation_undo(&summary);
         self.remove_cut_paths(&summary.moved_source_paths);
-        self.reload_async_with_options(
+        self.reload_async_with_options_preserving_live_selection(
             crate::explorer::view::ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
@@ -1309,6 +1309,7 @@ mod tests {
         clipboard::FileClipboardOperation,
         selection::SelectionModifiers,
         test_support::{TempDir, selected_names, test_view_entity_at_path, test_view_with_entries},
+        view::ExplorerContentBranch,
     };
     use gpui::{AppContext, Image, ImageFormat, TestAppContext};
     use std::{fs, io::Cursor};
@@ -1869,7 +1870,9 @@ mod tests {
 
                 assert_eq!(view.loading_path.as_deref(), Some(temp.path()));
                 assert!(view.directory_load_task.is_some());
-                assert!(view.entries.is_empty());
+                assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+                assert_eq!(view.entries.len(), 1);
+                assert_eq!(view.entries[0].name, "created.txt");
             });
         });
 

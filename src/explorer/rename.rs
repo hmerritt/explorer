@@ -889,6 +889,7 @@ impl ExplorerView {
                             false,
                             cx,
                         );
+                        self.hide_live_entries_during_load = true;
                     }
                 } else {
                     self.reload();

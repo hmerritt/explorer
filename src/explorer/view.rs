@@ -64,6 +64,7 @@ pub struct ExplorerView {
     pub(super) directory_load_generation: u64,
     pub(super) directory_load_task: Option<Task<()>>,
     pub(super) loading_path: Option<PathBuf>,
+    pub(super) hide_live_entries_during_load: bool,
     pub(super) selection: SelectionState,
     pub(super) read_error: Option<String>,
     pub(super) operation_notice: Option<OperationNotice>,
@@ -433,6 +434,7 @@ impl ExplorerView {
             directory_load_generation: 0,
             directory_load_task: None,
             loading_path: None,
+            hide_live_entries_during_load: false,
             selection: SelectionState::default(),
             read_error: None,
             operation_notice: None,
@@ -762,7 +764,14 @@ impl ExplorerView {
         selected_paths: Vec<PathBuf>,
         select_after_load: Vec<PathBuf>,
         entries: Vec<FileEntry>,
-    ) {
+    ) -> bool {
+        let previous_entries = self.entries.clone();
+        let previous_all_entries = self.all_entries.clone();
+        let previous_selection = self.selection.clone();
+        let previous_recursive_results_active = self.search.recursive_results_active;
+        let previous_recursive_file_sort_override = self.recursive_file_sort_override;
+        let had_read_error = self.read_error.is_some();
+
         self.read_error = None;
         let mut entries = entries;
 
@@ -804,28 +813,54 @@ impl ExplorerView {
                 self.selection.selected_indices.len()
             ),
         );
+
+        had_read_error
+            || self.all_entries != previous_all_entries
+            || self.entries != previous_entries
+            || self.selection != previous_selection
+            || self.search.recursive_results_active != previous_recursive_results_active
+            || self.recursive_file_sort_override != previous_recursive_file_sort_override
     }
 
-    fn apply_directory_load_error(&mut self, error: io::Error) {
+    fn apply_directory_load_error(&mut self, error: io::Error) -> bool {
+        let previous_entries = self.entries.clone();
+        let previous_all_entries = self.all_entries.clone();
+        let previous_selection = self.selection.clone();
+        let error = error.to_string();
+        let previous_read_error = self.read_error.clone();
+
         self.all_entries.clear();
         self.entries.clear();
         self.clear_selection();
-        self.read_error = Some(error.to_string());
+        self.read_error = Some(error);
+
+        self.all_entries != previous_all_entries
+            || self.entries != previous_entries
+            || self.selection != previous_selection
+            || self.read_error != previous_read_error
     }
 
-    fn finish_directory_reload_layout(&mut self) {
+    fn finish_directory_reload_layout(&mut self) -> bool {
+        let mut changed = false;
+
         if self.entries.is_empty() {
+            let previous_horizontal_scroll_offset = self.visible_horizontal_scroll_offset();
+            let had_horizontal_scrollbar_drag = self.horizontal_scrollbar_drag.is_some();
             self.set_horizontal_scroll_offset(0.0);
             self.horizontal_scrollbar_drag = None;
+            changed |= previous_horizontal_scroll_offset != self.visible_horizontal_scroll_offset()
+                || had_horizontal_scrollbar_drag;
         }
         if self.view_mode_selection == ViewModeSelection::Pending {
-            self.apply_automatic_view_mode();
+            changed |= self.apply_automatic_view_mode();
             self.view_mode_selection = ViewModeSelection::Automatic;
         }
+
+        changed
     }
 
     pub(super) fn reload_async_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
-        self.reload_async_with_options(
+        self.reload_async_with_options_preserving_live_selection(
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
@@ -865,7 +900,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.invalidate_current_folder_size_cache(cx);
-        self.reload_async_with_options(
+        self.reload_async_with_options_preserving_live_selection(
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
@@ -937,6 +972,7 @@ impl ExplorerView {
         let generation = self.directory_load_generation;
         self.directory_load_task = None;
         self.loading_path = Some(self.path.clone());
+        self.hide_live_entries_during_load = false;
 
         let selected_paths = if preserve_live_selection {
             self.prepare_directory_reload_preserving_live_entries(ReloadMode {
@@ -1023,6 +1059,7 @@ impl ExplorerView {
         let generation = self.directory_load_generation;
         self.directory_load_task = None;
         self.loading_path = Some(self.path.clone());
+        self.hide_live_entries_during_load = false;
 
         let selected_paths = self.prepare_directory_reload(ReloadMode {
             preserve_selection: mode.preserve_selection,
@@ -1102,10 +1139,15 @@ impl ExplorerView {
             return false;
         }
 
+        let previous_content_branch = self.content_branch();
+        let mut changed = false;
+
         self.directory_load_task = None;
         self.loading_path = None;
+        self.hide_live_entries_during_load = false;
 
         if let Some(sidebar_sections) = result.sidebar_sections {
+            changed |= self.sidebar_sections != sidebar_sections;
             self.sidebar_sections = sidebar_sections;
         }
 
@@ -1117,45 +1159,46 @@ impl ExplorerView {
                     } else {
                         state.selected_paths
                     };
-                self.apply_loaded_entries(
+                changed |= self.apply_loaded_entries(
                     state.mode,
                     selected_paths,
                     state.select_after_load,
                     entries,
                 );
             }
-            Err(error) => self.apply_directory_load_error(error),
+            Err(error) => changed |= self.apply_directory_load_error(error),
         }
-        self.finish_directory_reload_layout();
+        changed |= self.finish_directory_reload_layout();
         if let Some(path) = state.rename_after_load {
-            if let Some(window) = window {
-                self.start_rename_for_path(&path, window, cx);
+            changed |= if let Some(window) = window {
+                self.start_rename_for_path(&path, window, cx)
             } else {
-                self.start_rename_for_path_without_focus(&path);
-            }
+                self.start_rename_for_path_without_focus(&path)
+            };
         }
 
         if state.refresh_search {
-            self.refresh_search_after_external_change(cx);
+            changed |= self.refresh_search_after_external_change(cx);
         }
         if state.schedule_metadata {
-            self.schedule_entry_metadata_resolution(cx);
+            changed |= self.schedule_entry_metadata_resolution(cx);
         }
         if state.restart_watcher {
             self.restart_directory_watcher(cx);
         }
 
-        true
+        changed || self.content_branch() != previous_content_branch
     }
 
     fn cancel_directory_load(&mut self) {
         self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
         self.directory_load_task = None;
         self.loading_path = None;
+        self.hide_live_entries_during_load = false;
     }
 
     pub(super) fn reload_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
-        self.reload_async_with_options(
+        self.reload_async_with_options_preserving_live_selection(
             ReloadMode {
                 preserve_selection: true,
                 rebuild_sidebar: true,
@@ -1180,34 +1223,36 @@ impl ExplorerView {
         self.refresh_async_with_entry_metadata_resolution(true, cx);
     }
 
-    pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) -> bool {
         self.schedule_pending_shell_shortcut_resolution(cx);
-        self.schedule_folder_sizes(cx);
-        self.schedule_codebase_summary(cx);
-        self.schedule_git_status(cx);
+        let mut changed = self.schedule_folder_sizes(cx);
+        changed |= self.schedule_codebase_summary(cx);
+        changed |= self.schedule_git_status(cx);
+        changed
     }
 
-    pub(super) fn schedule_codebase_summary(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_codebase_summary(&mut self, cx: &mut Context<Self>) -> bool {
         self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
         let generation = self.codebase_summary_generation;
         let path = self.path.clone();
         if path_is_wsl_unc_root(&path) {
-            self.codebase_summary = None;
+            let changed = self.codebase_summary.take().is_some();
             self.codebase_summary_task = None;
-            return;
+            return changed;
         }
         let Some(repo_root) = find_git_repository_root(&path) else {
-            self.codebase_summary = None;
+            let changed = self.codebase_summary.take().is_some();
             self.codebase_summary_task = None;
-            return;
+            return changed;
         };
 
+        let mut changed = false;
         if self
             .codebase_summary
             .as_ref()
             .is_none_or(|summary| summary.repo_root != repo_root)
         {
-            self.codebase_summary = None;
+            changed = self.codebase_summary.take().is_some();
         }
 
         let task = cx.spawn(async move |this, cx| {
@@ -1227,29 +1272,31 @@ impl ExplorerView {
             });
         });
         self.codebase_summary_task = Some(task);
+        changed
     }
 
-    pub(super) fn schedule_git_status(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_git_status(&mut self, cx: &mut Context<Self>) -> bool {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         let path = self.path.clone();
         if path_is_wsl_unc_root(&path) {
-            self.git_status = None;
+            let changed = self.git_status.take().is_some();
             self.git_status_task = None;
-            return;
+            return changed;
         }
         let Some(repo_root) = find_git_repository_root(&path) else {
-            self.git_status = None;
+            let changed = self.git_status.take().is_some();
             self.git_status_task = None;
-            return;
+            return changed;
         };
 
+        let mut changed = false;
         if self
             .git_status
             .as_ref()
             .is_none_or(|status| status.repo_root != repo_root)
         {
-            self.git_status = None;
+            changed = self.git_status.take().is_some();
         }
 
         let task = cx.spawn(async move |this, cx| {
@@ -1269,6 +1316,7 @@ impl ExplorerView {
             });
         });
         self.git_status_task = Some(task);
+        changed
     }
 
     fn schedule_pending_shell_shortcut_resolution(&mut self, cx: &mut Context<Self>) {
@@ -1304,13 +1352,13 @@ impl ExplorerView {
         self.shell_shortcut_resolution_task = Some(task);
     }
 
-    pub(super) fn schedule_folder_sizes(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_folder_sizes(&mut self, cx: &mut Context<Self>) -> bool {
         self.cancel_folder_size_task();
         if !self.show_folder_size {
-            return;
+            return false;
         }
         if path_is_filesystem_root(&self.path) || path_is_wsl_unc_root(&self.path) {
-            return;
+            return false;
         }
 
         let root = self.path.clone();
@@ -1335,11 +1383,12 @@ impl ExplorerView {
             missing = targets;
         }
 
+        let mut changed = false;
         for (path, size) in cached {
-            self.apply_folder_size(&path, size);
+            changed |= self.apply_folder_size(&path, size);
         }
         if missing.is_empty() {
-            return;
+            return changed;
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1376,6 +1425,7 @@ impl ExplorerView {
             });
         });
         self.folder_size_task = Some(task);
+        changed
     }
 
     fn drain_folder_size_calculations(
@@ -1936,10 +1986,13 @@ impl ExplorerView {
     pub(super) fn content_branch(&self) -> ExplorerContentBranch {
         if self.read_error.is_some() {
             ExplorerContentBranch::Error
-        } else if self.is_directory_loading() {
-            ExplorerContentBranch::Loading
         } else if self.recursive_search_is_working() {
             ExplorerContentBranch::SearchWorking
+        } else if self.is_directory_loading()
+            && (self.hide_live_entries_during_load
+                || (self.all_entries.is_empty() && self.entries.is_empty()))
+        {
+            ExplorerContentBranch::Loading
         } else if self.should_show_empty_folder_message() {
             ExplorerContentBranch::Empty
         } else if self.entries.is_empty() && self.search_is_active() {
@@ -3252,7 +3305,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn async_directory_load_shows_loading_until_entries_apply(cx: &mut gpui::TestAppContext) {
+    fn refresh_with_existing_entries_keeps_list_visible_while_loading(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let temp = crate::explorer::test_support::TempDir::new();
         std::fs::write(temp.path().join("file.txt"), b"file").unwrap();
         let path = temp.path().to_path_buf();
@@ -3260,6 +3315,35 @@ mod tests {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
             ExplorerView::new_with_focus_handle_for_test(path, focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+                assert_eq!(view.entries.len(), 1);
+                view.refresh_with_entry_metadata_resolution(cx);
+                assert_eq!(view.loading_path.as_deref(), Some(view.path.as_path()));
+                assert!(view.directory_load_task.is_some());
+                assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+                assert_eq!(view.entries.len(), 1);
+                assert_eq!(view.entries[0].name, "file.txt");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn first_async_directory_load_shows_loading_until_entries_apply(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        std::fs::write(temp.path().join("file.txt"), b"file").unwrap();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &test_explorer_settings(),
+            )
         });
 
         cx.update(|_, app| {
@@ -3277,6 +3361,112 @@ mod tests {
             assert_eq!(view.entries[0].name, "file.txt");
             assert!(view.loading_path.is_none());
             assert!(view.directory_load_task.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn unchanged_async_directory_load_result_reports_no_visible_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("current"),
+                Some(focus_handle),
+                &test_explorer_settings(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = FileEntry::test("file.txt", false, Some(1), None);
+                view.path = PathBuf::from("current");
+                view.all_entries = vec![entry.clone()];
+                view.entries = vec![entry.clone()];
+                view.directory_load_generation = 3;
+                view.loading_path = Some(view.path.clone());
+                let state = DirectoryLoadState {
+                    path: view.path.clone(),
+                    generation: 3,
+                    selected_paths: Vec::new(),
+                    select_after_load: Vec::new(),
+                    rename_after_load: None,
+                    mode: ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                        preserve_context_menu: false,
+                    },
+                    schedule_metadata: false,
+                    refresh_search: false,
+                    restart_watcher: false,
+                    preserve_live_selection: true,
+                };
+
+                assert!(!view.apply_directory_load_result(
+                    state,
+                    DirectoryLoadResult {
+                        entries: Ok(vec![entry]),
+                        sidebar_sections: None,
+                    },
+                    None,
+                    cx,
+                ));
+                assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+                assert_eq!(view.entries.len(), 1);
+                assert!(view.loading_path.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn changed_async_directory_load_result_reports_visible_change(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("current"),
+                Some(focus_handle),
+                &test_explorer_settings(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = PathBuf::from("current");
+                view.all_entries = vec![FileEntry::test("old.txt", false, Some(1), None)];
+                view.entries = view.all_entries.clone();
+                view.directory_load_generation = 4;
+                view.loading_path = Some(view.path.clone());
+                let state = DirectoryLoadState {
+                    path: view.path.clone(),
+                    generation: 4,
+                    selected_paths: Vec::new(),
+                    select_after_load: Vec::new(),
+                    rename_after_load: None,
+                    mode: ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                        preserve_context_menu: false,
+                    },
+                    schedule_metadata: false,
+                    refresh_search: false,
+                    restart_watcher: false,
+                    preserve_live_selection: true,
+                };
+
+                assert!(view.apply_directory_load_result(
+                    state,
+                    DirectoryLoadResult {
+                        entries: Ok(vec![FileEntry::test("new.txt", false, Some(1), None)]),
+                        sidebar_sections: None,
+                    },
+                    None,
+                    cx,
+                ));
+                assert_eq!(names(&view.entries), vec!["new.txt"]);
+                assert!(view.loading_path.is_none());
+            });
         });
     }
 

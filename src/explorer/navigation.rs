@@ -116,7 +116,7 @@ impl ExplorerView {
         if path == self.path {
             let reload_started = Instant::now();
             if let Some(cx) = cx.as_deref_mut() {
-                self.reload_async_with_options(
+                self.reload_async_with_options_preserving_live_selection(
                     ReloadMode {
                         preserve_selection: true,
                         rebuild_sidebar: true,

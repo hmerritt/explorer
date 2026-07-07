@@ -140,6 +140,7 @@ mod tests {
     use crate::explorer::{
         context_menu::ContextMenuState,
         test_support::{TempDir, test_view_entity_at_path},
+        view::ExplorerContentBranch,
     };
     use futures::channel::mpsc::UnboundedSender;
     use gpui::{AppContext, Entity};
@@ -241,6 +242,12 @@ mod tests {
                 ));
                 view.refresh_with_entry_metadata_resolution(cx);
                 assert!(view.context_menu.is_none());
+                assert_eq!(view.content_branch(), ExplorerContentBranch::List);
+                assert!(
+                    view.entries
+                        .iter()
+                        .any(|entry| entry.name == "existing.txt")
+                );
             });
         });
         cx.run_until_parked();

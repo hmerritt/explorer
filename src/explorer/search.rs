@@ -291,9 +291,21 @@ impl ExplorerView {
         self.refresh_search_filter_with_selection(&selected_paths, cx);
     }
 
-    pub(super) fn refresh_search_after_external_change(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_search_after_external_change(&mut self, cx: &mut Context<Self>) -> bool {
+        let previous_entries = self.entries.clone();
+        let previous_selection = self.selection.clone();
+        let previous_recursive_status = self.search.recursive_status;
+        let previous_recursive_results_active = self.search.recursive_results_active;
+        let previous_recursive_file_sort_override = self.recursive_file_sort_override;
+
         let selected_paths = self.selected_paths();
         self.refresh_search_filter_with_selection(&selected_paths, cx);
+
+        self.entries != previous_entries
+            || self.selection != previous_selection
+            || self.search.recursive_status != previous_recursive_status
+            || self.search.recursive_results_active != previous_recursive_results_active
+            || self.recursive_file_sort_override != previous_recursive_file_sort_override
     }
 
     pub(super) fn start_search_edit(
