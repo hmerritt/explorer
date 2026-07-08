@@ -56,8 +56,8 @@ use crate::explorer::{
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
         ContextMenuSource, clamped_context_menu_origin, context_menu_height,
-        context_menu_item_is_persistently_active, context_menu_item_top,
-        context_menu_path_is_active, context_menu_pointer_tip_origin, context_submenu_left,
+        context_menu_item_is_visually_active, context_menu_item_top, context_menu_path_is_active,
+        context_menu_pointer_tip_origin, context_submenu_left,
     },
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
@@ -4312,7 +4312,7 @@ fn render_context_menu_item(
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
-    let active = context_menu_item_is_persistently_active(item, hovered_path, &path);
+    let visually_active = context_menu_item_is_visually_active(item, hovered_path, &path);
 
     match item {
         ContextMenuItem::Action {
@@ -4328,7 +4328,7 @@ fn render_context_menu_item(
             command.clone(),
             *enabled,
             path,
-            active,
+            visually_active,
             cx,
             native_file_icon,
             native_path_icons,
@@ -4341,7 +4341,7 @@ fn render_context_menu_item(
             icon.clone(),
             label,
             path,
-            active,
+            visually_active,
             cx,
             native_file_icon,
             native_path_icons,
@@ -4357,7 +4357,7 @@ fn render_context_menu_item(
             value,
             *icon_slot,
             path,
-            active,
+            visually_active,
             cx,
             native_path_icons,
             url_icon_paths,
@@ -4372,7 +4372,7 @@ fn context_menu_action_row(
     command: ContextMenuCommand,
     enabled: bool,
     path: Vec<usize>,
-    active: bool,
+    visually_active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
@@ -4383,7 +4383,7 @@ fn context_menu_action_row(
         icon,
         ContextMenuIconSlot::Reserve,
         path,
-        active,
+        visually_active,
         cx,
         native_file_icon,
         native_path_icons,
@@ -4407,7 +4407,7 @@ fn context_menu_submenu_row(
     icon: Option<ContextMenuIcon>,
     label: &str,
     path: Vec<usize>,
-    active: bool,
+    visually_active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
@@ -4418,7 +4418,7 @@ fn context_menu_submenu_row(
         icon,
         ContextMenuIconSlot::Reserve,
         path,
-        active,
+        visually_active,
         cx,
         native_file_icon,
         native_path_icons,
@@ -4434,7 +4434,7 @@ fn context_menu_detail_row(
     value: &str,
     icon_slot: ContextMenuIconSlot,
     path: Vec<usize>,
-    active: bool,
+    visually_active: bool,
     cx: &mut Context<ExplorerView>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
@@ -4450,7 +4450,7 @@ fn context_menu_detail_row(
         None,
         icon_slot,
         path,
-        active,
+        visually_active,
         cx,
         None,
         native_path_icons,
@@ -4478,7 +4478,7 @@ fn context_menu_row_base(
     icon: Option<ContextMenuIcon>,
     icon_slot: ContextMenuIconSlot,
     path: Vec<usize>,
-    active: bool,
+    visually_active: bool,
     cx: &mut Context<ExplorerView>,
     native_file_icon: Option<&Arc<Image>>,
     native_path_icons: &HashMap<PathBuf, Arc<Image>>,
@@ -4496,8 +4496,7 @@ fn context_menu_row_base(
         .px(px(CONTEXT_MENU_ROW_INNER_HORIZONTAL_PADDING / 2.0))
         .gap(px(CONTEXT_MENU_ROW_CHILD_GAP))
         .cursor_default()
-        .when(active, |this| this.bg(rgb(0xe5f3ff)))
-        .hover(|style| style.bg(rgb(0xe5f3ff)))
+        .when(visually_active, |this| this.bg(rgb(0xe5f3ff)))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if *hovered {
                 this.set_context_menu_hovered_path(path.clone());
@@ -6680,7 +6679,8 @@ mod tests {
     };
 
     use crate::explorer::context_menu::{
-        ContextMenuIconSlot, ContextMenuItem, ContextMenuSource, ContextMenuState,
+        ContextMenuCommand, ContextMenuIconSlot, ContextMenuItem, ContextMenuSource,
+        ContextMenuState,
     };
     use crate::explorer::{
         DirectoryKind,
@@ -7457,6 +7457,63 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             let menu = view.context_menu.as_ref().expect("context menu");
             assert_eq!(menu.origin, event_position);
+        });
+    }
+
+    #[gpui::test]
+    fn context_menu_hover_tracks_only_latest_mouse_moved_row(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(
+                path,
+                Some(focus_handle),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.context_menu = Some(ContextMenuState::new(
+                    gpui::point(gpui::px(20.0), gpui::px(20.0)),
+                    vec![
+                        ContextMenuItem::Action {
+                            id: "context-menu-hover-first".to_owned(),
+                            icon: None,
+                            label: "First".to_owned(),
+                            command: ContextMenuCommand::Paste,
+                            enabled: false,
+                        },
+                        ContextMenuItem::Action {
+                            id: "context-menu-hover-second".to_owned(),
+                            icon: None,
+                            label: "Second".to_owned(),
+                            command: ContextMenuCommand::DeleteSelected,
+                            enabled: true,
+                        },
+                    ],
+                ));
+                cx.notify();
+            });
+        });
+
+        let first = run_until_debug_bounds(cx, "context-menu-hover-first").center();
+        let second = run_until_debug_bounds(cx, "context-menu-hover-second").center();
+
+        cx.simulate_mouse_move(first, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("context menu");
+            assert_eq!(menu.hovered_path, vec![0]);
+        });
+
+        cx.simulate_mouse_move(second, Option::<MouseButton>::None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("context menu");
+            assert_eq!(menu.hovered_path, vec![1]);
         });
     }
 

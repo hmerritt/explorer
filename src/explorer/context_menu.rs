@@ -1784,6 +1784,14 @@ pub(super) fn context_menu_item_is_persistently_active(
         && context_menu_path_is_active(hovered_path, path)
 }
 
+pub(super) fn context_menu_item_is_visually_active(
+    item: &ContextMenuItem,
+    hovered_path: &[usize],
+    path: &[usize],
+) -> bool {
+    hovered_path == path || context_menu_item_is_persistently_active(item, hovered_path, path)
+}
+
 pub(super) fn context_menu_height(
     items: &[ContextMenuItem],
     row_height: f32,
@@ -2066,6 +2074,66 @@ mod tests {
             &submenu,
             &hovered,
             &[0]
+        ));
+    }
+
+    #[test]
+    fn visually_active_item_matches_hovered_row_and_submenu_branch() {
+        let action = ContextMenuItem::Action {
+            id: "action".to_owned(),
+            icon: None,
+            label: "Action".to_owned(),
+            command: ContextMenuCommand::Paste,
+            enabled: true,
+        };
+        let detail = ContextMenuItem::Detail {
+            label: "Created",
+            value: "Today".to_owned(),
+            icon_slot: ContextMenuIconSlot::Collapse,
+        };
+        let submenu = ContextMenuItem::Submenu {
+            id: "submenu".to_owned(),
+            icon: None,
+            label: "New".to_owned(),
+            children: vec![action.clone()],
+        };
+        let hovered_action = vec![1];
+        let hovered_child = vec![2, 0];
+
+        assert!(context_menu_item_is_visually_active(
+            &action,
+            &hovered_action,
+            &[1]
+        ));
+        assert!(!context_menu_item_is_visually_active(
+            &action,
+            &hovered_action,
+            &[0]
+        ));
+        assert!(context_menu_item_is_visually_active(
+            &submenu,
+            &hovered_child,
+            &[2]
+        ));
+        assert!(context_menu_item_is_visually_active(
+            &action,
+            &hovered_child,
+            &[2, 0]
+        ));
+        assert!(!context_menu_item_is_visually_active(
+            &submenu,
+            &hovered_child,
+            &[3]
+        ));
+        assert!(!context_menu_item_is_visually_active(
+            &action,
+            &hovered_child,
+            &[1]
+        ));
+        assert!(!context_menu_item_is_visually_active(
+            &detail,
+            &hovered_child,
+            &[4]
         ));
     }
 
