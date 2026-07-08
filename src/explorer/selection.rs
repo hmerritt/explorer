@@ -217,6 +217,18 @@ impl ExplorerView {
         self.scroll_index_into_view(last);
     }
 
+    pub(super) fn scroll_focused_selection_into_view(&self) -> bool {
+        let Some(ix) = self.selection.focused_index else {
+            return false;
+        };
+        if ix >= self.entries.len() {
+            return false;
+        }
+
+        self.scroll_index_into_view(ix);
+        true
+    }
+
     pub(super) fn scroll_index_into_view(&self, ix: usize) {
         if self.view_mode == FileViewMode::LargeIcons {
             self.scroll_large_icon_index_into_view(ix);

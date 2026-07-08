@@ -1151,6 +1151,7 @@ impl ExplorerView {
             self.sidebar_sections = sidebar_sections;
         }
 
+        let reveal_selection_after_load = !state.select_after_load.is_empty();
         match result.entries {
             Ok(entries) => {
                 let selected_paths =
@@ -1169,6 +1170,9 @@ impl ExplorerView {
             Err(error) => changed |= self.apply_directory_load_error(error),
         }
         changed |= self.finish_directory_reload_layout();
+        if reveal_selection_after_load {
+            changed |= self.scroll_focused_selection_into_view();
+        }
         if let Some(path) = state.rename_after_load {
             changed |= if let Some(window) = window {
                 self.start_rename_for_path(&path, window, cx)
@@ -3466,6 +3470,64 @@ mod tests {
                 ));
                 assert_eq!(names(&view.entries), vec!["new.txt"]);
                 assert!(view.loading_path.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn async_directory_load_reveals_select_after_load(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("current"),
+                Some(focus_handle),
+                &test_explorer_settings(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entries = (0..80)
+                    .map(|ix| FileEntry::test(&format!("item-{ix:03}.txt"), false, Some(1), None))
+                    .collect::<Vec<_>>();
+                let target = PathBuf::from("item-040.txt");
+
+                view.path = PathBuf::from("current");
+                view.all_entries = entries.clone();
+                view.entries = entries.clone();
+                view.restore_selection_from_paths(std::slice::from_ref(&target));
+                view.directory_load_generation = 5;
+                view.loading_path = Some(view.path.clone());
+                let state = DirectoryLoadState {
+                    path: view.path.clone(),
+                    generation: 5,
+                    selected_paths: vec![target.clone()],
+                    select_after_load: vec![target.clone()],
+                    rename_after_load: None,
+                    mode: ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                        preserve_context_menu: false,
+                    },
+                    schedule_metadata: false,
+                    refresh_search: false,
+                    restart_watcher: false,
+                    preserve_live_selection: true,
+                };
+
+                assert!(view.apply_directory_load_result(
+                    state,
+                    DirectoryLoadResult {
+                        entries: Ok(entries),
+                        sidebar_sections: None,
+                    },
+                    None,
+                    cx,
+                ));
+                assert_eq!(view.selected_paths(), vec![target]);
+                assert_eq!(view.selection.focused_index, Some(40));
+                assert_eq!(view.scroll_handle.logical_scroll_top_index(), 40);
             });
         });
     }
