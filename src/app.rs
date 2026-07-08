@@ -958,6 +958,13 @@ mod tests {
                 "right",
                 Some("PropertiesImageDialog")
             ));
+            assert!(has_binding(&bindings, SelectNextTab, "ctrl-tab", None));
+            assert!(has_binding(
+                &bindings,
+                SelectPreviousTab,
+                "ctrl-shift-tab",
+                None
+            ));
             assert!(has_binding(&bindings, OpenSelected, "right", None));
         }
 

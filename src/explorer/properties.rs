@@ -38,7 +38,8 @@ use crate::explorer::image_preview::load_property_image_preview;
 #[cfg(test)]
 use crate::explorer::image_preview::svg_raster_dimensions;
 use crate::explorer::{
-    DialogCancel, DialogConfirm, PropertiesOpenNext, PropertiesOpenPrevious,
+    DialogCancel, DialogConfirm, PropertiesOpenNext, PropertiesOpenPrevious, SelectNextTab,
+    SelectPreviousTab,
     app_icons::NativeIconSize,
     codebase_summary::{
         CodebaseLanguageSummary, CodebaseSummary, direct_git_repository_root,
@@ -360,6 +361,12 @@ enum PropertyTab {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PropertyNavigationDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PropertyTabDirection {
     Previous,
     Next,
 }
@@ -1957,6 +1964,24 @@ impl PropertiesDialog {
         self.open_adjacent_properties_target(PropertyNavigationDirection::Next, window, cx);
     }
 
+    fn handle_select_previous_tab(
+        &mut self,
+        _: &SelectPreviousTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_adjacent_property_tab(PropertyTabDirection::Previous, cx);
+    }
+
+    fn handle_select_next_tab(
+        &mut self,
+        _: &SelectNextTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_adjacent_property_tab(PropertyTabDirection::Next, cx);
+    }
+
     fn open_adjacent_properties_target(
         &mut self,
         direction: PropertyNavigationDirection,
@@ -1970,6 +1995,17 @@ impl PropertiesDialog {
         };
 
         self.retarget_to_path_preserving_tab(path, window, cx);
+    }
+
+    fn select_adjacent_property_tab(
+        &mut self,
+        direction: PropertyTabDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.ready_snapshot();
+        if let Some(tab) = adjacent_property_tab(self.active_tab, snapshot, direction) {
+            self.set_active_tab(tab, cx);
+        }
     }
 
     fn close(&mut self, window: &mut Window, _: &mut Context<Self>) {
@@ -2440,6 +2476,8 @@ impl Render for PropertiesDialog {
             .on_action(cx.listener(Self::handle_confirm))
             .on_action(cx.listener(Self::handle_properties_open_previous))
             .on_action(cx.listener(Self::handle_properties_open_next))
+            .on_action(cx.listener(Self::handle_select_previous_tab))
+            .on_action(cx.listener(Self::handle_select_next_tab))
             .child(
                 div()
                     .flex()
@@ -9550,6 +9588,30 @@ fn property_tabs_for_snapshot(
         .collect()
 }
 
+fn adjacent_property_tab(
+    active_tab: PropertyTab,
+    snapshot: Option<&PropertySnapshot>,
+    direction: PropertyTabDirection,
+) -> Option<PropertyTab> {
+    let visible_tabs = property_tabs_for_snapshot(snapshot);
+    if visible_tabs.len() <= 1 {
+        return None;
+    }
+
+    let active_index = visible_tabs
+        .iter()
+        .position(|(tab, _)| *tab == active_tab)
+        .unwrap_or(0);
+    let target_index = match direction {
+        PropertyTabDirection::Previous => active_index
+            .checked_sub(1)
+            .unwrap_or(visible_tabs.len() - 1),
+        PropertyTabDirection::Next => (active_index + 1) % visible_tabs.len(),
+    };
+
+    Some(visible_tabs[target_index].0)
+}
+
 fn property_tab_is_visible(tab: PropertyTab, snapshot: Option<&PropertySnapshot>) -> bool {
     match tab {
         PropertyTab::General | PropertyTab::Details => true,
@@ -11325,6 +11387,105 @@ mod tests {
                 panic!("snapshot should be ready");
             };
             assert_eq!(snapshot.target.paths, vec![file]);
+        });
+    }
+
+    #[test]
+    fn property_tab_navigation_wraps_and_skips_hidden_tabs() {
+        let temp = TempDir::new();
+        let image_path = temp.path().join("photo.png");
+        let text_path = temp.path().join("note.txt");
+        write_test_png(&image_path, 4, 2);
+        fs::write(&text_path, b"note").unwrap();
+
+        let image = collect_property_snapshot(PropertyTarget {
+            paths: vec![image_path],
+        })
+        .unwrap();
+        let text = collect_property_snapshot(PropertyTarget {
+            paths: vec![text_path],
+        })
+        .unwrap();
+
+        assert_eq!(
+            adjacent_property_tab(
+                PropertyTab::Details,
+                Some(&image),
+                PropertyTabDirection::Next
+            ),
+            Some(PropertyTab::Image)
+        );
+        assert_eq!(
+            adjacent_property_tab(PropertyTab::Image, Some(&image), PropertyTabDirection::Next),
+            Some(PropertyTab::General)
+        );
+        assert_eq!(
+            adjacent_property_tab(
+                PropertyTab::General,
+                Some(&image),
+                PropertyTabDirection::Previous
+            ),
+            Some(PropertyTab::Image)
+        );
+        assert_eq!(
+            adjacent_property_tab(
+                PropertyTab::Details,
+                Some(&text),
+                PropertyTabDirection::Next
+            ),
+            Some(PropertyTab::General)
+        );
+        assert_eq!(
+            adjacent_property_tab(
+                PropertyTab::General,
+                Some(&text),
+                PropertyTabDirection::Previous
+            ),
+            Some(PropertyTab::Details)
+        );
+    }
+
+    #[gpui::test]
+    fn properties_dialog_tab_actions_switch_visible_tabs_without_retargeting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let image = temp.path().join("photo.png");
+        write_test_png(&image, 4, 2);
+
+        let target = PropertyTarget {
+            paths: vec![image.clone()],
+        };
+        let (dialog, cx) = test_properties_dialog_window(cx, target.clone());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let focus_handle = dialog.read(cx).focus_handle(cx);
+            focus_handle.focus(window);
+        });
+
+        cx.dispatch_action(SelectNextTab);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, target.paths);
+            assert_eq!(dialog.active_tab, PropertyTab::Details);
+        });
+
+        cx.dispatch_action(SelectNextTab);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, target.paths);
+            assert_eq!(dialog.active_tab, PropertyTab::Image);
+        });
+
+        cx.dispatch_action(SelectPreviousTab);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let dialog = dialog.read(cx);
+            assert_eq!(dialog.target.paths, vec![image]);
+            assert_eq!(dialog.active_tab, PropertyTab::Details);
         });
     }
 
