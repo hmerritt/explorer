@@ -272,6 +272,8 @@ struct ImageBodyPoint {
 
 #[derive(Clone, Copy, Debug)]
 struct ImagePanDrag {
+    button: MouseButton,
+    active: bool,
     start_position: Point<Pixels>,
     start_pan: ImagePanOffset,
 }
@@ -287,6 +289,10 @@ impl ImageDisplayPlacement {
     fn can_pan(self) -> bool {
         self.pan_limit.x > 0.0 || self.pan_limit.y > 0.0
     }
+}
+
+fn image_pan_drag_button(button: MouseButton) -> bool {
+    matches!(button, MouseButton::Left | MouseButton::Right)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -917,55 +923,6 @@ impl ImageViewer {
         true
     }
 
-    fn handle_wheel_pan(
-        &mut self,
-        delta_x: f32,
-        delta_y: f32,
-        body_size: gpui::Size<Pixels>,
-        scale_factor: f32,
-    ) -> bool {
-        let Some(placement) = self.current_placement_for_body(body_size, scale_factor) else {
-            return false;
-        };
-
-        let horizontal_metrics = horizontal_scrollbar_metrics_for_placement(placement);
-        let vertical_metrics = vertical_scrollbar_metrics_for_placement(placement);
-        if horizontal_metrics.is_none() && vertical_metrics.is_none() {
-            return false;
-        }
-
-        let mut pan_offset = placement.offset;
-        if let Some(metrics) = vertical_metrics {
-            let effective_delta_y = if delta_y != 0.0 { delta_y } else { delta_x };
-            if effective_delta_y != 0.0 {
-                let scroll_top = metrics.clamp_scroll_top(metrics.scroll_top - effective_delta_y);
-                pan_offset.y = pan_offset_y_from_scroll_top(scroll_top, placement.pan_limit.y);
-            }
-        }
-
-        if let Some(metrics) = horizontal_metrics {
-            let effective_delta_x = if delta_x != 0.0 || vertical_metrics.is_some() {
-                delta_x
-            } else {
-                delta_y
-            };
-            if effective_delta_x != 0.0 {
-                let scroll_left =
-                    metrics.clamp_scroll_left(metrics.scroll_left - effective_delta_x);
-                pan_offset.x = pan_offset_x_from_scroll_left(scroll_left, placement.pan_limit.x);
-            }
-        }
-
-        let pan_offset = clamp_pan_offset_to_limits(pan_offset, placement.pan_limit);
-        if pan_offset == self.pan_offset {
-            return false;
-        }
-
-        self.pan_offset = pan_offset;
-        self.manual_transform = true;
-        true
-    }
-
     fn set_zoom_to_native_resolution(
         &mut self,
         available_width: f32,
@@ -1233,6 +1190,7 @@ impl ImageViewer {
 
     fn begin_pan_drag(
         &mut self,
+        button: MouseButton,
         position: Point<Pixels>,
         bounds: &Bounds<Pixels>,
         window: &Window,
@@ -1247,6 +1205,8 @@ impl ImageViewer {
 
         self.pan_offset = placement.offset;
         self.pan_drag = Some(ImagePanDrag {
+            button,
+            active: false,
             start_position: position,
             start_pan: placement.offset,
         });
@@ -1256,6 +1216,7 @@ impl ImageViewer {
 
     fn update_pan_drag(
         &mut self,
+        button: MouseButton,
         position: Point<Pixels>,
         bounds: &Bounds<Pixels>,
         window: &Window,
@@ -1263,6 +1224,9 @@ impl ImageViewer {
         let Some(drag) = self.pan_drag else {
             return false;
         };
+        if drag.button != button {
+            return false;
+        }
         let Some(placement) = self.current_placement_for_body(bounds.size, window.scale_factor())
         else {
             return false;
@@ -1279,7 +1243,21 @@ impl ImageViewer {
             f32::from(bounds.size.width),
             f32::from(bounds.size.height),
         );
+        if let Some(drag) = self.pan_drag.as_mut() {
+            drag.active = true;
+        }
         true
+    }
+
+    fn end_pan_drag(&mut self, button: MouseButton) -> bool {
+        if self.pan_drag.is_some_and(|drag| drag.button == button) {
+            let drag = self.pan_drag.expect("checked pan drag");
+            let handled = drag.active || button == MouseButton::Right;
+            self.pan_drag = None;
+            return handled;
+        }
+
+        false
     }
 
     fn handle_vertical_scrollbar_mouse_down(
@@ -1549,6 +1527,7 @@ impl ImageViewer {
                     .child(
                         div()
                             .id("image-viewer-image-viewport")
+                            .debug_selector(|| "image-viewer-image-viewport".to_owned())
                             .relative()
                             .flex()
                             .items_center()
@@ -1966,12 +1945,19 @@ impl ImageViewer {
 
                         let _ = entity.update(cx, |this, cx| {
                             this.focus_handle.focus(window);
-                            if event.button == MouseButton::Right
-                                && this.begin_pan_drag(event.position, &bounds, window)
+                            if image_pan_drag_button(event.button)
+                                && this.begin_pan_drag(
+                                    event.button,
+                                    event.position,
+                                    &bounds,
+                                    window,
+                                )
                             {
-                                cx.stop_propagation();
-                                window.prevent_default();
-                                cx.notify();
+                                if event.button == MouseButton::Right {
+                                    cx.stop_propagation();
+                                    window.prevent_default();
+                                    cx.notify();
+                                }
                             }
                         });
                     }
@@ -1980,12 +1966,15 @@ impl ImageViewer {
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseMoveEvent, _, window, cx| {
-                        if event.pressed_button != Some(MouseButton::Right) {
+                        let Some(button) = event.pressed_button else {
+                            return;
+                        };
+                        if !image_pan_drag_button(button) {
                             return;
                         }
 
                         let _ = entity.update(cx, |this, cx| {
-                            if this.update_pan_drag(event.position, &bounds, window) {
+                            if this.update_pan_drag(button, event.position, &bounds, window) {
                                 cx.stop_propagation();
                                 window.prevent_default();
                                 cx.notify();
@@ -1997,12 +1986,12 @@ impl ImageViewer {
                 window.on_mouse_event({
                     let entity = entity.clone();
                     move |event: &MouseUpEvent, _, _, cx| {
-                        if event.button != MouseButton::Right {
+                        if !image_pan_drag_button(event.button) {
                             return;
                         }
 
                         let _ = entity.update(cx, |this, cx| {
-                            if this.pan_drag.take().is_some() {
+                            if this.end_pan_drag(event.button) {
                                 cx.stop_propagation();
                                 cx.notify();
                             }
@@ -2017,17 +2006,9 @@ impl ImageViewer {
 
                     let delta = event.delta.pixel_delta(px(IMAGE_VIEWER_WHEEL_LINE_HEIGHT));
                     let _ = entity.update(cx, |this, cx| {
-                        let handled = if event.modifiers.secondary() {
-                            let anchor = local_body_point(event.position, &bounds);
-                            this.handle_wheel_zoom(f32::from(delta.y), anchor, bounds.size, window)
-                        } else {
-                            this.handle_wheel_pan(
-                                f32::from(delta.x),
-                                f32::from(delta.y),
-                                bounds.size,
-                                window.scale_factor(),
-                            )
-                        };
+                        let anchor = local_body_point(event.position, &bounds);
+                        let handled =
+                            this.handle_wheel_zoom(f32::from(delta.y), anchor, bounds.size, window);
 
                         if handled {
                             cx.stop_propagation();
@@ -2855,7 +2836,7 @@ mod tests {
         settings::{ConfigPlatform, config_dir_for},
         window_state::StoredWindowMode,
     };
-    use gpui::{AppContext, Modifiers, MouseButton, TestAppContext};
+    use gpui::{AppContext, Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext};
     use std::{
         env,
         path::Path,
@@ -3415,6 +3396,8 @@ mod tests {
             manual_transform: true,
             pan_offset: ImagePanOffset { x: 40.0, y: -20.0 },
             pan_drag: Some(ImagePanDrag {
+                button: MouseButton::Left,
+                active: true,
                 start_position: point(px(10.0), px(10.0)),
                 start_pan: ImagePanOffset { x: 40.0, y: -20.0 },
             }),
@@ -3507,7 +3490,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn fit_status_button_resets_to_initial_size_without_toggling(cx: &mut TestAppContext) {
+    fn fit_handler_resets_to_initial_size_without_toggling(cx: &mut TestAppContext) {
         let (viewer, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
@@ -3520,10 +3503,11 @@ mod tests {
         });
 
         cx.run_until_parked();
-        let fit = cx
-            .debug_bounds("image-viewer-status-fit")
-            .expect("fit button bounds");
-        cx.simulate_click(fit.center(), Modifiers::default());
+        cx.update(|window, app| {
+            viewer.update(app, |viewer, cx| {
+                viewer.handle_fit_click(&ClickEvent::default(), window, cx);
+            });
+        });
         cx.run_until_parked();
 
         viewer.update(cx, |viewer, _| {
@@ -3639,6 +3623,47 @@ mod tests {
         );
         cx.debug_bounds("image-viewer-status-bar")
             .expect("status bar bounds");
+    }
+
+    #[gpui::test]
+    fn left_dragging_oversized_image_pans_viewport(cx: &mut TestAppContext) {
+        assert_dragging_oversized_image_pans_viewport(cx, MouseButton::Left);
+    }
+
+    #[gpui::test]
+    fn right_dragging_oversized_image_still_pans_viewport(cx: &mut TestAppContext) {
+        assert_dragging_oversized_image_pans_viewport(cx, MouseButton::Right);
+    }
+
+    #[gpui::test]
+    fn scroll_wheel_without_ctrl_zooms_image(cx: &mut TestAppContext) {
+        let (viewer, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            oversized_ready_image_viewer(focus_handle)
+        });
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("image-viewer-image-viewport")
+            .expect("image viewport bounds");
+        let initial_zoom = viewer.update(cx, |viewer, _| viewer.zoom.expect("initial zoom"));
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Lines(point(0.0, 3.0)),
+            modifiers: Modifiers::default(),
+            ..Default::default()
+        });
+
+        viewer.update(cx, |viewer, _| {
+            let zoom = viewer.zoom.expect("zoom after wheel");
+            assert!(
+                zoom > initial_zoom,
+                "plain wheel should zoom without requiring Ctrl"
+            );
+            assert!(viewer.manual_transform);
+        });
     }
 
     #[gpui::test]
@@ -4050,11 +4075,59 @@ mod tests {
         }
     }
 
+    fn oversized_ready_image_viewer(focus_handle: FocusHandle) -> ImageViewer {
+        let mut viewer = image_viewer_for_test(
+            focus_handle,
+            ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
+        );
+        viewer.zoom = Some(4.0);
+        viewer.manual_transform = true;
+        viewer
+    }
+
+    fn assert_dragging_oversized_image_pans_viewport(cx: &mut TestAppContext, button: MouseButton) {
+        let (viewer, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            oversized_ready_image_viewer(focus_handle)
+        });
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("image-viewer-image-viewport")
+            .expect("image viewport bounds");
+        let start = viewport.center();
+        let end = point(start.x + px(120.0), start.y + px(80.0));
+
+        cx.simulate_mouse_move(start, Option::<MouseButton>::None, Modifiers::default());
+        cx.simulate_mouse_down(start, button, Modifiers::default());
+        viewer.update(cx, |viewer, _| {
+            assert_eq!(viewer.pan_drag.map(|drag| drag.button), Some(button));
+            assert!(viewer.manual_transform);
+        });
+
+        cx.simulate_mouse_move(end, button, Modifiers::default());
+        viewer.update(cx, |viewer, _| {
+            assert!(viewer.pan_offset.x > 0.0);
+            assert!(viewer.pan_offset.y > 0.0);
+            assert_eq!(viewer.pan_drag.map(|drag| drag.button), Some(button));
+        });
+
+        cx.simulate_mouse_up(end, button, Modifiers::default());
+        viewer.update(cx, |viewer, _| {
+            assert!(viewer.pan_drag.is_none());
+            assert!(viewer.pan_offset.x > 0.0);
+            assert!(viewer.pan_offset.y > 0.0);
+        });
+    }
+
     fn configure_manual_fit_reset_state(viewer: &mut ImageViewer) {
         viewer.zoom = Some(0.5);
         viewer.manual_transform = true;
         viewer.pan_offset = ImagePanOffset { x: 40.0, y: -20.0 };
         viewer.pan_drag = Some(ImagePanDrag {
+            button: MouseButton::Left,
+            active: true,
             start_position: point(px(10.0), px(10.0)),
             start_pan: ImagePanOffset { x: 40.0, y: -20.0 },
         });
