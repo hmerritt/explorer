@@ -121,6 +121,7 @@ use thousands::Separable;
 
 const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP: f32 = 8.0;
+const DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE: f32 = 2.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
 const FILE_ENTRY_BG: u32 = 0xffffff;
@@ -6076,7 +6077,7 @@ fn details_name_content_width(text_width: f32) -> f32 {
 }
 
 fn details_name_physical_text_width(widths: DetailsNameWidths, manual_width: bool) -> f32 {
-    if manual_width {
+    if manual_width || widths.full_path_text_width.is_some() {
         widths.draw_text_width
     } else {
         widths.hit_text_width
@@ -6407,7 +6408,8 @@ fn available_filename_text_width(viewport_width: f32) -> f32 {
 }
 
 fn recursive_result_text_width(name_column_width: f32) -> f32 {
-    available_filename_text_width(name_column_width)
+    (available_filename_text_width(name_column_width) - DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE)
+        .max(0.0)
 }
 
 fn truncated_text(
@@ -6905,16 +6907,16 @@ mod tests {
     use super::{
         CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
         CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
-        DROP_INDICATOR_TARGET_MAX_WIDTH, DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG,
-        FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
-        IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
-        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
-        SIDEBAR_COLLAPSED_GROUP_GAP, SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP,
-        UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
-        codebase_makeup_segments, context_menu_action_width_for_text_width,
-        context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
-        context_menu_width_for_natural_width, copied_directory_address,
-        details_name_physical_text_width, details_name_width_policy,
+        DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE, DROP_INDICATOR_TARGET_MAX_WIDTH,
+        DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG,
+        FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE, IMAGE_HOVER_PREVIEW_OFFSET_X,
+        IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview, NAME_CELL_LEFT_PADDING,
+        NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP,
+        SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP, UTILITY_TEXT_BUTTON_ICON_SIZE,
+        UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, codebase_makeup_segments,
+        context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
+        context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
+        copied_directory_address, details_name_physical_text_width, details_name_width_policy,
         directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         file_entry_background_color, filename_text_width, folder_status_summary,
@@ -7279,6 +7281,46 @@ mod tests {
             assert!(
                 view.horizontal_scrollbar_metrics().is_none(),
                 "auto Name column should not create horizontal overflow"
+            );
+        });
+        assert!(cx.debug_bounds("explorer-horizontal-scrollbar").is_none());
+    }
+
+    #[gpui::test]
+    fn recursive_auto_name_column_does_not_show_horizontal_scrollbar_for_path_results(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let nested_dir = temp
+            .path()
+            .join("search-results-with-a-long-parent-path")
+            .join("another-long-folder-name-for-recursive-results");
+        fs::create_dir_all(&nested_dir).expect("create nested recursive result directory");
+        let result_path = nested_dir.join("matching-file.txt");
+        fs::write(&result_path, b"file").expect("create recursive result file");
+        let recursive_entry = FileEntry::from_path(result_path).expect("recursive result entry");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.search.content = "matching".to_owned();
+                view.search.recursive_enabled = true;
+                view.search.recursive_results_active = true;
+                view.entries = vec![recursive_entry.clone()];
+                cx.notify();
+            });
+        });
+        run_until_debug_bounds(cx, "explorer-entry-name-0");
+        for _ in 0..3 {
+            cx.run_until_parked();
+        }
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.file_columns.name_width.is_none());
+            let metrics = view.horizontal_scrollbar_metrics();
+            assert!(
+                metrics.is_none(),
+                "recursive auto Name column should not create horizontal overflow: {metrics:?}"
             );
         });
         assert!(cx.debug_bounds("explorer-horizontal-scrollbar").is_none());
@@ -10044,7 +10086,9 @@ mod tests {
 
             assert_eq!(
                 recursive_width,
-                available_filename_text_width(viewport_width)
+                (available_filename_text_width(viewport_width)
+                    - DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE)
+                    .max(0.0)
             );
             assert!(recursive_width > 0.0);
         }
@@ -10105,6 +10149,13 @@ mod tests {
         let widths = details_name_width_policy(300.0, 64.0, None);
 
         assert_eq!(details_name_physical_text_width(widths, true), 300.0);
+    }
+
+    #[test]
+    fn details_name_physical_text_width_uses_draw_width_for_recursive_auto_names() {
+        let widths = details_name_width_policy(300.0, 64.0, Some(140.0));
+
+        assert_eq!(details_name_physical_text_width(widths, false), 300.0);
     }
 
     #[test]
