@@ -217,7 +217,7 @@ impl ExplorerView {
         self.scroll_index_into_view(last);
     }
 
-    pub(super) fn scroll_focused_selection_into_view(&self) -> bool {
+    pub(super) fn scroll_focused_selection_to_view_bottom(&self) -> bool {
         let Some(ix) = self.selection.focused_index else {
             return false;
         };
@@ -225,7 +225,7 @@ impl ExplorerView {
             return false;
         }
 
-        self.scroll_index_into_view(ix);
+        self.scroll_index_to_view_bottom(ix);
         true
     }
 
@@ -248,6 +248,27 @@ impl ExplorerView {
             }
         } else {
             self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
+        }
+    }
+
+    fn scroll_index_to_view_bottom(&self, ix: usize) {
+        if self.view_mode == FileViewMode::LargeIcons {
+            self.scroll_large_icon_index_into_view(ix);
+            return;
+        }
+
+        let row_height = self.entry_row_height();
+        let row_top = ix as f32 * row_height;
+        let row_bottom = row_top + row_height;
+
+        if let Some(metrics) = self.scrollbar_metrics() {
+            let viewport_bottom = metrics.scroll_top + metrics.viewport_height;
+            if row_top < metrics.scroll_top || row_bottom > viewport_bottom {
+                self.set_scroll_offset(row_bottom - metrics.viewport_height);
+            }
+        } else {
+            self.scroll_handle
+                .scroll_to_item(ix, ScrollStrategy::Bottom);
         }
     }
 
@@ -642,6 +663,54 @@ mod tests {
         view.select_all_entries();
 
         assert_eq!(selected_names(&view), vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn auto_reveal_bottom_aligns_focused_selection_with_measured_rows() {
+        let mut view = ExplorerView::new(PathBuf::from("selection"));
+        view.entries = (0..80)
+            .map(|ix| FileEntry::test(&format!("item-{ix:03}.txt"), false, Some(1), None))
+            .collect();
+        view.all_entries = view.entries.clone();
+
+        let row_height = view.entry_row_height();
+        {
+            let mut scroll_state = view.scroll_handle.0.borrow_mut();
+            scroll_state.last_item_size = Some(gpui::ItemSize {
+                item: gpui::size(gpui::px(400.0), gpui::px(100.0)),
+                contents: gpui::size(
+                    gpui::px(400.0),
+                    gpui::px(row_height * view.entries.len() as f32),
+                ),
+            });
+            scroll_state
+                .base_handle
+                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        }
+
+        view.selection = SelectionState {
+            anchor_index: Some(2),
+            focused_index: Some(2),
+            selected_indices: std::collections::BTreeSet::from([2]),
+        };
+        assert!(view.scroll_focused_selection_to_view_bottom());
+        assert_eq!(
+            view.scroll_handle.0.borrow().base_handle.offset().y,
+            gpui::px(0.0)
+        );
+
+        view.selection = SelectionState {
+            anchor_index: Some(40),
+            focused_index: Some(40),
+            selected_indices: std::collections::BTreeSet::from([40]),
+        };
+        assert!(view.scroll_focused_selection_to_view_bottom());
+        let scroll_top = -f32::from(view.scroll_handle.0.borrow().base_handle.offset().y);
+        let expected_scroll_top = (41.0 * row_height) - 100.0;
+        assert!(
+            (scroll_top - expected_scroll_top).abs() < 0.000_1,
+            "expected scroll top {expected_scroll_top}, got {scroll_top}"
+        );
     }
 
     #[test]

@@ -1171,7 +1171,7 @@ impl ExplorerView {
         }
         changed |= self.finish_directory_reload_layout();
         if reveal_selection_after_load {
-            changed |= self.scroll_focused_selection_into_view();
+            changed |= self.scroll_focused_selection_to_view_bottom();
         }
         if let Some(path) = state.rename_after_load {
             changed |= if let Some(window) = window {
@@ -3527,7 +3527,13 @@ mod tests {
                 ));
                 assert_eq!(view.selected_paths(), vec![target]);
                 assert_eq!(view.selection.focused_index, Some(40));
-                assert_eq!(view.scroll_handle.logical_scroll_top_index(), 40);
+                let scroll_state = view.scroll_handle.0.borrow();
+                let deferred_scroll = scroll_state
+                    .deferred_scroll_to_item
+                    .as_ref()
+                    .expect("select_after_load should request a deferred reveal");
+                assert_eq!(deferred_scroll.item_index, 40);
+                assert_eq!(deferred_scroll.strategy, gpui::ScrollStrategy::Bottom);
             });
         });
     }
