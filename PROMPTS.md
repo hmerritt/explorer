@@ -24,14 +24,26 @@
 
 Major remaining Windows Explorer parity areas:
 
-1. **Navigation shell surfaces**
-   Sidebar is currently basic user dirs/drives plus macOS-specific entries. Remaining: This PC-style device grouping, Network, removable/media volumes, trash/recycle bin browsing, sidebar tree expansion.
+- GUI Settings / Preferences
+  The app already has a lot of power in JSON settings: view mode, hidden files, extensions, sidebar pins, WSL visibility, columns, native icons, context menu commands. A real settings window would make existing functionality discoverable immediately. This is probably the best 80/20 feature.
 
-2. **File operation parity**
-   Current copy/move/delete is strong, but Explorer has much more: pause/resume, speed/ETA details, recycle bin restore/empty, robust cross-app clipboard formats, and more exact same-volume/network behavior.
+- Explorer-style Shell Sidebar
+  Add first-class places like This PC, Network, Recycle Bin/Trash, removable drives, drive capacity display, and expandable sidebar folders. The current sidebar has pinned folders, drives, WSL, and macOS locations, but not the full Windows Explorer shell model.
 
-3. **Shell integration and platform associations**
-   Opening files uses the default app, but there is no full file association management, executable/app launching nuance, shortcut/link creation/editing, mounted volume eject, network path handling, or platform-native trash/recycle-bin browsing.
+- Cross-App File Clipboard
+  Copy/cut/paste currently appears mostly app-private. Supporting native file clipboard formats would let users copy from Finder/Nautilus/Dolphin/Windows Explorer into this app and vice versa. This is a huge “feels real” improvement.
+
+- First-Class Recycle Bin / Trash
+  Delete-to-trash and some undo behavior exist, but users need a browsable Trash/Recycle Bin location with restore, empty, and permanent delete workflows. This strongly improves trust around destructive actions.
+
+- File Operation Polish
+  The copy engine is already strong, including resumable copy and cancellation. The missing 80/20 layer is UX: queue multiple operations, pause/resume, ETA, clearer source/destination details, and richer conflict handling than global Replace/Skip.
+
+- Preview / Details Pane
+  Alt-hover previews and rich Properties are already implemented. A right-side Preview/Details pane would make browsing much faster, especially for images, video, audio, text/code, PDFs, and metadata-heavy files.
+
+- Open With / Default App Management
+  Open With support exists, but the Windows Explorer-style flow of choosing an app, setting defaults, and managing associations would close a common daily-use gap.
 
 ## Properties > Details tab:
 
