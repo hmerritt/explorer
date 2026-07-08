@@ -10,7 +10,7 @@ use std::{
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
     CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, ExternalPathsDragCallback, FocusHandle,
-    Focusable, Image, IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent,
+    Focusable, FontWeight, Image, IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit,
     Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div,
     list, prelude::*, px, rgb, transparent_black, uniform_list,
@@ -79,9 +79,10 @@ use crate::explorer::{
         SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
         drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
-        drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, executable_icon_sized, file_icon,
-        file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font, pinned_group_icon, sshfs_drive_icon,
+        drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
+        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
+        folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
+        pinned_group_icon, sshfs_drive_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -252,6 +253,9 @@ const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION: f32 = 0.40;
 const SIDEBAR_GROUP_CHILD_INDENT: f32 = 28.0;
+const SIDEBAR_GROUP_GAP: f32 = 14.0;
+const SIDEBAR_COLLAPSED_GROUP_GAP: f32 = 4.0;
+const SIDEBAR_GROUP_LABEL_Y_OFFSET: f32 = 1.0;
 const SIDEBAR_GROUP_CHEVRON_DOWN: &str = "\u{E70D}";
 const SIDEBAR_GROUP_CHEVRON_RIGHT: &str = "\u{E76C}";
 const CONTEXT_MENU_MIN_WIDTH: f32 = 170.0;
@@ -1468,6 +1472,7 @@ impl ExplorerView {
         let sections = &self.sidebar_sections;
         let mut children = Vec::new();
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
+        let mut previous_group_expanded = None;
 
         if !sections.user_directories.is_empty() {
             let expanded =
@@ -1512,12 +1517,13 @@ impl ExplorerView {
                     cx,
                 ));
             }
+            previous_group_expanded = Some(expanded);
         }
 
         #[cfg(target_os = "macos")]
         if !sections.macos_system_locations.is_empty() {
-            if !children.is_empty() {
-                children.push(sidebar_group_gap().into_any_element());
+            if let Some(previous_group_expanded) = previous_group_expanded {
+                children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
             let expanded =
                 sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Macos);
@@ -1530,6 +1536,7 @@ impl ExplorerView {
             ));
 
             if expanded {
+                children.push(sidebar_item_gap().into_any_element());
                 for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
@@ -1542,23 +1549,25 @@ impl ExplorerView {
                     ));
                 }
             }
+            previous_group_expanded = Some(expanded);
         }
 
         if !sections.drives.is_empty() {
-            if !children.is_empty() {
-                children.push(sidebar_group_gap().into_any_element());
+            if let Some(previous_group_expanded) = previous_group_expanded {
+                children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
             let expanded =
                 sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Drives);
             children.push(self.render_sidebar_group_header(
                 SidebarGroupKind::Drives,
                 "Drives",
-                drive_icon(),
+                drives_group_icon(),
                 expanded,
                 cx,
             ));
 
             if expanded {
+                children.push(sidebar_item_gap().into_any_element());
                 for (index, item) in sections.drives.iter().cloned().enumerate() {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
@@ -1571,12 +1580,16 @@ impl ExplorerView {
                     ));
                 }
             }
+            #[cfg(target_os = "windows")]
+            {
+                previous_group_expanded = Some(expanded);
+            }
         }
 
         #[cfg(target_os = "windows")]
         if !sections.wsl_drives.is_empty() {
-            if !children.is_empty() {
-                children.push(sidebar_group_gap().into_any_element());
+            if let Some(previous_group_expanded) = previous_group_expanded {
+                children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
             let expanded = sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Wsl);
             children.push(self.render_sidebar_group_header(
@@ -1588,6 +1601,7 @@ impl ExplorerView {
             ));
 
             if expanded {
+                children.push(sidebar_item_gap().into_any_element());
                 for (index, item) in sections.wsl_drives.iter().cloned().enumerate() {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
@@ -1843,9 +1857,12 @@ impl ExplorerView {
                     .flex_1()
                     .min_w(px(0.0))
                     .ml(px(SIDEBAR_ICON_TEXT_GAP))
+                    .relative()
+                    .top(px(SIDEBAR_GROUP_LABEL_Y_OFFSET))
                     .truncate()
                     .text_size(px(SIDEBAR_TEXT_SIZE))
-                    .text_color(rgb(0x5f5f5f))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x707070))
                     .child(label),
             )
             .into_any_element()
@@ -3315,8 +3332,13 @@ fn truncated_drop_indicator_target_label(
         )
 }
 
-fn sidebar_group_gap() -> Div {
-    div().h(px(8.0)).flex_shrink_0()
+fn sidebar_group_gap(previous_group_expanded: bool) -> Div {
+    let gap = if previous_group_expanded {
+        SIDEBAR_GROUP_GAP
+    } else {
+        SIDEBAR_COLLAPSED_GROUP_GAP
+    };
+    div().h(px(gap)).flex_shrink_0()
 }
 
 fn sidebar_item_gap() -> Div {
@@ -6887,6 +6909,7 @@ mod tests {
         FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
         IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot,
+        SIDEBAR_COLLAPSED_GROUP_GAP, SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP,
         UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width,
         codebase_makeup_segments, context_menu_action_width_for_text_width,
         context_menu_detail_width_for_text_widths, context_menu_text_width, context_menu_width,
@@ -8033,6 +8056,121 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sidebar_group_gap_after_expanded_group_is_14px(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let pinned_path = temp.path().join("pinned");
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Pinned];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                user_directories: vec![SidebarItem {
+                    label: "Pinned".to_owned(),
+                    path: pinned_path,
+                    kind: SidebarItemKind::CustomDirectory,
+                    configured_index: Some(0),
+                }],
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        let pinned_group = cx
+            .debug_bounds("explorer-sidebar-group-pinned")
+            .expect("pinned group bounds");
+        let pinned_row = cx
+            .debug_bounds("explorer-sidebar-row-0")
+            .expect("pinned row bounds");
+        let drive_group = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds");
+        let header_gap = f32::from(pinned_row.origin.y)
+            - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
+        let trailing_gap = f32::from(drive_group.origin.y)
+            - (f32::from(pinned_row.origin.y) + f32::from(pinned_row.size.height));
+        let group_gap = trailing_gap - SIDEBAR_ITEM_GAP;
+
+        assert!(
+            (header_gap - SIDEBAR_ITEM_GAP).abs() <= 1.0,
+            "expanded header and first row should be separated by {SIDEBAR_ITEM_GAP}px, got {header_gap}"
+        );
+        assert!(
+            (group_gap - SIDEBAR_GROUP_GAP).abs() <= 1.0,
+            "expanded group trailing gap should be {SIDEBAR_GROUP_GAP}px, got {group_gap}"
+        );
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+    }
+
+    #[gpui::test]
+    fn sidebar_group_gap_after_collapsed_group_is_4px(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let pinned_path = temp.path().join("pinned");
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = Vec::new();
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                user_directories: vec![SidebarItem {
+                    label: "Pinned".to_owned(),
+                    path: pinned_path,
+                    kind: SidebarItemKind::CustomDirectory,
+                    configured_index: Some(0),
+                }],
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        let pinned_group = cx
+            .debug_bounds("explorer-sidebar-group-pinned")
+            .expect("pinned group bounds");
+        let drive_group = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds");
+        let group_gap = f32::from(drive_group.origin.y)
+            - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
+
+        assert!(
+            (group_gap - SIDEBAR_COLLAPSED_GROUP_GAP).abs() <= 1.0,
+            "collapsed group trailing gap should be {SIDEBAR_COLLAPSED_GROUP_GAP}px, got {group_gap}"
+        );
+        assert!(cx.debug_bounds("explorer-sidebar-row-0").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+    }
+
+    #[gpui::test]
     fn sidebar_pinned_group_is_expanded_by_default(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
@@ -8050,8 +8188,63 @@ mod tests {
 
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-0").is_some());
+        let pinned_group = cx
+            .debug_bounds("explorer-sidebar-group-pinned")
+            .expect("pinned group bounds");
+        let pinned_row = cx
+            .debug_bounds("explorer-sidebar-row-0")
+            .expect("pinned row bounds");
+        let header_gap = f32::from(pinned_row.origin.y)
+            - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
+
+        assert!(
+            (header_gap - SIDEBAR_ITEM_GAP).abs() <= 1.0,
+            "pinned header and first row should be separated by {SIDEBAR_ITEM_GAP}px, got {header_gap}"
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_expanded_drive_group_header_gap_matches_item_gap(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Drives];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        let drive_group = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds");
+        let drive_row = cx
+            .debug_bounds("explorer-sidebar-row-2000")
+            .expect("drive row bounds");
+        let header_gap = f32::from(drive_row.origin.y)
+            - (f32::from(drive_group.origin.y) + f32::from(drive_group.size.height));
+
+        assert!(
+            (header_gap - SIDEBAR_ITEM_GAP).abs() <= 1.0,
+            "drive header and first row should be separated by {SIDEBAR_ITEM_GAP}px, got {header_gap}"
+        );
     }
 
     #[gpui::test]

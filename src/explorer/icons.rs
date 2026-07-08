@@ -141,6 +141,7 @@ png_icon!(
     "sidebar",
     "macos-applications.png"
 );
+png_icon!(DRIVES_GROUP_ICON, "devices", "monitor.png");
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(MOUNT_DISC_ICON, "devices/discs", "disc.png");
@@ -397,6 +398,10 @@ pub(super) fn pinned_group_icon() -> AnyElement {
     image_sidebar_icon(PINNED_GROUP_ICON.clone())
 }
 
+pub(super) fn drives_group_icon() -> AnyElement {
+    image_sidebar_icon(DRIVES_GROUP_ICON.clone())
+}
+
 pub(super) fn desktop_folder_icon() -> AnyElement {
     image_sidebar_icon(DESKTOP_SIDEBAR_ICON.clone())
 }
@@ -574,6 +579,7 @@ mod tests {
         assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!PINNED_GROUP_ICON_BYTES.is_empty());
+        assert!(!DRIVES_GROUP_ICON_BYTES.is_empty());
         assert!(!DRIVE_DISC_ICON_BYTES.is_empty());
         assert!(!BLU_RAY_DISC_ICON_BYTES.is_empty());
         assert!(!DVD_DISC_ICON_BYTES.is_empty());
