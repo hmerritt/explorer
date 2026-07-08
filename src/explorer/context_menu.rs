@@ -96,6 +96,7 @@ pub(super) enum ContextMenuIcon {
     NativePathOptional(PathBuf),
     NewTab,
     OpenWith,
+    OpenLocation,
     Eject,
     Unpin,
 }
@@ -107,6 +108,10 @@ pub(super) enum ContextMenuCommand {
     },
     OpenDirectoryInNewTab {
         path: PathBuf,
+    },
+    OpenItemLocation {
+        directory: PathBuf,
+        select_path: PathBuf,
     },
     OpenSelectedFiles,
     ChooseApplication {
@@ -292,6 +297,7 @@ impl ExplorerView {
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
                 selected_context.native_icon_entry.is_some(),
+                self.recursive_search_results_active(),
                 &custom_items,
                 &targets,
                 &selected_entries,
@@ -335,6 +341,7 @@ impl ExplorerView {
                 selected_context.directory_new_tab_count,
                 self.can_start_selected_rename(),
                 selected_context.native_icon_entry.is_some(),
+                self.recursive_search_results_active(),
                 &custom_items,
                 &targets,
                 &selected_entries,
@@ -373,6 +380,17 @@ impl ExplorerView {
             }
             ContextMenuCommand::OpenDirectoryInNewTab { path } => {
                 cx.emit(crate::explorer::view::ExplorerViewEvent::OpenDirectoryInNewTab(path));
+            }
+            ContextMenuCommand::OpenItemLocation {
+                directory,
+                select_path,
+            } => {
+                self.navigate_to_directory_with_watcher_selecting(
+                    directory,
+                    HistoryMode::Record,
+                    vec![select_path],
+                    cx,
+                );
             }
             ContextMenuCommand::OpenSelectedFiles => {
                 self.open_selected_files_with_default_app(window, cx);
@@ -1128,6 +1146,7 @@ pub(super) fn entry_context_menu_items(
         selected_directory_count,
         can_rename,
         use_native_file_icon,
+        false,
         &[],
         &targets,
         &selected_entries,
@@ -1191,6 +1210,7 @@ fn entry_context_menu_items_with_custom(
     selected_directory_count: usize,
     can_rename: bool,
     use_native_file_icon: bool,
+    recursive_search_results_active: bool,
     custom_items: &[CustomContextMenuItem],
     targets: &[PathBuf],
     selected_entries: &[FileEntry],
@@ -1218,6 +1238,14 @@ fn entry_context_menu_items_with_custom(
             command,
             enabled: true,
         });
+
+        if recursive_search_results_active
+            && let Some(item) = selected_entries
+                .first()
+                .and_then(open_location_context_menu_item)
+        {
+            items.push(item);
+        }
 
         if selected_entries_are_supported_mountable_images(selected_entries) {
             items.push(ContextMenuItem::Action {
@@ -1357,6 +1385,30 @@ fn entry_context_menu_items_with_custom(
         },
     ]);
     items
+}
+
+fn open_location_context_menu_item(entry: &FileEntry) -> Option<ContextMenuItem> {
+    let directory = entry.path.parent()?;
+    if directory.as_os_str().is_empty() {
+        return None;
+    }
+
+    let label = if directory_new_tab_target(entry).is_some() {
+        "Open folder location"
+    } else {
+        "Open file location"
+    };
+
+    Some(ContextMenuItem::Action {
+        id: "context-menu-entry-open-location".to_owned(),
+        icon: Some(ContextMenuIcon::OpenLocation),
+        label: label.to_owned(),
+        command: ContextMenuCommand::OpenItemLocation {
+            directory: directory.to_path_buf(),
+            select_path: entry.path.clone(),
+        },
+        enabled: true,
+    })
 }
 
 fn entry_is_file_open_target(entry: &FileEntry) -> bool {
@@ -1866,7 +1918,9 @@ pub(super) fn context_submenu_left(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::test_support::{TempDir, test_view_entity_at_path};
     use crate::settings::CustomContextMenuItem;
+    use gpui::AppContext;
     use std::time::UNIX_EPOCH;
 
     fn configured_executable_path() -> PathBuf {
@@ -1948,6 +2002,19 @@ mod tests {
     }
 
     fn entry_menu_for_selected_entries(selected_entries: Vec<FileEntry>) -> Vec<ContextMenuItem> {
+        entry_menu_for_selected_entries_with_recursive_state(selected_entries, false)
+    }
+
+    fn recursive_entry_menu_for_selected_entries(
+        selected_entries: Vec<FileEntry>,
+    ) -> Vec<ContextMenuItem> {
+        entry_menu_for_selected_entries_with_recursive_state(selected_entries, true)
+    }
+
+    fn entry_menu_for_selected_entries_with_recursive_state(
+        selected_entries: Vec<FileEntry>,
+        recursive_search_results_active: bool,
+    ) -> Vec<ContextMenuItem> {
         let targets = selected_entries
             .iter()
             .map(|entry| entry.path.clone())
@@ -1971,6 +2038,7 @@ mod tests {
             selected_directory_count,
             false,
             false,
+            recursive_search_results_active,
             &[],
             &targets,
             &selected_entries,
@@ -2011,6 +2079,7 @@ mod tests {
             selected_entries.len(),
             selected_file_count,
             selected_directory_count,
+            false,
             false,
             false,
             &configured,
@@ -2609,6 +2678,130 @@ mod tests {
     }
 
     #[test]
+    fn recursive_entry_menu_for_single_file_shows_open_file_location() {
+        let path = PathBuf::from("root").join("nested").join("file.txt");
+        let directory = path.parent().expect("parent").to_path_buf();
+        let entry = test_context_menu_entry(path.clone(), false);
+        let items = recursive_entry_menu_for_selected_entries(vec![entry]);
+
+        assert_eq!(
+            items.get(1),
+            Some(&ContextMenuItem::Action {
+                id: "context-menu-entry-open-location".to_owned(),
+                icon: Some(ContextMenuIcon::OpenLocation),
+                label: "Open file location".to_owned(),
+                command: ContextMenuCommand::OpenItemLocation {
+                    directory,
+                    select_path: path,
+                },
+                enabled: true,
+            })
+        );
+    }
+
+    #[test]
+    fn recursive_entry_menu_for_single_folder_shows_open_folder_location() {
+        let path = PathBuf::from("root").join("nested");
+        let directory = path.parent().expect("parent").to_path_buf();
+        let entry = test_context_menu_entry(path.clone(), true);
+        let items = recursive_entry_menu_for_selected_entries(vec![entry]);
+
+        assert_eq!(
+            items.get(1),
+            Some(&ContextMenuItem::Action {
+                id: "context-menu-entry-open-location".to_owned(),
+                icon: Some(ContextMenuIcon::OpenLocation),
+                label: "Open folder location".to_owned(),
+                command: ContextMenuCommand::OpenItemLocation {
+                    directory,
+                    select_path: path,
+                },
+                enabled: true,
+            })
+        );
+        assert!(matches!(
+            items.get(2),
+            Some(ContextMenuItem::Action {
+                id,
+                command: ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+                ..
+            }) if id == "context-menu-entry-open-new-tab"
+        ));
+    }
+
+    #[test]
+    fn open_location_is_only_shown_for_single_recursive_entries_with_parent() {
+        let file =
+            test_context_menu_entry(PathBuf::from("root").join("nested").join("file.txt"), false);
+        let folder = test_context_menu_entry(PathBuf::from("root").join("nested"), true);
+        let rootless = test_context_menu_entry(PathBuf::from("file.txt"), false);
+
+        let normal_items = entry_menu_for_selected_entries(vec![file.clone()]);
+        assert!(!menu_has_label(&normal_items, "Open file location"));
+
+        let multi_items = recursive_entry_menu_for_selected_entries(vec![file, folder]);
+        assert!(!multi_items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::OpenItemLocation { .. },
+                ..
+            }
+        )));
+
+        let rootless_items = recursive_entry_menu_for_selected_entries(vec![rootless]);
+        assert!(!menu_has_label(&rootless_items, "Open file location"));
+    }
+
+    #[gpui::test]
+    fn open_location_command_opens_parent_and_selects_original_item(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        let selected = child.join("inside.txt");
+        fs::create_dir_all(&child).expect("create child directory");
+        fs::write(&selected, b"data").expect("create child file");
+        fs::write(child.join("other.png"), b"image").expect("create other file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.set_search_query("child".to_owned());
+                view.context_menu = Some(ContextMenuState::new(
+                    gpui::point(gpui::px(1.0), gpui::px(1.0)),
+                    vec![ContextMenuItem::Action {
+                        id: "context-menu-entry-open-location".to_owned(),
+                        icon: Some(ContextMenuIcon::OpenLocation),
+                        label: "Open file location".to_owned(),
+                        command: ContextMenuCommand::OpenItemLocation {
+                            directory: child.clone(),
+                            select_path: selected.clone(),
+                        },
+                        enabled: true,
+                    }],
+                ));
+                view.execute_context_menu_command(
+                    ContextMenuCommand::OpenItemLocation {
+                        directory: child.clone(),
+                        select_path: selected.clone(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, child);
+            assert_eq!(view.search_query(), "");
+            assert_eq!(view.selected_paths(), vec![selected]);
+            assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+            assert!(view.forward_stack.is_empty());
+            assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[test]
     fn entry_menu_for_file_in_repo_shows_relative_repo_path_after_copy_path() {
         let repo = unique_temp_dir("file-relative-path-repo");
         fs::create_dir_all(repo.join("src").join("explorer")).unwrap();
@@ -2729,6 +2922,7 @@ mod tests {
             0,
             true,
             true,
+            false,
             &[],
             std::slice::from_ref(&file.path),
             std::slice::from_ref(&file),
@@ -2761,6 +2955,7 @@ mod tests {
             1,
             true,
             false,
+            false,
             &[],
             std::slice::from_ref(&folder.path),
             std::slice::from_ref(&folder),
@@ -2777,6 +2972,7 @@ mod tests {
             0,
             1,
             true,
+            false,
             false,
             &[],
             std::slice::from_ref(&shortcut.path),
@@ -2798,6 +2994,7 @@ mod tests {
             0,
             true,
             false,
+            false,
             &[],
             std::slice::from_ref(&file_shortcut.path),
             std::slice::from_ref(&file_shortcut),
@@ -2814,6 +3011,7 @@ mod tests {
                 0,
                 true,
                 true,
+                false,
                 &[],
                 std::slice::from_ref(&app.path),
                 std::slice::from_ref(&app),
@@ -2826,6 +3024,7 @@ mod tests {
             2,
             2,
             0,
+            false,
             false,
             false,
             &[],
@@ -3340,6 +3539,7 @@ mod tests {
             1,
             false,
             false,
+            false,
             &configured,
             &targets,
             &[],
@@ -3414,6 +3614,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             &configured,
             &targets,
             &[],
@@ -3470,6 +3671,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             &configured,
             &targets,
             &[],
@@ -3523,6 +3725,7 @@ mod tests {
             1,
             1,
             0,
+            false,
             false,
             false,
             &configured,
@@ -3606,6 +3809,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             &configured,
             &targets,
             &[],
@@ -3668,6 +3872,7 @@ mod tests {
             1,
             1,
             0,
+            false,
             false,
             false,
             &configured,
@@ -3899,6 +4104,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             &configured,
             &matching_targets,
             &matching_entries,
@@ -3912,6 +4118,7 @@ mod tests {
             0,
             false,
             false,
+            false,
             &configured,
             &matching_targets,
             &mixed_entries,
@@ -3923,6 +4130,7 @@ mod tests {
             2,
             1,
             1,
+            false,
             false,
             false,
             &configured,
@@ -3954,6 +4162,7 @@ mod tests {
             1,
             1,
             0,
+            false,
             false,
             false,
             &configured,
@@ -4074,6 +4283,7 @@ mod tests {
             1,
             1,
             0,
+            false,
             false,
             false,
             &configured,

@@ -46,14 +46,35 @@ impl ExplorerView {
         history_mode: HistoryMode,
         cx: &mut Context<Self>,
     ) {
+        self.navigate_to_directory_with_watcher_selecting(path, history_mode, Vec::new(), cx);
+    }
+
+    pub(super) fn navigate_to_directory_with_watcher_selecting(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        select_after_load: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(target_os = "windows")]
         {
-            self.navigate_to_directory_with_watcher_and_parent(path, history_mode, None, cx);
+            self.navigate_to_directory_with_watcher_and_parent_selecting(
+                path,
+                history_mode,
+                None,
+                select_after_load,
+                cx,
+            );
             return;
         }
 
         #[cfg(not(target_os = "windows"))]
-        self.navigate_to_directory_with_watcher_after_platform_connect(path, history_mode, cx);
+        self.navigate_to_directory_with_watcher_after_platform_connect_selecting(
+            path,
+            history_mode,
+            select_after_load,
+            cx,
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -64,26 +85,51 @@ impl ExplorerView {
         parent: Option<windows::Win32::Foundation::HWND>,
         cx: &mut Context<Self>,
     ) {
-        if self.connect_sshfs_remote_path_with_watcher(
+        self.navigate_to_directory_with_watcher_and_parent_selecting(
+            path,
+            history_mode,
+            parent,
+            Vec::new(),
+            cx,
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn navigate_to_directory_with_watcher_and_parent_selecting(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        parent: Option<windows::Win32::Foundation::HWND>,
+        select_after_load: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connect_sshfs_remote_path_with_watcher_selecting(
             path.clone(),
             history_mode,
             parent,
+            select_after_load.clone(),
             false,
             cx,
         ) {
             return;
         }
 
-        self.navigate_to_directory_with_watcher_after_platform_connect(path, history_mode, cx);
+        self.navigate_to_directory_with_watcher_after_platform_connect_selecting(
+            path,
+            history_mode,
+            select_after_load,
+            cx,
+        );
     }
 
-    fn navigate_to_directory_with_watcher_after_platform_connect(
+    fn navigate_to_directory_with_watcher_after_platform_connect_selecting(
         &mut self,
         path: PathBuf,
         history_mode: HistoryMode,
+        select_after_load: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_to_directory_inner(path, history_mode, Some(cx));
+        self.navigate_to_directory_inner_selecting(path, history_mode, Some(cx), select_after_load);
     }
 
     fn navigate_to_directory_inner(
@@ -92,7 +138,23 @@ impl ExplorerView {
         history_mode: HistoryMode,
         cx: Option<&mut Context<Self>>,
     ) {
-        self.navigate_to_directory_inner_with_options(path, history_mode, cx, false);
+        self.navigate_to_directory_inner_selecting(path, history_mode, cx, Vec::new());
+    }
+
+    fn navigate_to_directory_inner_selecting(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        cx: Option<&mut Context<Self>>,
+        select_after_load: Vec<PathBuf>,
+    ) {
+        self.navigate_to_directory_inner_with_options(
+            path,
+            history_mode,
+            cx,
+            false,
+            select_after_load,
+        );
     }
 
     fn navigate_to_directory_inner_with_options(
@@ -101,6 +163,7 @@ impl ExplorerView {
         history_mode: HistoryMode,
         mut cx: Option<&mut Context<Self>>,
         rebuild_sidebar: bool,
+        select_after_load: Vec<PathBuf>,
     ) {
         let _timing_batch = crate::debug_options::NavTimingBatch::start();
         let total_started = Instant::now();
@@ -115,21 +178,46 @@ impl ExplorerView {
 
         if path == self.path {
             let reload_started = Instant::now();
-            if let Some(cx) = cx.as_deref_mut() {
-                self.reload_async_with_options_preserving_live_selection(
-                    ReloadMode {
-                        preserve_selection: true,
-                        rebuild_sidebar: true,
-                        preserve_context_menu: false,
-                    },
-                    Vec::new(),
-                    true,
-                    true,
-                    true,
-                    cx,
-                );
+            if select_after_load.is_empty() {
+                if let Some(cx) = cx.as_deref_mut() {
+                    self.reload_async_with_options_preserving_live_selection(
+                        ReloadMode {
+                            preserve_selection: true,
+                            rebuild_sidebar: true,
+                            preserve_context_menu: false,
+                        },
+                        Vec::new(),
+                        true,
+                        true,
+                        true,
+                        cx,
+                    );
+                } else {
+                    self.reload();
+                }
             } else {
-                self.reload();
+                self.reset_search_for_navigation();
+                self.clear_selection();
+                self.read_error = None;
+                self.clear_operation_notice();
+                self.scroll_to_top();
+                if let Some(cx) = cx.as_deref_mut() {
+                    self.reload_async_with_options(
+                        ReloadMode {
+                            preserve_selection: false,
+                            rebuild_sidebar: true,
+                            preserve_context_menu: false,
+                        },
+                        select_after_load,
+                        true,
+                        false,
+                        true,
+                        cx,
+                    );
+                } else {
+                    self.reload_for_navigation();
+                    self.restore_selection_from_paths(&select_after_load);
+                }
             }
             crate::debug_options::log_nav_timing(
                 reload_started.elapsed(),
@@ -145,8 +233,14 @@ impl ExplorerView {
             return;
         }
 
-        let select_entry_after_reload =
-            (self.path.parent() == Some(path.as_path())).then(|| self.path.clone());
+        let select_after_load = if select_after_load.is_empty() {
+            (self.path.parent() == Some(path.as_path()))
+                .then(|| self.path.clone())
+                .into_iter()
+                .collect()
+        } else {
+            select_after_load
+        };
 
         let pre_reload_started = Instant::now();
         if matches!(history_mode, HistoryMode::Record) {
@@ -182,18 +276,14 @@ impl ExplorerView {
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
                     },
-                    select_entry_after_reload.clone().into_iter().collect(),
+                    select_after_load.clone(),
                     true,
                     false,
                     true,
                     cx,
                 );
             } else {
-                self.reload_for_navigation_async(
-                    select_entry_after_reload.clone().into_iter().collect(),
-                    true,
-                    cx,
-                );
+                self.reload_for_navigation_async(select_after_load.clone(), true, cx);
             }
         } else {
             self.reload_for_navigation();
@@ -203,16 +293,14 @@ impl ExplorerView {
             format_args!("navigate.reload same_path=false path={:?}", self.path),
         );
 
-        if cx.is_none()
-            && let Some(path) = select_entry_after_reload
-        {
+        if cx.is_none() && !select_after_load.is_empty() {
             let selection_started = Instant::now();
-            self.select_single_path(&path);
+            self.restore_selection_from_paths(&select_after_load);
             crate::debug_options::log_nav_timing(
                 selection_started.elapsed(),
                 format_args!(
-                    "navigate.select_origin path={:?} selected={}",
-                    path,
+                    "navigate.select_origin paths={} selected={}",
+                    select_after_load.len(),
                     self.selection.selected_indices.len()
                 ),
             );
@@ -261,6 +349,26 @@ impl ExplorerView {
         initial_load: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.connect_sshfs_remote_path_with_watcher_selecting(
+            path,
+            history_mode,
+            parent,
+            Vec::new(),
+            initial_load,
+            cx,
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    fn connect_sshfs_remote_path_with_watcher_selecting(
+        &mut self,
+        path: PathBuf,
+        history_mode: HistoryMode,
+        parent: Option<windows::Win32::Foundation::HWND>,
+        select_after_load: Vec<PathBuf>,
+        initial_load: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(target) = crate::explorer::filesystem::sshfs_connection_target_for_path(&path)
         else {
             return false;
@@ -298,6 +406,7 @@ impl ExplorerView {
                             history_mode,
                             Some(cx),
                             true,
+                            select_after_load,
                         );
                     }
                     Err(error) => {
@@ -333,6 +442,7 @@ impl ExplorerView {
             HistoryMode::Preserve,
             Some(cx),
             true,
+            Vec::new(),
         );
         true
     }
@@ -801,6 +911,32 @@ mod tests {
         assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].name, "inside.txt");
+    }
+
+    #[test]
+    fn navigating_to_directory_selecting_path_clears_search_and_selects_item() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        let selected = child.join("inside.txt");
+        fs::create_dir_all(&child).expect("create child directory");
+        fs::write(&selected, b"data").expect("create child file");
+        fs::write(child.join("other.png"), b"image").expect("create other file");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.set_search_query("child".to_owned());
+
+        view.navigate_to_directory_inner_selecting(
+            child.clone(),
+            HistoryMode::Record,
+            None,
+            vec![selected.clone()],
+        );
+
+        assert_eq!(view.path, child);
+        assert_eq!(view.search_query(), "");
+        assert_eq!(view.selected_paths(), vec![selected]);
+        assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
+        assert!(view.forward_stack.is_empty());
+        assert_eq!(view.entries.len(), 2);
     }
 
     #[test]
