@@ -5,21 +5,21 @@ use super::{
     renderer,
 };
 use crate::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardItem, ClipboardString,
-    CursorStyle, ForegroundExecutor, Image, ImageFormat, KeyContext, Keymap, MacDispatcher,
-    MacDisplay, MacWindow, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, SemanticVersion, SystemMenuType, Task, WindowAppearance, WindowParams,
-    hash,
+    Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardFileOperation,
+    ClipboardFiles, ClipboardItem, ClipboardString, CursorStyle, ForegroundExecutor, Image,
+    ImageFormat, KeyContext, Keymap, MacDispatcher, MacDisplay, MacWindow, Menu, MenuItem, OsMenu,
+    OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SemanticVersion,
+    SystemMenuType, Task, WindowAppearance, WindowParams, hash,
 };
 use anyhow::{Context as _, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     appkit::{
         NSApplication, NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular,
-        NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel, NSPasteboard,
-        NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeRTFD, NSPasteboardTypeString,
-        NSPasteboardTypeTIFF, NSSavePanel, NSWindow,
+        NSEventModifierFlags, NSFilenamesPboardType, NSMenu, NSMenuItem, NSModalResponse,
+        NSOpenPanel, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeRTF,
+        NSPasteboardTypeRTFD, NSPasteboardTypeString, NSPasteboardTypeTIFF, NSSavePanel, NSWindow,
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
@@ -1028,6 +1028,13 @@ impl Platform for MacPlatform {
         use crate::ClipboardEntry;
 
         unsafe {
+            if let Some(files) = item.files() {
+                let text = item.text();
+                let metadata = item.metadata().cloned();
+                self.write_files_to_clipboard(files, text.as_deref(), metadata.as_deref());
+                return;
+            }
+
             // We only want to use NSAttributedString if there are multiple entries to write.
             if item.entries.len() <= 1 {
                 match item.entries.first() {
@@ -1038,6 +1045,7 @@ impl Platform for MacPlatform {
                         ClipboardEntry::Image(image) => {
                             self.write_image_to_clipboard(image);
                         }
+                        ClipboardEntry::Files(_) => {}
                     },
                     None => {
                         // Writing an empty list of entries just clears the clipboard.
@@ -1112,6 +1120,10 @@ impl Platform for MacPlatform {
                 .is_some_and(|item| item.metadata().is_some())
             {
                 return string_item;
+            }
+
+            if let Some(item) = read_files_from_clipboard(pasteboard, types) {
+                return Some(item);
             }
 
             let mut entries = Vec::new();
@@ -1350,6 +1362,121 @@ impl MacPlatform {
             state
                 .pasteboard
                 .setData_forType(bytes, Into::<UTType>::into(image.format).inner_mut());
+        }
+    }
+
+    unsafe fn write_files_to_clipboard(
+        &self,
+        files: &ClipboardFiles,
+        text: Option<&str>,
+        metadata: Option<&str>,
+    ) {
+        unsafe {
+            let state = self.0.lock();
+            state.pasteboard.clearContents();
+
+            let mut filenames = Vec::new();
+            let mut file_urls = Vec::new();
+            for path in &files.paths {
+                let path = path.to_string_lossy();
+                if path.is_empty() {
+                    continue;
+                }
+
+                let ns_path = ns_string(path.as_ref());
+                filenames.push(ns_path);
+
+                let file_url = NSURL::fileURLWithPath_(nil, ns_path);
+                if file_url != nil {
+                    file_urls.push(file_url);
+                }
+            }
+
+            if !file_urls.is_empty() {
+                let file_url_array = NSArray::arrayWithObjects(nil, &file_urls);
+                let _: BOOL = msg_send![state.pasteboard, writeObjects: file_url_array];
+            }
+
+            if !filenames.is_empty() {
+                let filename_array = NSArray::arrayWithObjects(nil, &filenames);
+                let _: BOOL = msg_send![
+                    state.pasteboard,
+                    setPropertyList: filename_array
+                    forType: NSFilenamesPboardType
+                ];
+            }
+
+            if let Some(text) = text {
+                let text_bytes =
+                    NSData::dataWithBytes_length_(nil, text.as_ptr() as *const c_void, text.len() as u64);
+                state
+                    .pasteboard
+                    .setData_forType(text_bytes, NSPasteboardTypeString);
+
+                if let Some(metadata) = metadata {
+                    let hash_bytes = ClipboardString::text_hash(text).to_be_bytes();
+                    let hash_bytes = NSData::dataWithBytes_length_(
+                        nil,
+                        hash_bytes.as_ptr() as *const c_void,
+                        hash_bytes.len() as u64,
+                    );
+                    state
+                        .pasteboard
+                        .setData_forType(hash_bytes, state.text_hash_pasteboard_type);
+
+                    let metadata_bytes = NSData::dataWithBytes_length_(
+                        nil,
+                        metadata.as_ptr() as *const c_void,
+                        metadata.len() as u64,
+                    );
+                    state
+                        .pasteboard
+                        .setData_forType(metadata_bytes, state.metadata_pasteboard_type);
+                }
+            }
+        }
+    }
+}
+
+fn read_files_from_clipboard(pasteboard: id, types: id) -> Option<ClipboardItem> {
+    unsafe {
+        let mut paths = Vec::new();
+        if msg_send![types, containsObject: NSFilenamesPboardType] {
+            let filenames = NSPasteboard::propertyListForType(pasteboard, NSFilenamesPboardType);
+            if filenames != nil {
+                for file in filenames.iter() {
+                    let path = {
+                        let f = NSString::UTF8String(file);
+                        CStr::from_ptr(f).to_string_lossy().into_owned()
+                    };
+                    paths.push(PathBuf::from(path));
+                }
+            }
+        }
+
+        if paths.is_empty() {
+            let file_url_type = ns_string("public.file-url");
+            if msg_send![types, containsObject: file_url_type] {
+                let file_url_string: id = msg_send![pasteboard, stringForType: file_url_type];
+                if file_url_string != nil {
+                    let file_url: id = msg_send![class!(NSURL), URLWithString: file_url_string];
+                    if file_url != nil {
+                        let is_file_url: BOOL = msg_send![file_url, isFileURL];
+                        if is_file_url == YES {
+                            paths.push(ns_url_to_path(file_url).ok()?);
+                        }
+                    }
+                }
+            }
+        }
+
+        if paths.is_empty() {
+            None
+        } else {
+            Some(ClipboardItem::from(ClipboardFiles::new(
+                ClipboardFileOperation::Copy,
+                paths,
+            )))
         }
     }
 }

@@ -11,7 +11,8 @@ use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::{
-    ClipboardEntry, ClipboardItem, Image, ImageFormat, WaylandClientStatePtr, hash,
+    ClipboardEntry, ClipboardFileOperation, ClipboardFiles, ClipboardItem, Image, ImageFormat,
+    WaylandClientStatePtr, hash,
     platform::linux::platform::read_fd,
 };
 
@@ -19,6 +20,15 @@ use crate::{
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
+pub(crate) const GNOME_COPIED_FILES_MIME_TYPE: &str = "x-special/gnome-copied-files";
+pub(crate) const KDE_FILE_LIST_MIME_TYPE: &str = "application/x-kde4-urilist";
+pub(crate) const KDE_CUTSELECTION_MIME_TYPE: &str = "application/x-kde-cutselection";
+pub(crate) const FILE_CLIPBOARD_MIME_TYPES: [&str; 4] = [
+    GNOME_COPIED_FILES_MIME_TYPE,
+    FILE_LIST_MIME_TYPE,
+    KDE_FILE_LIST_MIME_TYPE,
+    KDE_CUTSELECTION_MIME_TYPE,
+];
 
 /// Text mime types that we'll accept from other programs.
 pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
@@ -119,6 +129,38 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
+    fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
+        if self.has_mime_type(GNOME_COPIED_FILES_MIME_TYPE) {
+            let bytes = self.read_bytes(connection, GNOME_COPIED_FILES_MIME_TYPE)?;
+            let text = String::from_utf8(bytes).ok()?;
+            if let Some(files) = ClipboardFiles::from_gnome_copied_files(&text) {
+                return Some(ClipboardItem::from(files));
+            }
+        }
+
+        let uri_list_mime_type = if self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            FILE_LIST_MIME_TYPE
+        } else if self.has_mime_type(KDE_FILE_LIST_MIME_TYPE) {
+            KDE_FILE_LIST_MIME_TYPE
+        } else {
+            return None;
+        };
+
+        let operation = if self.has_mime_type(KDE_CUTSELECTION_MIME_TYPE)
+            && self
+                .read_bytes(connection, KDE_CUTSELECTION_MIME_TYPE)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .is_some_and(|text| kde_cutselection_is_move(&text))
+        {
+            ClipboardFileOperation::Move
+        } else {
+            ClipboardFileOperation::Copy
+        };
+        let bytes = self.read_bytes(connection, uri_list_mime_type)?;
+        let text = String::from_utf8(bytes).ok()?;
+        ClipboardFiles::from_uri_list(&text, operation).map(ClipboardItem::from)
+    }
+
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
@@ -179,19 +221,23 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
-            self.send_internal(fd, text.as_bytes().to_owned());
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self
+            .contents
+            .as_ref()
+            .and_then(|contents| clipboard_bytes_for_mime(contents, &mime_type))
+        {
+            self.send_internal(fd, bytes);
         }
     }
 
-    pub fn send_primary(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self
+    pub fn send_primary(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self
             .primary_contents
             .as_ref()
-            .and_then(|contents| contents.text())
+            .and_then(|contents| clipboard_bytes_for_mime(contents, &mime_type))
         {
-            self.send_internal(fd, text.as_bytes().to_owned());
+            self.send_internal(fd, bytes);
         }
     }
 
@@ -206,7 +252,8 @@ impl Clipboard {
         }
 
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());
@@ -224,7 +271,8 @@ impl Clipboard {
         }
 
         let item = offer
-            .read_text(&self.connection)
+            .read_files(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_primary_read = Some(item.clone());
@@ -259,4 +307,35 @@ impl Clipboard {
             )
             .unwrap();
     }
+}
+
+fn clipboard_bytes_for_mime(item: &ClipboardItem, mime_type: &str) -> Option<Vec<u8>> {
+    if let Some(files) = item.files() {
+        match mime_type {
+            FILE_LIST_MIME_TYPE | KDE_FILE_LIST_MIME_TYPE => {
+                return Some(files.uri_list().into_bytes());
+            }
+            GNOME_COPIED_FILES_MIME_TYPE => {
+                return Some(files.gnome_copied_files().into_bytes());
+            }
+            KDE_CUTSELECTION_MIME_TYPE => {
+                let cut = match files.operation {
+                    ClipboardFileOperation::Copy => "0",
+                    ClipboardFileOperation::Move => "1",
+                };
+                return Some(cut.as_bytes().to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    if TEXT_MIME_TYPES.iter().any(|text_mime| text_mime == &mime_type) {
+        item.text().map(|text| text.into_bytes())
+    } else {
+        None
+    }
+}
+
+fn kde_cutselection_is_move(text: &str) -> bool {
+    matches!(text.trim(), "1" | "true" | "cut")
 }

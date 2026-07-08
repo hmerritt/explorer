@@ -87,7 +87,10 @@ use crate::{
         LinuxClient, get_xkb_compose_state, is_within_click_distance, open_uri_internal, read_fd,
         reveal_path_internal,
         wayland::{
-            clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
+            clipboard::{
+                Clipboard, DataOffer, FILE_CLIPBOARD_MIME_TYPES, FILE_LIST_MIME_TYPE,
+                TEXT_MIME_TYPES,
+            },
             cursor::Cursor,
             serial::{SerialKind, SerialTracker},
             window::WaylandWindow,
@@ -918,9 +921,15 @@ impl LinuxClient for WaylandClient {
             return;
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
+            let has_files = item.files().is_some();
             state.clipboard.set(item);
             let serial = state.serial_tracker.get(SerialKind::KeyPress);
             let data_source = data_device_manager.create_data_source(&state.globals.qh, ());
+            if has_files {
+                for mime_type in FILE_CLIPBOARD_MIME_TYPES {
+                    data_source.offer(mime_type.to_string());
+                }
+            }
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }

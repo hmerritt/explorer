@@ -14359,6 +14359,7 @@ mod tests {
         item.entries().iter().find_map(|entry| match entry {
             gpui::ClipboardEntry::Image(image) => Some(image.clone()),
             gpui::ClipboardEntry::String(_) => None,
+            gpui::ClipboardEntry::Files(_) => None,
         })
     }
 

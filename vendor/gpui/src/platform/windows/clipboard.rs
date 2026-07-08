@@ -1,10 +1,14 @@
-use std::sync::LazyLock;
+use std::{
+    mem,
+    path::PathBuf,
+    sync::LazyLock,
+};
 
 use anyhow::Result;
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
 use windows::Win32::{
-    Foundation::{HANDLE, HGLOBAL},
+    Foundation::{HANDLE, HGLOBAL, POINT},
     System::{
         DataExchange::{
             CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
@@ -12,13 +16,16 @@ use windows::Win32::{
             RegisterClipboardFormatW, SetClipboardData,
         },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-        Ole::{CF_HDROP, CF_UNICODETEXT},
+        Ole::{CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_MOVE},
     },
-    UI::Shell::{DragQueryFileW, HDROP},
+    UI::Shell::{DROPFILES, DragQueryFileW, HDROP},
 };
-use windows_core::PCWSTR;
+use windows_core::{BOOL, PCWSTR};
 
-use crate::{ClipboardEntry, ClipboardItem, ClipboardString, Image, ImageFormat, hash};
+use crate::{
+    ClipboardEntry, ClipboardFileOperation, ClipboardFiles, ClipboardItem, ClipboardString, Image,
+    ImageFormat, hash,
+};
 
 // https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragqueryfilew
 const DRAGDROP_GET_FILES_COUNT: u32 = 0xFFFFFFFF;
@@ -36,6 +43,8 @@ static CLIPBOARD_PNG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("PNG")));
 static CLIPBOARD_JPG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("JFIF")));
+static PREFERRED_DROPEFFECT_FORMAT: LazyLock<u32> =
+    LazyLock::new(|| register_clipboard_format(windows::core::w!("Preferred DropEffect")));
 
 // Helper maps and sets
 static FORMATS_MAP: LazyLock<FxHashMap<u32, ClipboardFormatType>> = LazyLock::new(|| {
@@ -80,6 +89,14 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
 
 pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
     with_clipboard(|| {
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() } {
+            if let Some(entry) = read_files_from_clipboard() {
+                return Some(ClipboardItem {
+                    entries: vec![entry],
+                });
+            }
+        }
+
         with_best_match_format(|item_format| match format_to_type(item_format) {
             ClipboardFormatType::Text => read_string_from_clipboard(),
             ClipboardFormatType::Image => read_image_from_clipboard(item_format),
@@ -146,11 +163,19 @@ fn format_to_type(item_format: u32) -> &'static ClipboardFormatType {
     FORMATS_MAP.get(&item_format).unwrap()
 }
 
-// Currently, we only write the first item.
 fn write_to_clipboard_inner(item: ClipboardItem) -> Result<()> {
     unsafe {
         EmptyClipboard()?;
     }
+    if let Some(files) = item.files() {
+        write_files_to_clipboard(files)?;
+        if let Some(text) = item.text() {
+            set_unicode_text_to_clipboard(&text)?;
+        }
+        return Ok(());
+    }
+
+    // Currently, we only write the first non-file item.
     match item.entries().first() {
         Some(entry) => match entry {
             ClipboardEntry::String(string) => {
@@ -159,6 +184,7 @@ fn write_to_clipboard_inner(item: ClipboardItem) -> Result<()> {
             ClipboardEntry::Image(image) => {
                 write_image_to_clipboard(image)?;
             }
+            ClipboardEntry::Files(_) => {}
         },
         None => {
             // Writing an empty list of entries just clears the clipboard.
@@ -168,8 +194,7 @@ fn write_to_clipboard_inner(item: ClipboardItem) -> Result<()> {
 }
 
 fn write_string_to_clipboard(item: &ClipboardString) -> Result<()> {
-    let encode_wide = item.text.encode_utf16().chain(Some(0)).collect_vec();
-    set_data_to_clipboard(&encode_wide, CF_UNICODETEXT.0 as u32)?;
+    set_unicode_text_to_clipboard(&item.text)?;
 
     if let Some(metadata) = item.metadata.as_ref() {
         let hash_result = {
@@ -186,6 +211,11 @@ fn write_string_to_clipboard(item: &ClipboardString) -> Result<()> {
     Ok(())
 }
 
+fn set_unicode_text_to_clipboard(text: &str) -> Result<()> {
+    let encode_wide = text.encode_utf16().chain(Some(0)).collect_vec();
+    set_data_to_clipboard(&encode_wide, CF_UNICODETEXT.0 as u32)
+}
+
 fn set_data_to_clipboard<T>(data: &[T], format: u32) -> Result<()> {
     unsafe {
         let global = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(data))?;
@@ -194,6 +224,18 @@ fn set_data_to_clipboard<T>(data: &[T], format: u32) -> Result<()> {
         let _ = GlobalUnlock(global);
         SetClipboardData(format, Some(HANDLE(global.0)))?;
     }
+    Ok(())
+}
+
+fn write_files_to_clipboard(files: &ClipboardFiles) -> Result<()> {
+    let payload = build_hdrop_payload(&files.paths);
+    set_data_to_clipboard(&payload, CF_HDROP.0 as u32)?;
+
+    let effect = match files.operation {
+        ClipboardFileOperation::Copy => DROPEFFECT_COPY.0,
+        ClipboardFileOperation::Move => DROPEFFECT_MOVE.0,
+    };
+    set_data_to_clipboard(&[effect], *PREFERRED_DROPEFFECT_FORMAT)?;
     Ok(())
 }
 
@@ -346,18 +388,87 @@ fn read_image_for_type(format_number: u32, format: ImageFormat) -> Option<Clipbo
 }
 
 fn read_files_from_clipboard() -> Option<ClipboardEntry> {
-    let text = with_clipboard_data(CF_HDROP.0 as u32, |data_ptr, _size| {
+    let paths = with_clipboard_data(CF_HDROP.0 as u32, |data_ptr, _size| {
         let hdrop = HDROP(data_ptr);
-        let mut filenames = String::new();
+        let mut paths = Vec::new();
         with_file_names(hdrop, |file_name| {
-            filenames.push_str(&file_name);
+            paths.push(PathBuf::from(file_name));
         });
-        filenames
+        paths
     })?;
-    Some(ClipboardEntry::String(ClipboardString {
-        text,
-        metadata: None,
-    }))
+    if paths.is_empty() {
+        return None;
+    }
+
+    Some(ClipboardEntry::Files(ClipboardFiles::new(
+        read_preferred_drop_effect(),
+        paths,
+    )))
+}
+
+fn read_preferred_drop_effect() -> ClipboardFileOperation {
+    if unsafe { IsClipboardFormatAvailable(*PREFERRED_DROPEFFECT_FORMAT).is_err() } {
+        return ClipboardFileOperation::Copy;
+    }
+
+    let Some(effect) = with_clipboard_data(*PREFERRED_DROPEFFECT_FORMAT, |data_ptr, size| {
+        if size < mem::size_of::<u32>() {
+            return None;
+        }
+        let effect_bytes: [u8; 4] = unsafe {
+            std::slice::from_raw_parts(data_ptr.cast::<u8>(), mem::size_of::<u32>())
+                .try_into()
+                .ok()
+        }?;
+        Some(u32::from_ne_bytes(effect_bytes))
+    })
+    .flatten() else {
+        return ClipboardFileOperation::Copy;
+    };
+
+    clipboard_operation_from_drop_effect(effect)
+}
+
+fn clipboard_operation_from_drop_effect(effect: u32) -> ClipboardFileOperation {
+    if effect & DROPEFFECT_MOVE.0 != 0 {
+        ClipboardFileOperation::Move
+    } else {
+        ClipboardFileOperation::Copy
+    }
+}
+
+fn build_hdrop_payload(paths: &[PathBuf]) -> Vec<u8> {
+    let mut encoded_paths = Vec::<u16>::new();
+    for path in paths {
+        encoded_paths.extend(path.to_string_lossy().encode_utf16());
+        encoded_paths.push(0);
+    }
+    encoded_paths.push(0);
+
+    let header = DROPFILES {
+        pFiles: mem::size_of::<DROPFILES>() as u32,
+        pt: POINT { x: 0, y: 0 },
+        fNC: BOOL(0),
+        fWide: BOOL(1),
+    };
+
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!(header).cast::<u8>(),
+            mem::size_of::<DROPFILES>(),
+        )
+    };
+    let path_bytes = unsafe {
+        std::slice::from_raw_parts(
+            encoded_paths.as_ptr().cast::<u8>(),
+            encoded_paths.len() * mem::size_of::<u16>(),
+        )
+    };
+
+    let mut payload = Vec::with_capacity(header_bytes.len() + path_bytes.len());
+    payload.extend_from_slice(header_bytes);
+    payload.extend_from_slice(path_bytes);
+    payload
 }
 
 fn with_clipboard_data<F, R>(format: u32, f: F) -> Option<R>
@@ -384,5 +495,52 @@ impl From<ImageFormat> for image::ImageFormat {
             ImageFormat::Tiff => image::ImageFormat::Tiff,
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferred_drop_effect_maps_move_before_copy() {
+        assert_eq!(
+            clipboard_operation_from_drop_effect(DROPEFFECT_COPY.0),
+            ClipboardFileOperation::Copy
+        );
+        assert_eq!(
+            clipboard_operation_from_drop_effect(DROPEFFECT_MOVE.0),
+            ClipboardFileOperation::Move
+        );
+        assert_eq!(
+            clipboard_operation_from_drop_effect(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0),
+            ClipboardFileOperation::Move
+        );
+    }
+
+    #[test]
+    fn hdrop_payload_encodes_utf16_paths_with_double_null() {
+        let payload = build_hdrop_payload(&[
+            PathBuf::from(r"C:\Users\test\file one.txt"),
+            PathBuf::from(r"D:\folder"),
+        ]);
+        assert!(payload.len() > mem::size_of::<DROPFILES>());
+
+        let header = unsafe { *(payload.as_ptr().cast::<DROPFILES>()) };
+        assert_eq!(header.pFiles, mem::size_of::<DROPFILES>() as u32);
+        assert_eq!(header.fWide, BOOL(1));
+
+        let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
+        assert_eq!(path_bytes.len() % mem::size_of::<u16>(), 0);
+        let path_wide = unsafe {
+            std::slice::from_raw_parts(
+                path_bytes.as_ptr().cast::<u16>(),
+                path_bytes.len() / mem::size_of::<u16>(),
+            )
+        };
+        assert_eq!(&path_wide[path_wide.len() - 2..], &[0, 0]);
+        let text = String::from_utf16_lossy(path_wide);
+        assert!(text.contains(r"C:\Users\test\file one.txt"));
+        assert!(text.contains(r"D:\folder"));
     }
 }

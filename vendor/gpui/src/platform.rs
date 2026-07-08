@@ -1519,13 +1519,85 @@ pub struct ClipboardItem {
     entries: Vec<ClipboardEntry>,
 }
 
-/// Either a ClipboardString or a ClipboardImage
+/// A file operation carried by a native file clipboard payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardFileOperation {
+    /// The files should be copied.
+    Copy,
+    /// The files should be moved.
+    Move,
+}
+
+/// A native file clipboard payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardFiles {
+    /// The requested operation for the file paste.
+    pub operation: ClipboardFileOperation,
+    /// Local filesystem paths carried by the clipboard.
+    pub paths: Vec<PathBuf>,
+}
+
+impl ClipboardFiles {
+    /// Create a new native file clipboard payload.
+    pub fn new(operation: ClipboardFileOperation, paths: Vec<PathBuf>) -> Self {
+        Self { operation, paths }
+    }
+
+    /// Returns a plain-text representation of the paths.
+    pub fn plain_text(&self) -> String {
+        self.paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Returns an RFC 2483 `text/uri-list` representation of the paths.
+    pub fn uri_list(&self) -> String {
+        file_uri_list_for_paths(&self.paths)
+    }
+
+    /// Returns a GNOME/Nautilus copied-files payload.
+    pub fn gnome_copied_files(&self) -> String {
+        let operation = match self.operation {
+            ClipboardFileOperation::Copy => "copy",
+            ClipboardFileOperation::Move => "cut",
+        };
+        let uri_list = self.uri_list();
+        if uri_list.is_empty() {
+            operation.to_string()
+        } else {
+            format!("{operation}\n{uri_list}")
+        }
+    }
+
+    /// Parses an RFC 2483 `text/uri-list` payload as local files.
+    pub fn from_uri_list(text: &str, operation: ClipboardFileOperation) -> Option<Self> {
+        local_paths_from_uri_list(text).map(|paths| Self { operation, paths })
+    }
+
+    /// Parses a GNOME/Nautilus copied-files payload.
+    pub fn from_gnome_copied_files(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        let operation = match lines.next()?.trim() {
+            "copy" => ClipboardFileOperation::Copy,
+            "cut" => ClipboardFileOperation::Move,
+            _ => return None,
+        };
+        let uri_list = lines.collect::<Vec<_>>().join("\n");
+        Self::from_uri_list(&uri_list, operation)
+    }
+}
+
+/// Either a ClipboardString, ClipboardImage, or native file payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClipboardEntry {
     /// A string entry
     String(ClipboardString),
     /// An image entry
     Image(Image),
+    /// A native file entry
+    Files(ClipboardFiles),
 }
 
 impl ClipboardItem {
@@ -1562,6 +1634,31 @@ impl ClipboardItem {
         }
     }
 
+    /// Create a new ClipboardItem::Files with the given operation and paths.
+    pub fn new_files(paths: Vec<PathBuf>, operation: ClipboardFileOperation) -> Self {
+        Self {
+            entries: vec![ClipboardEntry::Files(ClipboardFiles::new(operation, paths))],
+        }
+    }
+
+    /// Create a new ClipboardItem::Files with a companion string metadata entry.
+    pub fn new_files_with_metadata(
+        paths: Vec<PathBuf>,
+        operation: ClipboardFileOperation,
+        text: String,
+        metadata: String,
+    ) -> Self {
+        Self {
+            entries: vec![
+                ClipboardEntry::Files(ClipboardFiles::new(operation, paths)),
+                ClipboardEntry::String(ClipboardString {
+                    text,
+                    metadata: Some(metadata),
+                }),
+            ],
+        }
+    }
+
     /// Concatenates together all the ClipboardString entries in the item.
     /// Returns None if there were no ClipboardString entries.
     pub fn text(&self) -> Option<String> {
@@ -1578,15 +1675,27 @@ impl ClipboardItem {
         if any_entries { Some(answer) } else { None }
     }
 
-    /// If this item is one ClipboardEntry::String, returns its metadata.
+    /// If this item has exactly one metadata-bearing string entry, returns its metadata.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn metadata(&self) -> Option<&String> {
-        match self.entries().first() {
-            Some(ClipboardEntry::String(clipboard_string)) if self.entries.len() == 1 => {
-                clipboard_string.metadata.as_ref()
-            }
+        let mut metadata_entries = self.entries.iter().filter_map(|entry| match entry {
+            ClipboardEntry::String(clipboard_string) => clipboard_string.metadata.as_ref(),
             _ => None,
+        });
+        let metadata = metadata_entries.next()?;
+        if metadata_entries.next().is_none() {
+            Some(metadata)
+        } else {
+            None
         }
+    }
+
+    /// Returns the first native file clipboard payload in this item.
+    pub fn files(&self) -> Option<&ClipboardFiles> {
+        self.entries.iter().find_map(|entry| match entry {
+            ClipboardEntry::Files(files) => Some(files),
+            _ => None,
+        })
     }
 
     /// Get the item's entries
@@ -1618,6 +1727,12 @@ impl From<Image> for ClipboardEntry {
     }
 }
 
+impl From<ClipboardFiles> for ClipboardEntry {
+    fn from(value: ClipboardFiles) -> Self {
+        Self::Files(value)
+    }
+}
+
 impl From<ClipboardEntry> for ClipboardItem {
     fn from(value: ClipboardEntry) -> Self {
         Self {
@@ -1635,6 +1750,113 @@ impl From<String> for ClipboardItem {
 impl From<Image> for ClipboardItem {
     fn from(value: Image) -> Self {
         Self::from(ClipboardEntry::from(value))
+    }
+}
+
+impl From<ClipboardFiles> for ClipboardItem {
+    fn from(value: ClipboardFiles) -> Self {
+        Self::from(ClipboardEntry::from(value))
+    }
+}
+
+fn file_uri_list_for_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .filter_map(|path| http_client::Url::from_file_path(path).ok())
+        .map(|url| url.to_string())
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+fn local_paths_from_uri_list(text: &str) -> Option<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let url = http_client::Url::parse(line).ok()?;
+        if url.scheme() != "file" {
+            return None;
+        }
+        paths.push(url.to_file_path().ok()?);
+    }
+
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+#[cfg(test)]
+mod clipboard_file_tests {
+    use super::*;
+
+    #[test]
+    fn uri_list_round_trips_local_paths() {
+        let path = std::env::temp_dir().join("gpui clipboard file.txt");
+        let files = ClipboardFiles::new(ClipboardFileOperation::Copy, vec![path.clone()]);
+        let parsed =
+            ClipboardFiles::from_uri_list(&files.uri_list(), ClipboardFileOperation::Copy)
+                .expect("local uri list");
+
+        assert_eq!(parsed.operation, ClipboardFileOperation::Copy);
+        assert_eq!(parsed.paths, vec![path]);
+    }
+
+    #[test]
+    fn uri_list_rejects_remote_invalid_and_mixed_payloads() {
+        let path = std::env::temp_dir().join("local.txt");
+        let local_uri = http_client::Url::from_file_path(&path)
+            .expect("file url")
+            .to_string();
+
+        assert_eq!(
+            ClipboardFiles::from_uri_list("https://example.com/file.txt", ClipboardFileOperation::Copy),
+            None
+        );
+        assert_eq!(
+            ClipboardFiles::from_uri_list("not a uri", ClipboardFileOperation::Copy),
+            None
+        );
+        assert_eq!(
+            ClipboardFiles::from_uri_list(
+                &format!("{local_uri}\nhttps://example.com/file.txt"),
+                ClipboardFileOperation::Copy
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn gnome_copied_files_round_trips_copy_and_cut() {
+        let path = std::env::temp_dir().join("gnome file.txt");
+        let copy = ClipboardFiles::new(ClipboardFileOperation::Copy, vec![path.clone()]);
+        let cut = ClipboardFiles::new(ClipboardFileOperation::Move, vec![path.clone()]);
+
+        assert_eq!(
+            ClipboardFiles::from_gnome_copied_files(&copy.gnome_copied_files()),
+            Some(copy)
+        );
+        assert_eq!(
+            ClipboardFiles::from_gnome_copied_files(&cut.gnome_copied_files()),
+            Some(cut)
+        );
+    }
+
+    #[test]
+    fn file_clipboard_item_preserves_legacy_metadata_entry() {
+        let item = ClipboardItem::new_files_with_metadata(
+            vec![PathBuf::from("a.txt")],
+            ClipboardFileOperation::Move,
+            "a.txt".to_owned(),
+            "{\"kind\":\"legacy\"}".to_owned(),
+        );
+
+        assert_eq!(
+            item.files().map(|files| files.operation),
+            Some(ClipboardFileOperation::Move)
+        );
+        assert_eq!(item.text(), Some("a.txt".to_owned()));
+        assert_eq!(item.metadata(), Some(&"{\"kind\":\"legacy\"}".to_owned()));
     }
 }
 

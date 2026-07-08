@@ -47,7 +47,9 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
-use crate::{ClipboardItem, Image, ImageFormat, hash};
+use crate::{
+    ClipboardEntry, ClipboardFileOperation, ClipboardFiles, ClipboardItem, Image, ImageFormat, hash,
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -77,7 +79,10 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        URI_LIST: b"text/uri-list",
+        GNOME_COPIED_FILES: b"x-special/gnome-copied-files",
+        KDE4_URI_LIST: b"application/x-kde4-urilist",
+        KDE_CUTSELECTION: b"application/x-kde-cutselection",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -988,6 +993,60 @@ impl Clipboard {
         self.inner.write(data, selection, wait)
     }
 
+    pub(crate) fn set_item(
+        &self,
+        item: &ClipboardItem,
+        selection: ClipboardKind,
+        wait: WaitConfig,
+    ) -> Result<()> {
+        let mut data = Vec::new();
+
+        if let Some(files) = item.files() {
+            let uri_list = files.uri_list().into_bytes();
+            data.push(ClipboardData {
+                bytes: files.gnome_copied_files().into_bytes(),
+                format: self.inner.atoms.GNOME_COPIED_FILES,
+            });
+            data.push(ClipboardData {
+                bytes: uri_list.clone(),
+                format: self.inner.atoms.URI_LIST,
+            });
+            data.push(ClipboardData {
+                bytes: uri_list,
+                format: self.inner.atoms.KDE4_URI_LIST,
+            });
+            data.push(ClipboardData {
+                bytes: kde_cutselection_bytes(files.operation),
+                format: self.inner.atoms.KDE_CUTSELECTION,
+            });
+        }
+
+        for entry in item.entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                data.push(ClipboardData {
+                    bytes: image.bytes().to_vec(),
+                    format: self.atom_for_image_format(image.format()),
+                });
+            }
+        }
+
+        if let Some(text) = item.text().or_else(|| item.files().map(|files| files.plain_text())) {
+            data.push(ClipboardData {
+                bytes: text.into_bytes(),
+                format: self.inner.atoms.UTF8_STRING,
+            });
+        }
+
+        if data.is_empty() {
+            data.push(ClipboardData {
+                bytes: Vec::new(),
+                format: self.inner.atoms.UTF8_STRING,
+            });
+        }
+
+        self.inner.write(data, selection, wait)
+    }
+
     #[allow(unused)]
     pub(crate) fn set_image(
         &self,
@@ -1006,12 +1065,19 @@ impl Clipboard {
         };
         let data = vec![ClipboardData {
             bytes: image.bytes,
-            format: self.inner.atoms.PNG__MIME,
+            format,
         }];
         self.inner.write(data, selection, wait)
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        const FILE_FORMAT_COUNT: usize = 3;
+        let file_format_atoms: [Atom; FILE_FORMAT_COUNT] = [
+            self.inner.atoms.GNOME_COPIED_FILES,
+            self.inner.atoms.URI_LIST,
+            self.inner.atoms.KDE4_URI_LIST,
+        ];
+
         const IMAGE_FORMAT_COUNT: usize = 7;
         let image_format_atoms: [Atom; IMAGE_FORMAT_COUNT] = [
             self.inner.atoms.PNG__MIME,
@@ -1044,14 +1110,17 @@ impl Clipboard {
 
         let atom_none: Atom = AtomEnum::NONE.into();
 
-        const FORMAT_ATOM_COUNT: usize = TEXT_FORMAT_COUNT + IMAGE_FORMAT_COUNT;
+        const FORMAT_ATOM_COUNT: usize = FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT + TEXT_FORMAT_COUNT;
 
         let mut format_atoms: [Atom; FORMAT_ATOM_COUNT] = [atom_none; FORMAT_ATOM_COUNT];
 
+        // file formats first, because file managers often also expose plain text path fallbacks.
+        format_atoms[0..FILE_FORMAT_COUNT].copy_from_slice(&file_format_atoms);
         // image formats first, as they are more specific, and read will return the first
         // format that the contents can be converted to
-        format_atoms[0..IMAGE_FORMAT_COUNT].copy_from_slice(&image_format_atoms);
-        format_atoms[IMAGE_FORMAT_COUNT..].copy_from_slice(&text_format_atoms);
+        format_atoms[FILE_FORMAT_COUNT..FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT]
+            .copy_from_slice(&image_format_atoms);
+        format_atoms[FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT..].copy_from_slice(&text_format_atoms);
         debug_assert!(!format_atoms.contains(&atom_none));
 
         let result = self.inner.read(&format_atoms, selection)?;
@@ -1060,6 +1129,22 @@ impl Clipboard {
             "read clipboard as format {:?}",
             self.inner.atom_name(result.format)
         );
+
+        if result.format == self.inner.atoms.GNOME_COPIED_FILES {
+            let text = String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?;
+            return ClipboardFiles::from_gnome_copied_files(&text)
+                .map(ClipboardItem::from)
+                .ok_or(Error::ConversionFailure);
+        }
+
+        if result.format == self.inner.atoms.URI_LIST || result.format == self.inner.atoms.KDE4_URI_LIST
+        {
+            let text = String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?;
+            let operation = self.kde_cutselection_operation(selection);
+            return ClipboardFiles::from_uri_list(&text, operation)
+                .map(ClipboardItem::from)
+                .ok_or(Error::ConversionFailure);
+        }
 
         for (format_atom, image_format) in image_format_atoms.into_iter().zip(image_formats) {
             if result.format == format_atom {
@@ -1083,9 +1168,42 @@ impl Clipboard {
         Ok(ClipboardItem::new_string(text))
     }
 
+    fn atom_for_image_format(&self, format: ImageFormat) -> Atom {
+        match format {
+            ImageFormat::Png => self.inner.atoms.PNG__MIME,
+            ImageFormat::Jpeg => self.inner.atoms.JPEG_MIME,
+            ImageFormat::Webp => self.inner.atoms.WEBP_MIME,
+            ImageFormat::Gif => self.inner.atoms.GIF__MIME,
+            ImageFormat::Svg => self.inner.atoms.SVG__MIME,
+            ImageFormat::Bmp => self.inner.atoms.BMP__MIME,
+            ImageFormat::Tiff => self.inner.atoms.TIFF_MIME,
+        }
+    }
+
+    fn kde_cutselection_operation(&self, selection: ClipboardKind) -> ClipboardFileOperation {
+        self.inner
+            .read(&[self.inner.atoms.KDE_CUTSELECTION], selection)
+            .ok()
+            .and_then(|data| String::from_utf8(data.bytes).ok())
+            .filter(|text| kde_cutselection_is_move(text))
+            .map(|_| ClipboardFileOperation::Move)
+            .unwrap_or(ClipboardFileOperation::Copy)
+    }
+
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {
         self.inner.is_owner(selection).unwrap_or(false)
     }
+}
+
+fn kde_cutselection_bytes(operation: ClipboardFileOperation) -> Vec<u8> {
+    match operation {
+        ClipboardFileOperation::Copy => b"0".to_vec(),
+        ClipboardFileOperation::Move => b"1".to_vec(),
+    }
+}
+
+fn kde_cutselection_is_move(text: &str) -> bool {
+    matches!(text.trim(), "1" | "true" | "cut")
 }
 
 impl Drop for Clipboard {

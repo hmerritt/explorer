@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::{ClipboardEntry, ClipboardItem, Image};
+use gpui::{ClipboardEntry, ClipboardFileOperation, ClipboardItem, Image};
 use serde::{Deserialize, Serialize};
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
@@ -43,13 +43,24 @@ pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<Clip
     let metadata = serde_json::to_string(&metadata)
         .map_err(|error| format!("Could not write Explorer clipboard data: {error}"))?;
 
-    Ok(ClipboardItem::new_string_with_metadata(
+    Ok(ClipboardItem::new_files_with_metadata(
+        clipboard.paths.clone(),
+        native_clipboard_operation(clipboard.operation),
         clipboard_text(&clipboard.paths),
         metadata,
     ))
 }
 
 pub(super) fn file_clipboard_from_item(item: &ClipboardItem) -> Option<FileClipboard> {
+    if let Some(files) = item.files() {
+        if !files.paths.is_empty() {
+            return Some(FileClipboard {
+                operation: explorer_clipboard_operation(files.operation),
+                paths: files.paths.clone(),
+            });
+        }
+    }
+
     let metadata = item.metadata()?;
     let metadata = serde_json::from_str::<FileClipboardMetadata>(metadata).ok()?;
 
@@ -67,6 +78,7 @@ pub(super) fn image_clipboard_from_item(item: &ClipboardItem) -> Option<&Image> 
     item.entries().iter().find_map(|entry| match entry {
         ClipboardEntry::Image(image) => Some(image),
         ClipboardEntry::String(_) => None,
+        ClipboardEntry::Files(_) => None,
     })
 }
 
@@ -84,6 +96,20 @@ fn clipboard_text(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
+fn native_clipboard_operation(operation: FileClipboardOperation) -> ClipboardFileOperation {
+    match operation {
+        FileClipboardOperation::Copy => ClipboardFileOperation::Copy,
+        FileClipboardOperation::Cut => ClipboardFileOperation::Move,
+    }
+}
+
+fn explorer_clipboard_operation(operation: ClipboardFileOperation) -> FileClipboardOperation {
+    match operation {
+        ClipboardFileOperation::Copy => FileClipboardOperation::Copy,
+        ClipboardFileOperation::Move => FileClipboardOperation::Cut,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +125,10 @@ mod tests {
         let item = clipboard_item_for_files(&clipboard).expect("clipboard item");
 
         assert_eq!(item.text(), Some("a.txt\nfolder".to_owned()));
+        assert_eq!(
+            item.files().map(|files| files.operation),
+            Some(ClipboardFileOperation::Copy)
+        );
         assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
     }
 
@@ -111,12 +141,54 @@ mod tests {
 
         let item = clipboard_item_for_files(&clipboard).expect("clipboard item");
 
+        assert_eq!(
+            item.files().map(|files| files.operation),
+            Some(ClipboardFileOperation::Move)
+        );
         assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
     }
 
     #[test]
-    fn non_explorer_clipboard_item_is_ignored() {
-        let item = ClipboardItem::new_string("plain text".to_owned());
+    fn native_file_clipboard_round_trips() {
+        let item = ClipboardItem::new_files(
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            ClipboardFileOperation::Move,
+        );
+
+        assert_eq!(
+            file_clipboard_from_item(&item),
+            Some(FileClipboard::new(
+                FileClipboardOperation::Cut,
+                vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")],
+            ))
+        );
+    }
+
+    #[test]
+    fn legacy_metadata_clipboard_round_trips() {
+        let metadata = FileClipboardMetadata {
+            kind: CLIPBOARD_KIND.to_owned(),
+            version: CLIPBOARD_VERSION,
+            operation: FileClipboardOperation::Copy,
+            paths: vec![PathBuf::from("a.txt")],
+        };
+        let item = ClipboardItem::new_string_with_metadata(
+            "a.txt".to_owned(),
+            serde_json::to_string(&metadata).expect("metadata"),
+        );
+
+        assert_eq!(
+            file_clipboard_from_item(&item),
+            Some(FileClipboard::new(
+                FileClipboardOperation::Copy,
+                vec![PathBuf::from("a.txt")],
+            ))
+        );
+    }
+
+    #[test]
+    fn plain_text_clipboard_item_is_ignored() {
+        let item = ClipboardItem::new_string("C:\\Users\\test\\file.txt".to_owned());
 
         assert_eq!(file_clipboard_from_item(&item), None);
     }
