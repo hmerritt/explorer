@@ -66,6 +66,16 @@ pub enum DriveHideKind {
     Wsl,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarGroupKind {
+    Pinned,
+    Drives,
+    Wsl,
+    #[serde(rename = "macos")]
+    Macos,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressSlash {
@@ -203,7 +213,8 @@ impl Serialize for SerializableSidebarSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry("expanded_groups", &self.settings.expanded_groups)?;
         map.serialize_entry("hide", &self.settings.hide)?;
         map.serialize_entry(
             "items",
@@ -397,6 +408,11 @@ impl Serialize for AppSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SidebarSettings {
+    #[serde(
+        default = "default_sidebar_expanded_groups",
+        deserialize_with = "deserialize_sidebar_expanded_groups"
+    )]
+    pub expanded_groups: Vec<SidebarGroupKind>,
     #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
     pub hide: Vec<DriveHideKind>,
     #[serde(
@@ -527,6 +543,7 @@ impl Default for AppSettings {
 impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
+            expanded_groups: default_sidebar_expanded_groups(),
             hide: Vec::new(),
             items: default_sidebar_items(),
             width: SIDEBAR_DEFAULT_WIDTH,
@@ -751,6 +768,16 @@ pub(crate) fn set_sidebar_width(value: u32, cx: &mut impl BorrowAppContext) {
     });
 }
 
+pub(crate) fn set_sidebar_group_expanded(
+    kind: SidebarGroupKind,
+    expanded: bool,
+    cx: &mut impl BorrowAppContext,
+) -> bool {
+    update_settings(cx, |settings| {
+        set_sidebar_group_expanded_in_settings(kind, expanded, settings)
+    })
+}
+
 pub(crate) fn set_file_column_width(
     kind: FileColumnKind,
     value: u32,
@@ -951,6 +978,26 @@ fn unpin_sidebar_item_in_settings(
 ) -> Option<PathBuf> {
     (configured_index < settings.sidebar.items.len())
         .then(|| settings.sidebar.items.remove(configured_index))
+}
+
+fn set_sidebar_group_expanded_in_settings(
+    kind: SidebarGroupKind,
+    expanded: bool,
+    settings: &mut ExplorerSettings,
+) -> bool {
+    let groups = &mut settings.sidebar.expanded_groups;
+    if expanded {
+        if groups.contains(&kind) {
+            false
+        } else {
+            groups.push(kind);
+            true
+        }
+    } else {
+        let len = groups.len();
+        groups.retain(|group| *group != kind);
+        groups.len() != len
+    }
 }
 
 fn settings_watcher(
@@ -1733,6 +1780,10 @@ fn default_sidebar_width() -> u32 {
     SIDEBAR_DEFAULT_WIDTH
 }
 
+fn default_sidebar_expanded_groups() -> Vec<SidebarGroupKind> {
+    vec![SidebarGroupKind::Pinned]
+}
+
 fn default_date_format() -> String {
     DEFAULT_DATE_FORMAT.to_owned()
 }
@@ -1800,6 +1851,16 @@ fn drive_hide_kind_from_str(value: &str) -> Option<DriveHideKind> {
     }
 }
 
+fn sidebar_group_kind_from_str(value: &str) -> Option<SidebarGroupKind> {
+    match value {
+        "pinned" => Some(SidebarGroupKind::Pinned),
+        "drives" => Some(SidebarGroupKind::Drives),
+        "wsl" => Some(SidebarGroupKind::Wsl),
+        "macos" => Some(SidebarGroupKind::Macos),
+        _ => None,
+    }
+}
+
 fn deserialize_sidebar_items<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1822,6 +1883,16 @@ where
     Ok(drive_hide_kinds_from_value(value))
 }
 
+fn deserialize_sidebar_expanded_groups<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SidebarGroupKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(sidebar_group_kinds_from_value(value))
+}
+
 fn drive_hide_kinds_from_value(value: Value) -> Vec<DriveHideKind> {
     let Some(values) = value.as_array() else {
         return Vec::new();
@@ -1832,6 +1903,24 @@ fn drive_hide_kinds_from_value(value: Value) -> Vec<DriveHideKind> {
         .iter()
         .filter_map(Value::as_str)
         .filter_map(drive_hide_kind_from_str)
+    {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+fn sidebar_group_kinds_from_value(value: Value) -> Vec<SidebarGroupKind> {
+    let Some(values) = value.as_array() else {
+        return default_sidebar_expanded_groups();
+    };
+
+    let mut kinds = Vec::new();
+    for kind in values
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(sidebar_group_kind_from_str)
     {
         if !kinds.contains(&kind) {
             kinds.push(kind);
@@ -2114,6 +2203,10 @@ mod tests {
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
         );
         assert!(settings.sidebar.hide.is_empty());
+        assert_eq!(
+            settings.sidebar.expanded_groups,
+            vec![SidebarGroupKind::Pinned]
+        );
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
     }
@@ -2165,6 +2258,10 @@ mod tests {
         assert_eq!(settings.app.start, default_app_start_path());
         assert!(settings.contextmenu.items.is_empty());
         assert!(settings.sidebar.hide.is_empty());
+        assert_eq!(
+            settings.sidebar.expanded_groups,
+            vec![SidebarGroupKind::Pinned]
+        );
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.sidebar.items.len(), 4);
     }
@@ -2290,6 +2387,34 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_expanded_groups_default_to_pinned() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"sidebar":{}}"#).expect("deserialize sidebar settings");
+
+        assert_eq!(
+            settings.sidebar.expanded_groups,
+            vec![SidebarGroupKind::Pinned]
+        );
+    }
+
+    #[test]
+    fn sidebar_expanded_groups_deserialize_and_ignore_unknown_values() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"sidebar":{"expanded_groups":["drives","future_group",42,"wsl","drives","macos"]}}"#,
+        )
+        .expect("deserialize sidebar expanded group settings");
+
+        assert_eq!(
+            settings.sidebar.expanded_groups,
+            vec![
+                SidebarGroupKind::Drives,
+                SidebarGroupKind::Wsl,
+                SidebarGroupKind::Macos
+            ]
+        );
+    }
+
+    #[test]
     fn sidebar_width_is_normalized_from_settings() {
         let settings: ExplorerSettings =
             serde_json::from_str(r#"{"sidebar":{"width":50}}"#).expect("deserialize settings");
@@ -2373,6 +2498,42 @@ mod tests {
         assert_eq!(
             load_settings_from_path(&path).unwrap().sidebar.width,
             SIDEBAR_MIN_WIDTH
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn set_sidebar_group_expanded_persists_group_list(cx: &mut gpui::TestAppContext) {
+        let path = unique_temp_dir("sidebar-expanded").join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        let changed =
+            cx.update(|cx| set_sidebar_group_expanded(SidebarGroupKind::Drives, true, cx));
+
+        assert!(changed);
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .sidebar
+                .expanded_groups,
+            vec![SidebarGroupKind::Pinned, SidebarGroupKind::Drives]
+        );
+
+        let changed =
+            cx.update(|cx| set_sidebar_group_expanded(SidebarGroupKind::Pinned, false, cx));
+
+        assert!(changed);
+        assert_eq!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .sidebar
+                .expanded_groups,
+            vec![SidebarGroupKind::Drives]
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2559,6 +2720,11 @@ mod tests {
             ))
         );
         assert!(document["app"]["start"].is_string());
+        assert_eq!(
+            document["sidebar"]["expanded_groups"],
+            Value::Array(vec![Value::String("pinned".to_owned())])
+        );
+        assert!(json.contains("\n    \"expanded_groups\": [\"pinned\"],"));
         assert!(json.contains("\n    \"hide\": [],"));
         let expected_sidebar_items = settings
             .sidebar

@@ -134,6 +134,7 @@ png_icon!(DELETE_MIXED_DIALOG_ICON, "emblems", "alert.png");
 png_icon!(FOLDER_ICON, "folders", "folder.png");
 png_icon!(FOLDER_SHORTCUT_ICON, "folders", "shortcut.png");
 png_icon!(ARCHIVE_FILE_ICON, "folders", "zip.png");
+png_icon!(PINNED_GROUP_ICON, "emblems", "star.png");
 
 png_icon!(
     APPLICATIONS_SIDEBAR_ICON,
@@ -392,6 +393,10 @@ pub(super) fn folder_sidebar_icon() -> AnyElement {
     image_sidebar_icon(FOLDER_ICON.clone())
 }
 
+pub(super) fn pinned_group_icon() -> AnyElement {
+    image_sidebar_icon(PINNED_GROUP_ICON.clone())
+}
+
 pub(super) fn desktop_folder_icon() -> AnyElement {
     image_sidebar_icon(DESKTOP_SIDEBAR_ICON.clone())
 }
@@ -568,6 +573,7 @@ mod tests {
     fn sidebar_image_icons_use_bundled_png_assets() {
         assert!(!APPLICATIONS_SIDEBAR_ICON_BYTES.is_empty());
         assert!(!BIN_SIDEBAR_ICON_BYTES.is_empty());
+        assert!(!PINNED_GROUP_ICON_BYTES.is_empty());
         assert!(!DRIVE_DISC_ICON_BYTES.is_empty());
         assert!(!BLU_RAY_DISC_ICON_BYTES.is_empty());
         assert!(!DVD_DISC_ICON_BYTES.is_empty());

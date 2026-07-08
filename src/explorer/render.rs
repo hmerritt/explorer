@@ -18,6 +18,10 @@ use gpui::{
 
 #[cfg(test)]
 use crate::explorer::address_bar::format_address_path;
+#[cfg(target_os = "macos")]
+use crate::explorer::icons::applications_sidebar_icon;
+#[cfg(target_os = "windows")]
+use crate::explorer::icons::drive_wsl_icon;
 use crate::explorer::{
     DirectoryKind, OpenSettings,
     address_bar::{
@@ -77,7 +81,7 @@ use crate::explorer::{
         drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, executable_icon_sized, file_icon,
         file_icon_for_path, file_icon_sized, folder_icon, folder_icon_sized, image_icon,
-        large_file_icon_for_path_sized, nav_icon_font, sshfs_drive_icon,
+        large_file_icon_for_path_sized, nav_icon_font, pinned_group_icon, sshfs_drive_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -109,7 +113,8 @@ use crate::explorer::{
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::{
-    FileColumnKind, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
+    FileColumnKind, FileSortColumn, FileSortSettings, FileViewMode, SettingsState,
+    SidebarGroupKind, SortDirection,
 };
 use thousands::Separable;
 
@@ -246,6 +251,9 @@ const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION: f32 = 0.40;
+const SIDEBAR_GROUP_CHILD_INDENT: f32 = 28.0;
+const SIDEBAR_GROUP_CHEVRON_DOWN: &str = "\u{E70D}";
+const SIDEBAR_GROUP_CHEVRON_RIGHT: &str = "\u{E76C}";
 const CONTEXT_MENU_MIN_WIDTH: f32 = 170.0;
 const CONTEXT_MENU_MAX_WIDTH: f32 = 280.0;
 const CONTEXT_MENU_BORDER_WIDTH: f32 = 1.0;
@@ -1459,67 +1467,139 @@ impl ExplorerView {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let sections = &self.sidebar_sections;
         let mut children = Vec::new();
-        let has_user_directories = !sections.user_directories.is_empty();
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
 
-        for (index, item) in sections.user_directories.iter().cloned().enumerate() {
-            children.push(
-                self.render_sidebar_insertion_zone(
-                    item.configured_index
-                        .unwrap_or(self.sidebar_settings.items.len()),
-                    index,
-                    SIDEBAR_ITEM_GAP,
-                    cx,
-                ),
-            );
-            children.push(self.render_sidebar_row(index, item, cx));
-        }
-        if has_user_directories {
-            let final_insertion_index = sections
-                .user_directories
-                .last()
-                .and_then(|item| item.configured_index)
-                .map(|index| index + 1)
-                .unwrap_or(self.sidebar_settings.items.len());
-            children.push(self.render_sidebar_insertion_zone(
-                final_insertion_index,
-                sections.user_directories.len(),
-                SIDEBAR_ITEM_GAP,
+        if !sections.user_directories.is_empty() {
+            let expanded =
+                sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Pinned);
+            children.push(self.render_sidebar_group_header(
+                SidebarGroupKind::Pinned,
+                "Pinned",
+                pinned_group_icon(),
+                expanded,
                 cx,
             ));
-        }
 
-        if has_user_directories && !sections.macos_system_locations.is_empty() {
-            children.push(sidebar_separator().into_any_element());
-        }
+            if expanded {
+                for (index, item) in sections.user_directories.iter().cloned().enumerate() {
+                    children.push(
+                        self.render_sidebar_insertion_zone(
+                            item.configured_index
+                                .unwrap_or(self.sidebar_settings.items.len()),
+                            index,
+                            SIDEBAR_ITEM_GAP,
+                            cx,
+                        ),
+                    );
+                    children.push(self.render_sidebar_row(
+                        index,
+                        item,
+                        SIDEBAR_GROUP_CHILD_INDENT,
+                        cx,
+                    ));
+                }
 
-        for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
-            if index > 0 {
-                children.push(sidebar_item_gap().into_any_element());
+                let final_insertion_index = sections
+                    .user_directories
+                    .last()
+                    .and_then(|item| item.configured_index)
+                    .map(|index| index + 1)
+                    .unwrap_or(self.sidebar_settings.items.len());
+                children.push(self.render_sidebar_insertion_zone(
+                    final_insertion_index,
+                    sections.user_directories.len(),
+                    SIDEBAR_ITEM_GAP,
+                    cx,
+                ));
             }
-            children.push(self.render_sidebar_row(index + 1_000, item, cx));
         }
 
-        if !children.is_empty() && !sections.drives.is_empty() {
-            children.push(sidebar_separator().into_any_element());
-        }
-
-        for (index, item) in sections.drives.iter().cloned().enumerate() {
-            if index > 0 {
-                children.push(sidebar_item_gap().into_any_element());
+        #[cfg(target_os = "macos")]
+        if !sections.macos_system_locations.is_empty() {
+            if !children.is_empty() {
+                children.push(sidebar_group_gap().into_any_element());
             }
-            children.push(self.render_sidebar_row(index + 2_000, item, cx));
-        }
+            let expanded =
+                sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Macos);
+            children.push(self.render_sidebar_group_header(
+                SidebarGroupKind::Macos,
+                "macOS",
+                applications_sidebar_icon(),
+                expanded,
+                cx,
+            ));
 
-        if !children.is_empty() && !sections.wsl_drives.is_empty() {
-            children.push(sidebar_separator().into_any_element());
-        }
-
-        for (index, item) in sections.wsl_drives.iter().cloned().enumerate() {
-            if index > 0 {
-                children.push(sidebar_item_gap().into_any_element());
+            if expanded {
+                for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
+                    if index > 0 {
+                        children.push(sidebar_item_gap().into_any_element());
+                    }
+                    children.push(self.render_sidebar_row(
+                        index + 1_000,
+                        item,
+                        SIDEBAR_GROUP_CHILD_INDENT,
+                        cx,
+                    ));
+                }
             }
-            children.push(self.render_sidebar_row(index + 3_000, item, cx));
+        }
+
+        if !sections.drives.is_empty() {
+            if !children.is_empty() {
+                children.push(sidebar_group_gap().into_any_element());
+            }
+            let expanded =
+                sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Drives);
+            children.push(self.render_sidebar_group_header(
+                SidebarGroupKind::Drives,
+                "Drives",
+                drive_icon(),
+                expanded,
+                cx,
+            ));
+
+            if expanded {
+                for (index, item) in sections.drives.iter().cloned().enumerate() {
+                    if index > 0 {
+                        children.push(sidebar_item_gap().into_any_element());
+                    }
+                    children.push(self.render_sidebar_row(
+                        index + 2_000,
+                        item,
+                        SIDEBAR_GROUP_CHILD_INDENT,
+                        cx,
+                    ));
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if !sections.wsl_drives.is_empty() {
+            if !children.is_empty() {
+                children.push(sidebar_group_gap().into_any_element());
+            }
+            let expanded = sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Wsl);
+            children.push(self.render_sidebar_group_header(
+                SidebarGroupKind::Wsl,
+                "WSL",
+                drive_wsl_icon(),
+                expanded,
+                cx,
+            ));
+
+            if expanded {
+                for (index, item) in sections.wsl_drives.iter().cloned().enumerate() {
+                    if index > 0 {
+                        children.push(sidebar_item_gap().into_any_element());
+                    }
+                    children.push(self.render_sidebar_row(
+                        index + 3_000,
+                        item,
+                        SIDEBAR_GROUP_CHILD_INDENT,
+                        cx,
+                    ));
+                }
+            }
         }
 
         div()
@@ -1707,6 +1787,70 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn render_sidebar_group_header(
+        &self,
+        kind: SidebarGroupKind,
+        label: &'static str,
+        icon: AnyElement,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chevron = if expanded {
+            SIDEBAR_GROUP_CHEVRON_DOWN
+        } else {
+            SIDEBAR_GROUP_CHEVRON_RIGHT
+        };
+
+        div()
+            .id(sidebar_group_header_id(kind))
+            .debug_selector(move || sidebar_group_header_id(kind).to_owned())
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .mx(px(8.0))
+            .px(px(4.0))
+            .rounded(px(4.0))
+            .cursor_default()
+            .hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
+            .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let expanded = !expanded;
+                if crate::settings::set_sidebar_group_expanded(kind, expanded, cx) {
+                    set_local_sidebar_group_expanded(
+                        &mut this.sidebar_settings.expanded_groups,
+                        kind,
+                        expanded,
+                    );
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(12.0))
+                    .font(nav_icon_font())
+                    .text_size(px(7.0))
+                    .text_color(rgb(0x606060))
+                    .child(chevron),
+            )
+            .child(div().ml(px(4.0)).child(icon))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .ml(px(SIDEBAR_ICON_TEXT_GAP))
+                    .truncate()
+                    .text_size(px(SIDEBAR_TEXT_SIZE))
+                    .text_color(rgb(0x5f5f5f))
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
     fn render_sidebar_insertion_zone(
         &self,
         insertion_index: usize,
@@ -1751,6 +1895,7 @@ impl ExplorerView {
         &self,
         id: usize,
         item: SidebarItem,
+        content_indent: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_current = item.path == self.path;
@@ -1838,6 +1983,7 @@ impl ExplorerView {
                     cx.notify();
                 }),
             )
+            .child(div().w(px(content_indent)).h(px(1.0)).flex_shrink_0())
             .child(sidebar_item_icon(&icon_item))
             .child(
                 div()
@@ -3169,17 +3315,47 @@ fn truncated_drop_indicator_target_label(
         )
 }
 
-fn sidebar_separator() -> Div {
-    div()
-        .h(px(1.0))
-        .mx(px(12.0))
-        .my(px(18.0))
-        .bg(rgb(0xe5e5e5))
-        .flex_shrink_0()
+fn sidebar_group_gap() -> Div {
+    div().h(px(8.0)).flex_shrink_0()
 }
 
 fn sidebar_item_gap() -> Div {
     div().h(px(SIDEBAR_ITEM_GAP)).flex_shrink_0()
+}
+
+fn sidebar_group_header_id(kind: SidebarGroupKind) -> &'static str {
+    match kind {
+        SidebarGroupKind::Pinned => "explorer-sidebar-group-pinned",
+        SidebarGroupKind::Drives => "explorer-sidebar-group-drives",
+        SidebarGroupKind::Wsl => "explorer-sidebar-group-wsl",
+        SidebarGroupKind::Macos => "explorer-sidebar-group-macos",
+    }
+}
+
+fn sidebar_group_is_expanded(
+    settings: &crate::settings::SidebarSettings,
+    kind: SidebarGroupKind,
+) -> bool {
+    settings.expanded_groups.contains(&kind)
+}
+
+fn set_local_sidebar_group_expanded(
+    groups: &mut Vec<SidebarGroupKind>,
+    kind: SidebarGroupKind,
+    expanded: bool,
+) -> bool {
+    if expanded {
+        if groups.contains(&kind) {
+            false
+        } else {
+            groups.push(kind);
+            true
+        }
+    } else {
+        let len = groups.len();
+        groups.retain(|group| *group != kind);
+        groups.len() != len
+    }
 }
 
 fn sidebar_pin_path_from_value(dragged_value: &dyn Any) -> Option<PathBuf> {
@@ -6729,7 +6905,8 @@ mod tests {
         sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
-        AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState, SortDirection,
+        AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState,
+        SidebarGroupKind, SortDirection,
     };
 
     fn entry_names(view: &ExplorerView) -> Vec<String> {
@@ -7814,7 +7991,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_omits_empty_configured_items_section_before_drives(cx: &mut gpui::TestAppContext) {
+    fn sidebar_renders_drive_group_header_collapsed_by_default(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
@@ -7842,15 +8019,192 @@ mod tests {
         cx.run_until_parked();
 
         let sidebar = cx.debug_bounds("explorer-sidebar").expect("sidebar bounds");
-        let drive = cx
-            .debug_bounds("explorer-sidebar-row-2000")
-            .expect("drive row bounds");
-        let drive_top_offset = f32::from(drive.origin.y) - f32::from(sidebar.origin.y);
+        let drive_group = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds");
+        let drive_group_top_offset = f32::from(drive_group.origin.y) - f32::from(sidebar.origin.y);
 
         assert!(
-            (drive_top_offset - 8.0).abs() <= 1.0,
-            "drive row should start after sidebar top padding, got {drive_top_offset}"
+            (drive_group_top_offset - 8.0).abs() <= 1.0,
+            "drive group should start after sidebar top padding, got {drive_group_top_offset}"
         );
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_none());
+    }
+
+    #[gpui::test]
+    fn sidebar_pinned_group_is_expanded_by_default(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let pinned_path = temp.path().join("pinned");
+        fs::create_dir(&pinned_path).unwrap();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = vec![pinned_path.clone()];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings)
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-0").is_some());
+    }
+
+    #[gpui::test]
+    fn clicking_sidebar_group_header_persists_and_repaints(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+        let position = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_some());
+        cx.read_entity(&view, |view, _| {
+            assert!(
+                view.sidebar_settings
+                    .expanded_groups
+                    .contains(&SidebarGroupKind::Drives)
+            );
+        });
+        assert!(cx.read(|cx| {
+            cx.global::<SettingsState>()
+                .value
+                .sidebar
+                .expanded_groups
+                .contains(&SidebarGroupKind::Drives)
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn sidebar_wsl_group_renders_on_windows(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                wsl_drives: vec![SidebarItem {
+                    label: "Ubuntu".to_owned(),
+                    path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+                    kind: SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_some());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    fn sidebar_wsl_group_is_omitted_off_windows(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                wsl_drives: vec![SidebarItem {
+                    label: "Ubuntu".to_owned(),
+                    path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+                    kind: SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn sidebar_macos_locations_render_under_macos_group(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let applications_path = temp.path().join("Applications");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Macos];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                macos_system_locations: vec![SidebarItem {
+                    label: "Applications".to_owned(),
+                    path: applications_path,
+                    kind: SidebarItemKind::Directory(DirectoryKind::Applications),
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-macos").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-1000").is_some());
     }
 
     #[gpui::test]
