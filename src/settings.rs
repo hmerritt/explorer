@@ -181,11 +181,12 @@ impl Serialize for SerializableAppSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(2))?;
+        let mut map = serializer.serialize_map(Some(3))?;
         map.serialize_entry(
             "cache_cleanup_interval_days",
             &self.settings.cache_cleanup_interval_days,
         )?;
+        map.serialize_entry("new_window_behaviour", &self.settings.new_window_behaviour)?;
         map.serialize_entry(
             "start",
             &format_configured_path(&self.settings.start, self.slash),
@@ -389,6 +390,8 @@ pub struct AppSettings {
         deserialize_with = "deserialize_cache_cleanup_interval_days"
     )]
     pub cache_cleanup_interval_days: u32,
+    #[serde(default)]
+    pub new_window_behaviour: NewWindowBehaviour,
     #[serde(
         default = "default_app_start_path",
         deserialize_with = "deserialize_app_start_path"
@@ -473,6 +476,14 @@ pub struct ViewSettings {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum NewWindowBehaviour {
+    Open,
+    #[default]
+    Focus,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileViewMode {
     #[default]
     Details,
@@ -535,6 +546,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             cache_cleanup_interval_days: DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS,
+            new_window_behaviour: NewWindowBehaviour::Focus,
             start: default_app_start_path(),
         }
     }
@@ -2198,6 +2210,7 @@ mod tests {
         );
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, default_app_start_path());
+        assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
         assert_eq!(
             settings.app.cache_cleanup_interval_days,
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
@@ -2256,6 +2269,7 @@ mod tests {
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(settings.app.start, default_app_start_path());
+        assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
         assert!(settings.contextmenu.items.is_empty());
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(
@@ -2300,6 +2314,46 @@ mod tests {
             serde_json::from_str(r#"{"app":{"cache_cleanup_interval_days":45}}"#)
                 .expect("deserialize app settings");
         assert_eq!(settings.app.cache_cleanup_interval_days, 45);
+    }
+
+    #[test]
+    fn app_new_window_behaviour_deserializes_and_defaults_to_focus() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{}}"#).expect("deserialize default app settings");
+        assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{"new_window_behaviour":"open"}}"#)
+                .expect("deserialize open app setting");
+        assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Open);
+
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{"new_window_behaviour":"focus"}}"#)
+                .expect("deserialize focus app setting");
+        assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
+    }
+
+    #[test]
+    fn app_new_window_behaviour_serializes_known_values() {
+        let mut app = AppSettings::default();
+        app.new_window_behaviour = NewWindowBehaviour::Open;
+        assert_eq!(
+            serde_json::to_value(&app).expect("serialize open app settings")["new_window_behaviour"],
+            "open"
+        );
+
+        app.new_window_behaviour = NewWindowBehaviour::Focus;
+        assert_eq!(
+            serde_json::to_value(&app).expect("serialize focus app settings")["new_window_behaviour"],
+            "focus"
+        );
+    }
+
+    #[test]
+    fn app_new_window_behaviour_rejects_unknown_values() {
+        let result: Result<ExplorerSettings, _> =
+            serde_json::from_str(r#"{"app":{"new_window_behaviour":"reuse"}}"#);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2719,6 +2773,7 @@ mod tests {
                 settings_address_slash(&settings),
             ))
         );
+        assert_eq!(document["app"]["new_window_behaviour"], "focus");
         assert!(document["app"]["start"].is_string());
         assert_eq!(
             document["sidebar"]["expanded_groups"],
@@ -3532,6 +3587,7 @@ mod tests {
             object["app"]["cache_cleanup_interval_days"],
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
         );
+        assert_eq!(object["app"]["new_window_behaviour"], "focus");
         assert_eq!(
             object["app"]["start"],
             Value::String(format_configured_path(

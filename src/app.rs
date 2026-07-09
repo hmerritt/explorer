@@ -1,18 +1,27 @@
-#[cfg(any(target_os = "linux", test))]
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
     env,
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, Write},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process, thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use futures::{
+    StreamExt,
+    channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
 use gpui::{
-    App, Application, Bounds, Context, DisplayId, KeyBinding, Pixels, SharedString,
+    App, Application, Bounds, Context, DisplayId, Global, KeyBinding, Pixels, SharedString,
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px,
     size,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::explorer::{
     AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel, AddressCommit,
@@ -39,7 +48,7 @@ use crate::explorer::{
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
 };
-use crate::settings::{APP_ID, SettingsState, config_dir};
+use crate::settings::{APP_ID, NewWindowBehaviour, SettingsState, config_dir};
 use crate::window_state::{
     StoredWindowState, WindowStateOptions,
     load_window_state_from_path as load_stored_window_state_from_path, save_window_state_to_path,
@@ -52,6 +61,11 @@ const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const MIN_WINDOW_WIDTH: f32 = 400.0;
 const MIN_WINDOW_HEIGHT: f32 = 120.0;
 const NEW_WINDOW_OFFSET: f32 = 50.0;
+const SINGLE_INSTANCE_LOCK_FILE_NAME: &str = "single-instance.lock";
+const SINGLE_INSTANCE_ENDPOINT_FILE_NAME: &str = "single-instance.json";
+const SINGLE_INSTANCE_PROTOCOL_VERSION: u32 = 1;
+const SINGLE_INSTANCE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const SINGLE_INSTANCE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const EXPLORER_WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
     min_width: MIN_WINDOW_WIDTH,
     min_height: MIN_WINDOW_HEIGHT,
@@ -64,6 +78,59 @@ const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
 
 struct Explorer {
     explorer: gpui::Entity<ExplorerTabs>,
+}
+
+struct SingleInstanceServer {
+    _guard: SingleInstanceGuard,
+}
+
+impl Global for SingleInstanceServer {}
+
+struct SingleInstanceGuard {
+    _lock_file: File,
+    paths: SingleInstancePaths,
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.paths.endpoint_path);
+        let _ = fs::remove_file(&self.paths.lock_path);
+    }
+}
+
+struct SingleInstancePrimary {
+    guard: SingleInstanceGuard,
+    requests: UnboundedReceiver<LaunchRequest>,
+}
+
+enum SingleInstanceLaunch {
+    Primary(Option<SingleInstancePrimary>),
+    RoutedToPrimary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct LaunchRequest {
+    image_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SingleInstancePaths {
+    lock_path: PathBuf,
+    endpoint_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct SingleInstanceEndpoint {
+    version: u32,
+    port: u16,
+    token: String,
+    pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct SingleInstanceMessage {
+    token: String,
+    request: LaunchRequest,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -479,9 +546,291 @@ pub(crate) fn open_new_explorer_window(
     open_explorer_window_at(initial_path, window_bounds, display_id, cx);
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn should_open_window_on_reopen(open_window_count: usize) -> bool {
-    open_window_count == 0
+impl LaunchRequest {
+    fn from_args(args: impl IntoIterator<Item = OsString>) -> Self {
+        Self {
+            image_path: crate::image_viewer::startup_image_path(args),
+        }
+    }
+}
+
+fn handle_initial_launch(request: LaunchRequest, cx: &mut App) {
+    handle_launch_request(request, cx);
+}
+
+fn handle_launch_request(request: LaunchRequest, cx: &mut App) {
+    if let Some(path) = request.image_path {
+        crate::image_viewer::open_image_window(path, cx);
+    } else {
+        handle_explorer_launch_request(cx);
+    }
+    cx.activate(true);
+}
+
+fn handle_explorer_launch_request(cx: &mut App) {
+    match cx.global::<SettingsState>().value.app.new_window_behaviour {
+        NewWindowBehaviour::Open => open_explorer_window(cx),
+        NewWindowBehaviour::Focus => {
+            if !focus_existing_window(cx) {
+                open_explorer_window(cx);
+            }
+        }
+    }
+}
+
+fn focus_existing_window(cx: &mut App) -> bool {
+    let mut windows = cx.window_stack().unwrap_or_default();
+    if windows.is_empty()
+        && let Some(active_window) = cx.active_window()
+    {
+        windows.push(active_window);
+    }
+    if windows.is_empty() {
+        windows = cx.windows();
+    }
+
+    for handle in windows {
+        if handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn start_single_instance_request_handler(
+    mut requests: UnboundedReceiver<LaunchRequest>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        while let Some(request) = requests.next().await {
+            if let Err(error) = cx.update(|cx| handle_launch_request(request, cx)) {
+                eprintln!("Unable to handle Explorer launch request: {error}");
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+fn prepare_single_instance_launch(request: &LaunchRequest) -> SingleInstanceLaunch {
+    let Some(config_dir) = config_dir() else {
+        eprintln!(
+            "Unable to determine Explorer settings directory; single-instance routing disabled."
+        );
+        return SingleInstanceLaunch::Primary(None);
+    };
+
+    prepare_single_instance_launch_in_dir(config_dir, request)
+}
+
+fn prepare_single_instance_launch_in_dir(
+    config_dir: PathBuf,
+    request: &LaunchRequest,
+) -> SingleInstanceLaunch {
+    let paths = single_instance_paths(&config_dir);
+    match start_single_instance_primary(paths.clone()) {
+        Ok(primary) => SingleInstanceLaunch::Primary(Some(primary)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match send_launch_request_from_paths(&paths, request) {
+                Ok(()) => SingleInstanceLaunch::RoutedToPrimary,
+                Err(error) => {
+                    eprintln!(
+                        "Unable to route Explorer launch to the existing instance: {error}. Starting a new instance."
+                    );
+                    remove_single_instance_files(&paths);
+                    match start_single_instance_primary(paths) {
+                        Ok(primary) => SingleInstanceLaunch::Primary(Some(primary)),
+                        Err(error) => {
+                            eprintln!(
+                                "Unable to claim Explorer single-instance ownership after stale cleanup: {error}"
+                            );
+                            SingleInstanceLaunch::Primary(None)
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("Unable to claim Explorer single-instance ownership: {error}");
+            SingleInstanceLaunch::Primary(None)
+        }
+    }
+}
+
+fn single_instance_paths(config_dir: &Path) -> SingleInstancePaths {
+    SingleInstancePaths {
+        lock_path: config_dir.join(SINGLE_INSTANCE_LOCK_FILE_NAME),
+        endpoint_path: config_dir.join(SINGLE_INSTANCE_ENDPOINT_FILE_NAME),
+    }
+}
+
+fn start_single_instance_primary(paths: SingleInstancePaths) -> io::Result<SingleInstancePrimary> {
+    if let Some(parent) = paths.lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let lock_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&paths.lock_path)?;
+    let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = fs::remove_file(&paths.lock_path);
+            return Err(error);
+        }
+    };
+    let token = single_instance_token();
+    let endpoint = SingleInstanceEndpoint {
+        version: SINGLE_INSTANCE_PROTOCOL_VERSION,
+        port: listener.local_addr()?.port(),
+        token: token.clone(),
+        pid: process::id(),
+    };
+
+    if let Err(error) = save_single_instance_endpoint(&paths.endpoint_path, &endpoint) {
+        let _ = fs::remove_file(&paths.lock_path);
+        return Err(error);
+    }
+
+    let (tx, requests) = mpsc::unbounded();
+    spawn_single_instance_listener(listener, token, tx);
+
+    Ok(SingleInstancePrimary {
+        guard: SingleInstanceGuard {
+            _lock_file: lock_file,
+            paths,
+        },
+        requests,
+    })
+}
+
+fn save_single_instance_endpoint(path: &Path, endpoint: &SingleInstanceEndpoint) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string(endpoint).map_err(io::Error::other)?;
+    fs::write(path, json)
+}
+
+fn spawn_single_instance_listener(
+    listener: TcpListener,
+    token: String,
+    tx: UnboundedSender<LaunchRequest>,
+) {
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_single_instance_stream(stream, &token, &tx),
+                Err(error) => {
+                    eprintln!("Unable to accept Explorer launch request: {error}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn handle_single_instance_stream(
+    mut stream: TcpStream,
+    token: &str,
+    tx: &UnboundedSender<LaunchRequest>,
+) {
+    let _ = stream.set_read_timeout(Some(SINGLE_INSTANCE_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SINGLE_INSTANCE_IO_TIMEOUT));
+
+    let mut line = String::new();
+    let read_result = {
+        let mut reader = BufReader::new(&mut stream);
+        reader.read_line(&mut line)
+    };
+
+    let response = match read_result {
+        Ok(0) => "empty\n",
+        Ok(_) => match serde_json::from_str::<SingleInstanceMessage>(line.trim_end()) {
+            Ok(message) if message.token == token => {
+                if tx.unbounded_send(message.request).is_ok() {
+                    "ok\n"
+                } else {
+                    "closed\n"
+                }
+            }
+            Ok(_) => "invalid-token\n",
+            Err(_) => "invalid-json\n",
+        },
+        Err(_) => "read-error\n",
+    };
+
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn send_launch_request_from_paths(
+    paths: &SingleInstancePaths,
+    request: &LaunchRequest,
+) -> io::Result<()> {
+    let endpoint = load_single_instance_endpoint(&paths.endpoint_path)?;
+    send_launch_request_to_endpoint(&endpoint, request)
+}
+
+fn load_single_instance_endpoint(path: &Path) -> io::Result<SingleInstanceEndpoint> {
+    let endpoint = serde_json::from_str::<SingleInstanceEndpoint>(&fs::read_to_string(path)?)
+        .map_err(io::Error::other)?;
+    if endpoint.version == SINGLE_INSTANCE_PROTOCOL_VERSION {
+        Ok(endpoint)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported single-instance endpoint version",
+        ))
+    }
+}
+
+fn send_launch_request_to_endpoint(
+    endpoint: &SingleInstanceEndpoint,
+    request: &LaunchRequest,
+) -> io::Result<()> {
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port));
+    let mut stream = TcpStream::connect_timeout(&addr, SINGLE_INSTANCE_CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(SINGLE_INSTANCE_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(SINGLE_INSTANCE_IO_TIMEOUT))?;
+
+    let message = SingleInstanceMessage {
+        token: endpoint.token.clone(),
+        request: request.clone(),
+    };
+    let json = serde_json::to_string(&message).map_err(io::Error::other)?;
+    stream.write_all(json.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut response = String::new();
+    BufReader::new(stream).read_line(&mut response)?;
+    if response.trim_end() == "ok" {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "single-instance server returned {}",
+            response.trim_end()
+        )))
+    }
+}
+
+fn remove_single_instance_files(paths: &SingleInstancePaths) {
+    let _ = fs::remove_file(&paths.endpoint_path);
+    let _ = fs::remove_file(&paths.lock_path);
+}
+
+fn single_instance_token() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{:x}-{nanos:x}", process::id())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -836,18 +1185,21 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
 
+    let initial_launch_request = LaunchRequest::from_args(env::args_os());
+    let single_instance_primary = match prepare_single_instance_launch(&initial_launch_request) {
+        SingleInstanceLaunch::Primary(primary) => primary,
+        SingleInstanceLaunch::RoutedToPrimary => return,
+    };
+
     let app = Application::new();
 
     #[cfg(target_os = "macos")]
     app.on_reopen(|cx| {
-        if should_open_window_on_reopen(cx.windows().len()) {
-            open_explorer_window(cx);
-        }
+        handle_explorer_launch_request(cx);
         cx.activate(true);
     });
 
-    app.run(|cx: &mut App| {
-        let startup_image_path = crate::image_viewer::startup_image_path(env::args_os());
+    app.run(move |cx: &mut App| {
         register_embedded_fonts(cx);
         crate::http_client::initialize(cx);
         crate::debug_options::initialize(cx, env::args_os());
@@ -859,12 +1211,14 @@ pub fn run() {
         crate::explorer::initialize_cache_cleanup(cx);
         cx.bind_keys(platform_key_bindings());
 
-        if let Some(path) = startup_image_path {
-            crate::image_viewer::open_image_window(path, cx);
-        } else {
-            open_explorer_window(cx);
+        if let Some(primary) = single_instance_primary {
+            start_single_instance_request_handler(primary.requests, cx);
+            cx.set_global(SingleInstanceServer {
+                _guard: primary.guard,
+            });
         }
-        cx.activate(true);
+
+        handle_initial_launch(initial_launch_request, cx);
     });
 }
 
@@ -875,8 +1229,8 @@ mod tests {
     use crate::window_state::StoredWindowMode;
     use gpui::{Keystroke, TestAppContext};
     use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
+        fs, thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     fn has_binding<A: gpui::Action>(
@@ -1608,11 +1962,172 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[gpui::test]
+    fn focus_launch_opens_window_when_none_exist(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("focus-launch-opens");
+        fs::create_dir_all(&dir).unwrap();
+        cx.set_global(SettingsState::for_test(settings_with_launch_behaviour(
+            NewWindowBehaviour::Focus,
+            dir.clone(),
+        )));
+
+        cx.update(handle_explorer_launch_request);
+        cx.run_until_parked();
+
+        assert_eq!(cx.windows().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn focus_launch_activates_existing_window_without_opening_another(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("focus-launch-existing");
+        fs::create_dir_all(&dir).unwrap();
+        cx.set_global(SettingsState::for_test(settings_with_launch_behaviour(
+            NewWindowBehaviour::Focus,
+            dir.clone(),
+        )));
+        cx.update(|cx| {
+            open_explorer_window_at(
+                dir.clone(),
+                WindowBounds::Windowed(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(900.0), px(700.0)),
+                )),
+                None,
+                cx,
+            )
+        });
+        let window = cx.windows()[0];
+
+        cx.update(handle_explorer_launch_request);
+        cx.run_until_parked();
+
+        assert_eq!(cx.windows().len(), 1);
+        assert!(
+            window
+                .update(cx, |_, window, _| window.is_window_active())
+                .expect("read active state")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn open_launch_opens_another_window(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("open-launch-window");
+        fs::create_dir_all(&dir).unwrap();
+        cx.set_global(SettingsState::for_test(settings_with_launch_behaviour(
+            NewWindowBehaviour::Open,
+            dir.clone(),
+        )));
+
+        cx.update(handle_explorer_launch_request);
+        cx.update(handle_explorer_launch_request);
+        cx.run_until_parked();
+
+        assert_eq!(cx.windows().len(), 2);
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn image_launch_opens_image_window_even_when_focus_is_configured(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("image-launch-focus");
+        fs::create_dir_all(&dir).unwrap();
+        let image_path = dir.join("photo.png");
+        cx.set_global(SettingsState::for_test(settings_with_launch_behaviour(
+            NewWindowBehaviour::Focus,
+            dir.clone(),
+        )));
+        cx.update(handle_explorer_launch_request);
+
+        cx.update(|cx| {
+            handle_launch_request(
+                LaunchRequest {
+                    image_path: Some(image_path),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.windows().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
-    fn app_reopen_only_opens_window_when_none_exist() {
-        assert!(should_open_window_on_reopen(0));
-        assert!(!should_open_window_on_reopen(1));
-        assert!(!should_open_window_on_reopen(2));
+    fn single_instance_primary_accepts_secondary_launch_request() {
+        let dir = unique_temp_dir("single-instance-primary");
+        let paths = single_instance_paths(&dir);
+        let mut primary = start_single_instance_primary(paths.clone()).expect("start primary");
+        let request = LaunchRequest {
+            image_path: Some(PathBuf::from("photo.png")),
+        };
+
+        send_launch_request_from_paths(&paths, &request).expect("send launch request");
+
+        assert_eq!(
+            receive_single_instance_request(&mut primary.requests),
+            Some(request)
+        );
+        drop(primary);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn single_instance_secondary_routes_to_primary() {
+        let dir = unique_temp_dir("single-instance-secondary");
+        let initial = LaunchRequest { image_path: None };
+        let mut primary = match prepare_single_instance_launch_in_dir(dir.clone(), &initial) {
+            SingleInstanceLaunch::Primary(Some(primary)) => primary,
+            _ => panic!("initial launch should become primary"),
+        };
+        let request = LaunchRequest {
+            image_path: Some(PathBuf::from("photo.png")),
+        };
+
+        let secondary = prepare_single_instance_launch_in_dir(dir.clone(), &request);
+
+        assert!(matches!(secondary, SingleInstanceLaunch::RoutedToPrimary));
+        assert_eq!(
+            receive_single_instance_request(&mut primary.requests),
+            Some(request)
+        );
+        drop(primary);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_single_instance_endpoint_falls_back_to_primary() {
+        let dir = unique_temp_dir("single-instance-stale");
+        let paths = single_instance_paths(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&paths.lock_path, "stale").unwrap();
+        let stale_listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = stale_listener.local_addr().unwrap().port();
+        drop(stale_listener);
+        save_single_instance_endpoint(
+            &paths.endpoint_path,
+            &SingleInstanceEndpoint {
+                version: SINGLE_INSTANCE_PROTOCOL_VERSION,
+                port,
+                token: "stale".to_owned(),
+                pid: 0,
+            },
+        )
+        .unwrap();
+
+        let launch =
+            prepare_single_instance_launch_in_dir(dir.clone(), &LaunchRequest { image_path: None });
+
+        assert!(matches!(launch, SingleInstanceLaunch::Primary(Some(_))));
+        drop(launch);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1813,6 +2328,33 @@ mod tests {
             crate::explorer::initialize_folder_size_cache(app);
             crate::explorer::initialize_file_checksum_cache(app);
         });
+    }
+
+    fn settings_with_launch_behaviour(
+        new_window_behaviour: NewWindowBehaviour,
+        start: PathBuf,
+    ) -> ExplorerSettings {
+        ExplorerSettings {
+            app: crate::settings::AppSettings {
+                new_window_behaviour,
+                start,
+                ..crate::settings::AppSettings::default()
+            },
+            ..ExplorerSettings::default()
+        }
+    }
+
+    fn receive_single_instance_request(
+        requests: &mut UnboundedReceiver<LaunchRequest>,
+    ) -> Option<LaunchRequest> {
+        for _ in 0..100 {
+            match requests.try_recv() {
+                Ok(request) => return Some(request),
+                Err(error) if error.is_empty() => thread::sleep(Duration::from_millis(10)),
+                Err(_) => return None,
+            }
+        }
+        None
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {

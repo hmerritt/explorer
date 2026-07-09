@@ -23,8 +23,8 @@ mod windows_file_associations;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
     AppSettings, ContextMenuSettings, CustomContextMenuItem, DriveHideKind, ExplorerSettings,
-    FileColumnKind, FileColumnSettings, SidebarGroupKind, SidebarSettings, TabSettings,
-    ViewSettings,
+    FileColumnKind, FileColumnSettings, NewWindowBehaviour, SidebarGroupKind, SidebarSettings,
+    TabSettings, ViewSettings,
 };
 
 #[cfg(all(
