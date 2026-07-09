@@ -29,7 +29,6 @@ use gpui::{
 };
 use image::ImageEncoder;
 use jwalk::WalkDirGeneric;
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use thousands::Separable;
 
@@ -97,10 +96,9 @@ const PROPERTIES_CODE_LANGUAGE_LABEL_WIDTH: f32 = 178.0;
 const PROPERTIES_CODE_LANGUAGE_LOC_WIDTH: f32 = 86.0;
 const PROPERTIES_CODE_LANGUAGE_SWATCH_SIZE: f32 = 10.0;
 const PROPERTIES_SPECTRUM_INITIAL_TIME_BINS: usize = 512;
-const PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS: usize = 256;
+const PROPERTIES_SPECTRUM_FREQUENCY_BINS: usize = PROPERTIES_SPECTRUM_FFT_SIZE / 2 + 1;
 const PROPERTIES_SPECTRUM_MAX_TIME_BINS: usize = 4096;
-const PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS: usize = 2048;
-const PROPERTIES_SPECTRUM_FFT_SIZE: usize = 4096;
+const PROPERTIES_SPECTRUM_FFT_SIZE: usize = 2048;
 const PROPERTIES_SPECTRUM_RESIZE_DEBOUNCE_MS: u64 = 300;
 const PROPERTIES_SPECTRUM_DEFAULT_LOW_DB: f32 = -120.0;
 const PROPERTIES_SPECTRUM_DEFAULT_HIGH_DB: f32 = -20.0;
@@ -512,6 +510,9 @@ struct PropertySpectrumMetadata {
     header: String,
     sample_rate: u32,
     duration_seconds: f64,
+    bit_rate: Option<u64>,
+    bit_depth: Option<u32>,
+    channels: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -564,7 +565,7 @@ impl PropertySpectrumTarget {
     fn initial() -> Self {
         Self {
             time_bins: PROPERTIES_SPECTRUM_INITIAL_TIME_BINS,
-            frequency_bins: PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS,
+            frequency_bins: PROPERTIES_SPECTRUM_FREQUENCY_BINS,
             fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
         }
     }
@@ -572,7 +573,7 @@ impl PropertySpectrumTarget {
     fn from_render_size(size: PropertySpectrumRenderSize) -> Self {
         Self {
             time_bins: (size.width as usize).clamp(1, PROPERTIES_SPECTRUM_MAX_TIME_BINS),
-            frequency_bins: (size.height as usize).clamp(1, PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS),
+            frequency_bins: PROPERTIES_SPECTRUM_FREQUENCY_BINS,
             fft_size: PROPERTIES_SPECTRUM_FFT_SIZE,
         }
     }
@@ -1531,10 +1532,13 @@ impl PropertiesDialog {
                 Ok(analysis) => crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "spectrum ready path={} duration={:.3}s sample_rate={} columns={} rows={}",
+                        "spectrum ready path={} duration={:.3}s sample_rate={} bit_rate={:?} bit_depth={:?} channels={} columns={} rows={}",
                         path.display(),
                         analysis.metadata.duration_seconds,
                         analysis.metadata.sample_rate,
+                        analysis.metadata.bit_rate,
+                        analysis.metadata.bit_depth,
+                        analysis.metadata.channels,
                         analysis.width,
                         analysis.height
                     ),
@@ -1651,10 +1655,13 @@ impl PropertiesDialog {
                 Ok(analysis) => crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "spectrum resize refinement ready path={} duration={:.3}s sample_rate={} columns={} rows={}",
+                        "spectrum resize refinement ready path={} duration={:.3}s sample_rate={} bit_rate={:?} bit_depth={:?} channels={} columns={} rows={}",
                         path.display(),
                         analysis.metadata.duration_seconds,
                         analysis.metadata.sample_rate,
+                        analysis.metadata.bit_rate,
+                        analysis.metadata.bit_depth,
+                        analysis.metadata.channels,
                         analysis.width,
                         analysis.height
                     ),
@@ -6302,12 +6309,11 @@ fn load_audio_spectrum_analysis(
     );
 
     let metadata = audio_spectrum_metadata_from_probe(&probe)?;
-    let windows = decode_audio_spectrum_windows(path, &metadata, target, cancel)?;
+    let db_values = decode_audio_spectrum_db_values(path, &metadata, target, cancel)?;
     if cancel.load(Ordering::Relaxed) {
         return Err("Spectrum analysis was cancelled.".to_owned());
     }
 
-    let db_values = spectrum_db_values_from_windows(&windows, target);
     let image = spectrum_render_image(&db_values, target.width(), target.height(), range)
         .ok_or_else(|| "Spectrum image has invalid dimensions.".to_owned())?;
 
@@ -6337,17 +6343,29 @@ fn audio_spectrum_metadata_from_probe(
         .ok_or_else(|| "Audio duration is not available.".to_owned())?;
     let codec = audio_spectrum_codec_label(stream);
     let bit_depth = audio_spectrum_bit_depth(stream);
+    let bit_rate = audio_spectrum_bit_rate(probe, stream);
     let channels = stream
         .get("channels")
         .and_then(ffprobe_integer_value)
         .and_then(|channels| u32::try_from(channels).ok())
-        .filter(|channels| *channels > 0);
-    let header = audio_spectrum_header(&codec, sample_rate, bit_depth, channels);
+        .filter(|channels| *channels > 0)
+        .ok_or_else(|| "Audio channel count is not available.".to_owned())?;
+    let header_bit_rate = bit_depth.is_none().then_some(bit_rate).flatten();
+    let header = audio_spectrum_header(
+        &codec,
+        header_bit_rate,
+        sample_rate,
+        bit_depth,
+        Some(channels),
+    );
 
     Ok(PropertySpectrumMetadata {
         header,
         sample_rate,
         duration_seconds,
+        bit_rate,
+        bit_depth,
+        channels,
     })
 }
 
@@ -6372,6 +6390,15 @@ fn ffprobe_audio_duration_seconds_from_probe(
     probe: &serde_json::Value,
     stream: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<f64> {
+    let stream_duration = stream.get("duration").and_then(|duration| {
+        ffprobe_scalar_value_label(duration)
+            .as_deref()
+            .and_then(parse_positive_f64)
+    });
+    if stream_duration.is_some() {
+        return stream_duration;
+    }
+
     let format_duration = probe
         .get("format")
         .and_then(|format| format.as_object())
@@ -6385,11 +6412,7 @@ fn ffprobe_audio_duration_seconds_from_probe(
         return format_duration;
     }
 
-    stream.get("duration").and_then(|duration| {
-        ffprobe_scalar_value_label(duration)
-            .as_deref()
-            .and_then(parse_positive_f64)
-    })
+    None
 }
 
 fn audio_spectrum_codec_label(stream: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -6423,38 +6446,50 @@ fn audio_spectrum_bit_depth(stream: &serde_json::Map<String, serde_json::Value>)
         }
     }
 
-    stream
-        .get("sample_fmt")
-        .and_then(ffprobe_scalar_value_label)
-        .as_deref()
-        .and_then(audio_spectrum_bit_depth_from_sample_format)
+    None
 }
 
-fn audio_spectrum_bit_depth_from_sample_format(format: &str) -> Option<u32> {
-    let format = format.trim().to_ascii_lowercase();
-    if format.contains("64") {
-        Some(64)
-    } else if format.contains("32") || format == "flt" || format == "fltp" {
-        Some(32)
-    } else if format.contains("24") {
-        Some(24)
-    } else if format.contains("16") || format == "s16" || format == "s16p" {
-        Some(16)
-    } else if format.contains('8') {
-        Some(8)
-    } else {
-        None
+fn audio_spectrum_bit_rate(
+    probe: &serde_json::Value,
+    stream: &serde_json::Map<String, serde_json::Value>,
+) -> Option<u64> {
+    let stream_bit_rate = stream
+        .get("bit_rate")
+        .and_then(ffprobe_scalar_value_label)
+        .as_deref()
+        .and_then(parse_positive_f64)
+        .map(|bit_rate| bit_rate.round() as u64)
+        .filter(|bit_rate| *bit_rate > 0);
+    if stream_bit_rate.is_some() {
+        return stream_bit_rate;
     }
+
+    probe
+        .get("format")
+        .and_then(|format| format.as_object())
+        .and_then(|format| format.get("bit_rate"))
+        .and_then(ffprobe_scalar_value_label)
+        .as_deref()
+        .and_then(parse_positive_f64)
+        .map(|bit_rate| bit_rate.round() as u64)
+        .filter(|bit_rate| *bit_rate > 0)
 }
 
 fn audio_spectrum_header(
     codec: &str,
+    bit_rate: Option<u64>,
     sample_rate: u32,
     bit_depth: Option<u32>,
     channels: Option<u32>,
 ) -> String {
-    let mut parts = vec![codec.to_owned(), format!("{sample_rate} Hz")];
-    if let Some(bit_depth) = bit_depth {
+    let mut parts = vec![codec.to_owned()];
+    if let Some(bit_rate) = bit_rate {
+        parts.push(format!("{} kbps", (bit_rate + 500) / 1000));
+    }
+    parts.push(format!("{sample_rate} Hz"));
+    if let Some(bit_depth) = bit_depth
+        && bit_rate.is_none()
+    {
         parts.push(format!("{bit_depth} bits"));
     }
     if let Some(channels) = channels {
@@ -6464,18 +6499,12 @@ fn audio_spectrum_header(
     parts.join(", ")
 }
 
-fn decode_audio_spectrum_windows(
+fn decode_audio_spectrum_db_values(
     path: &Path,
     metadata: &PropertySpectrumMetadata,
     target: PropertySpectrumTarget,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>, String> {
-    let starts = spectrum_window_starts(
-        metadata.duration_seconds,
-        metadata.sample_rate,
-        target.time_bins,
-        target.fft_size,
-    );
     let mut child = spawn_audio_spectrum_ffmpeg(path, 0)?;
     let stdout = child
         .stdout
@@ -6490,7 +6519,7 @@ fn decode_audio_spectrum_windows(
     });
 
     let mut reader = BufReader::new(stdout);
-    let result = collect_spectrum_windows_from_pcm_reader(&mut reader, &starts, target, cancel);
+    let result = collect_spectrum_db_values_from_pcm_reader(&mut reader, metadata, target, cancel);
     if result.is_err() || cancel.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
@@ -6504,7 +6533,7 @@ fn decode_audio_spectrum_windows(
     if cancel.load(Ordering::Relaxed) {
         return Err("Spectrum analysis was cancelled.".to_owned());
     }
-    let windows = result?;
+    let db_values = result?;
     if !status.success() {
         let stderr = command_error_output_label(&stderr);
         return if stderr.is_empty() {
@@ -6514,7 +6543,7 @@ fn decode_audio_spectrum_windows(
         };
     }
 
-    Ok(windows)
+    Ok(db_values)
 }
 
 fn spawn_audio_spectrum_ffmpeg(
@@ -6550,8 +6579,6 @@ fn ffmpeg_audio_spectrum_args(path: &Path, audio_stream_index: usize) -> Vec<OsS
         OsString::from("-map"),
         OsString::from(format!("0:a:{audio_stream_index}")),
         OsString::from("-vn"),
-        OsString::from("-ac"),
-        OsString::from("1"),
         OsString::from("-f"),
         OsString::from("f32le"),
         OsString::from("-acodec"),
@@ -6560,11 +6587,10 @@ fn ffmpeg_audio_spectrum_args(path: &Path, audio_stream_index: usize) -> Vec<OsS
     ]
 }
 
-fn spectrum_window_starts(
+fn spectrum_column_end_samples(
     duration_seconds: f64,
     sample_rate: u32,
     columns: usize,
-    fft_size: usize,
 ) -> Vec<u64> {
     if columns == 0 {
         return Vec::new();
@@ -6572,31 +6598,36 @@ fn spectrum_window_starts(
     let total_samples = (duration_seconds.max(0.0) * f64::from(sample_rate))
         .round()
         .max(0.0) as u64;
-    let max_start = total_samples.saturating_sub(fft_size as u64);
-    if columns == 1 {
-        return vec![0];
-    }
 
-    (0..columns)
-        .map(|column| {
-            let position = column as f64 / (columns - 1) as f64;
-            (position * max_start as f64).round() as u64
-        })
+    (1..=columns)
+        .map(|column| ((column as u128 * total_samples as u128) / columns as u128) as u64)
         .collect()
 }
 
-fn collect_spectrum_windows_from_pcm_reader(
+fn collect_spectrum_db_values_from_pcm_reader(
     reader: &mut impl Read,
-    starts: &[u64],
+    metadata: &PropertySpectrumMetadata,
     target: PropertySpectrumTarget,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>, String> {
-    let mut windows = vec![0.0; starts.len() * target.fft_size];
-    let mut ring = vec![0.0; target.fft_size];
+    let channels = usize::try_from(metadata.channels)
+        .ok()
+        .filter(|channels| *channels > 0)
+        .ok_or_else(|| "Audio channel count is not available.".to_owned())?;
+    let frame_size = channels
+        .checked_mul(4)
+        .ok_or_else(|| "Audio channel count is too large.".to_owned())?;
+    let column_ends = spectrum_column_end_samples(
+        metadata.duration_seconds,
+        metadata.sample_rate,
+        target.time_bins,
+    );
+    let mut db_values = Vec::with_capacity(target.time_bins * target.frequency_bins);
+    let mut accumulator = SpectrumColumnAccumulator::new(target);
     let mut read_buffer = [0u8; 64 * 1024];
     let mut pending = Vec::new();
     let mut sample_index = 0u64;
-    let mut next_window = 0usize;
+    let mut next_column = 0usize;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -6610,19 +6641,24 @@ fn collect_spectrum_windows_from_pcm_reader(
         }
 
         pending.extend_from_slice(&read_buffer[..count]);
-        let complete_len = (pending.len() / 4) * 4;
-        for chunk in pending[..complete_len].chunks_exact(4) {
-            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            ring[(sample_index as usize) % target.fft_size] = sample;
-            sample_index = sample_index.saturating_add(1);
+        let complete_len = (pending.len() / frame_size) * frame_size;
+        for frame in pending[..complete_len].chunks_exact(frame_size) {
+            while next_column < column_ends.len() && sample_index >= column_ends[next_column] {
+                accumulator.finish_column(sample_index, &mut db_values);
+                next_column += 1;
+            }
 
-            while next_window < starts.len()
-                && sample_index >= starts[next_window].saturating_add(target.fft_size as u64)
-            {
-                let start = starts[next_window];
-                let window = spectrum_window_slice_mut(&mut windows, next_window, target.fft_size);
-                copy_spectrum_window_from_ring(&ring, start, target.fft_size, window);
-                next_window += 1;
+            let sample = average_f32le_audio_frame(frame, channels);
+            if next_column < column_ends.len() {
+                accumulator.push_sample(sample, sample_index);
+                sample_index = sample_index.saturating_add(1);
+
+                if sample_index >= column_ends[next_column] {
+                    accumulator.finish_column(sample_index, &mut db_values);
+                    next_column += 1;
+                }
+            } else {
+                sample_index = sample_index.saturating_add(1);
             }
         }
         pending.drain(..complete_len);
@@ -6632,69 +6668,175 @@ fn collect_spectrum_windows_from_pcm_reader(
         return Err("ffmpeg returned no decoded audio samples.".to_owned());
     }
 
-    while next_window < starts.len() {
-        let start = starts[next_window];
-        let available = sample_index
-            .saturating_sub(start)
-            .min(target.fft_size as u64) as usize;
-        if available > 0 {
-            let window = spectrum_window_slice_mut(&mut windows, next_window, target.fft_size);
-            copy_spectrum_window_from_ring(&ring, start, available, window);
-        }
-        next_window += 1;
+    while next_column < column_ends.len() {
+        accumulator.finish_column(sample_index, &mut db_values);
+        next_column += 1;
     }
 
-    Ok(windows)
+    Ok(db_values)
 }
 
-fn spectrum_window_slice_mut(windows: &mut [f32], column: usize, fft_size: usize) -> &mut [f32] {
-    let start = column * fft_size;
-    &mut windows[start..start + fft_size]
+fn average_f32le_audio_frame(frame: &[u8], channels: usize) -> f32 {
+    let mut sum = 0.0;
+    for channel in 0..channels {
+        let offset = channel * 4;
+        sum += f32::from_le_bytes([
+            frame[offset],
+            frame[offset + 1],
+            frame[offset + 2],
+            frame[offset + 3],
+        ]);
+    }
+    sum / channels as f32
 }
 
-fn copy_spectrum_window_from_ring(ring: &[f32], start: u64, available: usize, output: &mut [f32]) {
+fn copy_spectrum_window_ending_at(ring: &[f32], end_sample: u64, output: &mut [f32]) {
     output.fill(0.0);
-    for (index, sample) in output.iter_mut().take(available).enumerate() {
-        *sample = ring[((start + index as u64) as usize) % ring.len()];
+    let available = end_sample.min(output.len() as u64) as usize;
+    let output_start = output.len().saturating_sub(available);
+    let sample_start = end_sample.saturating_sub(available as u64);
+    for index in 0..available {
+        output[output_start + index] = ring[((sample_start + index as u64) as usize) % ring.len()];
     }
 }
 
+struct SpectrumColumnAccumulator {
+    target: PropertySpectrumTarget,
+    ring: Vec<f32>,
+    window: Vec<f32>,
+    fft_buffer: Vec<rustfft::num_complex::Complex<f32>>,
+    fft: Arc<dyn rustfft::Fft<f32>>,
+    sum_db: Vec<f32>,
+    column_db: Vec<f32>,
+    interval_frames: usize,
+    fft_count: usize,
+}
+
+impl SpectrumColumnAccumulator {
+    fn new(target: PropertySpectrumTarget) -> Self {
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(target.fft_size);
+        Self {
+            target,
+            ring: vec![0.0; target.fft_size],
+            window: vec![0.0; target.fft_size],
+            fft_buffer: vec![rustfft::num_complex::Complex { re: 0.0, im: 0.0 }; target.fft_size],
+            fft,
+            sum_db: vec![0.0; target.frequency_bins],
+            column_db: vec![0.0; target.frequency_bins],
+            interval_frames: 0,
+            fft_count: 0,
+        }
+    }
+
+    fn push_sample(&mut self, sample: f32, sample_index: u64) {
+        self.ring[(sample_index as usize) % self.target.fft_size] = sample;
+        self.interval_frames += 1;
+        if self.interval_frames % self.target.fft_size == 0 {
+            self.accumulate_window_ending_at(sample_index.saturating_add(1));
+        }
+    }
+
+    fn finish_column(&mut self, sample_index: u64, db_values: &mut Vec<f32>) {
+        if self.fft_count == 0 {
+            if self.interval_frames > 0 {
+                self.accumulate_window_ending_at(sample_index);
+            } else {
+                self.accumulate_samples(&vec![0.0; self.target.fft_size]);
+            }
+        }
+
+        let count = self.fft_count.max(1) as f32;
+        for db in &self.sum_db {
+            db_values.push(*db / count);
+        }
+
+        self.sum_db.fill(0.0);
+        self.interval_frames = 0;
+        self.fft_count = 0;
+    }
+
+    fn accumulate_window_ending_at(&mut self, sample_index: u64) {
+        copy_spectrum_window_ending_at(&self.ring, sample_index, &mut self.window);
+        self.accumulate_samples_from_window();
+    }
+
+    fn accumulate_samples_from_window(&mut self) {
+        spectrum_db_column_with_plan(
+            &self.window,
+            self.target,
+            self.fft.as_ref(),
+            &mut self.fft_buffer,
+            &mut self.column_db,
+        );
+        for (sum, db) in self.sum_db.iter_mut().zip(&self.column_db) {
+            *sum += *db;
+        }
+        self.fft_count += 1;
+    }
+
+    fn accumulate_samples(&mut self, samples: &[f32]) {
+        spectrum_db_column_with_plan(
+            samples,
+            self.target,
+            self.fft.as_ref(),
+            &mut self.fft_buffer,
+            &mut self.column_db,
+        );
+        for (sum, db) in self.sum_db.iter_mut().zip(&self.column_db) {
+            *sum += *db;
+        }
+        self.fft_count += 1;
+    }
+}
+
+#[cfg(test)]
 fn spectrum_db_values_from_windows(windows: &[f32], target: PropertySpectrumTarget) -> Vec<f32> {
     windows
-        .par_chunks_exact(target.fft_size)
+        .chunks_exact(target.fft_size)
         .flat_map(|samples| spectrum_db_column(samples, target))
         .collect()
 }
 
+#[cfg(test)]
 fn spectrum_db_column(samples: &[f32], target: PropertySpectrumTarget) -> Vec<f32> {
-    use rustfft::{FftPlanner, num_complex::Complex};
-
-    let mut planner = FftPlanner::<f32>::new();
+    let mut planner = rustfft::FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(target.fft_size);
-    let mut buffer: Vec<_> = samples
-        .iter()
-        .enumerate()
-        .map(|(index, sample)| Complex {
-            re: *sample * hann_window_value(index, target.fft_size),
-            im: 0.0,
-        })
-        .collect();
-    fft.process(&mut buffer);
+    let mut buffer = vec![rustfft::num_complex::Complex { re: 0.0, im: 0.0 }; target.fft_size];
+    let mut db_values = vec![0.0; target.frequency_bins];
+    spectrum_db_column_with_plan(samples, target, fft.as_ref(), &mut buffer, &mut db_values);
+    db_values
+}
 
+fn spectrum_db_column_with_plan(
+    samples: &[f32],
+    target: PropertySpectrumTarget,
+    fft: &dyn rustfft::Fft<f32>,
+    buffer: &mut [rustfft::num_complex::Complex<f32>],
+    db_values: &mut [f32],
+) {
+    debug_assert_eq!(buffer.len(), target.fft_size);
+    debug_assert_eq!(db_values.len(), target.frequency_bins);
+    for (index, value) in buffer.iter_mut().enumerate() {
+        let sample = samples.get(index).copied().unwrap_or(0.0);
+        *value = rustfft::num_complex::Complex {
+            re: sample * hann_window_value(index, target.fft_size),
+            im: 0.0,
+        };
+    }
+    fft.process(buffer);
     let nyquist_bin = target.fft_size / 2;
-    (0..target.frequency_bins)
-        .map(|frequency_bin| {
-            let fft_bin = if target.frequency_bins <= 1 {
-                0
-            } else {
-                frequency_bin * nyquist_bin / (target.frequency_bins - 1)
-            };
-            let value = buffer[fft_bin];
-            let magnitude =
-                (value.re.mul_add(value.re, value.im * value.im)).sqrt() / target.fft_size as f32;
-            20.0 * magnitude.max(1.0e-12).log10()
-        })
-        .collect()
+    for (frequency_bin, db) in db_values.iter_mut().enumerate() {
+        let fft_bin = if target.frequency_bins <= 1 {
+            0
+        } else {
+            frequency_bin * nyquist_bin / (target.frequency_bins - 1)
+        };
+        let value = buffer[fft_bin];
+        let magnitude =
+            (value.re.mul_add(value.re, value.im * value.im)).sqrt() / target.fft_size as f32;
+        *db = 20.0 * magnitude.max(1.0e-12).log10();
+    }
 }
 
 fn hann_window_value(index: usize, len: usize) -> f32 {
@@ -6811,13 +6953,13 @@ fn spectrum_render_image_resampled(
 }
 
 fn spectrum_legend_render_image(range: PropertySpectrumRange) -> Option<Arc<RenderImage>> {
-    let height = PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS as u32;
+    let height = PROPERTIES_SPECTRUM_FREQUENCY_BINS as u32;
     let mut bgra = Vec::with_capacity(height as usize * 4);
     for y in 0..height {
         let level = if height <= 1 {
             1.0
         } else {
-            1.0 - (y as f32 / (height - 1) as f32)
+            (height - y - 1) as f32 / height as f32
         };
         let db = range.low_db + (range.high_db - range.low_db) * level;
         bgra.extend_from_slice(&spectrum_density_bgra(db, range));
@@ -6840,44 +6982,41 @@ fn render_image_from_bgra_bytes(
 
 fn spectrum_density_bgra(db: f32, range: PropertySpectrumRange) -> [u8; 4] {
     let span = (range.high_db - range.low_db).max(PROPERTIES_SPECTRUM_MIN_RANGE_DB);
-    let level = ((db - range.low_db) / span).clamp(0.0, 1.0);
+    let level = ((db - range.low_db) / span).clamp(0.0, 1.0 - f32::EPSILON);
     spectrum_palette_bgra(level)
 }
 
 fn spectrum_palette_bgra(level: f32) -> [u8; 4] {
-    let level = level.clamp(0.0, 1.0);
-    let stops = [
-        (0.0, [0x00, 0x00, 0x00]),
-        (0.14, [0x35, 0x00, 0x7a]),
-        (0.28, [0x00, 0x12, 0xff]),
-        (0.43, [0x00, 0xd8, 0xff]),
-        (0.58, [0x00, 0xff, 0x3b]),
-        (0.74, [0xff, 0xf0, 0x00]),
-        (0.88, [0xff, 0x7a, 0x00]),
-        (1.0, [0xff, 0x00, 0x00]),
-    ];
+    let level = f64::from(level.clamp(0.0, 1.0)) * 0.6625;
+    let mut r = 0.0;
+    let mut g = 0.0;
+    let mut b = 0.0;
 
-    let mut lower = stops[0];
-    let mut upper = stops[stops.len() - 1];
-    for pair in stops.windows(2) {
-        if level >= pair[0].0 && level <= pair[1].0 {
-            lower = pair[0];
-            upper = pair[1];
-            break;
-        }
+    if (0.0..0.15).contains(&level) {
+        r = (0.15 - level) / (0.15 + 0.075);
+        b = 1.0;
+    } else if (0.15..0.275).contains(&level) {
+        g = (level - 0.15) / (0.275 - 0.15);
+        b = 1.0;
+    } else if (0.275..0.325).contains(&level) {
+        g = 1.0;
+        b = (0.325 - level) / (0.325 - 0.275);
+    } else if (0.325..0.5).contains(&level) {
+        r = (level - 0.325) / (0.5 - 0.325);
+        g = 1.0;
+    } else if (0.5..0.6625).contains(&level) {
+        r = 1.0;
+        g = (0.6625 - level) / (0.6625 - 0.5);
     }
 
-    let local = if upper.0 <= lower.0 {
-        0.0
-    } else {
-        (level - lower.0) / (upper.0 - lower.0)
-    };
-    let channel = |index: usize| {
-        (lower.1[index] as f32 + (upper.1[index] as f32 - lower.1[index] as f32) * local)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    [channel(2), channel(1), channel(0), 255]
+    let mut correction = 1.0;
+    if (0.0..0.1).contains(&level) {
+        correction = level / 0.1;
+    }
+    correction *= 255.0;
+
+    let channel = |value: f64| (value * correction + 0.5).clamp(0.0, 255.0) as u8;
+    [channel(b), channel(g), channel(r), 255]
 }
 
 fn spectrum_frequency_ruler_labels(sample_rate: u32) -> Vec<String> {
@@ -6908,12 +7047,7 @@ fn spectrum_frequency_ruler_labels(sample_rate: u32) -> Vec<String> {
 
 fn frequency_ruler_label(hz: f64) -> String {
     if hz >= 1000.0 {
-        let khz = hz / 1000.0;
-        if (khz - khz.round()).abs() < 0.05 {
-            format!("{khz:.0} kHz")
-        } else {
-            format!("{khz:.1} kHz")
-        }
+        format!("{} kHz", (hz / 1000.0).floor() as u64)
     } else {
         format!("{:.0} Hz", hz.round())
     }
@@ -11799,6 +11933,9 @@ mod tests {
                             .to_owned(),
                         sample_rate: 192_000,
                         duration_seconds: 267.0,
+                        bit_rate: None,
+                        bit_depth: Some(24),
+                        channels: 2,
                     },
                     db_values: vec![-120.0, -80.0, -40.0, -20.0],
                     image: render_image_from_bgra(2, 2, vec![0, 0, 0, 255].repeat(4)),
@@ -13070,33 +13207,65 @@ mod tests {
         );
         assert_eq!(flac.sample_rate, 44_100);
         assert_seconds(flac.duration_seconds, 192.5);
+        assert_eq!(flac.bit_rate, Some(921_600));
+        assert_eq!(flac.bit_depth, Some(24));
+        assert_eq!(flac.channels, 2);
 
-        let aac_probe = serde_json::json!({
+        let mp3_probe = serde_json::json!({
+            "format": {
+                "duration": "1261.000",
+                "bit_rate": "63900"
+            },
+            "streams": [
+                {
+                    "codec_name": "mp3",
+                    "codec_long_name": "MP3 (MPEG audio layer 3)",
+                    "codec_type": "audio",
+                    "sample_rate": "44100",
+                    "channels": 1,
+                    "sample_fmt": "fltp",
+                    "duration": "1273.000",
+                    "bit_rate": "64000"
+                }
+            ]
+        });
+        let mp3 = audio_spectrum_metadata_from_probe(&mp3_probe).unwrap();
+        assert_eq!(
+            mp3.header,
+            "MP3 (MPEG audio layer 3), 64 kbps, 44100 Hz, 1 channel"
+        );
+        assert!(!mp3.header.contains("32 bits"));
+        assert_eq!(mp3.bit_rate, Some(64_000));
+        assert_eq!(mp3.bit_depth, None);
+        assert_eq!(mp3.channels, 1);
+        assert_seconds(mp3.duration_seconds, 1273.0);
+
+        let pcm_probe = serde_json::json!({
             "format": {
                 "duration": "9.250"
             },
             "streams": [
                 {
-                    "codec_name": "aac",
-                    "codec_long_name": "AAC (Advanced Audio Coding)",
+                    "codec_name": "pcm_s16le",
+                    "codec_long_name": "PCM signed 16-bit little-endian",
                     "codec_type": "audio",
                     "sample_rate": "48000",
-                    "channels": 1,
-                    "sample_fmt": "fltp"
+                    "channels": 2,
+                    "bits_per_raw_sample": "16"
                 }
             ]
         });
-        let aac = audio_spectrum_metadata_from_probe(&aac_probe).unwrap();
+        let pcm = audio_spectrum_metadata_from_probe(&pcm_probe).unwrap();
         assert_eq!(
-            aac.header,
-            "AAC (Advanced Audio Coding), 48000 Hz, 32 bits, 1 channel"
+            pcm.header,
+            "PCM signed 16-bit little-endian, 48000 Hz, 16 bits, 2 channels"
         );
-        assert_eq!(aac.sample_rate, 48_000);
-        assert_seconds(aac.duration_seconds, 9.25);
+        assert_eq!(pcm.bit_rate, None);
+        assert_eq!(pcm.bit_depth, Some(16));
     }
 
     #[test]
-    fn ffmpeg_audio_spectrum_args_decode_first_audio_stream_to_mono_f32le() {
+    fn ffmpeg_audio_spectrum_args_decode_first_audio_stream_to_f32le() {
         let args: Vec<_> = ffmpeg_audio_spectrum_args(Path::new("song.flac"), 0)
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -13107,8 +13276,8 @@ mod tests {
                 .any(|window| window[0] == "-map" && window[1] == "0:a:0")
         );
         assert!(
-            args.windows(2)
-                .any(|window| window[0] == "-ac" && window[1] == "1")
+            !args.iter().any(|arg| arg == "-ac"),
+            "channels should be preserved for Rust-side averaging"
         );
         assert!(
             args.windows(2)
@@ -13135,6 +13304,10 @@ mod tests {
             vec!["24 kHz", "20 kHz", "15 kHz", "10 kHz", "5 kHz", "0 kHz"]
         );
         assert_eq!(
+            spectrum_frequency_ruler_labels(44_100),
+            vec!["22 kHz", "20 kHz", "15 kHz", "10 kHz", "5 kHz", "0 kHz"]
+        );
+        assert_eq!(
             spectrum_time_ruler_labels(145.0),
             vec![
                 "0:00", "0:20", "0:40", "1:00", "1:20", "1:40", "2:00", "2:20", "2:25"
@@ -13156,6 +13329,11 @@ mod tests {
         assert_eq!(
             spectrum_density_bgra(20.0, default_range),
             spectrum_density_bgra(default_range.high_db, default_range)
+        );
+        let high_color = spectrum_density_bgra(default_range.high_db, default_range);
+        assert!(
+            high_color[2] > 240 && high_color[1] < 8 && high_color[0] < 8,
+            "high spectrum density should render as Spek red in GPUI BGRA order"
         );
 
         let db = -100.0;
@@ -13194,18 +13372,17 @@ mod tests {
     fn spectrum_target_clamps_render_size_to_safe_analysis_bounds() {
         let initial = PropertySpectrumTarget::initial();
         assert_eq!(initial.time_bins, PROPERTIES_SPECTRUM_INITIAL_TIME_BINS);
-        assert_eq!(
-            initial.frequency_bins,
-            PROPERTIES_SPECTRUM_INITIAL_FREQUENCY_BINS
-        );
+        assert_eq!(initial.frequency_bins, PROPERTIES_SPECTRUM_FREQUENCY_BINS);
         assert_eq!(initial.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
+        assert_eq!(initial.fft_size, 2048);
+        assert_eq!(initial.frequency_bins, 1025);
 
         let small = PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
             width: 0,
             height: 0,
         });
         assert_eq!(small.time_bins, 1);
-        assert_eq!(small.frequency_bins, 1);
+        assert_eq!(small.frequency_bins, PROPERTIES_SPECTRUM_FREQUENCY_BINS);
         assert_eq!(small.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
 
         let large = PropertySpectrumTarget::from_render_size(PropertySpectrumRenderSize {
@@ -13213,8 +13390,44 @@ mod tests {
             height: u32::MAX,
         });
         assert_eq!(large.time_bins, PROPERTIES_SPECTRUM_MAX_TIME_BINS);
-        assert_eq!(large.frequency_bins, PROPERTIES_SPECTRUM_MAX_FREQUENCY_BINS);
+        assert_eq!(large.frequency_bins, PROPERTIES_SPECTRUM_FREQUENCY_BINS);
         assert_eq!(large.fft_size, PROPERTIES_SPECTRUM_FFT_SIZE);
+    }
+
+    #[test]
+    fn spectrum_pcm_collector_averages_channels_and_columns() {
+        let target = PropertySpectrumTarget {
+            time_bins: 2,
+            frequency_bins: 5,
+            fft_size: 8,
+        };
+        let metadata = PropertySpectrumMetadata {
+            header: "PCM signed 32-bit float little-endian, 8 Hz, 2 channels".to_owned(),
+            sample_rate: 8,
+            duration_seconds: 2.0,
+            bit_rate: None,
+            bit_depth: Some(32),
+            channels: 2,
+        };
+        let frame = [1.0f32.to_le_bytes(), 0.0f32.to_le_bytes()].concat();
+        assert_eq!(average_f32le_audio_frame(&frame, 2), 0.5);
+
+        let mut pcm = Vec::new();
+        for _ in 0..16 {
+            pcm.extend_from_slice(&1.0f32.to_le_bytes());
+            pcm.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        let cancel = AtomicBool::new(false);
+        let db_values = collect_spectrum_db_values_from_pcm_reader(
+            &mut Cursor::new(pcm),
+            &metadata,
+            target,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(db_values.len(), target.time_bins * target.frequency_bins);
+        assert!(db_values.iter().all(|value| value.is_finite()));
     }
 
     #[test]
@@ -13259,8 +13472,8 @@ mod tests {
 
         assert!(peak_db > silence_max + 80.0);
         assert!(
-            (55..=75).contains(&peak_index),
-            "expected sine peak near frequency bin 64, got {peak_index}"
+            (500..=524).contains(&peak_index),
+            "expected sine peak near frequency bin 512, got {peak_index}"
         );
     }
 
@@ -14471,6 +14684,9 @@ mod tests {
                     .to_owned(),
                 sample_rate: 48_000,
                 duration_seconds: 207.0,
+                bit_rate: None,
+                bit_depth: Some(16),
+                channels: 2,
             },
             db_values,
             image,
