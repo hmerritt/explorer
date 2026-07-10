@@ -1,5 +1,9 @@
 ## 1
 
+- macOS fixes and tweaks:
+    - Image viewer does not open when opening an image file with Explorer on macOS (nothing happens. Windows works correctly)
+    - Remove "macOS" sidebar group. Instead add Applications and Bin to Pinned group by default (user can then unpin/remove as usual)
+    - (compression)
 - Improve readme - add screenshots / branding
 
 ## 2

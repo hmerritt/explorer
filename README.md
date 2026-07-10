@@ -31,6 +31,8 @@
 
 #### ➡️ macOS via Homebrew
 
+> First launch may need approval in **System Settings → Privacy & Security**
+
 ```sh
 brew install --cask hmerritt/tap/explorer
 ```
