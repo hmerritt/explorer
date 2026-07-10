@@ -16,9 +16,9 @@
 </p>
 
 <p align="center">
-  <a href="#install">💾 Install</a>
+  <a href="#-install">💾 Install</a>
   |
-  <a href="#features">⚡ Features</a>
+  <a href="#-features">⚡ Features</a>
   |
   <a href="#-anti-features-that-will-not-be-implemented"><s>🔃 Anti-Features</s></a>
 </p>
