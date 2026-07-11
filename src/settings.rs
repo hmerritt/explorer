@@ -72,8 +72,6 @@ pub enum SidebarGroupKind {
     Pinned,
     Drives,
     Wsl,
-    #[serde(rename = "macos")]
-    Macos,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -1777,15 +1775,28 @@ fn platform_root_path() -> PathBuf {
 
 fn default_sidebar_items() -> Vec<PathBuf> {
     let home = crate::explorer::user_home_dir();
-    [
+    default_sidebar_items_from_paths(
         home.clone(),
         crate::explorer::user_desktop_dir(home.as_deref()),
         crate::explorer::user_documents_dir(home.as_deref()),
         crate::explorer::user_downloads_dir(home.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+        crate::explorer::macos_applications_dir(),
+        crate::explorer::macos_bin_dir(home.as_deref()),
+    )
+}
+
+fn default_sidebar_items_from_paths(
+    home: Option<PathBuf>,
+    desktop: Option<PathBuf>,
+    documents: Option<PathBuf>,
+    downloads: Option<PathBuf>,
+    applications: Option<PathBuf>,
+    bin: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    [home, desktop, documents, downloads, applications, bin]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn default_sidebar_width() -> u32 {
@@ -1868,7 +1879,6 @@ fn sidebar_group_kind_from_str(value: &str) -> Option<SidebarGroupKind> {
         "pinned" => Some(SidebarGroupKind::Pinned),
         "drives" => Some(SidebarGroupKind::Drives),
         "wsl" => Some(SidebarGroupKind::Wsl),
-        "macos" => Some(SidebarGroupKind::Macos),
         _ => None,
     }
 }
@@ -2221,7 +2231,52 @@ mod tests {
             vec![SidebarGroupKind::Pinned]
         );
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
-        assert_eq!(settings.sidebar.items.len(), 4);
+        assert_eq!(
+            settings.sidebar.items.len(),
+            if cfg!(target_os = "macos") { 6 } else { 4 }
+        );
+    }
+
+    #[test]
+    fn sidebar_default_items_append_macos_locations() {
+        let home = PathBuf::from("home");
+        let desktop = PathBuf::from("Desktop");
+        let documents = PathBuf::from("Documents");
+        let downloads = PathBuf::from("Downloads");
+        let applications = PathBuf::from("Applications");
+        let bin = PathBuf::from(".Trash");
+
+        assert_eq!(
+            default_sidebar_items_from_paths(
+                Some(home.clone()),
+                Some(desktop.clone()),
+                Some(documents.clone()),
+                Some(downloads.clone()),
+                Some(applications.clone()),
+                Some(bin.clone()),
+            ),
+            vec![home, desktop, documents, downloads, applications, bin]
+        );
+    }
+
+    #[test]
+    fn sidebar_default_items_omit_unavailable_macos_locations() {
+        let home = PathBuf::from("home");
+        let desktop = PathBuf::from("Desktop");
+        let documents = PathBuf::from("Documents");
+        let downloads = PathBuf::from("Downloads");
+
+        assert_eq!(
+            default_sidebar_items_from_paths(
+                Some(home.clone()),
+                Some(desktop.clone()),
+                Some(documents.clone()),
+                Some(downloads.clone()),
+                None,
+                None,
+            ),
+            vec![home, desktop, documents, downloads]
+        );
     }
 
     #[test]
@@ -2460,11 +2515,7 @@ mod tests {
 
         assert_eq!(
             settings.sidebar.expanded_groups,
-            vec![
-                SidebarGroupKind::Drives,
-                SidebarGroupKind::Wsl,
-                SidebarGroupKind::Macos
-            ]
+            vec![SidebarGroupKind::Drives, SidebarGroupKind::Wsl]
         );
     }
 

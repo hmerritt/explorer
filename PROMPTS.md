@@ -1,5 +1,7 @@
 ## 1
 
+- Linux fixes:
+    - Explorer can't be set as default image viewer for image types (tested on Ubuntu Desktop)
 - macOS fixes and tweaks:
     - Image viewer does not open when opening an image file with Explorer on macOS (nothing happens. Windows works correctly)
     - Remove "macOS" sidebar group. Instead add Applications and Bin to Pinned group by default (user can then unpin/remove as usual)

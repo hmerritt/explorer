@@ -4,8 +4,7 @@ use crate::explorer::filesystem::{
     SshfsMount, SshfsMountState, sshfs_mounts, windows_local_os_drive_root,
 };
 use crate::explorer::{
-    DirectoryKind, drive_display_label, local_drive_roots, macos_applications_dir, macos_bin_dir,
-    resolve_directory_kind, user_home_dir, wsl_drive_roots,
+    DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
 };
 use crate::settings::{DriveHideKind, SidebarSettings, expand_configured_path};
 
@@ -47,13 +46,11 @@ fn sidebar_sections_from_roots_internal(
     sshfs_mounts: Vec<SshfsMount>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
-    let home_dir = user_home_dir();
     let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
     let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
     drives.extend(sshfs_drive_items(sshfs_mounts));
     SidebarSections {
         user_directories: configured_sidebar_items(&settings.items, filesystem_name),
-        macos_system_locations: macos_system_location_items(home_dir.as_deref()),
         drives,
         wsl_drives: if hide_wsl_drives {
             Vec::new()
@@ -99,7 +96,6 @@ fn sidebar_sections_from_sources(
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SidebarSections {
     pub(super) user_directories: Vec<SidebarItem>,
-    pub(super) macos_system_locations: Vec<SidebarItem>,
     pub(super) drives: Vec<SidebarItem>,
     pub(super) wsl_drives: Vec<SidebarItem>,
 }
@@ -203,44 +199,6 @@ fn home_sidebar_label(path: &Path) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("Home")
         .to_owned()
-}
-
-fn macos_system_location_items(home: Option<&Path>) -> Vec<SidebarItem> {
-    macos_system_location_items_from_paths(macos_applications_dir(), macos_bin_dir(home))
-}
-
-fn macos_system_location_items_from_paths(
-    applications: Option<PathBuf>,
-    bin: Option<PathBuf>,
-) -> Vec<SidebarItem> {
-    [
-        (
-            "Applications".to_owned(),
-            applications,
-            DirectoryKind::Applications,
-        ),
-        ("Bin".to_owned(), bin, DirectoryKind::Bin),
-    ]
-    .into_iter()
-    .filter_map(|(label, path, kind)| {
-        path.filter(|path| {
-            if !path.is_dir() {
-                return false;
-            }
-            if kind == DirectoryKind::Bin {
-                std::fs::read_dir(path).is_ok()
-            } else {
-                true
-            }
-        })
-        .map(|path| SidebarItem {
-            label,
-            path,
-            kind: SidebarItemKind::Directory(kind),
-            configured_index: None,
-        })
-    })
-    .collect()
 }
 
 fn drive_items_from_roots(roots: Vec<PathBuf>, filesystem_name: &str) -> Vec<SidebarItem> {
@@ -429,64 +387,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn macos_system_location_items_preserve_requested_order() {
-        let temp = TempDir::new();
-        let applications = temp.path().join("Applications");
-        let bin = temp.path().join(".Trash");
-        fs::create_dir_all(&applications).expect("create applications");
-        fs::create_dir_all(&bin).expect("create bin");
-
-        let items =
-            macos_system_location_items_from_paths(Some(applications.clone()), Some(bin.clone()));
-
-        assert_eq!(
-            items,
-            vec![
-                SidebarItem {
-                    label: "Applications".to_owned(),
-                    path: applications,
-                    kind: SidebarItemKind::Directory(DirectoryKind::Applications),
-                    configured_index: None,
-                },
-                SidebarItem {
-                    label: "Bin".to_owned(),
-                    path: bin,
-                    kind: SidebarItemKind::Directory(DirectoryKind::Bin),
-                    configured_index: None,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn macos_system_location_items_omit_missing_paths() {
-        let temp = TempDir::new();
-        let bin = temp.path().join(".Trash");
-        fs::create_dir_all(&bin).expect("create bin");
-
-        let items = macos_system_location_items_from_paths(
-            Some(temp.path().join("missing Applications")),
-            Some(bin),
-        );
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "Bin");
-        assert_eq!(
-            items[0].kind,
-            SidebarItemKind::Directory(DirectoryKind::Bin)
-        );
-    }
-
-    #[test]
-    fn macos_system_locations_are_empty_off_macos() {
-        if cfg!(target_os = "macos") {
-            return;
-        }
-
-        assert!(macos_system_location_items(None).is_empty());
     }
 
     #[test]

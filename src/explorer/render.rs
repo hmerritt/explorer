@@ -18,8 +18,6 @@ use gpui::{
 
 #[cfg(test)]
 use crate::explorer::address_bar::format_address_path;
-#[cfg(target_os = "macos")]
-use crate::explorer::icons::applications_sidebar_icon;
 #[cfg(target_os = "windows")]
 use crate::explorer::icons::drive_wsl_icon;
 use crate::explorer::{
@@ -1517,38 +1515,6 @@ impl ExplorerView {
                     SIDEBAR_ITEM_GAP,
                     cx,
                 ));
-            }
-            previous_group_expanded = Some(expanded);
-        }
-
-        #[cfg(target_os = "macos")]
-        if !sections.macos_system_locations.is_empty() {
-            if let Some(previous_group_expanded) = previous_group_expanded {
-                children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
-            }
-            let expanded =
-                sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Macos);
-            children.push(self.render_sidebar_group_header(
-                SidebarGroupKind::Macos,
-                "macOS",
-                applications_sidebar_icon(),
-                expanded,
-                cx,
-            ));
-
-            if expanded {
-                children.push(sidebar_item_gap().into_any_element());
-                for (index, item) in sections.macos_system_locations.iter().cloned().enumerate() {
-                    if index > 0 {
-                        children.push(sidebar_item_gap().into_any_element());
-                    }
-                    children.push(self.render_sidebar_row(
-                        index + 1_000,
-                        item,
-                        SIDEBAR_GROUP_CHILD_INDENT,
-                        cx,
-                    ));
-                }
             }
             previous_group_expanded = Some(expanded);
         }
@@ -3351,7 +3317,6 @@ fn sidebar_group_header_id(kind: SidebarGroupKind) -> &'static str {
         SidebarGroupKind::Pinned => "explorer-sidebar-group-pinned",
         SidebarGroupKind::Drives => "explorer-sidebar-group-drives",
         SidebarGroupKind::Wsl => "explorer-sidebar-group-wsl",
-        SidebarGroupKind::Macos => "explorer-sidebar-group-macos",
     }
 }
 
@@ -8412,15 +8377,15 @@ mod tests {
         assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui::test]
-    fn sidebar_macos_locations_render_under_macos_group(cx: &mut gpui::TestAppContext) {
+    fn sidebar_macos_locations_render_as_configured_pins(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let applications_path = temp.path().join("Applications");
+        let bin_path = temp.path().join(".Trash");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
-        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Macos];
+        settings.sidebar.items = vec![applications_path.clone(), bin_path.clone()];
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Pinned];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
         let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -8429,12 +8394,20 @@ mod tests {
             let mut view =
                 ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
             view.sidebar_sections = SidebarSections {
-                macos_system_locations: vec![SidebarItem {
-                    label: "Applications".to_owned(),
-                    path: applications_path,
-                    kind: SidebarItemKind::Directory(DirectoryKind::Applications),
-                    configured_index: None,
-                }],
+                user_directories: vec![
+                    SidebarItem {
+                        label: "Applications".to_owned(),
+                        path: applications_path,
+                        kind: SidebarItemKind::Directory(DirectoryKind::Applications),
+                        configured_index: Some(0),
+                    },
+                    SidebarItem {
+                        label: "Bin".to_owned(),
+                        path: bin_path,
+                        kind: SidebarItemKind::Directory(DirectoryKind::Bin),
+                        configured_index: Some(1),
+                    },
+                ],
                 ..SidebarSections::default()
             };
             view
@@ -8442,8 +8415,10 @@ mod tests {
 
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("explorer-sidebar-group-macos").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-1000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-0").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-1").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-group-macos").is_none());
     }
 
     #[gpui::test]
