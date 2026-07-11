@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{
@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use filetime::FileTime;
@@ -2507,6 +2507,10 @@ pub(super) fn prepare_extract_archives_to_directory(
     prepare_extract_archive_operation(archives, destination).map(prepared_or_conflicts)
 }
 
+pub(super) fn prepare_compress_paths(paths: &[PathBuf]) -> Result<PreparedFileOperation, String> {
+    prepare_compress_operation(paths).map(prepared_or_conflicts)
+}
+
 #[cfg(test)]
 pub(super) fn resolve_file_conflicts(
     conflicts: FileConflictBatch,
@@ -2691,6 +2695,7 @@ pub(super) enum FileOperationKind {
     Move,
     Copy,
     Link,
+    Compress,
     Extract,
 }
 
@@ -2700,6 +2705,7 @@ impl FileOperationKind {
             FileOperationKind::Move => "Moving",
             FileOperationKind::Copy => "Copying",
             FileOperationKind::Link => "Creating links",
+            FileOperationKind::Compress => "Compressing",
             FileOperationKind::Extract => "Extracting",
         }
     }
@@ -2712,6 +2718,7 @@ pub(super) enum FileOperationPhase {
     Resuming,
     Copying,
     Linking,
+    Compressing,
     Verifying,
     Extracting,
     Moving,
@@ -2852,6 +2859,29 @@ struct ArchiveExtractPlan {
     by_destination: HashMap<PathBuf, usize>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ArchiveCompressionEntryKind {
+    File,
+    Directory,
+    Symlink { target: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArchiveCompressionEntry {
+    source: PathBuf,
+    archive_name: String,
+    kind: ArchiveCompressionEntryKind,
+    size: u64,
+    modified: Option<SystemTime>,
+    permissions: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArchiveCompressionPlan {
+    destination_base: PathBuf,
+    entries: Vec<ArchiveCompressionEntry>,
+}
+
 impl ArchiveExtractPlan {
     fn new(entries: Vec<ArchiveExtractEntry>) -> Self {
         let mut by_display_path = HashMap::with_capacity(entries.len());
@@ -2900,6 +2930,7 @@ enum FileOperationStep {
         plan: ArchiveExtractPlan,
         diagnostics: Option<ArchiveHandle>,
     },
+    CompressArchive(ArchiveCompressionPlan),
     RemoveEmptyDirectory(PathBuf),
 }
 
@@ -3064,6 +3095,7 @@ fn prepare_file_operation(
                     FileOperationKind::Move => "move",
                     FileOperationKind::Copy => "copy",
                     FileOperationKind::Link => "link",
+                    FileOperationKind::Compress => "compress",
                     FileOperationKind::Extract => "extract",
                 };
                 return Err(format!(
@@ -3199,7 +3231,7 @@ fn plan_path_operation(
                 conflict,
                 copy_engine,
             }),
-            FileOperationKind::Link | FileOperationKind::Extract => {}
+            FileOperationKind::Link | FileOperationKind::Compress | FileOperationKind::Extract => {}
         }
     }
 
@@ -3276,6 +3308,148 @@ fn prepare_link_operation(
         roots,
         archive_diagnostics: None,
     })
+}
+
+fn prepare_compress_operation(paths: &[PathBuf]) -> Result<FileOperationJob, String> {
+    let Some(parent) = paths.first().and_then(|path| path.parent()) else {
+        return Err("No items were selected to compress.".to_owned());
+    };
+    if paths
+        .iter()
+        .any(|path| path.parent().is_none_or(|candidate| candidate != parent))
+    {
+        return Err("Selected items must be in the same folder to be compressed.".to_owned());
+    }
+
+    let archive_name = if paths.len() == 1 {
+        let name = compression_path_component(paths[0].file_name(), &paths[0])?;
+        format!("{name}.zip")
+    } else {
+        "Archive.zip".to_owned()
+    };
+    let mut entries = Vec::new();
+    for path in paths {
+        let top_level_name = compression_path_component(path.file_name(), path)?;
+        collect_compression_entries(path, top_level_name, &mut entries)?;
+    }
+
+    let stats = FileOperationStats {
+        total_bytes: entries.iter().map(|entry| entry.size).sum(),
+        total_files: entries.len(),
+    };
+    Ok(FileOperationJob {
+        kind: FileOperationKind::Compress,
+        stats,
+        steps: vec![FileOperationStep::CompressArchive(ArchiveCompressionPlan {
+            destination_base: parent.join(archive_name),
+            entries,
+        })],
+        roots: Vec::new(),
+        archive_diagnostics: None,
+    })
+}
+
+fn compression_path_component(component: Option<&OsStr>, path: &Path) -> Result<String, String> {
+    let component = component
+        .and_then(OsStr::to_str)
+        .filter(|component| !component.is_empty() && !component.contains('\\'))
+        .ok_or_else(|| {
+            format!(
+                "{} has a name that cannot be stored in a portable ZIP archive.",
+                path_display_name(path)
+            )
+        })?;
+    Ok(component.to_owned())
+}
+
+fn compression_operation_error(action: &str, path: &Path, error: io::Error) -> String {
+    format!("Could not {action} {}: {error}", path_display_name(path))
+}
+
+fn collect_compression_entries(
+    root: &Path,
+    archive_root: String,
+    entries: &mut Vec<ArchiveCompressionEntry>,
+) -> Result<(), String> {
+    let mut pending = vec![(root.to_path_buf(), archive_root)];
+    while let Some((source, archive_name)) = pending.pop() {
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| compression_operation_error("read", &source, error))?;
+        let file_type = metadata.file_type();
+        let modified = metadata.modified().ok();
+        let permissions = compression_permissions(&metadata);
+        if file_type.is_symlink() {
+            let target = fs::read_link(&source)
+                .map_err(|error| compression_operation_error("read link", &source, error))?;
+            let target = target.to_str().ok_or_else(|| {
+                format!(
+                    "{} points to a name that cannot be stored in a portable ZIP archive.",
+                    path_display_name(&source)
+                )
+            })?;
+            entries.push(ArchiveCompressionEntry {
+                source,
+                archive_name,
+                kind: ArchiveCompressionEntryKind::Symlink {
+                    target: target.to_owned(),
+                },
+                size: 0,
+                modified,
+                permissions,
+            });
+        } else if file_type.is_file() {
+            entries.push(ArchiveCompressionEntry {
+                source,
+                archive_name,
+                kind: ArchiveCompressionEntryKind::File,
+                size: metadata.len(),
+                modified,
+                permissions,
+            });
+        } else if file_type.is_dir() {
+            entries.push(ArchiveCompressionEntry {
+                source: source.clone(),
+                archive_name: format!("{archive_name}/"),
+                kind: ArchiveCompressionEntryKind::Directory,
+                size: 0,
+                modified,
+                permissions,
+            });
+            let mut children = fs::read_dir(&source)
+                .map_err(|error| compression_operation_error("read", &source, error))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| compression_operation_error("read", &source, error))?;
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children.into_iter().rev() {
+                let child_path = child.path();
+                let child_name = compression_path_component(Some(&child.file_name()), &child_path)?;
+                pending.push((child_path, format!("{archive_name}/{child_name}")));
+            }
+        } else {
+            return Err(format!(
+                "{} is not a regular file, folder, or symbolic link and cannot be compressed.",
+                path_display_name(&source)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn compression_permissions(metadata: &fs::Metadata) -> u32 {
+    metadata.mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn compression_permissions(metadata: &fs::Metadata) -> u32 {
+    let read_only = metadata.permissions().readonly();
+    if metadata.is_dir() {
+        if read_only { 0o555 } else { 0o755 }
+    } else if read_only {
+        0o444
+    } else {
+        0o644
+    }
 }
 
 fn prepare_extract_archive_operation(
@@ -4054,6 +4228,221 @@ fn finish_file_operation_summary(
     Ok(summary)
 }
 
+fn execute_compress_operation_with_progress(
+    job: FileOperationJob,
+    cancel: Arc<AtomicBool>,
+    mut on_progress: impl FnMut(FileOperationProgress),
+) -> Result<FileOperationSummary, FileOperationError> {
+    let plan = job
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            FileOperationStep::CompressArchive(plan) => Some(plan.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| FileOperationError::Failed("The compression plan is empty.".to_owned()))?;
+    let mut progress = job.initial_progress();
+    progress.phase = FileOperationPhase::Compressing;
+    on_progress(progress.clone());
+
+    let destination = create_zip_archive(&plan, &cancel, &mut progress, &mut on_progress)?;
+    progress.phase = FileOperationPhase::Finished;
+    progress.current_item = None;
+    progress.finish_work();
+    progress.completed_files = progress.completed_files.max(progress.total_files);
+    progress.cancellable = false;
+    on_progress(progress);
+
+    Ok(FileOperationSummary {
+        kind: FileOperationKind::Compress,
+        destination_paths: vec![destination.clone()],
+        copy_undo: FileOperationCopyUndo {
+            created_files: vec![destination],
+            ..FileOperationCopyUndo::default()
+        },
+        moved_source_paths: Vec::new(),
+        moved_paths: Vec::new(),
+        archive_diagnostics: None,
+    })
+}
+
+fn create_zip_archive(
+    plan: &ArchiveCompressionPlan,
+    cancel: &AtomicBool,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<PathBuf, FileOperationError> {
+    let (destination, file) = create_unique_zip_file(&plan.destination_base)?;
+    let mut writer = zip::ZipWriter::new(file);
+    let write_result = write_zip_entries(
+        &mut writer,
+        &plan.entries,
+        &destination,
+        cancel,
+        progress,
+        on_progress,
+    );
+    let result = match write_result {
+        Ok(()) => writer
+            .finish()
+            .map_err(|error| compression_zip_error("finish", &destination, error))
+            .and_then(|file| {
+                file.sync_all().map_err(|error| {
+                    FileOperationError::Failed(compression_operation_error(
+                        "finish",
+                        &destination,
+                        error,
+                    ))
+                })
+            }),
+        Err(error) => Err(error),
+    };
+    drop(writer);
+    if let Err(error) = result {
+        if let Err(cleanup_error) = fs::remove_file(&destination)
+            && cleanup_error.kind() != io::ErrorKind::NotFound
+        {
+            let message = match error {
+                FileOperationError::Cancelled => "The compression was cancelled.".to_owned(),
+                FileOperationError::Failed(message) => message,
+            };
+            return Err(FileOperationError::Failed(format!(
+                "{message} Could not remove incomplete archive {}: {cleanup_error}",
+                path_display_name(&destination),
+            )));
+        }
+        return Err(error);
+    }
+    Ok(destination)
+}
+
+fn create_unique_zip_file(base: &Path) -> Result<(PathBuf, File), FileOperationError> {
+    let file_name = base.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+        FileOperationError::Failed("The archive name is not valid Unicode.".to_owned())
+    })?;
+    let stem = file_name.strip_suffix(".zip").unwrap_or(file_name);
+    for number in 1u64.. {
+        let destination = if number == 1 {
+            base.to_path_buf()
+        } else {
+            base.with_file_name(format!("{stem} {number}.zip"))
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => return Ok((destination, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(FileOperationError::Failed(compression_operation_error(
+                    "create",
+                    &destination,
+                    error,
+                )));
+            }
+        }
+    }
+    unreachable!("the archive suffix counter cannot be exhausted")
+}
+
+fn write_zip_entries(
+    writer: &mut zip::ZipWriter<File>,
+    entries: &[ArchiveCompressionEntry],
+    destination: &Path,
+    cancel: &AtomicBool,
+    progress: &mut FileOperationProgress,
+    on_progress: &mut impl FnMut(FileOperationProgress),
+) -> Result<(), FileOperationError> {
+    let mut buffer = vec![0; COPY_BUFFER_SIZE];
+    for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = FileOperationPhase::Cancelled;
+            progress.cancellable = false;
+            on_progress(progress.clone());
+            return Err(FileOperationError::Cancelled);
+        }
+        progress.current_item = Some(entry.source.clone());
+        on_progress(progress.clone());
+        let options = compression_zip_options(entry);
+        match &entry.kind {
+            ArchiveCompressionEntryKind::Directory => writer
+                .add_directory(&entry.archive_name, options)
+                .map_err(|error| compression_zip_error("compress", &entry.source, error))?,
+            ArchiveCompressionEntryKind::Symlink { target } => writer
+                .add_symlink(&entry.archive_name, target, options)
+                .map_err(|error| compression_zip_error("compress", &entry.source, error))?,
+            ArchiveCompressionEntryKind::File => {
+                writer
+                    .start_file(&entry.archive_name, options)
+                    .map_err(|error| compression_zip_error("compress", &entry.source, error))?;
+                let mut source = File::open(&entry.source).map_err(|error| {
+                    FileOperationError::Failed(compression_operation_error(
+                        "read",
+                        &entry.source,
+                        error,
+                    ))
+                })?;
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        progress.phase = FileOperationPhase::Cancelled;
+                        progress.cancellable = false;
+                        on_progress(progress.clone());
+                        return Err(FileOperationError::Cancelled);
+                    }
+                    let read = source.read(&mut buffer).map_err(|error| {
+                        FileOperationError::Failed(compression_operation_error(
+                            "read",
+                            &entry.source,
+                            error,
+                        ))
+                    })?;
+                    if read == 0 {
+                        break;
+                    }
+                    writer.write_all(&buffer[..read]).map_err(|error| {
+                        FileOperationError::Failed(compression_operation_error(
+                            "write",
+                            destination,
+                            error,
+                        ))
+                    })?;
+                    progress.add_copied_bytes(read as u64);
+                    on_progress(progress.clone());
+                }
+            }
+        }
+        progress.completed_files = progress.completed_files.saturating_add(1);
+        on_progress(progress.clone());
+    }
+    Ok(())
+}
+
+fn compression_zip_options(entry: &ArchiveCompressionEntry) -> zip::write::FileOptions {
+    let mut options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(entry.size >= u32::MAX as u64)
+        .unix_permissions(entry.permissions);
+    if let Some(modified) = entry.modified {
+        let modified = time::OffsetDateTime::from(modified);
+        if let Ok(modified) = zip::DateTime::try_from(modified) {
+            options = options.last_modified_time(modified);
+        }
+    }
+    options
+}
+
+fn compression_zip_error(
+    action: &str,
+    path: &Path,
+    error: zip::result::ZipError,
+) -> FileOperationError {
+    FileOperationError::Failed(format!(
+        "Could not {action} {}: {error}",
+        path_display_name(path)
+    ))
+}
+
 pub(super) fn execute_file_operation_with_progress(
     job: FileOperationJob,
     conflict_choice: ConflictChoice,
@@ -4061,6 +4450,9 @@ pub(super) fn execute_file_operation_with_progress(
     terminate: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
+    if job.kind == FileOperationKind::Compress {
+        return execute_compress_operation_with_progress(job, cancel, on_progress);
+    }
     if job.kind != FileOperationKind::Extract {
         return execute_copy_move_operation_with_progress(
             job,
@@ -4281,6 +4673,7 @@ pub(super) fn execute_file_operation_with_progress(
                 result?;
                 operated_destinations.insert(destination.clone());
             }
+            FileOperationStep::CompressArchive(_) => {}
             FileOperationStep::RemoveEmptyDirectory(path) => {
                 progress.phase = FileOperationPhase::Removing;
                 progress.current_item = Some(path.clone());
@@ -6215,6 +6608,122 @@ mod tests {
             cfg!(target_os = "windows")
         );
         assert!(!mountable_image_extension_is_supported("zip"));
+    }
+
+    #[test]
+    fn compress_single_file_uses_full_name_selects_result_and_increments_collisions() {
+        let temp = TempDir::new();
+        let source = temp.path().join("report.txt");
+        fs::write(&source, b"hello zip").expect("create source");
+        fs::write(temp.path().join("report.txt.zip"), b"existing").expect("create collision");
+        fs::write(temp.path().join("report.txt 3.zip"), b"existing").expect("create gap");
+
+        let job = ready_job(prepare_compress_paths(std::slice::from_ref(&source)));
+        let summary = execute_file_operation(job, ConflictChoice::Replace).expect("compress file");
+
+        assert_eq!(summary.kind, FileOperationKind::Compress);
+        assert_eq!(summary.destination_paths.len(), 1);
+        let destination = &summary.destination_paths[0];
+        assert_eq!(destination.file_name().unwrap(), "report.txt 2.zip");
+        assert_eq!(fs::read(&source).unwrap(), b"hello zip");
+        assert_eq!(summary.copy_undo.created_files, vec![destination.clone()]);
+        let mut archive = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+        let mut compressed = archive.by_name("report.txt").unwrap();
+        let mut contents = Vec::new();
+        compressed.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"hello zip");
+    }
+
+    #[test]
+    fn compress_multiple_items_preserves_top_level_names_and_empty_directories() {
+        let temp = TempDir::new();
+        let file = temp.path().join("readme.md");
+        let folder = temp.path().join("src");
+        let empty = folder.join("empty");
+        fs::create_dir_all(&empty).expect("create folders");
+        fs::write(&file, b"readme").expect("create file");
+        fs::write(folder.join("main.rs"), b"fn main() {}").expect("create nested file");
+
+        let job = ready_job(prepare_compress_paths(&[file.clone(), folder.clone()]));
+        let summary = execute_file_operation(job, ConflictChoice::Replace).expect("compress items");
+        let destination = &summary.destination_paths[0];
+        assert_eq!(destination.file_name().unwrap(), "Archive.zip");
+        let mut archive = zip::ZipArchive::new(File::open(destination).unwrap()).unwrap();
+        let mut names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["readme.md", "src/", "src/empty/", "src/main.rs"]
+        );
+    }
+
+    #[test]
+    fn compress_rejects_different_parents() {
+        let temp = TempDir::new();
+        let first_parent = temp.path().join("one");
+        let second_parent = temp.path().join("two");
+        fs::create_dir_all(&first_parent).unwrap();
+        fs::create_dir_all(&second_parent).unwrap();
+        let first = first_parent.join("a.txt");
+        let second = second_parent.join("b.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+
+        assert!(
+            prepare_compress_paths(&[first, second])
+                .unwrap_err()
+                .contains("same folder")
+        );
+    }
+
+    #[test]
+    fn compress_cancellation_removes_incomplete_archive() {
+        let temp = TempDir::new();
+        let source = temp.path().join("large.bin");
+        fs::write(&source, vec![7; COPY_BUFFER_SIZE * 2]).expect("create source");
+        let job = ready_job(prepare_compress_paths(std::slice::from_ref(&source)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let request_cancel = cancel.clone();
+
+        let result = execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+            move |progress| {
+                if progress.phase == FileOperationPhase::Compressing && progress.copied_bytes > 0 {
+                    request_cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+
+        assert_eq!(result, Err(FileOperationError::Cancelled));
+        assert!(source.exists());
+        assert!(!temp.path().join("large.bin.zip").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compress_preserves_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new();
+        let target = temp.path().join("target.txt");
+        let link = temp.path().join("link.txt");
+        fs::write(&target, b"target contents").unwrap();
+        symlink("target.txt", &link).unwrap();
+
+        let job = ready_job(prepare_compress_paths(std::slice::from_ref(&link)));
+        let summary = execute_file_operation(job, ConflictChoice::Replace).unwrap();
+        let mut archive =
+            zip::ZipArchive::new(File::open(&summary.destination_paths[0]).unwrap()).unwrap();
+        let mut entry = archive.by_name("link.txt").unwrap();
+        assert_eq!(entry.unix_mode().unwrap() & 0o170000, 0o120000);
+        let mut target_name = String::new();
+        entry.read_to_string(&mut target_name).unwrap();
+        assert_eq!(target_name, "target.txt");
     }
 
     #[cfg(target_os = "macos")]

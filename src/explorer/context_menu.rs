@@ -20,7 +20,7 @@ use crate::explorer::{
     view::{ExplorerView, ExplorerViewEvent},
 };
 use crate::settings::{
-    ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
+    ContextMenuAction, ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
     resolve_context_menu_only_filter,
 };
 
@@ -78,6 +78,7 @@ pub(super) enum ContextMenuIcon {
     New,
     Properties,
     RunElevated,
+    Compress,
     Extract,
     Mount,
     File,
@@ -145,6 +146,9 @@ pub(super) enum ContextMenuCommand {
     },
     NewFile,
     NewFolder,
+    Compress {
+        paths: Vec<PathBuf>,
+    },
     RunCustom {
         executable: PathBuf,
         args: Vec<String>,
@@ -440,6 +444,7 @@ impl ExplorerView {
             }
             ContextMenuCommand::NewFile => self.create_new_file(window, cx),
             ContextMenuCommand::NewFolder => self.create_new_folder(window, cx),
+            ContextMenuCommand::Compress { paths } => self.compress_paths(paths, cx),
             ContextMenuCommand::RunCustom {
                 executable,
                 args,
@@ -1348,6 +1353,7 @@ fn entry_context_menu_items_with_custom(
         custom_items,
         targets,
         CustomContextMenuTarget::Entries(selected_entries),
+        recursive_search_results_active,
     );
 
     items.extend([
@@ -1526,6 +1532,7 @@ fn folder_context_menu_items_with_custom(
             custom_items,
             &[path.to_path_buf()],
             CustomContextMenuTarget::Directory,
+            false,
         );
     }
     items
@@ -1692,12 +1699,19 @@ fn insert_custom_items_after_first_separator(
     configured: &[CustomContextMenuItem],
     targets: &[PathBuf],
     target: CustomContextMenuTarget<'_>,
+    recursive_search_results_active: bool,
 ) {
     let custom = configured
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            configured_context_menu_item(item, targets, target, &index.to_string())
+            configured_context_menu_item(
+                item,
+                targets,
+                target,
+                recursive_search_results_active,
+                &index.to_string(),
+            )
         })
         .collect::<Vec<_>>();
     if custom.is_empty() {
@@ -1720,9 +1734,43 @@ fn configured_context_menu_item(
     item: &CustomContextMenuItem,
     targets: &[PathBuf],
     target: CustomContextMenuTarget<'_>,
+    recursive_search_results_active: bool,
     id_suffix: &str,
 ) -> Option<ContextMenuItem> {
     match item {
+        CustomContextMenuItem::Action {
+            label,
+            action,
+            only,
+            ..
+        } => {
+            if recursive_search_results_active
+                || !context_menu_item_matches_only(only, target)
+                || !paths_share_parent(targets)
+            {
+                return None;
+            }
+            let icon = match item.resolved_icon() {
+                Some(ContextMenuConfiguredIcon::Image(path)) => ContextMenuIcon::ImagePath(path),
+                Some(ContextMenuConfiguredIcon::Url(url)) => ContextMenuIcon::ImageUrl(url),
+                Some(ContextMenuConfiguredIcon::NativePath(path)) => {
+                    ContextMenuIcon::NativePathOptional(path)
+                }
+                None => ContextMenuIcon::Compress,
+            };
+            let command = match action {
+                ContextMenuAction::Compress => ContextMenuCommand::Compress {
+                    paths: targets.to_vec(),
+                },
+            };
+            Some(ContextMenuItem::Action {
+                id: format!("context-menu-custom-{id_suffix}"),
+                icon: Some(icon),
+                label: label.clone(),
+                command,
+                enabled: true,
+            })
+        }
         CustomContextMenuItem::Item {
             label, args, only, ..
         } => {
@@ -1765,6 +1813,7 @@ fn configured_context_menu_item(
                         item,
                         targets,
                         target,
+                        recursive_search_results_active,
                         &format!("{id_suffix}-{index}"),
                     )
                 })
@@ -1787,6 +1836,15 @@ fn configured_context_menu_item(
             })
         }
     }
+}
+
+fn paths_share_parent(paths: &[PathBuf]) -> bool {
+    let Some(parent) = paths.first().and_then(|path| path.parent()) else {
+        return false;
+    };
+    paths
+        .iter()
+        .all(|path| path.parent().is_some_and(|candidate| candidate == parent))
 }
 
 #[derive(Clone, Copy)]
@@ -1947,7 +2005,7 @@ pub(super) fn context_submenu_left(
 mod tests {
     use super::*;
     use crate::explorer::test_support::{TempDir, test_view_entity_at_path};
-    use crate::settings::CustomContextMenuItem;
+    use crate::settings::{ContextMenuAction, CustomContextMenuItem};
     use gpui::AppContext;
     use std::time::UNIX_EPOCH;
 
@@ -4127,6 +4185,80 @@ mod tests {
             &only,
             CustomContextMenuTarget::Entries(&mixed)
         ));
+    }
+
+    #[test]
+    fn compress_action_requires_same_parent_and_is_hidden_in_recursive_search() {
+        let configured = vec![CustomContextMenuItem::Action {
+            label: "Compress".to_owned(),
+            action: ContextMenuAction::Compress,
+            icon: None,
+            only: vec!["*file".to_owned(), "*folder".to_owned()],
+        }];
+        let entries = vec![
+            FileEntry::test("root/a.txt", false, Some(1), None),
+            FileEntry::test("root/folder", true, None, None),
+        ];
+        let same_parent = vec![PathBuf::from("root/a.txt"), PathBuf::from("root/folder")];
+        let items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            1,
+            1,
+            false,
+            false,
+            false,
+            &configured,
+            &same_parent,
+            &entries,
+        );
+        assert!(items.iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                icon: Some(ContextMenuIcon::Compress),
+                command: ContextMenuCommand::Compress { paths },
+                ..
+            } if paths == &same_parent
+        )));
+
+        let different_parents = vec![PathBuf::from("one/a.txt"), PathBuf::from("two/folder")];
+        let different_parent_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            1,
+            1,
+            false,
+            false,
+            false,
+            &configured,
+            &different_parents,
+            &entries,
+        );
+        assert!(!menu_has_label(&different_parent_items, "Compress"));
+
+        let recursive_items = entry_context_menu_items_with_custom(
+            None,
+            2,
+            1,
+            1,
+            false,
+            false,
+            true,
+            &configured,
+            &same_parent,
+            &entries,
+        );
+        assert!(!menu_has_label(&recursive_items, "Compress"));
+        assert!(
+            configured_context_menu_item(
+                &configured[0],
+                &[PathBuf::from("root")],
+                CustomContextMenuTarget::Directory,
+                false,
+                "0",
+            )
+            .is_none()
+        );
     }
 
     #[test]

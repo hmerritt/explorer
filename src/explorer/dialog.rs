@@ -1549,6 +1549,7 @@ fn transfer_rate_between_samples(
 fn file_operation_transfer_bytes(progress: &FileOperationProgress) -> Option<u64> {
     match progress.phase {
         FileOperationPhase::Copying
+        | FileOperationPhase::Compressing
         | FileOperationPhase::Extracting
         | FileOperationPhase::Moving => Some(progress.copied_bytes),
         FileOperationPhase::Verifying => Some(progress.verified_bytes),
@@ -1583,6 +1584,7 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
         FileOperationPhase::Indexing => "Indexing",
         FileOperationPhase::Resuming => "Resuming",
         FileOperationPhase::Copying => "Copying",
+        FileOperationPhase::Compressing => "Compressing",
         FileOperationPhase::Linking => "Creating link",
         FileOperationPhase::Verifying => "Verifying",
         FileOperationPhase::Extracting => "Extracting",

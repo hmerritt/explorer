@@ -26,10 +26,10 @@ use crate::explorer::{
         FileOperationKind, FileOperationMove, FileOperationReplacedFile, FileOperationSummary,
         PreparedFileOperation, archive_path_is_supported, cleanup_copy_undo_backups,
         execute_file_operation, execute_file_operation_with_progress,
-        mountable_image_path_is_supported, prepare_copy_paths_to_directory_for_paste,
-        prepare_extract_archives_to_directory, prepare_move_paths_to_directory,
-        remove_existing_paths_permanently, remove_paths_permanently,
-        restore_replaced_file_from_copy_undo, trash_paths,
+        mountable_image_path_is_supported, prepare_compress_paths,
+        prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
+        prepare_move_paths_to_directory, remove_existing_paths_permanently,
+        remove_paths_permanently, restore_replaced_file_from_copy_undo, trash_paths,
     },
     view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
 };
@@ -225,6 +225,16 @@ impl ExplorerView {
 
         self.handle_prepared_file_command_result_and_open_dialog(
             prepare_extract_archives_to_directory(&paths, &self.path),
+            cx,
+        );
+    }
+
+    pub(super) fn compress_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.handle_prepared_file_command_result_and_open_dialog(
+            prepare_compress_paths(&paths),
             cx,
         );
     }
@@ -651,7 +661,7 @@ impl ExplorerView {
 
     fn record_file_operation_undo(&mut self, summary: &FileOperationSummary) {
         match summary.kind {
-            FileOperationKind::Copy | FileOperationKind::Link => {
+            FileOperationKind::Copy | FileOperationKind::Link | FileOperationKind::Compress => {
                 if !summary.copy_undo.is_empty() {
                     self.push_file_operation_undo(Some(FileOperationUndo::Copy {
                         undo: summary.copy_undo.clone(),
@@ -2148,6 +2158,30 @@ mod tests {
         });
 
         assert!(view.file_operation_undo_stack.is_empty());
+    }
+
+    #[test]
+    fn compression_summary_selects_archive_and_records_created_file_undo() {
+        let temp = TempDir::new();
+        let source = temp.path().join("notes.txt");
+        fs::write(&source, b"notes").expect("create source");
+        let prepared = prepare_compress_paths(std::slice::from_ref(&source)).unwrap();
+        let PreparedFileOperation::Ready(job) = prepared else {
+            panic!("compression should not conflict");
+        };
+        let summary = execute_file_operation(job, ConflictChoice::Replace).unwrap();
+        let archive = summary.destination_paths[0].clone();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        view.finish_file_operation_for_test(summary);
+
+        assert_eq!(selected_names(&view), vec!["notes.txt.zip"]);
+        assert_eq!(view.file_operation_undo_stack.len(), 1);
+        let undo = view.file_operation_undo_stack.last().cloned().unwrap();
+        view.apply_file_operation_undo(undo)
+            .expect("undo compression");
+        assert!(!archive.exists());
+        assert!(source.exists());
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

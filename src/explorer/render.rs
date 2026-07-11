@@ -70,11 +70,11 @@ use crate::explorer::{
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
-        COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON, EJECT_ICON,
-        EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON, HAMBURGER_ICON,
-        LARGE_ICONS_ICON, MOUNT_DISC_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon, OPEN_WITH_ICON,
-        PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON, SHORTCUT_ICON,
-        SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
+        ARCHIVE_FILE_ICON, COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON,
+        EJECT_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON,
+        HAMBURGER_ICON, LARGE_ICONS_ICON, MOUNT_DISC_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon,
+        OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON,
+        SHORTCUT_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
         directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
         drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
@@ -4848,6 +4848,10 @@ fn context_menu_icon_element(
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),
         ContextMenuIcon::RunElevated => gpui::img(RUN_ELEVATED_ICON.clone())
+            .w(px(CONTEXT_MENU_ICON_SIZE))
+            .h(px(CONTEXT_MENU_ICON_SIZE))
+            .into_any_element(),
+        ContextMenuIcon::Compress => gpui::img(ARCHIVE_FILE_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
             .into_any_element(),

@@ -1,8 +1,5 @@
 ## 1
 
-- macOS fixes and tweaks:
-    - (compression)
-
 ## 2
 
 - Drive total size + used, GB and percentages

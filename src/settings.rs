@@ -259,6 +259,12 @@ impl Serialize for SerializableSidebarItems<'_> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CustomContextMenuItem {
+    Action {
+        label: String,
+        action: ContextMenuAction,
+        icon: Option<PathBuf>,
+        only: Vec<String>,
+    },
     Item {
         label: String,
         exe: PathBuf,
@@ -271,6 +277,21 @@ pub enum CustomContextMenuItem {
         icon: Option<PathBuf>,
         items: Vec<CustomContextMenuItem>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMenuAction {
+    Compress,
+}
+
+fn compress_context_menu_item() -> CustomContextMenuItem {
+    CustomContextMenuItem::Action {
+        label: "Compress".to_owned(),
+        action: ContextMenuAction::Compress,
+        icon: None,
+        only: vec!["*file".to_owned(), "*folder".to_owned()],
+    }
 }
 
 fn default_context_menu_items() -> Vec<CustomContextMenuItem> {
@@ -287,21 +308,25 @@ fn default_context_menu_items_for(
     macos_application_available: impl Fn(&str) -> bool,
 ) -> Vec<CustomContextMenuItem> {
     let only = || vec!["*directory".to_owned(), "*folders".to_owned()];
-    let item = match platform {
+    let terminal = match platform {
         ConfigPlatform::Windows => {
             return vec![
-                CustomContextMenuItem::Item {
-                    label: "Add to archive...".to_owned(),
-                    exe: PathBuf::from("7zG"),
-                    icon: None,
-                    args: vec![
-                        "a".to_owned(),
-                        "-ad".to_owned(),
-                        "-saa".to_owned(),
-                        "{path}".to_owned(),
-                        "{paths}".to_owned(),
-                    ],
-                    only: vec!["*file".to_owned(), "*folder".to_owned()],
+                if executable_available("7zG") {
+                    CustomContextMenuItem::Item {
+                        label: "Add to archive...".to_owned(),
+                        exe: PathBuf::from("7zG"),
+                        icon: None,
+                        args: vec![
+                            "a".to_owned(),
+                            "-ad".to_owned(),
+                            "-saa".to_owned(),
+                            "{path}".to_owned(),
+                            "{paths}".to_owned(),
+                        ],
+                        only: vec!["*file".to_owned(), "*folder".to_owned()],
+                    }
+                } else {
+                    compress_context_menu_item()
                 },
                 CustomContextMenuItem::Item {
                     label: "Terminal".to_owned(),
@@ -354,11 +379,11 @@ fn default_context_menu_items_for(
                     only: only(),
                 }
             } else {
-                return Vec::new();
+                return vec![compress_context_menu_item()];
             }
         }
     };
-    vec![item]
+    vec![compress_context_menu_item(), terminal]
 }
 
 #[cfg(target_os = "macos")]
@@ -404,6 +429,30 @@ impl Serialize for CustomContextMenuItem {
         S: Serializer,
     {
         match self {
+            Self::Action {
+                label,
+                action,
+                icon,
+                only,
+            } => {
+                let mut length = 2;
+                if icon.is_some() {
+                    length += 1;
+                }
+                if !only.is_empty() {
+                    length += 1;
+                }
+                let mut map = serializer.serialize_map(Some(length))?;
+                map.serialize_entry("label", label)?;
+                map.serialize_entry("action", action)?;
+                if let Some(icon) = icon {
+                    map.serialize_entry("icon", icon)?;
+                }
+                if !only.is_empty() {
+                    map.serialize_entry("only", only)?;
+                }
+                map.end()
+            }
             Self::Item {
                 label,
                 exe,
@@ -467,9 +516,40 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
             .transpose()
             .map_err(de::Error::custom)?;
 
-        if let Some(items) = object.remove("items") {
+        let action = object.remove("action");
+        let items = object.remove("items");
+        if action.is_some() && items.is_some() {
+            return Err(de::Error::custom(
+                "contextmenu items cannot contain both action and items",
+            ));
+        }
+        if let Some(items) = items {
             let items = serde_json::from_value(items).map_err(de::Error::custom)?;
             return Ok(Self::Submenu { label, icon, items });
+        }
+
+        if let Some(action) = action {
+            if object.contains_key("exe")
+                || object.contains_key("executable")
+                || object.contains_key("args")
+            {
+                return Err(de::Error::custom(
+                    "contextmenu action items cannot contain exe or args",
+                ));
+            }
+            let action = serde_json::from_value(action).map_err(de::Error::custom)?;
+            let only = object
+                .remove("only")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(de::Error::custom)?
+                .unwrap_or_default();
+            return Ok(Self::Action {
+                label,
+                action,
+                icon,
+                only,
+            });
         }
 
         let exe = object
@@ -800,27 +880,29 @@ impl LegacySidebarLocation {
 impl CustomContextMenuItem {
     pub(crate) fn label(&self) -> &str {
         match self {
-            Self::Item { label, .. } | Self::Submenu { label, .. } => label,
+            Self::Action { label, .. } | Self::Item { label, .. } | Self::Submenu { label, .. } => {
+                label
+            }
         }
     }
 
     pub(crate) fn resolved_executable(&self) -> Option<PathBuf> {
         match self {
             Self::Item { exe, .. } => resolve_context_menu_executable(exe),
-            Self::Submenu { .. } => None,
+            Self::Action { .. } | Self::Submenu { .. } => None,
         }
     }
 
     pub(crate) fn resolved_executable_icon_path(&self, executable: &Path) -> PathBuf {
         match self {
             Self::Item { .. } => context_menu_executable_icon_path(executable),
-            Self::Submenu { .. } => executable.to_path_buf(),
+            Self::Action { .. } | Self::Submenu { .. } => executable.to_path_buf(),
         }
     }
 
     pub(crate) fn resolved_icon(&self) -> Option<ContextMenuConfiguredIcon> {
         match self {
-            Self::Item { icon, .. } | Self::Submenu { icon, .. } => {
+            Self::Action { icon, .. } | Self::Item { icon, .. } | Self::Submenu { icon, .. } => {
                 resolve_context_menu_icon(icon.as_deref())
             }
         }
@@ -835,7 +917,9 @@ fn add_directory_only_to_context_menu_items(items: &mut [CustomContextMenuItem])
 
 fn add_directory_only_to_context_menu_item(item: &mut CustomContextMenuItem) {
     match item {
-        CustomContextMenuItem::Item { only, .. } => add_directory_only_filter(only),
+        CustomContextMenuItem::Action { only, .. } | CustomContextMenuItem::Item { only, .. } => {
+            add_directory_only_filter(only)
+        }
         CustomContextMenuItem::Submenu { items, .. } => {
             add_directory_only_to_context_menu_items(items);
         }
@@ -1317,6 +1401,10 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
         }
 
         match item {
+            CustomContextMenuItem::Action { icon, only, .. } => {
+                validate_context_menu_icon(icon.as_deref())?;
+                validate_context_menu_only_extensions(only)?;
+            }
             CustomContextMenuItem::Item {
                 exe, icon, only, ..
             } => {
@@ -2369,7 +2457,11 @@ mod tests {
     #[test]
     fn windows_default_contextmenu_adds_archive_before_terminal() {
         assert_eq!(
-            default_context_menu_items_for(ConfigPlatform::Windows, |_| false, |_| false),
+            default_context_menu_items_for(
+                ConfigPlatform::Windows,
+                |executable| executable == "7zG",
+                |_| false,
+            ),
             vec![
                 CustomContextMenuItem::Item {
                     label: "Add to archive...".to_owned(),
@@ -2393,6 +2485,11 @@ mod tests {
                 },
             ]
         );
+        assert!(matches!(
+            default_context_menu_items_for(ConfigPlatform::Windows, |_| false, |_| false).as_slice(),
+            [CustomContextMenuItem::Action { action: ContextMenuAction::Compress, .. }, CustomContextMenuItem::Item { label, .. }]
+                if label == "Terminal"
+        ));
     }
 
     #[test]
@@ -2404,13 +2501,16 @@ mod tests {
         );
         assert_eq!(
             cmux,
-            vec![CustomContextMenuItem::Item {
-                label: "cmux".to_owned(),
-                exe: PathBuf::from("/usr/bin/open"),
-                icon: Some(PathBuf::from(CMUX_ICON_URL)),
-                args: vec!["-a".to_owned(), "cmux".to_owned(), "{path}".to_owned()],
-                only: vec!["*directory".to_owned(), "*folders".to_owned()],
-            }]
+            vec![
+                compress_context_menu_item(),
+                CustomContextMenuItem::Item {
+                    label: "cmux".to_owned(),
+                    exe: PathBuf::from("/usr/bin/open"),
+                    icon: Some(PathBuf::from(CMUX_ICON_URL)),
+                    args: vec!["-a".to_owned(), "cmux".to_owned(), "{path}".to_owned()],
+                    only: vec!["*directory".to_owned(), "*folders".to_owned()],
+                },
+            ]
         );
 
         let ghostty = default_context_menu_items_for(
@@ -2420,7 +2520,7 @@ mod tests {
         );
         assert!(matches!(
             ghostty.as_slice(),
-            [CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
+            [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
                 if label == "Ghostty"
                     && icon == Path::new(GHOSTTY_ICON_URL)
                     && args == &["-a", "Ghostty", "{path}"]
@@ -2429,7 +2529,7 @@ mod tests {
         let terminal = default_context_menu_items_for(ConfigPlatform::MacOS, |_| false, |_| false);
         assert!(matches!(
             terminal.as_slice(),
-            [CustomContextMenuItem::Item { label, icon: None, args, .. }]
+            [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: None, args, .. }]
                 if label == "Terminal" && args == &["-a", "Terminal", "{path}"]
         ));
     }
@@ -2439,7 +2539,7 @@ mod tests {
         let ghostty = default_context_menu_items_for(ConfigPlatform::Linux, |_| true, |_| false);
         assert!(matches!(
             ghostty.as_slice(),
-            [CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
+            [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
                 if label == "Ghostty"
                     && icon == Path::new(GHOSTTY_ICON_URL)
                     && args == &["--working-directory", "{path}"]
@@ -2452,7 +2552,7 @@ mod tests {
         );
         assert!(matches!(
             xdg.as_slice(),
-            [CustomContextMenuItem::Item { exe, args, .. }]
+            [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { exe, args, .. }]
                 if exe == Path::new("xdg-terminal-exec") && args == &["{cwd}"]
         ));
 
@@ -2463,11 +2563,43 @@ mod tests {
         );
         assert!(matches!(
             legacy.as_slice(),
-            [CustomContextMenuItem::Item { exe, args, .. }]
+            [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { exe, args, .. }]
                 if exe == Path::new("x-terminal-emulator") && args == &["{cwd}"]
         ));
+        assert_eq!(
+            default_context_menu_items_for(ConfigPlatform::Linux, |_| false, |_| false),
+            vec![compress_context_menu_item()]
+        );
+    }
+
+    #[test]
+    fn contextmenu_compress_action_round_trips_and_rejects_ambiguous_items() {
+        let item: CustomContextMenuItem = serde_json::from_str(
+            r#"{"label":"Zip it","action":"compress","icon":"https://example.com/archive.png","only":["*file","*folder"]}"#,
+        )
+        .expect("deserialize compress action");
+        assert!(matches!(
+            &item,
+            CustomContextMenuItem::Action {
+                label,
+                action: ContextMenuAction::Compress,
+                icon: Some(icon),
+                only,
+            } if label == "Zip it"
+                && icon == Path::new("https://example.com/archive.png")
+                && only == &["*file", "*folder"]
+        ));
+        let serialized = serde_json::to_value(&item).expect("serialize compress action");
+        assert_eq!(serialized["action"], "compress");
         assert!(
-            default_context_menu_items_for(ConfigPlatform::Linux, |_| false, |_| false).is_empty()
+            serde_json::from_str::<CustomContextMenuItem>(
+                r#"{"label":"Bad","action":"compress","exe":"zip"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<CustomContextMenuItem>(r#"{"label":"Bad","action":"unknown"}"#)
+                .is_err()
         );
     }
 

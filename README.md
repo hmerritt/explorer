@@ -76,6 +76,7 @@ scoop install hmerritt/explorer
     - [x] Video frames preview in properties
 - [x] A simple, functional, built-in image viewer (you can set `explorer` to the default image viewer)
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
+- [x] Native ZIP creation with Finder-style `Compress` naming and progress
 
 ## 🔃 'Anti-Features' that will NOT be implemented
 
@@ -138,6 +139,34 @@ Example with sidebar and contextmenu items:
     ]
 }
 ```
+
+Context-menu entries can launch an external executable or invoke a built-in action. The native
+no-dialog ZIP action is configured as:
+
+```json
+{
+    "label": "Compress",
+    "action": "compress",
+    "only": ["*file", "*folder"]
+}
+```
+
+It creates `<item name>.zip` for one item or `Archive.zip` for multiple items beside the
+selection, adding ` 2`, ` 3`, and so on when a name already exists. Selected items must share a
+folder, and the action is hidden in recursive search results. ZIPs preserve portable timestamps,
+permissions, empty folders, and symbolic links; macOS resource forks and extended attributes are
+not included.
+
+New settings place Compress before the terminal launcher on macOS and Linux. Windows uses the
+existing `7zG` “Add to archive...” entry when `7zG` is available through `PATH`/`PATHEXT`, falling
+back to Compress otherwise, and then adds Windows Terminal. Generated defaults are serialized
+once; existing explicit arrays, including `[]`, are not rewritten when installed applications
+change.
+
+External entries use `exe` and `args`. `{path}` expands to the first target, `{paths}` to every
+target, and an exact `{cwd}` sets the process working directory to the first target without adding
+implicit path arguments. The `only` list accepts `*directory` for a folder background, `*file` or
+`*folder` for individual selections, and the existing plural aliases and file extensions.
 
 ## Development
 

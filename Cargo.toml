@@ -46,12 +46,14 @@ mime_guess = "2.0.5"
 moxcms = "0.8.1"
 resvg = { version = "0.45.0", default-features = false }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "time"] }
+time = { version = "0.3.7", default-features = false, features = ["std"] }
 trash = "5.2.6"
 unrar = "0.4.4"
 usvg = { version = "0.45.0", default-features = false }
 sevenz-rust2 = "0.21.0"
 kamadak-exif = "0.6.1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+zip = "0.6.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_NetworkManagement_WNet", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
@@ -76,7 +78,6 @@ criterion = "0.8.2"
 flate2 = "1.1.9"
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "test-support", "wayland", "windows-manifest", "x11"] }
 tar = "0.4.46"
-zip = "0.6.6"
 
 [[bench]]
 name = "recursive_search"
