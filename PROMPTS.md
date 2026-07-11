@@ -1,5 +1,7 @@
 ## 1
 
+- Improve linux install.sh script (see aura's install script)
+
 ## 2
 
 - Drive total size + used, GB and percentages

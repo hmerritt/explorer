@@ -4748,6 +4748,41 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_cwd_launch_uses_first_target_without_arguments() {
+        let executable = PathBuf::from("ghostty");
+        let args = vec!["{cwd}".to_owned()];
+        let targets = vec![
+            PathBuf::from("/home/user/First Project"),
+            PathBuf::from("/home/user/Second Project"),
+        ];
+        let mut calls = Vec::new();
+
+        run_custom_command_with(
+            &executable,
+            &args,
+            &targets,
+            |actual_executable, actual_arguments, working_directory| {
+                calls.push((
+                    actual_executable.to_path_buf(),
+                    actual_arguments.to_vec(),
+                    working_directory.map(Path::to_path_buf),
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            vec![(
+                executable,
+                Vec::new(),
+                Some(PathBuf::from("/home/user/First Project")),
+            )]
+        );
+    }
+
+    #[test]
     fn custom_command_cwd_placeholder_suppresses_targets_when_selection_is_empty() {
         assert_eq!(
             custom_command_arguments(&["{cwd}".to_owned()], &[]),

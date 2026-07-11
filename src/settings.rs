@@ -359,7 +359,7 @@ fn default_context_menu_items_for(
                     label: "Ghostty".to_owned(),
                     exe: PathBuf::from("ghostty"),
                     icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
-                    args: vec!["--working-directory".to_owned(), "{path}".to_owned()],
+                    args: vec!["{cwd}".to_owned()],
                     only: only(),
                 }
             } else if executable_available("xdg-terminal-exec") {
@@ -1329,6 +1329,13 @@ fn load_settings_from_path(path: &Path) -> io::Result<ExplorerSettings> {
 }
 
 fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
+    load_settings_document_from_path_for(path, current_config_platform())
+}
+
+fn load_settings_document_from_path_for(
+    path: &Path,
+    platform: ConfigPlatform,
+) -> io::Result<LoadedSettings> {
     let source = fs::read_to_string(path)?;
     if source.trim().is_empty() {
         let value = ExplorerSettings::default();
@@ -1338,8 +1345,9 @@ fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
     }
 
     let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
-    let value =
+    let mut value =
         serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
+    migrate_settings_for_platform(&mut value, platform);
     validate_settings(&value)?;
 
     if !document.is_object() {
@@ -1359,6 +1367,34 @@ fn load_settings_document_from_path(path: &Path) -> io::Result<LoadedSettings> {
     }
 
     Ok(LoadedSettings { value, document })
+}
+
+fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: ConfigPlatform) {
+    if platform != ConfigPlatform::Linux {
+        return;
+    }
+
+    for item in &mut settings.contextmenu.items {
+        let CustomContextMenuItem::Item {
+            label,
+            exe,
+            icon,
+            args,
+            only,
+        } = item
+        else {
+            continue;
+        };
+
+        if label == "Ghostty"
+            && exe == Path::new("ghostty")
+            && icon.as_deref() == Some(Path::new(GHOSTTY_ICON_URL))
+            && args == &["--working-directory", "{path}"]
+            && only == &["*directory", "*folders"]
+        {
+            *args = vec!["{cwd}".to_owned()];
+        }
+    }
 }
 
 fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
@@ -2542,7 +2578,7 @@ mod tests {
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
                 if label == "Ghostty"
                     && icon == Path::new(GHOSTTY_ICON_URL)
-                    && args == &["--working-directory", "{path}"]
+                    && args == &["{cwd}"]
         ));
 
         let xdg = default_context_menu_items_for(
@@ -2570,6 +2606,92 @@ mod tests {
             default_context_menu_items_for(ConfigPlatform::Linux, |_| false, |_| false),
             vec![compress_context_menu_item()]
         );
+    }
+
+    #[test]
+    fn linux_ghostty_default_migration_normalizes_exact_item_on_disk() {
+        let path = unique_temp_dir("linux-ghostty-default-migration").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::json!({
+                "contextmenu": [{
+                    "label": "Ghostty",
+                    "exe": "ghostty",
+                    "icon": GHOSTTY_ICON_URL,
+                    "args": ["--working-directory", "{path}"],
+                    "only": ["*directory", "*folders"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_settings_document_from_path_for(&path, ConfigPlatform::Linux).unwrap();
+        assert!(matches!(
+            loaded.value.contextmenu.items.as_slice(),
+            [CustomContextMenuItem::Item { args, .. }] if args == &["{cwd}"]
+        ));
+
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            normalized["contextmenu"][0]["args"],
+            serde_json::json!(["{cwd}"])
+        );
+    }
+
+    #[test]
+    fn linux_ghostty_default_migration_leaves_custom_and_nested_items_unchanged() {
+        let mut settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+            "contextmenu": [
+                {
+                    "label": "Open Ghostty",
+                    "exe": "ghostty",
+                    "icon": GHOSTTY_ICON_URL,
+                    "args": ["--working-directory", "{path}"],
+                    "only": ["*directory", "*folders"]
+                },
+                {
+                    "label": "Ghostty",
+                    "exe": "ghostty",
+                    "icon": GHOSTTY_ICON_URL,
+                    "args": ["--working-directory", "{path}"],
+                    "only": ["*folders", "*directory"]
+                },
+                {
+                    "label": "Terminals",
+                    "items": [{
+                        "label": "Ghostty",
+                        "exe": "ghostty",
+                        "icon": GHOSTTY_ICON_URL,
+                        "args": ["--working-directory", "{path}"],
+                        "only": ["*directory", "*folders"]
+                    }]
+                }
+            ]
+        }))
+        .unwrap();
+        let original = settings.contextmenu.clone();
+
+        migrate_settings_for_platform(&mut settings, ConfigPlatform::Linux);
+
+        assert_eq!(settings.contextmenu, original);
+
+        let mut windows_settings = ExplorerSettings {
+            contextmenu: ContextMenuSettings {
+                items: vec![CustomContextMenuItem::Item {
+                    label: "Ghostty".to_owned(),
+                    exe: PathBuf::from("ghostty"),
+                    icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
+                    args: vec!["--working-directory".to_owned(), "{path}".to_owned()],
+                    only: vec!["*directory".to_owned(), "*folders".to_owned()],
+                }],
+            },
+            ..ExplorerSettings::default()
+        };
+        let original = windows_settings.contextmenu.clone();
+        migrate_settings_for_platform(&mut windows_settings, ConfigPlatform::Windows);
+        assert_eq!(windows_settings.contextmenu, original);
     }
 
     #[test]

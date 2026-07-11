@@ -151,23 +151,6 @@ no-dialog ZIP action is configured as:
 }
 ```
 
-It creates `<item name>.zip` for one item or `Archive.zip` for multiple items beside the
-selection, adding ` 2`, ` 3`, and so on when a name already exists. Selected items must share a
-folder, and the action is hidden in recursive search results. ZIPs preserve portable timestamps,
-permissions, empty folders, and symbolic links; macOS resource forks and extended attributes are
-not included.
-
-New settings place Compress before the terminal launcher on macOS and Linux. Windows uses the
-existing `7zG` “Add to archive...” entry when `7zG` is available through `PATH`/`PATHEXT`, falling
-back to Compress otherwise, and then adds Windows Terminal. Generated defaults are serialized
-once; existing explicit arrays, including `[]`, are not rewritten when installed applications
-change.
-
-External entries use `exe` and `args`. `{path}` expands to the first target, `{paths}` to every
-target, and an exact `{cwd}` sets the process working directory to the first target without adding
-implicit path arguments. The `only` list accepts `*directory` for a folder background, `*file` or
-`*folder` for individual selections, and the existing plural aliases and file extensions.
-
 ## Development
 
 Explorer is a Rust 2024 project using GPUI.
