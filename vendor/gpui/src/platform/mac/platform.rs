@@ -23,8 +23,8 @@ use cocoa::{
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
-        NSArray, NSAutoreleasePool, NSBundle, NSData, NSInteger, NSProcessInfo, NSRange, NSString,
-        NSUInteger, NSURL,
+        NSArray, NSAutoreleasePool, NSBundle, NSData, NSFastEnumeration, NSInteger, NSProcessInfo,
+        NSRange, NSString, NSUInteger, NSURL,
     },
 };
 use core_foundation::{
