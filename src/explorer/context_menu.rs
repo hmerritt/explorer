@@ -687,9 +687,19 @@ fn run_custom_command(
     args: &[String],
     targets: &[PathBuf],
 ) -> std::io::Result<()> {
-    run_custom_command_with(executable, args, targets, |executable, arguments| {
-        Command::new(executable).args(arguments).spawn().map(|_| ())
-    })
+    run_custom_command_with(
+        executable,
+        args,
+        targets,
+        |executable, arguments, working_directory| {
+            let mut command = Command::new(executable);
+            command.args(arguments);
+            if let Some(working_directory) = working_directory {
+                command.current_dir(working_directory);
+            }
+            command.spawn().map(|_| ())
+        },
+    )
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -730,14 +740,25 @@ fn run_custom_command_with(
     executable: &Path,
     args: &[String],
     targets: &[PathBuf],
-    spawn: impl FnOnce(&Path, &[OsString]) -> std::io::Result<()>,
+    spawn: impl FnOnce(&Path, &[OsString], Option<&Path>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let arguments = custom_command_arguments(args, targets);
-    spawn(executable, &arguments)
+    let command = custom_command_arguments(args, targets);
+    spawn(
+        executable,
+        &command.arguments,
+        command.working_directory.as_deref(),
+    )
 }
 
-fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsString> {
+#[derive(Debug, Eq, PartialEq)]
+struct CustomCommandArguments {
+    arguments: Vec<OsString>,
+    working_directory: Option<PathBuf>,
+}
+
+fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> CustomCommandArguments {
     let mut arguments = Vec::new();
+    let mut working_directory = None;
     let mut expanded_placeholder = false;
 
     for arg in args {
@@ -756,6 +777,10 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsStrin
                         .map(|target| target.as_os_str().to_os_string()),
                 );
             }
+            "{cwd}" => {
+                expanded_placeholder = true;
+                working_directory = targets.first().cloned();
+            }
             _ => arguments.push(OsString::from(arg)),
         }
     }
@@ -768,7 +793,10 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsStrin
         );
     }
 
-    arguments
+    CustomCommandArguments {
+        arguments,
+        working_directory,
+    }
 }
 
 struct SelectedEntryContext {
@@ -4451,8 +4479,12 @@ mod tests {
             &executable,
             &args,
             &targets,
-            |actual_executable, actual_arguments| {
-                calls.push((actual_executable.to_path_buf(), actual_arguments.to_vec()));
+            |actual_executable, actual_arguments, working_directory| {
+                calls.push((
+                    actual_executable.to_path_buf(),
+                    actual_arguments.to_vec(),
+                    working_directory.map(Path::to_path_buf),
+                ));
                 Ok(())
             },
         )
@@ -4466,7 +4498,8 @@ mod tests {
                     OsString::from("--inspect"),
                     OsString::from("a.txt"),
                     OsString::from("folder")
-                ]
+                ],
+                None,
             )]
         );
     }
@@ -4482,11 +4515,14 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            vec![
-                OsString::from("--open"),
-                OsString::from("a.txt"),
-                OsString::from("--literal={path}")
-            ]
+            CustomCommandArguments {
+                arguments: vec![
+                    OsString::from("--open"),
+                    OsString::from("a.txt"),
+                    OsString::from("--literal={path}")
+                ],
+                working_directory: None,
+            }
         );
     }
 
@@ -4497,11 +4533,42 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            vec![
-                OsString::from("--open"),
-                OsString::from("a.txt"),
-                OsString::from("folder")
-            ]
+            CustomCommandArguments {
+                arguments: vec![
+                    OsString::from("--open"),
+                    OsString::from("a.txt"),
+                    OsString::from("folder")
+                ],
+                working_directory: None,
+            }
+        );
+    }
+
+    #[test]
+    fn custom_command_arguments_use_exact_cwd_placeholder_as_working_directory() {
+        let args = vec!["{cwd}".to_owned(), "--literal={cwd}".to_owned()];
+        let targets = vec![
+            PathBuf::from("first folder"),
+            PathBuf::from("second folder"),
+        ];
+
+        assert_eq!(
+            custom_command_arguments(&args, &targets),
+            CustomCommandArguments {
+                arguments: vec![OsString::from("--literal={cwd}")],
+                working_directory: Some(PathBuf::from("first folder")),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_command_cwd_placeholder_suppresses_targets_when_selection_is_empty() {
+        assert_eq!(
+            custom_command_arguments(&["{cwd}".to_owned()], &[]),
+            CustomCommandArguments {
+                arguments: Vec::new(),
+                working_directory: None,
+            }
         );
     }
 

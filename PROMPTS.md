@@ -1,14 +1,8 @@
 ## 1
 
-- Linux fixes:
-    - Explorer can't be set as default image viewer for image types (tested on Ubuntu Desktop)
 - macOS fixes and tweaks:
     - (compression)
 - Improve readme - add screenshots / branding
-- Add a default contextmenu item on all platforms (slightly different per platform) to open Termial in directory/folder
-    - Windows open `wt`
-    - Linux try (in this order): Ghostty, default terminal
-    - Macos try: cmux, Ghostty, default terminal
 
 ## 2
 

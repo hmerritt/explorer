@@ -28,6 +28,9 @@ const SETTINGS_JSON_MAX_WIDTH: usize = 120;
 pub(crate) const SIDEBAR_DEFAULT_WIDTH: u32 = 225;
 pub(crate) const SIDEBAR_MIN_WIDTH: u32 = 100;
 pub(crate) const FILE_COLUMN_MIN_WIDTH: u32 = 48;
+const WINDOWS_TERMINAL_ICON_URL: &str = "https://raw.githubusercontent.com/microsoft/terminal/9853bc96076e811cef5eab4469095fc9be58201e/res/terminal/images/Square44x44Logo.targetsize-48.png";
+const CMUX_ICON_URL: &str = "https://cmux.com/brand/app-icon-light.png";
+const GHOSTTY_ICON_URL: &str = "https://ghostty.org/favicon-32.png";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConfigPlatform {
@@ -107,9 +110,17 @@ impl Serialize for ExplorerSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextMenuSettings {
     pub items: Vec<CustomContextMenuItem>,
+}
+
+impl Default for ContextMenuSettings {
+    fn default() -> Self {
+        Self {
+            items: default_context_menu_items(),
+        }
+    }
 }
 
 impl Serialize for ContextMenuSettings {
@@ -260,6 +271,107 @@ pub enum CustomContextMenuItem {
         icon: Option<PathBuf>,
         items: Vec<CustomContextMenuItem>,
     },
+}
+
+fn default_context_menu_items() -> Vec<CustomContextMenuItem> {
+    default_context_menu_items_for(
+        current_config_platform(),
+        |executable| resolve_context_menu_executable(Path::new(executable)).is_some(),
+        macos_application_is_available,
+    )
+}
+
+fn default_context_menu_items_for(
+    platform: ConfigPlatform,
+    executable_available: impl Fn(&str) -> bool,
+    macos_application_available: impl Fn(&str) -> bool,
+) -> Vec<CustomContextMenuItem> {
+    let only = || vec!["*directory".to_owned(), "*folders".to_owned()];
+    let item = match platform {
+        ConfigPlatform::Windows => CustomContextMenuItem::Item {
+            label: "Terminal".to_owned(),
+            exe: PathBuf::from("wt"),
+            icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
+            args: vec!["-d".to_owned(), "{paths}".to_owned()],
+            only: only(),
+        },
+        ConfigPlatform::MacOS => {
+            let (label, application, icon) = if macos_application_available("cmux") {
+                ("cmux", "cmux", Some(CMUX_ICON_URL))
+            } else if macos_application_available("Ghostty") {
+                ("Ghostty", "Ghostty", Some(GHOSTTY_ICON_URL))
+            } else {
+                ("Terminal", "Terminal", None)
+            };
+            CustomContextMenuItem::Item {
+                label: label.to_owned(),
+                exe: PathBuf::from("/usr/bin/open"),
+                icon: icon.map(PathBuf::from),
+                args: vec!["-a".to_owned(), application.to_owned(), "{path}".to_owned()],
+                only: only(),
+            }
+        }
+        ConfigPlatform::Linux => {
+            if executable_available("ghostty") {
+                CustomContextMenuItem::Item {
+                    label: "Ghostty".to_owned(),
+                    exe: PathBuf::from("ghostty"),
+                    icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
+                    args: vec!["--working-directory".to_owned(), "{path}".to_owned()],
+                    only: only(),
+                }
+            } else if executable_available("xdg-terminal-exec") {
+                CustomContextMenuItem::Item {
+                    label: "Terminal".to_owned(),
+                    exe: PathBuf::from("xdg-terminal-exec"),
+                    icon: None,
+                    args: vec!["{cwd}".to_owned()],
+                    only: only(),
+                }
+            } else if executable_available("x-terminal-emulator") {
+                CustomContextMenuItem::Item {
+                    label: "Terminal".to_owned(),
+                    exe: PathBuf::from("x-terminal-emulator"),
+                    icon: None,
+                    args: vec!["{cwd}".to_owned()],
+                    only: only(),
+                }
+            } else {
+                return Vec::new();
+            }
+        }
+    };
+    vec![item]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_is_available(name: &str) -> bool {
+    use cocoa::{
+        base::{id, nil},
+        foundation::NSString,
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let available = (|| {
+            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace == nil {
+                return false;
+            }
+            let name = NSString::alloc(nil).init_str(name);
+            let _: id = msg_send![name, autorelease];
+            let path: id = msg_send![workspace, fullPathForApplication: name];
+            path != nil
+        })();
+        let _: () = msg_send![pool, drain];
+        available
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_application_is_available(_name: &str) -> bool {
+    false
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2188,7 +2300,7 @@ mod tests {
     #[test]
     fn defaults_match_generated_settings_contract() {
         let settings = ExplorerSettings::default();
-        assert!(settings.contextmenu.items.is_empty());
+        assert_eq!(settings.contextmenu.items, default_context_menu_items());
         assert!(settings.view.show_dotfiles);
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
@@ -2235,6 +2347,111 @@ mod tests {
             settings.sidebar.items.len(),
             if cfg!(target_os = "macos") { 6 } else { 4 }
         );
+    }
+
+    #[test]
+    fn windows_default_contextmenu_opens_windows_terminal() {
+        assert_eq!(
+            default_context_menu_items_for(ConfigPlatform::Windows, |_| false, |_| false),
+            vec![CustomContextMenuItem::Item {
+                label: "Terminal".to_owned(),
+                exe: PathBuf::from("wt"),
+                icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
+                args: vec!["-d".to_owned(), "{paths}".to_owned()],
+                only: vec!["*directory".to_owned(), "*folders".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn macos_default_contextmenu_prefers_cmux_then_ghostty_then_terminal() {
+        let cmux = default_context_menu_items_for(
+            ConfigPlatform::MacOS,
+            |_| false,
+            |application| matches!(application, "cmux" | "Ghostty"),
+        );
+        assert_eq!(
+            cmux,
+            vec![CustomContextMenuItem::Item {
+                label: "cmux".to_owned(),
+                exe: PathBuf::from("/usr/bin/open"),
+                icon: Some(PathBuf::from(CMUX_ICON_URL)),
+                args: vec!["-a".to_owned(), "cmux".to_owned(), "{path}".to_owned()],
+                only: vec!["*directory".to_owned(), "*folders".to_owned()],
+            }]
+        );
+
+        let ghostty = default_context_menu_items_for(
+            ConfigPlatform::MacOS,
+            |_| false,
+            |application| application == "Ghostty",
+        );
+        assert!(matches!(
+            ghostty.as_slice(),
+            [CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
+                if label == "Ghostty"
+                    && icon == Path::new(GHOSTTY_ICON_URL)
+                    && args == &["-a", "Ghostty", "{path}"]
+        ));
+
+        let terminal = default_context_menu_items_for(ConfigPlatform::MacOS, |_| false, |_| false);
+        assert!(matches!(
+            terminal.as_slice(),
+            [CustomContextMenuItem::Item { label, icon: None, args, .. }]
+                if label == "Terminal" && args == &["-a", "Terminal", "{path}"]
+        ));
+    }
+
+    #[test]
+    fn linux_default_contextmenu_prefers_ghostty_then_xdg_then_legacy() {
+        let ghostty = default_context_menu_items_for(ConfigPlatform::Linux, |_| true, |_| false);
+        assert!(matches!(
+            ghostty.as_slice(),
+            [CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
+                if label == "Ghostty"
+                    && icon == Path::new(GHOSTTY_ICON_URL)
+                    && args == &["--working-directory", "{path}"]
+        ));
+
+        let xdg = default_context_menu_items_for(
+            ConfigPlatform::Linux,
+            |executable| executable == "xdg-terminal-exec",
+            |_| false,
+        );
+        assert!(matches!(
+            xdg.as_slice(),
+            [CustomContextMenuItem::Item { exe, args, .. }]
+                if exe == Path::new("xdg-terminal-exec") && args == &["{cwd}"]
+        ));
+
+        let legacy = default_context_menu_items_for(
+            ConfigPlatform::Linux,
+            |executable| executable == "x-terminal-emulator",
+            |_| false,
+        );
+        assert!(matches!(
+            legacy.as_slice(),
+            [CustomContextMenuItem::Item { exe, args, .. }]
+                if exe == Path::new("x-terminal-emulator") && args == &["{cwd}"]
+        ));
+        assert!(
+            default_context_menu_items_for(ConfigPlatform::Linux, |_| false, |_| false).is_empty()
+        );
+    }
+
+    #[test]
+    fn explicit_empty_contextmenu_is_preserved_while_missing_and_null_use_defaults() {
+        let explicit: ExplorerSettings = serde_json::from_str(r#"{"contextmenu":[]}"#)
+            .expect("deserialize explicit empty context menu");
+        assert!(explicit.contextmenu.items.is_empty());
+
+        let missing: ExplorerSettings =
+            serde_json::from_str("{}").expect("deserialize missing context menu");
+        assert_eq!(missing.contextmenu, ContextMenuSettings::default());
+
+        let null: ExplorerSettings =
+            serde_json::from_str(r#"{"contextmenu":null}"#).expect("deserialize null context menu");
+        assert_eq!(null.contextmenu, ContextMenuSettings::default());
     }
 
     #[test]
@@ -2325,7 +2542,7 @@ mod tests {
         assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(settings.app.start, default_app_start_path());
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
-        assert!(settings.contextmenu.items.is_empty());
+        assert_eq!(settings.contextmenu.items, default_context_menu_items());
         assert!(settings.sidebar.hide.is_empty());
         assert_eq!(
             settings.sidebar.expanded_groups,
@@ -2815,8 +3032,11 @@ mod tests {
         let json = fs::read_to_string(&path).unwrap();
         assert!(!json.ends_with('\n'));
         assert!(json.starts_with("{\n  \"app\": {"));
-        assert!(json.contains("\n  \"contextmenu\": [],"));
         let document: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            document["contextmenu"],
+            serde_json::to_value(&settings.contextmenu).unwrap()
+        );
         assert_eq!(
             document["app"]["start"],
             Value::String(format_configured_path(
