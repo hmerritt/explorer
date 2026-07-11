@@ -97,6 +97,10 @@ linux() {
     cp "$HOME/.local/explorer.app/share/applications/com.hmerritt.explorer.desktop" "$desktop_file_path"
     sed -i "s|^Icon=.*|Icon=$HOME/.local/explorer.app/share/icons/hicolor/512x512/apps/explorer.png|g" "$desktop_file_path"
     sed -i "s|^Exec=.*|Exec=$HOME/.local/explorer.app/bin/explorer %F|g" "$desktop_file_path"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+    fi
 }
 
 main "$@"

@@ -63,7 +63,7 @@ class Explorer < Formula
           Icon=#{opt_share}/icons/hicolor/512x512/apps/explorer.png
           Terminal=false
           Categories=Utility;FileManager;
-          MimeType=inode/directory;
+          MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
           StartupNotify=true
         DESKTOP
 
@@ -102,7 +102,7 @@ class Explorer < Formula
           Icon=$icon_path
           Terminal=false
           Categories=Utility;FileManager;
-          MimeType=inode/directory;
+          MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
           StartupNotify=true
           EOF
 
@@ -207,11 +207,13 @@ class Explorer < Formula
         desktop_entry = (share/"applications/com.hmerritt.explorer.desktop").read
         assert_match stable_exec, desktop_entry
         assert_match stable_icon, desktop_entry
+        assert_match "MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", desktop_entry
         refute_match versioned_exec, desktop_entry
         refute_match versioned_icon, desktop_entry
 
         register_desktop = (bin/"explorer-register-desktop").read
         assert_match stable_exec, register_desktop
+        assert_match "MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", register_desktop
         assert_match "bundle_icon=\"#{opt_libexec}/explorer.app/share/#{icon_path}\"", register_desktop
         assert_match "share_icon=\"#{opt_share}/#{icon_path}\"", register_desktop
         refute_match versioned_exec, register_desktop

@@ -61,7 +61,7 @@ jobs:
               if: steps.tag_check.outputs.valid == 'true'
               run: |
                   sudo apt update
-                  sudo apt install -y pkg-config libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev patchelf tar
+                  sudo apt install -y desktop-file-utils pkg-config libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev patchelf tar
 
             - name: Build
               if: steps.tag_check.outputs.valid == 'true'
@@ -111,7 +111,7 @@ jobs:
                   Icon=explorer
                   Terminal=false
                   Categories=Utility;FileManager;
-                  MimeType=inode/directory;
+                  MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
                   StartupNotify=true
                   EOF
 
@@ -133,6 +133,7 @@ jobs:
                   test -f "$app_dir/share/applications/com.hmerritt.explorer.desktop"
                   test -f "$app_dir/share/icons/hicolor/512x512/apps/explorer.png"
                   test "$(find "$app_dir/lib" -type f | wc -l)" -gt 0
+                  desktop-file-validate "$app_dir/share/applications/com.hmerritt.explorer.desktop"
 
                   tar -C package -czf "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" explorer.app
 
