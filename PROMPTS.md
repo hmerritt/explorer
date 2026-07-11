@@ -2,7 +2,6 @@
 
 - macOS fixes and tweaks:
     - (compression)
-- Improve readme - add screenshots / branding
 
 ## 2
 

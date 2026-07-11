@@ -288,13 +288,30 @@ fn default_context_menu_items_for(
 ) -> Vec<CustomContextMenuItem> {
     let only = || vec!["*directory".to_owned(), "*folders".to_owned()];
     let item = match platform {
-        ConfigPlatform::Windows => CustomContextMenuItem::Item {
-            label: "Terminal".to_owned(),
-            exe: PathBuf::from("wt"),
-            icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
-            args: vec!["-d".to_owned(), "{paths}".to_owned()],
-            only: only(),
-        },
+        ConfigPlatform::Windows => {
+            return vec![
+                CustomContextMenuItem::Item {
+                    label: "Add to archive...".to_owned(),
+                    exe: PathBuf::from("7zG"),
+                    icon: None,
+                    args: vec![
+                        "a".to_owned(),
+                        "-ad".to_owned(),
+                        "-saa".to_owned(),
+                        "{path}".to_owned(),
+                        "{paths}".to_owned(),
+                    ],
+                    only: vec!["*file".to_owned(), "*folder".to_owned()],
+                },
+                CustomContextMenuItem::Item {
+                    label: "Terminal".to_owned(),
+                    exe: PathBuf::from("wt"),
+                    icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
+                    args: vec!["-d".to_owned(), "{paths}".to_owned()],
+                    only: only(),
+                },
+            ];
+        }
         ConfigPlatform::MacOS => {
             let (label, application, icon) = if macos_application_available("cmux") {
                 ("cmux", "cmux", Some(CMUX_ICON_URL))
@@ -2350,16 +2367,31 @@ mod tests {
     }
 
     #[test]
-    fn windows_default_contextmenu_opens_windows_terminal() {
+    fn windows_default_contextmenu_adds_archive_before_terminal() {
         assert_eq!(
             default_context_menu_items_for(ConfigPlatform::Windows, |_| false, |_| false),
-            vec![CustomContextMenuItem::Item {
-                label: "Terminal".to_owned(),
-                exe: PathBuf::from("wt"),
-                icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
-                args: vec!["-d".to_owned(), "{paths}".to_owned()],
-                only: vec!["*directory".to_owned(), "*folders".to_owned()],
-            }]
+            vec![
+                CustomContextMenuItem::Item {
+                    label: "Add to archive...".to_owned(),
+                    exe: PathBuf::from("7zG"),
+                    icon: None,
+                    args: vec![
+                        "a".to_owned(),
+                        "-ad".to_owned(),
+                        "-saa".to_owned(),
+                        "{path}".to_owned(),
+                        "{paths}".to_owned(),
+                    ],
+                    only: vec!["*file".to_owned(), "*folder".to_owned()],
+                },
+                CustomContextMenuItem::Item {
+                    label: "Terminal".to_owned(),
+                    exe: PathBuf::from("wt"),
+                    icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
+                    args: vec!["-d".to_owned(), "{paths}".to_owned()],
+                    only: vec!["*directory".to_owned(), "*folders".to_owned()],
+                },
+            ]
         );
     }
 

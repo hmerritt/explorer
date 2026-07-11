@@ -4102,6 +4102,34 @@ mod tests {
     }
 
     #[test]
+    fn archive_default_filters_match_entry_files_and_folders_but_not_directory_backgrounds() {
+        let only = vec!["*file".to_owned(), "*folder".to_owned()];
+        let files = vec![FileEntry::test("readme.txt", false, Some(1), None)];
+        let folders = vec![FileEntry::test("src", true, None, None)];
+        let mixed = vec![
+            FileEntry::test("readme.txt", false, Some(1), None),
+            FileEntry::test("src", true, None, None),
+        ];
+
+        assert!(!context_menu_item_matches_only(
+            &only,
+            CustomContextMenuTarget::Directory
+        ));
+        assert!(context_menu_item_matches_only(
+            &only,
+            CustomContextMenuTarget::Entries(&files)
+        ));
+        assert!(context_menu_item_matches_only(
+            &only,
+            CustomContextMenuTarget::Entries(&folders)
+        ));
+        assert!(context_menu_item_matches_only(
+            &only,
+            CustomContextMenuTarget::Entries(&mixed)
+        ));
+    }
+
+    #[test]
     fn configured_entry_only_filters_require_every_selected_file_to_match() {
         let executable = configured_executable_path();
         let configured = vec![CustomContextMenuItem::Item {
@@ -4538,6 +4566,32 @@ mod tests {
                     OsString::from("--open"),
                     OsString::from("a.txt"),
                     OsString::from("folder")
+                ],
+                working_directory: None,
+            }
+        );
+    }
+
+    #[test]
+    fn archive_default_arguments_preserve_path_then_paths_expansion() {
+        let args = vec![
+            "a".to_owned(),
+            "-ad".to_owned(),
+            "-saa".to_owned(),
+            "{path}".to_owned(),
+            "{paths}".to_owned(),
+        ];
+        let targets = vec![PathBuf::from("archive me.txt")];
+
+        assert_eq!(
+            custom_command_arguments(&args, &targets),
+            CustomCommandArguments {
+                arguments: vec![
+                    OsString::from("a"),
+                    OsString::from("-ad"),
+                    OsString::from("-saa"),
+                    OsString::from("archive me.txt"),
+                    OsString::from("archive me.txt"),
                 ],
                 working_directory: None,
             }

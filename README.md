@@ -139,17 +139,6 @@ Example with sidebar and contextmenu items:
 }
 ```
 
-Context-menu command arguments support three exact placeholders: `{path}` passes the first
-target, `{paths}` passes every target, and `{cwd}` starts the command in the first target without
-passing that target as an argument. If no placeholder is present, all targets are appended to the
-configured arguments.
-
-New settings include one editable terminal command for directories and folders. Explorer uses
-Windows Terminal on Windows; cmux, Ghostty, or Terminal in that order on macOS; and Ghostty,
-`xdg-terminal-exec`, or `x-terminal-emulator` in that order on Linux. The first available macOS or
-Linux option is written to the settings file when defaults are created. An explicit
-`"contextmenu": []` remains empty.
-
 ## Development
 
 Explorer is a Rust 2024 project using GPUI.
