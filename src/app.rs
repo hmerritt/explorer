@@ -616,6 +616,38 @@ fn start_single_instance_request_handler(
     .detach();
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn launch_requests_from_open_urls(urls: impl IntoIterator<Item = String>) -> Vec<LaunchRequest> {
+    urls.into_iter()
+        .filter_map(|url| {
+            let path = reqwest::Url::parse(&url).ok()?.to_file_path().ok()?;
+            crate::image_viewer::image_like_existing_file(&path).then_some(LaunchRequest {
+                image_path: Some(path),
+            })
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn handle_open_urls(urls: Vec<String>, cx: &mut App) {
+    for request in launch_requests_from_open_urls(urls) {
+        handle_launch_request(request, cx);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_open_url_request_handler(mut requests: UnboundedReceiver<Vec<String>>, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        while let Some(urls) = requests.next().await {
+            if let Err(error) = cx.update(|cx| handle_open_urls(urls, cx)) {
+                eprintln!("Unable to handle macOS open URL request: {error}");
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
 fn prepare_single_instance_launch(request: &LaunchRequest) -> SingleInstanceLaunch {
     let Some(config_dir) = config_dir() else {
         eprintln!(
@@ -1194,10 +1226,19 @@ pub fn run() {
     let app = Application::new();
 
     #[cfg(target_os = "macos")]
-    app.on_reopen(|cx| {
-        handle_explorer_launch_request(cx);
-        cx.activate(true);
-    });
+    let open_url_requests = {
+        let (open_url_tx, open_url_requests) = mpsc::unbounded();
+        app.on_open_urls(move |urls| {
+            if open_url_tx.unbounded_send(urls).is_err() {
+                eprintln!("Unable to queue macOS open URL request: receiver is unavailable");
+            }
+        });
+        app.on_reopen(|cx| {
+            handle_explorer_launch_request(cx);
+            cx.activate(true);
+        });
+        open_url_requests
+    };
 
     app.run(move |cx: &mut App| {
         register_embedded_fonts(cx);
@@ -1217,6 +1258,9 @@ pub fn run() {
                 _guard: primary.guard,
             });
         }
+
+        #[cfg(target_os = "macos")]
+        start_open_url_request_handler(open_url_requests, cx);
 
         handle_initial_launch(initial_launch_request, cx);
     });
@@ -2061,6 +2105,105 @@ mod tests {
     }
 
     #[test]
+    fn mac_open_urls_decode_image_paths_with_spaces_unicode_and_no_extension() {
+        let dir = unique_temp_dir("mac-open-url-decode");
+        fs::create_dir_all(&dir).unwrap();
+        let named_image = dir.join("café image.png");
+        let extensionless_image = dir.join("extensionless image");
+        fs::write(&named_image, b"routed by extension").unwrap();
+        image::DynamicImage::new_rgba8(2, 1)
+            .save_with_format(&extensionless_image, image::ImageFormat::Png)
+            .unwrap();
+
+        let requests = launch_requests_from_open_urls([
+            file_url(&named_image),
+            file_url(&extensionless_image),
+        ]);
+
+        assert_eq!(
+            requests,
+            vec![
+                LaunchRequest {
+                    image_path: Some(named_image),
+                },
+                LaunchRequest {
+                    image_path: Some(extensionless_image),
+                },
+            ]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mac_open_urls_ignore_nonlocal_missing_directory_and_non_image_targets() {
+        let dir = unique_temp_dir("mac-open-url-rejections");
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.png");
+        let directory = dir.join("folder.png");
+        let text = dir.join("notes.txt");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&text, b"not an image").unwrap();
+
+        let requests = launch_requests_from_open_urls([
+            "https://example.com/photo.png".to_owned(),
+            "not a URL".to_owned(),
+            file_url(&missing),
+            file_url(&directory),
+            file_url(&text),
+        ]);
+
+        assert!(requests.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mac_open_urls_preserve_valid_image_order_in_mixed_batches() {
+        let dir = unique_temp_dir("mac-open-url-order");
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.png");
+        let ignored = dir.join("ignored.txt");
+        let second = dir.join("second.jpg");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&ignored, b"ignored").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        let requests = launch_requests_from_open_urls([
+            file_url(&first),
+            file_url(&ignored),
+            file_url(&second),
+        ]);
+
+        assert_eq!(
+            requests
+                .into_iter()
+                .filter_map(|request| request.image_path)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn mac_open_url_uses_image_launch_flow_when_focus_is_configured(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("mac-open-url-focus");
+        fs::create_dir_all(&dir).unwrap();
+        let image_path = dir.join("photo.png");
+        fs::write(&image_path, b"routed by extension").unwrap();
+        cx.set_global(SettingsState::for_test(settings_with_launch_behaviour(
+            NewWindowBehaviour::Focus,
+            dir.clone(),
+        )));
+        cx.update(handle_explorer_launch_request);
+
+        cx.update(|cx| handle_open_urls(vec![file_url(&image_path)], cx));
+        cx.run_until_parked();
+
+        assert_eq!(cx.windows().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn single_instance_primary_accepts_secondary_launch_request() {
         let dir = unique_temp_dir("single-instance-primary");
         let paths = single_instance_paths(&dir);
@@ -2342,6 +2485,12 @@ mod tests {
             },
             ..ExplorerSettings::default()
         }
+    }
+
+    fn file_url(path: &Path) -> String {
+        reqwest::Url::from_file_path(path)
+            .expect("absolute file path")
+            .to_string()
     }
 
     fn receive_single_instance_request(

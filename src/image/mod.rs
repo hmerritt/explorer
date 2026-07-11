@@ -231,7 +231,7 @@ pub(crate) fn adjacent_image_path(
     Some(images[target_index].clone())
 }
 
-fn image_like_existing_file(path: &Path) -> bool {
+pub(crate) fn image_like_existing_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && path_is_image_like(path)
 }
 

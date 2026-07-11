@@ -3,10 +3,12 @@
 - Linux fixes:
     - Explorer can't be set as default image viewer for image types (tested on Ubuntu Desktop)
 - macOS fixes and tweaks:
-    - Image viewer does not open when opening an image file with Explorer on macOS (nothing happens. Windows works correctly)
-    - Remove "macOS" sidebar group. Instead add Applications and Bin to Pinned group by default (user can then unpin/remove as usual)
     - (compression)
 - Improve readme - add screenshots / branding
+- Add a default contextmenu item on all platforms (slightly different per platform) to open Termial in directory/folder
+    - Windows open `wt`
+    - Linux try (in this order): Ghostty, default terminal
+    - Macos try: cmux, Ghostty, default terminal
 
 ## 2
 
