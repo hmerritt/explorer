@@ -1444,6 +1444,7 @@ mod tests {
             state.value.view.show_extensions = false;
             state.value.view.show_folder_sizes = true;
             state.value.view.font = "Inter".to_owned();
+            state.value.view.search_mode = crate::settings::SearchMode::Compact;
         });
         cx.run_until_parked();
 
@@ -1460,6 +1461,7 @@ mod tests {
                 assert!(view.show_folder_size);
                 assert_eq!(view.date_format, "%d %B %Y");
                 assert_eq!(view.font.family, "Inter");
+                assert_eq!(view.search_mode, crate::settings::SearchMode::Compact);
             });
         }
 
@@ -1475,6 +1477,7 @@ mod tests {
             assert!(view.show_folder_size);
             assert_eq!(view.date_format, "%d %B %Y");
             assert_eq!(view.font.family, "Inter");
+            assert_eq!(view.search_mode, crate::settings::SearchMode::Compact);
         });
     }
 

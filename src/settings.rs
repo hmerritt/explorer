@@ -668,6 +668,8 @@ pub struct ViewSettings {
     pub remote_mode_media: FileViewMode,
     #[serde(default)]
     pub remote_thumbnails: bool,
+    #[serde(default)]
+    pub search_mode: SearchMode,
     pub native_icons: bool,
     pub show_extensions: bool,
     pub show_folder_sizes: bool,
@@ -695,6 +697,14 @@ pub enum FileViewMode {
     #[default]
     Details,
     LargeIcons,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    #[default]
+    Detailed,
+    Compact,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -790,6 +800,7 @@ impl Default for ViewSettings {
             mode_media: default_media_view_mode(),
             remote_mode_media: FileViewMode::Details,
             remote_thumbnails: false,
+            search_mode: SearchMode::Detailed,
             native_icons: true,
             show_extensions: true,
             show_folder_sizes: false,
@@ -2457,6 +2468,7 @@ mod tests {
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
         assert!(!settings.view.remote_thumbnails);
+        assert_eq!(settings.view.search_mode, SearchMode::Detailed);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.sort, default_file_sort());
         assert_eq!(
@@ -2822,6 +2834,7 @@ mod tests {
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
         assert!(!settings.view.remote_thumbnails);
+        assert_eq!(settings.view.search_mode, SearchMode::Detailed);
         assert!(settings.view.native_icons);
         assert_eq!(settings.view.file_columns, default_file_columns());
         assert_eq!(settings.view.file_columns.name_width, None);
@@ -3039,6 +3052,35 @@ mod tests {
             .expect("deserialize settings");
 
         assert_eq!(settings.view.mode, FileViewMode::LargeIcons);
+    }
+
+    #[test]
+    fn search_mode_defaults_to_detailed_and_round_trips_supported_values() {
+        let missing: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{}}"#).expect("deserialize default search mode");
+        assert_eq!(missing.view.search_mode, SearchMode::Detailed);
+
+        for (configured, expected) in [
+            ("detailed", SearchMode::Detailed),
+            ("compact", SearchMode::Compact),
+        ] {
+            let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+                "view": {"search_mode": configured}
+            }))
+            .expect("deserialize search mode");
+            assert_eq!(settings.view.search_mode, expected);
+
+            let value = serde_json::to_value(settings).expect("serialize search mode");
+            assert_eq!(value["view"]["search_mode"], configured);
+        }
+    }
+
+    #[test]
+    fn unsupported_search_mode_is_rejected() {
+        let result =
+            serde_json::from_str::<ExplorerSettings>(r#"{"view":{"search_mode":"comfortable"}}"#);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3373,6 +3415,7 @@ mod tests {
         assert!(json.contains("\n    \"native_icons\": true"));
         assert!(json.contains("\n    \"remote_mode_media\": \"details\""));
         assert!(json.contains("\n    \"remote_thumbnails\": false"));
+        assert!(json.contains("\n    \"search_mode\": \"detailed\""));
         assert!(json.contains("\n    \"show_folder_sizes\": false"));
         assert!(json.contains("\n    \"date_format\": \"%Y/%m/%d %H:%M\""));
         assert!(
@@ -4136,6 +4179,7 @@ mod tests {
         assert!(object["view"].get("filesystem_name").is_none());
         assert_eq!(object["view"]["remote_mode_media"], "details");
         assert_eq!(object["view"]["remote_thumbnails"], false);
+        assert_eq!(object["view"]["search_mode"], "detailed");
         assert_eq!(object["view"]["show_extensions"], true);
         assert_eq!(object["view"]["show_dotfiles"], true);
         assert_eq!(object["view"]["sort"]["column"], "name");

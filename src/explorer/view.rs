@@ -45,7 +45,7 @@ use crate::explorer::{
 };
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
-    FileViewMode, SidebarSettings, SortDirection,
+    FileViewMode, SearchMode, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -137,6 +137,7 @@ pub struct ExplorerView {
     pub(super) remote_media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
     pub(super) view_mode_selection: ViewModeSelection,
+    pub(super) search_mode: SearchMode,
     pub(super) directory_is_remote: bool,
     pub(super) remote_thumbnails: bool,
     pub(super) thumbnail_source_policy: ThumbnailSourcePolicy,
@@ -508,6 +509,7 @@ impl ExplorerView {
             remote_media_view_mode: settings.view.remote_mode_media,
             view_mode: settings.view.mode,
             view_mode_selection: ViewModeSelection::Pending,
+            search_mode: settings.view.search_mode,
             directory_is_remote,
             remote_thumbnails: settings.view.remote_thumbnails,
             thumbnail_source_policy,
@@ -560,6 +562,7 @@ impl ExplorerView {
         self.base_view_mode = settings.view.mode;
         self.media_view_mode = settings.view.mode_media;
         self.remote_media_view_mode = settings.view.remote_mode_media;
+        self.search_mode = settings.view.search_mode;
         self.remote_thumbnails = settings.view.remote_thumbnails;
         self.thumbnail_source_policy =
             thumbnail_source_policy_for_remote(self.directory_is_remote, self.remote_thumbnails);
@@ -2177,6 +2180,7 @@ mod tests {
         );
         assert_eq!(view.view_mode, crate::settings::FileViewMode::Details);
         assert_eq!(view.view_mode_selection, ViewModeSelection::Automatic);
+        assert_eq!(view.search_mode, crate::settings::SearchMode::Detailed);
         assert!(!view.directory_is_remote);
         assert!(!view.remote_thumbnails);
         assert_eq!(

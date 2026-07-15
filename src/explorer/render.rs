@@ -112,7 +112,7 @@ use crate::explorer::{
 };
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::{
-    FileColumnKind, FileSortColumn, FileSortSettings, FileViewMode, SettingsState,
+    FileColumnKind, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
     SidebarGroupKind, SortDirection,
 };
 use thousands::Separable;
@@ -320,12 +320,16 @@ fn effective_sidebar_layout_width(
 }
 
 impl ExplorerView {
+    fn recursive_search_uses_detailed_rows(&self) -> bool {
+        self.recursive_search_results_active() && self.search_mode == SearchMode::Detailed
+    }
+
     pub(super) fn entry_row_height(&self) -> f32 {
         if self.view_mode == FileViewMode::LargeIcons {
             return LARGE_ICON_TILE_HEIGHT;
         }
 
-        if self.recursive_search_results_active() {
+        if self.recursive_search_uses_detailed_rows() {
             RECURSIVE_SEARCH_ROW_HEIGHT
         } else {
             ROW_HEIGHT
@@ -2231,7 +2235,10 @@ impl ExplorerView {
                     &self.font,
                     window,
                 )
-                .id((file_column_entry_drag_element_id(kind), ix));
+                .id((file_column_entry_drag_element_id(kind), ix))
+                .debug_selector(move || {
+                    format!("{}-{ix}", file_column_entry_drag_element_id(kind))
+                });
                 if let Some(drag_payload) = selected_drag_payload.clone() {
                     add_selected_entry_drag(cell, Some(drag_payload), entity.clone())
                         .into_any_element()
@@ -2253,7 +2260,8 @@ impl ExplorerView {
             )
             .into_any_element()
         } else {
-            let show_full_path = self.recursive_search_results_active();
+            let recursive_results_active = self.recursive_search_results_active();
+            let show_full_path = self.recursive_search_uses_detailed_rows();
             let name_widths = details_name_widths(
                 &entry,
                 self.show_file_name_extensions,
@@ -2266,6 +2274,7 @@ impl ExplorerView {
             let name_physical_text_width =
                 details_name_physical_text_width(name_widths, name_is_manual_width);
             let name_visual = name_cell_visual(
+                ix,
                 &entry,
                 app_icon,
                 self.show_file_name_extensions,
@@ -2278,6 +2287,10 @@ impl ExplorerView {
             let name_hit_target = name_cell_hit_target(name_widths)
                 .id(("explorer-entry-name-hit", ix))
                 .debug_selector(move || format!("explorer-entry-name-hit-{ix}"));
+            let name_hit_target = name_hit_target.when_some(
+                recursive_result_path_tooltip(&entry, recursive_results_active),
+                |this, tooltip| this.tooltip(explorer_tooltip(tooltip)),
+            );
             let name_hit_target =
                 add_entry_mouse_down_selection(name_hit_target, entry.clone(), cx);
             let name_hit_target =
@@ -2385,7 +2398,8 @@ impl ExplorerView {
         let destination = row_drop_destination_for_entry(&entry);
         let entity = cx.entity();
 
-        let name = if self.rename_is_active_for_path(&entry.path) {
+        let rename_is_active = self.rename_is_active_for_path(&entry.path);
+        let name = if rename_is_active {
             large_icon_rename_input(self.active_rename_focus_handle(), cx).into_any_element()
         } else {
             large_icon_filename(
@@ -2397,6 +2411,10 @@ impl ExplorerView {
                 cx,
             )
         };
+        let path_tooltip = recursive_result_path_tooltip(
+            &entry,
+            self.recursive_search_results_active() && !rename_is_active,
+        );
 
         let mut tile = div()
             .id(("explorer-large-icon-entry", ix))
@@ -2439,9 +2457,20 @@ impl ExplorerView {
             add_individual_entry_drag(tile, individual_drag_payload, entity.clone())
         };
 
-        tile.child(large_entry_icon(&entry, image_thumbnail, app_icon))
-            .child(div().mt(px(LARGE_ICON_TEXT_TOP_GAP)).child(name))
-            .into_any_element()
+        tile.child(
+            div()
+                .id(("explorer-large-icon-tooltip-target", ix))
+                .debug_selector(move || format!("explorer-large-icon-tooltip-target-{ix}"))
+                .flex()
+                .flex_col()
+                .items_center()
+                .when_some(path_tooltip, |this, tooltip| {
+                    this.tooltip(explorer_tooltip(tooltip))
+                })
+                .child(large_entry_icon(&entry, image_thumbnail, app_icon))
+                .child(div().mt(px(LARGE_ICON_TEXT_TOP_GAP)).child(name)),
+        )
+        .into_any_element()
     }
 
     fn render_large_icons(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -5916,6 +5945,7 @@ fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
 }
 
 fn name_cell_visual(
+    ix: usize,
     entry: &FileEntry,
     app_icon: Option<Arc<Image>>,
     show_file_name_extensions: bool,
@@ -5975,6 +6005,8 @@ fn name_cell_visual(
                 )
                 .child(
                     div()
+                        .id(("explorer-entry-full-path", ix))
+                        .debug_selector(move || format!("explorer-entry-full-path-{ix}"))
                         .w(px(widths.draw_text_width))
                         .overflow_hidden()
                         .whitespace_nowrap()
@@ -6000,6 +6032,13 @@ fn name_cell_hit_target(widths: DetailsNameWidths) -> Div {
         .top(px(0.0))
         .h_full()
         .w(px(details_name_content_width(widths.hit_text_width)))
+}
+
+fn recursive_result_path_tooltip(
+    entry: &FileEntry,
+    recursive_results_active: bool,
+) -> Option<SharedString> {
+    recursive_results_active.then(|| SharedString::from(entry.path.display().to_string()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -6884,9 +6923,10 @@ mod tests {
         DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG,
         FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE, IMAGE_HOVER_PREVIEW_OFFSET_X,
         IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP, RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP,
-        SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP, UTILITY_TEXT_BUTTON_ICON_SIZE,
-        UTILITY_TEXT_BUTTON_WIDTH, available_filename_text_width, codebase_makeup_segments,
+        NAME_ICON_TEXT_GAP, RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT,
+        RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP, SIDEBAR_GROUP_GAP,
+        SIDEBAR_ITEM_GAP, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
+        available_filename_text_width, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
@@ -6897,13 +6937,13 @@ mod tests {
         image_hover_preview_origin, image_hover_preview_render_size, is_alt_entry_double_click,
         is_normal_entry_click, is_secondary_entry_double_click, lines_of_code_tooltip,
         open_current_folder_context_menu_from_event, operation_notice_style,
-        recursive_result_text_width, search_working_detail, selection_modifiers_for_click,
-        sidebar_auto_hide_is_active, sidebar_context_menu_is_active, sidebar_context_menu_target,
-        sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
-        sort_indicator_direction, text_cell_width,
+        recursive_result_path_tooltip, recursive_result_text_width, search_working_detail,
+        selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
+        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
+        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
-        AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SettingsState,
+        AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
         SidebarGroupKind, SortDirection,
     };
 
@@ -6951,6 +6991,48 @@ mod tests {
             ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings)
         });
         (temp, view, cx)
+    }
+
+    fn recursive_result_test_view<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        search_mode: SearchMode,
+        view_mode: FileViewMode,
+    ) -> (
+        TempDir,
+        PathBuf,
+        gpui::Entity<ExplorerView>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let temp = TempDir::new();
+        let nested_dir = temp.path().join("nested").join("folder");
+        fs::create_dir_all(&nested_dir).expect("create recursive result directory");
+        let result_path = nested_dir.join("matching-file.txt");
+        fs::write(&result_path, b"file").expect("create recursive result file");
+        let entry = FileEntry::from_path(result_path.clone()).expect("recursive result entry");
+
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.view.mode = view_mode;
+        settings.view.mode_media = view_mode;
+        settings.view.search_mode = search_mode;
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let root = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_settings_for_test(root, Some(focus_handle), &settings)
+        });
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.search.content = "matching".to_owned();
+                view.search.recursive_enabled = true;
+                view.search.recursive_results_active = true;
+                view.entries = vec![entry];
+                cx.notify();
+            });
+        });
+
+        (temp, result_path, view, cx)
     }
 
     fn add_hover_preview_test_view<'a>(
@@ -7297,6 +7379,82 @@ mod tests {
             );
         });
         assert!(cx.debug_bounds("explorer-horizontal-scrollbar").is_none());
+    }
+
+    #[test]
+    fn recursive_result_tooltip_uses_the_exact_full_path() {
+        let temp = TempDir::new();
+        let path = temp.path().join("nested").join("matching-file.txt");
+        fs::create_dir_all(path.parent().unwrap()).expect("create parent directory");
+        fs::write(&path, b"file").expect("create recursive result file");
+        let entry = FileEntry::from_path(path.clone()).expect("recursive result entry");
+
+        assert_eq!(
+            recursive_result_path_tooltip(&entry, true),
+            Some(SharedString::from(path.display().to_string()))
+        );
+        assert_eq!(recursive_result_path_tooltip(&entry, false), None);
+    }
+
+    #[gpui::test]
+    fn detailed_recursive_results_keep_the_path_line_and_show_its_tooltip(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, _path, view, cx) =
+            recursive_result_test_view(cx, SearchMode::Detailed, FileViewMode::Details);
+        run_until_debug_bounds(cx, "explorer-entry-full-path-0");
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.recursive_search_uses_detailed_rows());
+            assert_eq!(view.entry_row_height(), RECURSIVE_SEARCH_ROW_HEIGHT);
+        });
+        hover_selector_until_tooltip(cx, "explorer-entry-name-hit-0");
+    }
+
+    #[gpui::test]
+    fn compact_recursive_results_hide_the_path_line_and_use_standard_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, _path, view, cx) =
+            recursive_result_test_view(cx, SearchMode::Compact, FileViewMode::Details);
+        run_until_debug_bounds(cx, "explorer-entry-name-hit-0");
+
+        assert!(cx.debug_bounds("explorer-entry-full-path-0").is_none());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.recursive_search_uses_detailed_rows());
+            assert_eq!(view.entry_row_height(), ROW_HEIGHT);
+        });
+
+        let metadata_position = run_until_debug_bounds(cx, "explorer-entry-type-drag-0").center();
+        cx.simulate_mouse_move(
+            metadata_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("explorer-tooltip").is_none());
+
+        hover_selector_until_tooltip(cx, "explorer-entry-name-hit-0");
+    }
+
+    #[gpui::test]
+    fn recursive_large_icon_names_show_the_full_path_tooltip(cx: &mut gpui::TestAppContext) {
+        let (_temp, _path, _view, cx) =
+            recursive_result_test_view(cx, SearchMode::Compact, FileViewMode::LargeIcons);
+
+        hover_selector_until_tooltip(cx, "explorer-large-icon-tooltip-target-0");
+    }
+
+    #[gpui::test]
+    fn ordinary_entries_do_not_show_full_path_tooltips(cx: &mut gpui::TestAppContext) {
+        let (_temp, _view, cx) = test_view_entity(cx, &["file.txt"]);
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-tooltip").is_none());
     }
 
     #[gpui::test]

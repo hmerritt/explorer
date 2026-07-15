@@ -1,7 +1,6 @@
 ## 1
 
 - Improve linux install.sh script (see aura's install script)
-- macOS Install ffprobe/ffmpeg issue (I installed via Brew, but this did not work)
 - Selecting a few items and dragging them around is fine, but when selecting many items and then dragging them the performance drops significantly to the point where the drag UI is lagging behind the cursor movements
 
 ## 2

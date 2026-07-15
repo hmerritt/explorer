@@ -104,12 +104,17 @@ Minimal example:
     },
     "view": {
         "mode": "details",
+        "search_mode": "detailed",
         "show_extensions": true,
         "show_hidden": false,
         "show_folder_sizes": false
     }
 }
 ```
+
+`view.search_mode` controls recursive search result density. It accepts `"detailed"`
+(the default, with the full path beneath each filename) or `"compact"` (single-line
+rows with the full path available on hover).
 
 Example with sidebar and contextmenu items:
 
@@ -120,6 +125,7 @@ Example with sidebar and contextmenu items:
     },
     "view": {
         "mode": "details",
+        "search_mode": "detailed",
         "show_extensions": true,
         "show_hidden": false,
         "show_folder_sizes": false
