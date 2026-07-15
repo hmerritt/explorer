@@ -1,4 +1,134 @@
-use std::path::Path;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
+#[cfg(any(target_os = "macos", test))]
+use std::env;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "macos")]
+use std::{fs, os::unix::fs::PermissionsExt};
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub(super) fn ffmpeg_executable_path() -> PathBuf {
+    resolve_media_tool_path(ffmpeg_sidecar::paths::ffmpeg_path(), OsStr::new("ffmpeg"))
+}
+
+pub(super) fn ffprobe_executable_path() -> PathBuf {
+    resolve_media_tool_path(
+        ffmpeg_sidecar::ffprobe::ffprobe_path(),
+        OsStr::new("ffprobe"),
+    )
+}
+
+pub(super) fn ffmpeg_is_installed() -> bool {
+    media_tool_is_installed(&ffmpeg_executable_path())
+}
+
+pub(super) fn ffprobe_is_installed() -> bool {
+    media_tool_is_installed(&ffprobe_executable_path())
+}
+
+fn resolve_media_tool_path(default_path: PathBuf, command_name: &OsStr) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let homebrew_dirs = macos_homebrew_bin_dirs();
+        return resolve_media_tool_path_with(
+            default_path,
+            command_name,
+            env::var_os("PATH").as_deref(),
+            &homebrew_dirs,
+            is_executable_file,
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = command_name;
+        default_path
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn resolve_media_tool_path_with(
+    default_path: PathBuf,
+    command_name: &OsStr,
+    path_var: Option<&OsStr>,
+    fallback_dirs: &[PathBuf],
+    mut is_executable_file: impl FnMut(&Path) -> bool,
+) -> PathBuf {
+    if default_path != Path::new(command_name) {
+        return default_path;
+    }
+
+    if let Some(path_var) = path_var {
+        for directory in env::split_paths(path_var) {
+            let candidate = directory.join(command_name);
+            if is_executable_file(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    for directory in fallback_dirs {
+        let candidate = directory.join(command_name);
+        if is_executable_file(&candidate) {
+            return candidate;
+        }
+    }
+
+    default_path
+}
+
+#[cfg(target_os = "macos")]
+fn macos_homebrew_bin_dirs() -> [PathBuf; 2] {
+    macos_homebrew_bin_dirs_for_arch(cfg!(target_arch = "aarch64"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_homebrew_bin_dirs_for_arch(is_apple_silicon: bool) -> [PathBuf; 2] {
+    if is_apple_silicon {
+        [
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]
+    } else {
+        [
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ]
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn media_tool_is_installed(path: &Path) -> bool {
+    let mut command = Command::new(path);
+    command
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
 
 const VIDEO_FRAME_SHORT_THRESHOLD_SECONDS: f64 = 60.0;
 const VIDEO_FRAME_LONG_THRESHOLD_SECONDS: f64 = 600.0;
@@ -154,6 +284,124 @@ pub(super) fn video_frame_timestamp_label(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn joined_path(paths: &[&str]) -> std::ffi::OsString {
+        env::join_paths(paths.iter().map(PathBuf::from)).unwrap()
+    }
+
+    #[test]
+    fn media_tool_resolution_prefers_adjacent_sidecar() {
+        let sidecar = PathBuf::from("bundle").join("ffmpeg");
+        let path_dir = PathBuf::from("path-bin");
+        let homebrew_dir = PathBuf::from("homebrew-bin");
+        let path_var = joined_path(&["path-bin"]);
+
+        let resolved = resolve_media_tool_path_with(
+            sidecar.clone(),
+            OsStr::new("ffmpeg"),
+            Some(&path_var),
+            &[homebrew_dir.clone()],
+            |candidate| {
+                candidate == path_dir.join("ffmpeg") || candidate == homebrew_dir.join("ffmpeg")
+            },
+        );
+
+        assert_eq!(resolved, sidecar);
+    }
+
+    #[test]
+    fn media_tool_resolution_prefers_inherited_path_to_homebrew() {
+        let path_dir = PathBuf::from("path-bin");
+        let homebrew_dir = PathBuf::from("homebrew-bin");
+        let path_var = joined_path(&["path-bin"]);
+
+        let resolved = resolve_media_tool_path_with(
+            PathBuf::from("ffmpeg"),
+            OsStr::new("ffmpeg"),
+            Some(&path_var),
+            &[homebrew_dir.clone()],
+            |candidate| {
+                candidate == path_dir.join("ffmpeg") || candidate == homebrew_dir.join("ffmpeg")
+            },
+        );
+
+        assert_eq!(resolved, path_dir.join("ffmpeg"));
+    }
+
+    #[test]
+    fn media_tool_resolution_uses_homebrew_fallback_order() {
+        let native_homebrew = PathBuf::from("native-homebrew-bin");
+        let other_homebrew = PathBuf::from("other-homebrew-bin");
+
+        let resolved = resolve_media_tool_path_with(
+            PathBuf::from("ffmpeg"),
+            OsStr::new("ffmpeg"),
+            None,
+            &[native_homebrew.clone(), other_homebrew.clone()],
+            |candidate| {
+                candidate == native_homebrew.join("ffmpeg")
+                    || candidate == other_homebrew.join("ffmpeg")
+            },
+        );
+
+        assert_eq!(resolved, native_homebrew.join("ffmpeg"));
+    }
+
+    #[test]
+    fn macos_homebrew_fallbacks_prefer_the_native_architecture_prefix() {
+        assert_eq!(
+            macos_homebrew_bin_dirs_for_arch(true),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin")
+            ]
+        );
+        assert_eq!(
+            macos_homebrew_bin_dirs_for_arch(false),
+            [
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/homebrew/bin")
+            ]
+        );
+    }
+
+    #[test]
+    fn media_tool_resolution_falls_back_to_bare_command() {
+        let resolved = resolve_media_tool_path_with(
+            PathBuf::from("ffmpeg"),
+            OsStr::new("ffmpeg"),
+            None,
+            &[PathBuf::from("homebrew-bin")],
+            |_| false,
+        );
+
+        assert_eq!(resolved, PathBuf::from("ffmpeg"));
+    }
+
+    #[test]
+    fn media_tool_resolution_handles_ffmpeg_and_ffprobe_independently() {
+        let homebrew_dir = PathBuf::from("homebrew-bin");
+        let fallbacks = [homebrew_dir.clone()];
+        let is_executable = |candidate: &Path| candidate == homebrew_dir.join("ffprobe");
+
+        let ffmpeg = resolve_media_tool_path_with(
+            PathBuf::from("ffmpeg"),
+            OsStr::new("ffmpeg"),
+            None,
+            &fallbacks,
+            is_executable,
+        );
+        let ffprobe = resolve_media_tool_path_with(
+            PathBuf::from("ffprobe"),
+            OsStr::new("ffprobe"),
+            None,
+            &fallbacks,
+            is_executable,
+        );
+
+        assert_eq!(ffmpeg, PathBuf::from("ffmpeg"));
+        assert_eq!(ffprobe, homebrew_dir.join("ffprobe"));
+    }
 
     #[test]
     fn video_thumbnail_seek_uses_frames_tab_inset_policy() {

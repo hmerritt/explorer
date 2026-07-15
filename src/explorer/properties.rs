@@ -64,9 +64,11 @@ use crate::explorer::{
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     tooltip::explorer_tooltip,
     video::{
-        ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe, ffprobe_scalar_value_label,
-        parse_positive_f64, path_may_have_audio_metadata, path_may_have_video_metadata,
-        safe_video_frame_seek_seconds, video_frame_inset_seconds, video_frame_timestamp_label,
+        ffmpeg_executable_path, ffmpeg_is_installed, ffmpeg_seek_argument,
+        ffprobe_duration_seconds_from_probe, ffprobe_executable_path, ffprobe_is_installed,
+        ffprobe_scalar_value_label, parse_positive_f64, path_may_have_audio_metadata,
+        path_may_have_video_metadata, safe_video_frame_seek_seconds, video_frame_inset_seconds,
+        video_frame_timestamp_label,
     },
     view::ExplorerView,
 };
@@ -5488,7 +5490,7 @@ fn ffprobe_metadata_kind_for_path(path: &Path) -> Option<FfprobeMetadataKind> {
 fn ffprobe_metadata_details(path: &Path, kind: FfprobeMetadataKind) -> Vec<PropertyDetailGroup> {
     let log_label = kind.log_label();
     let availability_started = Instant::now();
-    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    let ffprobe_installed = ffprobe_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -5574,7 +5576,7 @@ fn ffprobe_metadata_unavailable_groups(
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_sidecar::ffprobe::ffprobe_path());
+    let mut command = Command::new(ffprobe_executable_path());
     command
         .arg("-v")
         .arg("quiet")
@@ -5687,7 +5689,7 @@ fn load_audio_cover_previews(path: &Path) -> Result<Vec<PropertyCoverImage>, Str
 
 fn prepare_audio_cover_requests(path: &Path) -> Result<Vec<AudioCoverRequest>, String> {
     let availability_started = Instant::now();
-    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    let ffprobe_installed = ffprobe_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -5703,7 +5705,7 @@ fn prepare_audio_cover_requests(path: &Path) -> Result<Vec<AudioCoverRequest>, S
         );
     }
     let availability_started = Instant::now();
-    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    let ffmpeg_installed = ffmpeg_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -5890,7 +5892,7 @@ fn property_image_preview_from_rgba(
 }
 
 fn ffmpeg_cover_png_output(path: &Path, stream_index: usize) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    let mut command = Command::new(ffmpeg_executable_path());
     command
         .arg("-v")
         .arg("error")
@@ -5952,7 +5954,7 @@ struct VideoFramePng {
 
 fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, String> {
     let availability_started = Instant::now();
-    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    let ffprobe_installed = ffprobe_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -5968,7 +5970,7 @@ fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, S
         );
     }
     let availability_started = Instant::now();
-    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    let ffmpeg_installed = ffmpeg_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -6188,7 +6190,7 @@ fn evenly_spaced_seconds(start: f64, end: f64, count: usize) -> Vec<f64> {
 }
 
 fn ffmpeg_frame_png_output(path: &Path, seek_seconds: f64) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    let mut command = Command::new(ffmpeg_executable_path());
     command
         .arg("-v")
         .arg("error")
@@ -6252,7 +6254,7 @@ fn load_audio_spectrum_analysis(
     }
 
     let availability_started = Instant::now();
-    let ffprobe_installed = ffmpeg_sidecar::ffprobe::ffprobe_is_installed();
+    let ffprobe_installed = ffprobe_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -6269,7 +6271,7 @@ fn load_audio_spectrum_analysis(
     }
 
     let availability_started = Instant::now();
-    let ffmpeg_installed = ffmpeg_sidecar::command::ffmpeg_is_installed();
+    let ffmpeg_installed = ffmpeg_is_installed();
     crate::debug_options::log_property_timing(
         availability_started.elapsed(),
         format_args!(
@@ -6550,7 +6552,7 @@ fn spawn_audio_spectrum_ffmpeg(
     path: &Path,
     audio_stream_index: usize,
 ) -> Result<std::process::Child, String> {
-    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    let mut command = Command::new(ffmpeg_executable_path());
     for arg in ffmpeg_audio_spectrum_args(path, audio_stream_index) {
         command.arg(arg);
     }

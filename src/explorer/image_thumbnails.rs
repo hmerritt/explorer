@@ -30,7 +30,8 @@ use crate::{
         },
         image_resize::dimensions_for_longest_side,
         video::{
-            ffmpeg_seek_argument, ffprobe_duration_seconds_from_probe,
+            ffmpeg_executable_path, ffmpeg_is_installed, ffmpeg_seek_argument,
+            ffprobe_duration_seconds_from_probe, ffprobe_executable_path, ffprobe_is_installed,
             path_may_have_video_metadata, video_thumbnail_frame_seek_seconds,
         },
         view::ExplorerView,
@@ -955,13 +956,13 @@ fn load_video_thumbnail_png_with_cancel(
     }
 
     check_thumbnail_cancelled(cancel)?;
-    if !ffmpeg_sidecar::ffprobe::ffprobe_is_installed() {
+    if !ffprobe_is_installed() {
         return Err(
             "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
                 .to_owned(),
         );
     }
-    if !ffmpeg_sidecar::command::ffmpeg_is_installed() {
+    if !ffmpeg_is_installed() {
         return Err(
             "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
                 .to_owned(),
@@ -1015,7 +1016,7 @@ fn video_thumbnail_duration_seconds(path: &Path) -> Result<f64, String> {
 }
 
 fn ffprobe_video_duration_json_output(path: &Path) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_sidecar::ffprobe::ffprobe_path());
+    let mut command = Command::new(ffprobe_executable_path());
     command
         .arg("-v")
         .arg("error")
@@ -1056,7 +1057,7 @@ fn ffmpeg_video_thumbnail_png_output(
     size: u32,
     keyframe_only: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    let mut command = Command::new(ffmpeg_executable_path());
     for arg in ffmpeg_video_thumbnail_args(path, seek_seconds, size, keyframe_only) {
         command.arg(arg);
     }

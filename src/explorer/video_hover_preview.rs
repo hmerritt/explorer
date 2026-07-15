@@ -21,7 +21,7 @@ use crate::explorer::{
         CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
         entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
     },
-    video::path_may_have_video_metadata,
+    video::{ffmpeg_executable_path, ffmpeg_is_installed, path_may_have_video_metadata},
     view::ExplorerView,
 };
 
@@ -336,11 +336,11 @@ fn spawn_video_hover_preview_ffmpeg(path: &Path) -> Result<FfmpegChild, String> 
     if !path_may_have_video_metadata(path) {
         return Err("Path is not a recognized video.".to_owned());
     }
-    if !ffmpeg_sidecar::command::ffmpeg_is_installed() {
+    if !ffmpeg_is_installed() {
         return Err("ffmpeg is not available.".to_owned());
     }
 
-    let mut command = FfmpegCommand::new();
+    let mut command = FfmpegCommand::new_with_path(ffmpeg_executable_path());
     for arg in video_hover_preview_ffmpeg_args(path) {
         command.arg(arg);
     }
