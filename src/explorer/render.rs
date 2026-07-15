@@ -2178,14 +2178,8 @@ impl ExplorerView {
         let is_visually_hovered = self.entry_is_visually_hovered(&entry);
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
-        let selected_drag_payload = self
-            .can_start_item_drag_for_index(ix)
-            .then(|| self.dragged_entries_for_index(ix))
-            .flatten();
-        let individual_drag_payload = self
-            .can_start_individual_item_drag_for_index(ix)
-            .then(|| self.dragged_entry_for_index(ix))
-            .flatten();
+        let can_start_selected_drag = self.can_start_item_drag_for_index(ix);
+        let can_start_individual_drag = self.can_start_individual_item_drag_for_index(ix);
         let destination = row_drop_destination_for_entry(&entry);
         let entity = cx.entity();
 
@@ -2239,11 +2233,10 @@ impl ExplorerView {
                 .debug_selector(move || {
                     format!("{}-{ix}", file_column_entry_drag_element_id(kind))
                 });
-                if let Some(drag_payload) = selected_drag_payload.clone() {
-                    add_selected_entry_drag(cell, Some(drag_payload), entity.clone())
-                        .into_any_element()
+                if can_start_selected_drag {
+                    add_selected_entry_drag(cell, true, ix, entity.clone()).into_any_element()
                 } else {
-                    add_individual_entry_drag(cell, individual_drag_payload.clone(), entity.clone())
+                    add_individual_entry_drag(cell, can_start_individual_drag, ix, entity.clone())
                         .into_any_element()
                 }
             })
@@ -2304,12 +2297,14 @@ impl ExplorerView {
             );
             let name_hit_target = add_selected_entry_drag(
                 name_hit_target,
-                selected_drag_payload.clone(),
+                can_start_selected_drag,
+                ix,
                 entity.clone(),
             );
             let name_hit_target = add_individual_entry_drag(
                 name_hit_target,
-                individual_drag_payload.clone(),
+                can_start_individual_drag,
+                ix,
                 entity.clone(),
             );
 
@@ -2317,8 +2312,7 @@ impl ExplorerView {
                 name_cell_container(self.name_column_width(window), name_is_manual_width)
                     .id(("explorer-entry-name", ix))
                     .debug_selector(move || format!("explorer-entry-name-{ix}"));
-            let name_cell =
-                add_selected_entry_drag(name_cell, selected_drag_payload.clone(), entity);
+            let name_cell = add_selected_entry_drag(name_cell, can_start_selected_drag, ix, entity);
             let name_cell = add_entry_context_menu(
                 name_cell,
                 entry.clone(),
@@ -2387,14 +2381,8 @@ impl ExplorerView {
         let context_menu_active = self.context_menu.is_some();
         let is_cut = self.entry_is_cut(&entry.path);
         let name_click_entry = entry.clone();
-        let selected_drag_payload = self
-            .can_start_item_drag_for_index(ix)
-            .then(|| self.dragged_entries_for_index(ix))
-            .flatten();
-        let individual_drag_payload = self
-            .can_start_individual_item_drag_for_index(ix)
-            .then(|| self.dragged_entry_for_index(ix))
-            .flatten();
+        let can_start_selected_drag = self.can_start_item_drag_for_index(ix);
+        let can_start_individual_drag = self.can_start_individual_item_drag_for_index(ix);
         let destination = row_drop_destination_for_entry(&entry);
         let entity = cx.entity();
 
@@ -2451,10 +2439,10 @@ impl ExplorerView {
             entity.clone(),
             cx,
         );
-        tile = if selected_drag_payload.is_some() {
-            add_selected_entry_drag(tile, selected_drag_payload, entity.clone())
+        tile = if can_start_selected_drag {
+            add_selected_entry_drag(tile, true, ix, entity.clone())
         } else {
-            add_individual_entry_drag(tile, individual_drag_payload, entity.clone())
+            add_individual_entry_drag(tile, can_start_individual_drag, ix, entity.clone())
         };
 
         tile.child(
@@ -4025,20 +4013,29 @@ fn add_entry_middle_click(
 
 fn add_selected_entry_drag(
     element: gpui::Stateful<Div>,
-    drag_payload: Option<DraggedEntries>,
+    can_start: bool,
+    ix: usize,
     entity: Entity<ExplorerView>,
 ) -> gpui::Stateful<Div> {
-    let Some(drag_payload) = drag_payload else {
+    if !can_start {
         return element;
-    };
+    }
 
-    let external_paths = drag_payload.external_paths();
-    let completion_callback =
-        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
-    element.on_drag_with_external_paths_callback(
-        drag_payload,
-        external_paths,
-        completion_callback,
+    let factory_entity = entity.clone();
+    element.on_drag_with_external_paths_callback_factory(
+        move |_, cx| {
+            let dragged = factory_entity.update(cx, |this, _| {
+                this.can_start_item_drag_for_index(ix)
+                    .then(|| this.dragged_entries_for_index(ix))
+                    .flatten()
+            })?;
+            let external_paths = dragged.external_paths();
+            let completion_callback = external_paths_drag_completion_callback(
+                factory_entity.clone(),
+                dragged.paths.clone(),
+            );
+            Some((dragged, external_paths, completion_callback))
+        },
         {
             let entity = entity.clone();
             move |dragged: &DraggedEntries, cursor_offset, _, cx| {
@@ -4055,20 +4052,29 @@ fn add_selected_entry_drag(
 
 fn add_individual_entry_drag(
     element: gpui::Stateful<Div>,
-    drag_payload: Option<DraggedEntries>,
+    can_start: bool,
+    ix: usize,
     entity: Entity<ExplorerView>,
 ) -> gpui::Stateful<Div> {
-    let Some(drag_payload) = drag_payload else {
+    if !can_start {
         return element;
-    };
+    }
 
-    let external_paths = drag_payload.external_paths();
-    let completion_callback =
-        external_paths_drag_completion_callback(entity.clone(), drag_payload.paths.clone());
-    element.on_drag_with_external_paths_callback(
-        drag_payload,
-        external_paths,
-        completion_callback,
+    let factory_entity = entity.clone();
+    element.on_drag_with_external_paths_callback_factory(
+        move |_, cx| {
+            let dragged = factory_entity.update(cx, |this, _| {
+                (this.mouse_selection_drag.is_none() && this.entries.get(ix).is_some())
+                    .then(|| this.dragged_entry_for_index(ix))
+                    .flatten()
+            })?;
+            let external_paths = dragged.external_paths();
+            let completion_callback = external_paths_drag_completion_callback(
+                factory_entity.clone(),
+                dragged.paths.clone(),
+            );
+            Some((dragged, external_paths, completion_callback))
+        },
         move |dragged: &DraggedEntries, cursor_offset, _, cx| {
             entity.update(cx, |this, _| {
                 this.begin_individual_item_drag(dragged);
@@ -5527,18 +5533,17 @@ fn update_drag_cursor_if_hovered<T: 'static>(
         return;
     }
 
-    let cursor = entity.update(cx, |this, _| {
-        this.drag_cursor_for_value(event.dragged_item(), destination, window.modifiers())
-    });
-    cx.set_active_drag_cursor_style(cursor, window);
-
-    entity.update(cx, |this, cx| {
-        let indicator = this.drop_indicator_for_value(
+    let (cursor, indicator) = entity.update(cx, |this, _| {
+        this.drop_feedback_for_value(
             event.dragged_item(),
             destination,
             window.modifiers(),
             event.event.position,
-        );
+        )
+    });
+    cx.set_active_drag_cursor_style(cursor, window);
+
+    entity.update(cx, |this, cx| {
         if this.active_drop_indicator != indicator {
             this.active_drop_indicator = indicator;
             cx.notify();
@@ -7301,9 +7306,117 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["b.txt"]);
             assert!(view.mouse_selection_drag.is_none());
+            assert_eq!(view.test_drag_payload_build_count(), 1);
         });
 
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn multi_selection_drag_payload_is_built_once_after_drag_activation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let names = (0..64)
+            .map(|ix| format!("file-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity(cx, &name_refs);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.replace_selection_with_indices((0..view.entries.len()).collect());
+                cx.notify();
+            });
+        });
+        let start = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
+        let below_threshold = gpui::point(start.x + gpui::px(1.0), start.y);
+        let activated = gpui::point(start.x + gpui::px(18.0), start.y + gpui::px(6.0));
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 0);
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(below_threshold, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 0);
+        });
+
+        cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 1);
+        });
+
+        for offset in [24.0, 30.0, 36.0, 42.0] {
+            cx.simulate_mouse_move(
+                gpui::point(start.x + gpui::px(offset), start.y + gpui::px(6.0)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+        }
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 1);
+        });
+
+        cx.simulate_mouse_up(activated, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn large_icon_multi_selection_uses_the_lazy_drag_factory(cx: &mut gpui::TestAppContext) {
+        let names = (0..16)
+            .map(|ix| format!("file-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) =
+            test_view_entity_with_mode(cx, &name_refs, FileViewMode::LargeIcons);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.replace_selection_with_indices((0..view.entries.len()).collect());
+                cx.notify();
+            });
+        });
+        let start = run_until_debug_bounds(cx, "explorer-large-icon-entry-0").center();
+        let activated = gpui::point(start.x + gpui::px(18.0), start.y + gpui::px(6.0));
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 0);
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.test_drag_payload_build_count(), 1);
+        });
+
+        cx.simulate_mouse_up(activated, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn stale_lazy_drag_factory_aborts_without_building_a_payload(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["a.txt"]);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                cx.notify();
+            });
+        });
+        let start = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
+        let activated = gpui::point(start.x + gpui::px(18.0), start.y + gpui::px(6.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.update(|_, app| {
+            view.update(app, |view, _| view.clear_selection());
+        });
+        cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, app| {
+            assert_eq!(view.test_drag_payload_build_count(), 0);
+            assert!(!app.has_active_drag());
+        });
+        cx.simulate_mouse_up(activated, MouseButton::Left, Modifiers::default());
     }
 
     #[gpui::test]

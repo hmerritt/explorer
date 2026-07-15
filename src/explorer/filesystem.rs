@@ -6447,7 +6447,7 @@ fn test_replace_destination_error(destination: &Path) -> Option<std::io::Error> 
 }
 
 #[cfg(windows)]
-fn path_volume_key(path: &Path) -> Option<String> {
+pub(super) fn path_volume_key(path: &Path) -> Option<String> {
     #[cfg(test)]
     if let Some(key) = test_path_volume_key(path) {
         return key;
@@ -6474,7 +6474,7 @@ fn path_volume_key(path: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn path_volume_key(path: &Path) -> Option<String> {
+pub(super) fn path_volume_key(path: &Path) -> Option<String> {
     #[cfg(test)]
     if let Some(key) = test_path_volume_key(path) {
         return key;
@@ -6486,7 +6486,7 @@ fn path_volume_key(path: &Path) -> Option<String> {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn path_volume_key(path: &Path) -> Option<String> {
+pub(super) fn path_volume_key(path: &Path) -> Option<String> {
     #[cfg(test)]
     if let Some(key) = test_path_volume_key(path) {
         return key;

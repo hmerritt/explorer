@@ -551,18 +551,76 @@ impl Interactivity {
         T: 'static,
         W: 'static + Render,
     {
+        self.set_drag_factory(
+            move |_, _| Some((value, external_paths, external_paths_callback)),
+            constructor,
+        );
+    }
+
+    /// Like [`Self::on_drag_with_external_paths_callback`], but creates the drag value and
+    /// native-path state only after the pointer crosses the drag threshold.
+    ///
+    /// Returning `None` from `factory` aborts the pending drag. The factory is invoked at most
+    /// once for a rendered element.
+    pub fn on_drag_with_external_paths_callback_factory<T, W>(
+        &mut self,
+        factory: impl FnOnce(
+            &mut Window,
+            &mut App,
+        ) -> Option<(T, ExternalPaths, ExternalPathsDragCallback)>
+        + 'static,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
+        self.set_drag_factory(
+            move |window, cx| {
+                let (value, external_paths, external_paths_callback) = factory(window, cx)?;
+                Some((
+                    value,
+                    Some(external_paths),
+                    Some(external_paths_callback),
+                ))
+            },
+            constructor,
+        );
+    }
+
+    fn set_drag_factory<T, W>(
+        &mut self,
+        factory: impl FnOnce(
+            &mut Window,
+            &mut App,
+        ) -> Option<(
+            T,
+            Option<ExternalPaths>,
+            Option<ExternalPathsDragCallback>,
+        )>
+        + 'static,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
         debug_assert!(
             self.drag_listener.is_none(),
             "calling on_drag more than once on the same element is not supported"
         );
-        self.drag_listener = Some((
-            Arc::new(value),
-            external_paths,
-            external_paths_callback,
-            Box::new(move |value, offset, window, cx| {
-                constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
-            }),
-        ));
+        self.drag_listener = Some(Box::new(move |offset, window, cx| {
+            let (value, external_paths, external_paths_callback) = factory(window, cx)?;
+            let value = Arc::new(value);
+            let view = constructor(value.as_ref(), offset, window, cx).into();
+            let value: Arc<dyn Any> = value;
+            Some(PreparedDrag {
+                value,
+                view,
+                external_paths,
+                external_paths_callback,
+            })
+        }));
     }
 
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
@@ -1244,6 +1302,27 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Lazily creates the typed drag value and native-path state after the drag threshold is met.
+    /// Returning `None` from `factory` aborts the pending drag.
+    fn on_drag_with_external_paths_callback_factory<T, W>(
+        mut self,
+        factory: impl FnOnce(
+            &mut Window,
+            &mut App,
+        ) -> Option<(T, ExternalPaths, ExternalPathsDragCallback)>
+        + 'static,
+        constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
+        self.interactivity()
+            .on_drag_with_external_paths_callback_factory(factory, constructor);
+        self
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// The fluent API equivalent to [`Interactivity::on_hover`]
@@ -1298,8 +1377,15 @@ pub(crate) type ScrollWheelListener =
 
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
+pub(crate) struct PreparedDrag {
+    value: Arc<dyn Any>,
+    view: AnyView,
+    external_paths: Option<ExternalPaths>,
+    external_paths_callback: Option<ExternalPathsDragCallback>,
+}
+
 pub(crate) type DragListener =
-    Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>;
+    Box<dyn FnOnce(Point<Pixels>, &mut Window, &mut App) -> Option<PreparedDrag> + 'static>;
 
 type DropListener = Box<dyn Fn(&dyn Any, &mut Window, &mut App) + 'static>;
 
@@ -1622,12 +1708,7 @@ pub struct Interactivity {
     pub(crate) drop_listeners: Vec<(TypeId, DropListener)>,
     pub(crate) can_drop_predicate: Option<CanDropPredicate>,
     pub(crate) click_listeners: Vec<ClickListener>,
-    pub(crate) drag_listener: Option<(
-        Arc<dyn Any>,
-        Option<ExternalPaths>,
-        Option<ExternalPathsDragCallback>,
-        DragListener,
-    )>,
+    pub(crate) drag_listener: Option<DragListener>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) window_control: Option<WindowControlArea>,
@@ -2275,26 +2356,23 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
-                            && let Some((
-                                drag_value,
-                                external_paths,
-                                external_paths_callback,
-                                drag_listener,
-                            )) = drag_listener.take()
+                            && let Some(drag_listener) = drag_listener.take()
                         {
                             *clicked_state.borrow_mut() = ElementClickedState::default();
                             let cursor_offset = event.position - hitbox.origin;
-                            let drag =
-                                (drag_listener)(drag_value.as_ref(), cursor_offset, window, cx);
-                            let external_paths = external_paths.filter(|paths| !paths.paths().is_empty());
-                            cx.active_drag = Some(AnyDrag {
-                                view: drag,
-                                value: drag_value,
-                                cursor_offset,
-                                cursor_style: drag_cursor_style,
-                                external_paths,
-                                external_paths_callback,
-                            });
+                            if let Some(drag) = drag_listener(cursor_offset, window, cx) {
+                                let external_paths = drag
+                                    .external_paths
+                                    .filter(|paths| !paths.paths().is_empty());
+                                cx.active_drag = Some(AnyDrag {
+                                    view: drag.view,
+                                    value: drag.value,
+                                    cursor_offset,
+                                    cursor_style: drag_cursor_style,
+                                    external_paths,
+                                    external_paths_callback: drag.external_paths_callback,
+                                });
+                            }
                             pending_mouse_down.take();
                             window.refresh();
                             cx.stop_propagation();

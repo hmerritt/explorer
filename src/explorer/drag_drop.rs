@@ -1,9 +1,14 @@
 use std::{
     any::Any,
+    collections::HashSet,
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
 };
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     Context, CursorStyle, Modifiers, Pixels, Point, Render, SharedString, TextRun, Window, div,
@@ -14,7 +19,7 @@ use crate::explorer::{
     entry::FileEntry,
     explorer_fs::ExplorerFs,
     filesystem::{
-        paths_are_on_same_volume, prepare_copy_paths_to_directory_with_copy_names,
+        path_volume_key, paths_are_on_same_volume, prepare_copy_paths_to_directory_with_copy_names,
         prepare_create_links_to_directory, prepare_move_paths_to_directory,
     },
     view::ExplorerView,
@@ -25,7 +30,7 @@ use crate::explorer::filesystem::{
     copy_paths_to_directory_with_copy_names, create_links_to_directory, move_paths_to_directory,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) struct DraggedEntries {
     pub(super) paths: Vec<PathBuf>,
     pub(super) source_dir: PathBuf,
@@ -33,6 +38,71 @@ pub(super) struct DraggedEntries {
     pub(super) count: usize,
     pub(super) folder_count: usize,
     pub(super) file_count: usize,
+    source_facts: Arc<InternalDragSourceFacts>,
+}
+
+impl PartialEq for DraggedEntries {
+    fn eq(&self, other: &Self) -> bool {
+        self.paths == other.paths
+            && self.source_dir == other.source_dir
+            && self.display_name == other.display_name
+            && self.count == other.count
+            && self.folder_count == other.folder_count
+            && self.file_count == other.file_count
+    }
+}
+
+impl Eq for DraggedEntries {}
+
+#[derive(Debug)]
+struct InternalDragSourceFacts {
+    selected_paths: HashSet<PathBuf>,
+    directory_paths: DirectoryPathIndex,
+    source_dir: DropPathIdentity,
+    volume_keys: OnceLock<HashSet<String>>,
+    cached_resolution: Mutex<Option<CachedInternalDropResolution>>,
+    #[cfg(test)]
+    resolution_computations: AtomicUsize,
+    #[cfg(test)]
+    volume_key_computations: AtomicUsize,
+}
+
+#[derive(Clone, Debug)]
+struct DropPathIdentity {
+    lexical: PathBuf,
+    canonical: Option<PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct DirectoryPathIndex {
+    lexical: HashSet<PathBuf>,
+    canonical: HashSet<PathBuf>,
+    lexical_without_canonical: HashSet<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedInternalDropResolution {
+    destination: DropDestination,
+    current_directory: PathBuf,
+    modifiers: DropModifierState,
+    resolution: DraggedValueDropResolution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DropModifierState {
+    secondary: bool,
+    shift: bool,
+    alt: bool,
+}
+
+impl From<Modifiers> for DropModifierState {
+    fn from(modifiers: Modifiers) -> Self {
+        Self {
+            secondary: modifiers.secondary(),
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,6 +305,108 @@ impl ResolvedDrop {
     }
 }
 
+impl DropPathIdentity {
+    fn new(path: PathBuf) -> Self {
+        let canonical = fs::canonicalize(&path).ok();
+        Self {
+            lexical: path,
+            canonical,
+        }
+    }
+
+    fn matches(&self, path: &Path, canonical_path: Option<&Path>) -> bool {
+        match (&self.canonical, canonical_path) {
+            (Some(source), Some(target)) => source == target,
+            _ => self.lexical == path,
+        }
+    }
+}
+
+impl DirectoryPathIndex {
+    fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut index = Self::default();
+        for path in paths {
+            index.lexical.insert(path.clone());
+            if let Ok(canonical) = fs::canonicalize(&path) {
+                index.canonical.insert(canonical);
+            } else {
+                index.lexical_without_canonical.insert(path);
+            }
+        }
+        index
+    }
+
+    fn contains_same_or_ancestor(&self, path: &Path, canonical_path: Option<&Path>) -> bool {
+        match canonical_path {
+            Some(canonical_path) => {
+                path_or_ancestor_is_in(canonical_path, &self.canonical)
+                    || path_or_ancestor_is_in(path, &self.lexical_without_canonical)
+            }
+            None => path_or_ancestor_is_in(path, &self.lexical),
+        }
+    }
+}
+
+fn path_or_ancestor_is_in(path: &Path, candidates: &HashSet<PathBuf>) -> bool {
+    path.ancestors()
+        .any(|ancestor| candidates.contains(ancestor))
+}
+
+impl InternalDragSourceFacts {
+    fn new(paths: &[PathBuf], directory_paths: Vec<PathBuf>, source_dir: &Path) -> Self {
+        Self {
+            selected_paths: paths.iter().cloned().collect(),
+            directory_paths: DirectoryPathIndex::new(directory_paths),
+            source_dir: DropPathIdentity::new(source_dir.to_path_buf()),
+            volume_keys: OnceLock::new(),
+            cached_resolution: Mutex::new(None),
+            #[cfg(test)]
+            resolution_computations: AtomicUsize::new(0),
+            #[cfg(test)]
+            volume_key_computations: AtomicUsize::new(0),
+        }
+    }
+
+    fn cached_resolution(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> Option<DraggedValueDropResolution> {
+        let modifiers = DropModifierState::from(modifiers);
+        let cache = self
+            .cached_resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.as_ref().and_then(|cached| {
+            (cached.destination == *destination
+                && cached.current_directory == current_directory
+                && cached.modifiers == modifiers)
+                .then_some(cached.resolution)
+        })
+    }
+
+    fn store_resolution(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+        resolution: DraggedValueDropResolution,
+    ) {
+        let modifiers = DropModifierState::from(modifiers);
+        let mut cache = self
+            .cached_resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cache = Some(CachedInternalDropResolution {
+            destination: destination.clone(),
+            current_directory: current_directory.to_path_buf(),
+            modifiers,
+            resolution,
+        });
+    }
+}
+
 impl DraggedEntries {
     fn new(entries: Vec<&FileEntry>, source_dir: PathBuf) -> Option<Self> {
         let first = entries.first()?;
@@ -245,10 +417,20 @@ impl DraggedEntries {
             .filter(|entry| entry.is_directory_like())
             .count();
         let file_count = count - folder_count;
-        let paths = entries
+        let directory_paths: Vec<PathBuf> = entries
+            .iter()
+            .filter(|entry| entry.sorts_as_directory())
+            .map(|entry| entry.path.clone())
+            .collect();
+        let paths: Vec<PathBuf> = entries
             .into_iter()
             .map(|entry| entry.path.clone())
             .collect();
+        let source_facts = Arc::new(InternalDragSourceFacts::new(
+            &paths,
+            directory_paths,
+            &source_dir,
+        ));
 
         Some(Self {
             paths,
@@ -257,6 +439,7 @@ impl DraggedEntries {
             count,
             folder_count,
             file_count,
+            source_facts,
         })
     }
 
@@ -266,15 +449,132 @@ impl DraggedEntries {
             gpui::ExternalPathDragOperations::COPY_MOVE_LINK,
         )
     }
+
+    fn resolve_drop(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> DraggedValueDropResolution {
+        if let Some(resolution) =
+            self.source_facts
+                .cached_resolution(destination, current_directory, modifiers)
+        {
+            return resolution;
+        }
+
+        #[cfg(test)]
+        self.source_facts
+            .resolution_computations
+            .fetch_add(1, Ordering::Relaxed);
+
+        let destination_item = destination.item_path(current_directory);
+        let resolved_destination = destination.resolve(current_directory);
+        let validity = internal_drop_target_validity(
+            destination,
+            current_directory,
+            &destination_item,
+            &resolved_destination,
+            self,
+            modifiers,
+        );
+        let resolution = DraggedValueDropResolution {
+            resolved: resolve_drop_operation_for_internal_drag(
+                modifiers,
+                validity.valid,
+                self,
+                &resolved_destination,
+            ),
+            explicit_operation_required: validity.explicit_operation_required,
+        };
+        self.source_facts
+            .store_resolution(destination, current_directory, modifiers, resolution);
+        resolution
+    }
+
+    fn drop_should_copy_by_default(&self, destination: &Path) -> bool {
+        let Some(destination_key) = path_volume_key(destination) else {
+            return false;
+        };
+        let source_keys = self.source_facts.volume_keys.get_or_init(|| {
+            #[cfg(test)]
+            self.source_facts
+                .volume_key_computations
+                .fetch_add(1, Ordering::Relaxed);
+            self.paths
+                .iter()
+                .filter_map(|source| path_volume_key(source))
+                .collect()
+        });
+        source_keys.iter().any(|source| source != &destination_key)
+    }
+
+    #[cfg(test)]
+    fn test_resolution_computations(&self) -> usize {
+        self.source_facts
+            .resolution_computations
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn test_volume_key_computations(&self) -> usize {
+        self.source_facts
+            .volume_key_computations
+            .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn test_from_parts(
+        paths: Vec<PathBuf>,
+        source_dir: PathBuf,
+        display_name: &str,
+        folder_count: usize,
+    ) -> Self {
+        let count = paths.len();
+        let directory_paths = paths.iter().filter(|path| path.is_dir()).cloned().collect();
+        let source_facts = Arc::new(InternalDragSourceFacts::new(
+            &paths,
+            directory_paths,
+            &source_dir,
+        ));
+        Self {
+            paths,
+            source_dir,
+            display_name: display_name.to_owned(),
+            count,
+            folder_count,
+            file_count: count - folder_count,
+            source_facts,
+        }
+    }
 }
 
 impl ExplorerView {
+    fn drop_resolution_for_value(
+        &self,
+        dragged_value: &dyn Any,
+        destination: &DropDestination,
+        modifiers: Modifiers,
+    ) -> DraggedValueDropResolution {
+        let resolved_destination = destination.resolve(&self.path);
+        resolve_dragged_value_drop(
+            dragged_value,
+            destination,
+            &self.path,
+            &resolved_destination,
+            modifiers,
+        )
+    }
+
     pub(super) fn dragged_entries_for_index(&self, ix: usize) -> Option<DraggedEntries> {
         self.entries.get(ix)?;
         if !self.entry_is_selected(ix) {
             return None;
         }
 
+        #[cfg(test)]
+        self.drag_payload_build_count
+            .set(self.drag_payload_build_count.get() + 1);
         let entries = self
             .selection
             .selected_indices
@@ -285,17 +585,23 @@ impl ExplorerView {
     }
 
     pub(super) fn dragged_entry_for_index(&self, ix: usize) -> Option<DraggedEntries> {
-        DraggedEntries::new(vec![self.entries.get(ix)?], self.path.clone())
+        let entry = self.entries.get(ix)?;
+        #[cfg(test)]
+        self.drag_payload_build_count
+            .set(self.drag_payload_build_count.get() + 1);
+        DraggedEntries::new(vec![entry], self.path.clone())
     }
 
     pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
-        self.mouse_selection_drag.is_none() && self.dragged_entries_for_index(ix).is_some()
+        self.mouse_selection_drag.is_none()
+            && self.entries.get(ix).is_some()
+            && self.entry_is_selected(ix)
     }
 
     pub(super) fn can_start_individual_item_drag_for_index(&self, ix: usize) -> bool {
         self.mouse_selection_drag.is_none()
+            && self.entries.get(ix).is_some()
             && !self.entry_is_selected(ix)
-            && self.dragged_entry_for_index(ix).is_some()
     }
 
     pub(super) fn begin_individual_item_drag(&mut self, dragged: &DraggedEntries) {
@@ -314,24 +620,9 @@ impl ExplorerView {
         self.dragged_entry_for_index(ix)
     }
 
-    pub(super) fn drag_cursor_for_value(
-        &self,
-        dragged_value: &dyn Any,
-        destination: &DropDestination,
-        modifiers: Modifiers,
-    ) -> CursorStyle {
-        let destination_item = destination.item_path(&self.path);
-        let resolved_destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(
-            dragged_value,
-            destination,
-            &self.path,
-            &destination_item,
-            &resolved_destination,
-            modifiers,
-        )
-        .resolved
-        .cursor_style()
+    #[cfg(test)]
+    pub(super) fn test_drag_payload_build_count(&self) -> usize {
+        self.drag_payload_build_count.get()
     }
 
     pub(super) fn can_drop_value(
@@ -340,19 +631,10 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> bool {
-        let destination_item = destination.item_path(&self.path);
-        let resolved_destination = destination.resolve(&self.path);
-        resolve_dragged_value_drop(
-            dragged_value,
-            destination,
-            &self.path,
-            &destination_item,
-            &resolved_destination,
-            modifiers,
-        )
-        .resolved
-        .operation()
-        .is_some()
+        self.drop_resolution_for_value(dragged_value, destination, modifiers)
+            .resolved
+            .operation()
+            .is_some()
     }
 
     pub(super) fn can_trash_drop_value(&self, dragged_value: &dyn Any) -> bool {
@@ -365,6 +647,7 @@ impl ExplorerView {
             .is_some_and(|paths| !paths.paths().is_empty())
     }
 
+    #[cfg(test)]
     pub(super) fn drop_indicator_for_value(
         &self,
         dragged_value: &dyn Any,
@@ -372,16 +655,30 @@ impl ExplorerView {
         modifiers: Modifiers,
         mouse_position: Point<Pixels>,
     ) -> Option<DropIndicator> {
-        let destination_item = destination.item_path(&self.path);
-        let resolved_destination = destination.resolve(&self.path);
-        let resolution = resolve_dragged_value_drop(
-            dragged_value,
-            destination,
-            &self.path,
-            &destination_item,
-            &resolved_destination,
-            modifiers,
-        );
+        let resolution = self.drop_resolution_for_value(dragged_value, destination, modifiers);
+        self.drop_indicator_from_resolution(destination, resolution, mouse_position)
+    }
+
+    pub(super) fn drop_feedback_for_value(
+        &self,
+        dragged_value: &dyn Any,
+        destination: &DropDestination,
+        modifiers: Modifiers,
+        mouse_position: Point<Pixels>,
+    ) -> (CursorStyle, Option<DropIndicator>) {
+        let resolution = self.drop_resolution_for_value(dragged_value, destination, modifiers);
+        let cursor = resolution.resolved.cursor_style();
+        let indicator =
+            self.drop_indicator_from_resolution(destination, resolution, mouse_position);
+        (cursor, indicator)
+    }
+
+    fn drop_indicator_from_resolution(
+        &self,
+        destination: &DropDestination,
+        resolution: DraggedValueDropResolution,
+        mouse_position: Point<Pixels>,
+    ) -> Option<DropIndicator> {
         let operation = resolution.resolved.operation()?;
 
         Some(DropIndicator {
@@ -622,32 +919,40 @@ pub(super) fn resolve_drop_operation_for_paths(
     }
 }
 
+fn resolve_drop_operation_for_internal_drag(
+    modifiers: Modifiers,
+    valid_target: bool,
+    dragged: &DraggedEntries,
+    destination: &Path,
+) -> ResolvedDrop {
+    if !valid_target {
+        return ResolvedDrop::Invalid;
+    }
+
+    if modifiers.alt || (modifiers.secondary() && modifiers.shift) {
+        return ResolvedDrop::Link;
+    }
+
+    if modifiers.secondary() {
+        ResolvedDrop::Copy
+    } else if modifiers.shift {
+        ResolvedDrop::Move
+    } else if dragged.drop_should_copy_by_default(destination) {
+        ResolvedDrop::Copy
+    } else {
+        ResolvedDrop::Move
+    }
+}
+
 fn resolve_dragged_value_drop(
     dragged_value: &dyn Any,
     destination_kind: &DropDestination,
     current_directory: &Path,
-    destination_item: &Path,
     destination: &Path,
     modifiers: Modifiers,
 ) -> DraggedValueDropResolution {
     if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
-        let validity = internal_drop_target_validity(
-            destination_kind,
-            current_directory,
-            destination_item,
-            destination,
-            dragged,
-            modifiers,
-        );
-        return DraggedValueDropResolution {
-            resolved: resolve_drop_operation_for_paths(
-                modifiers,
-                validity.valid,
-                dragged.paths.as_slice(),
-                destination,
-            ),
-            explicit_operation_required: validity.explicit_operation_required,
-        };
+        return dragged.resolve_drop(destination_kind, current_directory, modifiers);
     }
 
     if let Some(paths) = dragged_value.downcast_ref::<gpui::ExternalPaths>() {
@@ -695,16 +1000,29 @@ fn drop_should_copy_by_default(source_paths: &[PathBuf], destination: &Path) -> 
 }
 
 fn internal_drop_target_validity(
-    destination: &DropDestination,
-    current_directory: &Path,
+    _destination: &DropDestination,
+    _current_directory: &Path,
     destination_item: &Path,
     resolved_destination: &Path,
     dragged: &DraggedEntries,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
-    if !drop_destination_is_dir(resolved_destination)
-        || dragged.paths.iter().any(|path| path == destination_item)
-        || destination_is_dragged_directory_or_descendant(resolved_destination, &dragged.paths)
+    if !drop_destination_is_dir(resolved_destination) {
+        return DropTargetValidity {
+            valid: false,
+            explicit_operation_required: false,
+        };
+    }
+
+    let canonical_destination = fs::canonicalize(resolved_destination).ok();
+    if dragged
+        .source_facts
+        .selected_paths
+        .contains(destination_item)
+        || dragged
+            .source_facts
+            .directory_paths
+            .contains_same_or_ancestor(resolved_destination, canonical_destination.as_deref())
     {
         return DropTargetValidity {
             valid: false,
@@ -712,12 +1030,10 @@ fn internal_drop_target_validity(
         };
     }
 
-    let same_source_destination = destination_contains_internal_drag_source(
-        destination,
-        current_directory,
-        resolved_destination,
-        dragged,
-    );
+    let same_source_destination = dragged
+        .source_facts
+        .source_dir
+        .matches(resolved_destination, canonical_destination.as_deref());
     drop_target_validity_for_same_source_destination(same_source_destination, modifiers)
 }
 
@@ -769,20 +1085,6 @@ fn same_source_destination_explicit_operation_requested(modifiers: Modifiers) ->
         resolve_drop_operation(modifiers, true),
         ResolvedDrop::Copy | ResolvedDrop::Link
     )
-}
-
-fn destination_contains_internal_drag_source(
-    destination: &DropDestination,
-    current_directory: &Path,
-    resolved_destination: &Path,
-    dragged: &DraggedEntries,
-) -> bool {
-    let target_directory = match destination {
-        DropDestination::CurrentDirectory => current_directory,
-        DropDestination::Directory { .. } => resolved_destination,
-    };
-
-    paths_match_for_drop(&dragged.source_dir, target_directory)
 }
 
 fn destination_contains_all_external_path_sources(
@@ -1508,6 +1810,98 @@ mod tests {
     }
 
     #[test]
+    fn repeated_many_item_feedback_reuses_source_analysis_and_drop_resolution() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let first_target = temp.path().join("first-target");
+        let second_target = temp.path().join("second-target");
+        let alternate_current_directory = temp.path().join("alternate-current-directory");
+        fs::create_dir(&source_dir).expect("create source folder");
+        fs::create_dir(&first_target).expect("create first target folder");
+        fs::create_dir(&second_target).expect("create second target folder");
+        fs::create_dir(&alternate_current_directory).expect("create alternate current directory");
+        let paths = (0..256)
+            .map(|ix| {
+                let path = source_dir.join(format!("file-{ix:03}.txt"));
+                fs::write(&path, b"data").expect("create source file");
+                path
+            })
+            .collect::<Vec<_>>();
+        let dragged = DraggedEntries::test_from_parts(paths, source_dir, "file-000.txt", 0);
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        let first_destination = DropDestination::Directory {
+            item_path: first_target.clone(),
+            target_path: first_target,
+        };
+        let second_destination = DropDestination::Directory {
+            item_path: second_target.clone(),
+            target_path: second_target,
+        };
+        let mouse_position = gpui::point(px(32.0), px(48.0));
+
+        assert!(view.can_drop_value(&dragged, &first_destination, Modifiers::default(),));
+        for _ in 0..8 {
+            let (cursor, indicator) = view.drop_feedback_for_value(
+                &dragged,
+                &first_destination,
+                Modifiers::default(),
+                mouse_position,
+            );
+            assert_eq!(cursor, CursorStyle::Arrow);
+            assert_eq!(indicator.unwrap().operation, FileOperationKind::Move);
+        }
+        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert_eq!(dragged.test_volume_key_computations(), 1);
+
+        let function_only = Modifiers {
+            function: true,
+            ..Modifiers::default()
+        };
+        assert!(view.can_drop_value(&dragged, &first_destination, function_only));
+        assert_eq!(dragged.test_resolution_computations(), 1);
+
+        assert!(view.can_drop_value(&dragged, &first_destination, Modifiers::secondary_key(),));
+        assert_eq!(dragged.test_resolution_computations(), 2);
+        assert_eq!(dragged.test_volume_key_computations(), 1);
+
+        assert!(view.can_drop_value(&dragged, &second_destination, Modifiers::default(),));
+        assert_eq!(dragged.test_resolution_computations(), 3);
+        assert_eq!(dragged.test_volume_key_computations(), 1);
+
+        view.path = alternate_current_directory;
+        assert!(view.can_drop_value(&dragged, &second_destination, Modifiers::default(),));
+        assert_eq!(dragged.test_resolution_computations(), 4);
+        assert_eq!(dragged.test_volume_key_computations(), 1);
+    }
+
+    #[test]
+    fn committed_internal_drop_revalidates_a_removed_target() {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&source_dir).expect("create source folder");
+        fs::create_dir(&target).expect("create target folder");
+        let source = source_dir.join("file.txt");
+        fs::write(&source, b"data").expect("create source file");
+        let dragged =
+            DraggedEntries::test_from_parts(vec![source.clone()], source_dir, "file.txt", 0);
+        let destination = DropDestination::Directory {
+            item_path: target.clone(),
+            target_path: target.clone(),
+        };
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+
+        assert!(view.can_drop_value(&dragged, &destination, Modifiers::default()));
+        assert_eq!(dragged.test_resolution_computations(), 1);
+        fs::remove_dir(&target).expect("remove cached target");
+
+        view.drop_internal_entries(&dragged, destination, Modifiers::default());
+
+        assert_eq!(fs::read(&source).unwrap(), b"data");
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn active_drop_indicator_updates_operation_when_modifiers_change() {
         let mut view = test_view_with_entries(&["file.txt"]);
         view.active_drop_indicator = Some(DropIndicator {
@@ -1772,14 +2166,7 @@ mod tests {
         fs::write(&source, b"data").expect("create source");
 
         let view = ExplorerView::new(temp.path().to_path_buf());
-        let dragged = DraggedEntries {
-            paths: vec![source],
-            source_dir: target.clone(),
-            display_name: "file.txt".to_owned(),
-            count: 1,
-            folder_count: 0,
-            file_count: 1,
-        };
+        let dragged = DraggedEntries::test_from_parts(vec![source], target.clone(), "file.txt", 0);
         let destination = DropDestination::Directory {
             item_path: target.clone(),
             target_path: target,
@@ -1805,14 +2192,8 @@ mod tests {
         fs::create_dir_all(&descendant).expect("create descendant folder");
 
         let view = ExplorerView::new(temp.path().to_path_buf());
-        let dragged = DraggedEntries {
-            paths: vec![source],
-            source_dir: temp.path().to_path_buf(),
-            display_name: "folder".to_owned(),
-            count: 1,
-            folder_count: 1,
-            file_count: 0,
-        };
+        let dragged =
+            DraggedEntries::test_from_parts(vec![source], temp.path().to_path_buf(), "folder", 1);
         let destination = DropDestination::Directory {
             item_path: descendant.clone(),
             target_path: descendant,
@@ -1839,14 +2220,12 @@ mod tests {
         fs::create_dir(&target).expect("create target folder");
 
         let view = ExplorerView::new(temp.path().to_path_buf());
-        let dragged = DraggedEntries {
-            paths: vec![source_dir.join("file.txt")],
+        let dragged = DraggedEntries::test_from_parts(
+            vec![source_dir.join("file.txt")],
             source_dir,
-            display_name: "file.txt".to_owned(),
-            count: 1,
-            folder_count: 0,
-            file_count: 1,
-        };
+            "file.txt",
+            0,
+        );
 
         assert!(view.can_drop_value(
             &dragged,
@@ -1865,14 +2244,12 @@ mod tests {
         fs::create_dir(&source_dir).expect("create source folder");
 
         let view = ExplorerView::new(temp.path().to_path_buf());
-        let dragged = DraggedEntries {
-            paths: vec![source_dir.join("file.txt")],
+        let dragged = DraggedEntries::test_from_parts(
+            vec![source_dir.join("file.txt")],
             source_dir,
-            display_name: "file.txt".to_owned(),
-            count: 1,
-            folder_count: 0,
-            file_count: 1,
-        };
+            "file.txt",
+            0,
+        );
 
         let indicator = view
             .drop_indicator_for_value(
@@ -1968,14 +2345,12 @@ mod tests {
         fs::create_dir(&source_dir).expect("create source folder");
 
         let view = ExplorerView::new(temp.path().to_path_buf());
-        let dragged = DraggedEntries {
-            paths: vec![source_dir.join("file.txt")],
+        let dragged = DraggedEntries::test_from_parts(
+            vec![source_dir.join("file.txt")],
             source_dir,
-            display_name: "file.txt".to_owned(),
-            count: 1,
-            folder_count: 0,
-            file_count: 1,
-        };
+            "file.txt",
+            0,
+        );
 
         assert!(view.can_drop_value(
             &dragged,

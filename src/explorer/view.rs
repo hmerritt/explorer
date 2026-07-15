@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use futures::FutureExt;
 use gpui::{
     AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Subscription, Task,
@@ -158,6 +161,8 @@ pub struct ExplorerView {
     pub(super) git_status: Option<GitRepositoryStatus>,
     pub(super) git_status_generation: u64,
     pub(super) git_status_task: Option<Task<()>>,
+    #[cfg(test)]
+    pub(super) drag_payload_build_count: Cell<usize>,
 }
 
 pub(super) struct FileOperationState {
@@ -530,6 +535,8 @@ impl ExplorerView {
             git_status: None,
             git_status_generation: 0,
             git_status_task: None,
+            #[cfg(test)]
+            drag_payload_build_count: Cell::new(0),
         }
     }
 
