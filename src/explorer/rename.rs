@@ -20,13 +20,13 @@ use crate::explorer::{
         RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
         RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
         RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
-        RenameWordRight,
+        RenameWordRight, TextInputRedo, TextInputUndo,
     },
     entry::FileEntry,
     selection::SelectionModifiers,
     text_input::{
-        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
-        scroll_offset_for_cursor,
+        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextEditKind, EditableTextState,
+        editable_text_runs, scroll_offset_for_cursor,
     },
     view::ExplorerView,
 };
@@ -143,11 +143,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            if rename.selected_range.is_empty() {
-                let offset = rename.previous_boundary(rename.cursor_offset());
-                rename.select_to(offset);
-            }
-            replace_rename_text(rename, None, "");
+            rename.delete_backward();
         }
         cx.stop_propagation();
         cx.notify();
@@ -173,11 +169,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(rename) = self.active_rename.as_mut() {
-            if rename.selected_range.is_empty() {
-                let offset = rename.next_boundary(rename.cursor_offset());
-                rename.select_to(offset);
-            }
-            replace_rename_text(rename, None, "");
+            rename.delete_forward();
         }
         cx.stop_propagation();
         cx.notify();
@@ -392,7 +384,7 @@ impl ExplorerView {
         if let Some(text) = self.selected_rename_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             if let Some(rename) = self.active_rename.as_mut() {
-                replace_rename_text(rename, None, "");
+                replace_rename_text(rename, None, "", EditableTextEditKind::Cut);
             }
         }
         cx.stop_propagation();
@@ -408,7 +400,12 @@ impl ExplorerView {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
             && let Some(rename) = self.active_rename.as_mut()
         {
-            replace_rename_text(rename, None, &text.replace(['\r', '\n'], " "));
+            replace_rename_text(
+                rename,
+                None,
+                &text.replace(['\r', '\n'], " "),
+                EditableTextEditKind::Paste,
+            );
         }
         cx.stop_propagation();
         cx.notify();
@@ -421,6 +418,54 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
+    }
+
+    pub(super) fn handle_text_input_undo(
+        &mut self,
+        _: &TextInputUndo,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.active_text_input() {
+            Some(ActiveTextInput::Rename) => {
+                if let Some(rename) = self.active_rename.as_mut() {
+                    rename.undo();
+                }
+            }
+            Some(ActiveTextInput::Address) => {
+                self.undo_address_text();
+            }
+            Some(ActiveTextInput::Search) => {
+                self.undo_search_text(cx);
+            }
+            None => {}
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_text_input_redo(
+        &mut self,
+        _: &TextInputRedo,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.active_text_input() {
+            Some(ActiveTextInput::Rename) => {
+                if let Some(rename) = self.active_rename.as_mut() {
+                    rename.redo();
+                }
+            }
+            Some(ActiveTextInput::Address) => {
+                self.redo_address_text();
+            }
+            Some(ActiveTextInput::Search) => {
+                self.redo_search_text(cx);
+            }
+            None => {}
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     pub(super) fn rename_is_active_for_path(&self, path: &Path) -> bool {
@@ -1305,8 +1350,13 @@ impl Element for RenameTextElement {
     }
 }
 
-fn replace_rename_text(rename: &mut RenameState, range: Option<Range<usize>>, new_text: &str) {
-    rename.replace_text(range, new_text);
+fn replace_rename_text(
+    rename: &mut RenameState,
+    range: Option<Range<usize>>,
+    new_text: &str,
+    kind: EditableTextEditKind,
+) {
+    rename.replace_text_with_kind(range, new_text, kind);
 }
 
 fn hidden_rename_suffix(entry: &FileEntry, show_file_name_extensions: bool) -> Option<String> {
@@ -1396,6 +1446,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         entry::FileEntry,
+        file_commands::{FileOperationUndo, TrashUndo},
         test_support::{TempDir, selected_names, test_view_entity, test_view_with_entries},
     };
     use gpui::{AppContext, ClipboardItem, MouseButton, TestAppContext};
@@ -1948,6 +1999,39 @@ mod tests {
         assert_eq!(selected_names(&view), vec!["c.txt"]);
         assert!(view.active_rename.is_none());
         assert!(view.operation_notice.is_none());
+    }
+
+    #[gpui::test]
+    fn rename_text_undo_does_not_touch_file_operation_history(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["alpha.txt"]);
+        let path = temp.path().join("alpha.txt");
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&path);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+
+                let rename = view.active_rename.as_mut().expect("active rename");
+                rename.select_all();
+                rename.replace_text_as_typing(None, "omega.txt");
+                assert_eq!(rename.content, "omega.txt");
+
+                view.file_operation_undo_stack
+                    .push(FileOperationUndo::Trash(TrashUndo::Unsupported {
+                        original_paths: vec![temp.path().join("deleted.txt")],
+                        reason: "file undo must remain untouched".to_owned(),
+                    }));
+
+                view.handle_text_input_undo(&TextInputUndo, window, cx);
+
+                let rename = view.active_rename.as_ref().expect("active rename");
+                assert_eq!(rename.content, "alpha.txt");
+                assert_eq!(rename.selected_range, 0.."alpha.txt".len());
+                assert_eq!(view.file_operation_undo_stack.len(), 1);
+                assert!(view.operation_notice.is_none());
+                assert!(path.exists());
+            });
+        });
     }
 
     #[gpui::test]

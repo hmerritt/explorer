@@ -43,7 +43,8 @@ use crate::explorer::{
     SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
     SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
     SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
+    SelectPreviousTab, SelectTabByIndex, TextInputRedo, TextInputUndo, TrashSelected,
+    UndoFileOperation,
 };
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
@@ -1049,6 +1050,8 @@ fn push_mac_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("cmd-c", RenameCopy, context),
         KeyBinding::new("cmd-x", RenameCut, context),
         KeyBinding::new("cmd-v", RenamePaste, context),
+        KeyBinding::new("cmd-z", TextInputUndo, context),
+        KeyBinding::new("cmd-shift-z", TextInputRedo, context),
         KeyBinding::new("up", RenameNoop, context),
         KeyBinding::new("down", RenameNoop, context),
         KeyBinding::new("shift-up", RenameNoop, context),
@@ -1080,6 +1083,8 @@ fn push_windows_like_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("ctrl-c", RenameCopy, context),
         KeyBinding::new("ctrl-x", RenameCut, context),
         KeyBinding::new("ctrl-v", RenamePaste, context),
+        KeyBinding::new("ctrl-z", TextInputUndo, context),
+        KeyBinding::new("ctrl-y", TextInputRedo, context),
         KeyBinding::new("up", RenameNoop, context),
         KeyBinding::new("down", RenameNoop, context),
         KeyBinding::new("shift-up", RenameNoop, context),
@@ -1117,6 +1122,8 @@ fn push_mac_address_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("cmd-c", AddressCopy, context),
         KeyBinding::new("cmd-x", AddressCut, context),
         KeyBinding::new("cmd-v", AddressPaste, context),
+        KeyBinding::new("cmd-z", TextInputUndo, context),
+        KeyBinding::new("cmd-shift-z", TextInputRedo, context),
         KeyBinding::new("up", AddressSuggestionUp, context),
         KeyBinding::new("down", AddressSuggestionDown, context),
         KeyBinding::new("tab", AddressAcceptSuggestion, context),
@@ -1147,6 +1154,8 @@ fn push_windows_like_address_input_key_bindings(bindings: &mut Vec<KeyBinding>) 
         KeyBinding::new("ctrl-c", AddressCopy, context),
         KeyBinding::new("ctrl-x", AddressCut, context),
         KeyBinding::new("ctrl-v", AddressPaste, context),
+        KeyBinding::new("ctrl-z", TextInputUndo, context),
+        KeyBinding::new("ctrl-y", TextInputRedo, context),
         KeyBinding::new("up", AddressSuggestionUp, context),
         KeyBinding::new("down", AddressSuggestionDown, context),
         KeyBinding::new("tab", AddressAcceptSuggestion, context),
@@ -1183,6 +1192,8 @@ fn push_mac_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("cmd-c", SearchCopy, context),
         KeyBinding::new("cmd-x", SearchCut, context),
         KeyBinding::new("cmd-v", SearchPaste, context),
+        KeyBinding::new("cmd-z", TextInputUndo, context),
+        KeyBinding::new("cmd-shift-z", TextInputRedo, context),
     ]);
 }
 
@@ -1210,6 +1221,8 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("ctrl-c", SearchCopy, context),
         KeyBinding::new("ctrl-x", SearchCut, context),
         KeyBinding::new("ctrl-v", SearchPaste, context),
+        KeyBinding::new("ctrl-z", TextInputUndo, context),
+        KeyBinding::new("ctrl-y", TextInputRedo, context),
     ]);
 }
 
@@ -1294,6 +1307,46 @@ mod tests {
                     == context
                 && matches!(binding.match_keystrokes(&[keystroke.clone()]), Some(false))
         })
+    }
+
+    fn assert_text_clipboard_and_history_bindings(
+        bindings: &[KeyBinding],
+        modifier: &str,
+        undo_keystroke: &str,
+        redo_keystroke: &str,
+    ) {
+        macro_rules! assert_context {
+            ($context:literal, $cut:expr, $paste:expr) => {
+                assert!(has_binding(
+                    bindings,
+                    $cut,
+                    &format!("{modifier}-x"),
+                    Some($context)
+                ));
+                assert!(has_binding(
+                    bindings,
+                    $paste,
+                    &format!("{modifier}-v"),
+                    Some($context)
+                ));
+                assert!(has_binding(
+                    bindings,
+                    TextInputUndo,
+                    undo_keystroke,
+                    Some($context)
+                ));
+                assert!(has_binding(
+                    bindings,
+                    TextInputRedo,
+                    redo_keystroke,
+                    Some($context)
+                ));
+            };
+        }
+
+        assert_context!("ExplorerRenameInput", RenameCut, RenamePaste);
+        assert_context!("ExplorerAddressInput", AddressCut, AddressPaste);
+        assert_context!("ExplorerSearchInput", SearchCut, SearchPaste);
     }
 
     #[test]
@@ -1455,6 +1508,8 @@ mod tests {
     fn mac_text_input_bindings_use_command_and_option_navigation() {
         let bindings = key_bindings_for_profile(KeyBindingProfile::Mac);
 
+        assert_text_clipboard_and_history_bindings(&bindings, "cmd", "cmd-z", "cmd-shift-z");
+
         assert!(has_binding(
             &bindings,
             RenameCopy,
@@ -1534,6 +1589,8 @@ mod tests {
     #[test]
     fn windows_like_key_bindings_preserve_existing_shortcuts() {
         let bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
+
+        assert_text_clipboard_and_history_bindings(&bindings, "ctrl", "ctrl-z", "ctrl-y");
 
         assert!(has_binding(&bindings, EnterSelected, "enter", None));
         assert!(has_binding(&bindings, GoUp, "left", None));

@@ -43,8 +43,8 @@ use crate::explorer::{
     },
     sorting::sort_entries,
     text_input::{
-        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
-        scroll_offset_for_cursor,
+        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextEditKind, EditableTextState,
+        editable_text_runs, scroll_offset_for_cursor,
     },
     view::ExplorerView,
 };
@@ -170,7 +170,7 @@ impl ExplorerView {
         };
 
         if self.start_search_edit(window, cx) {
-            self.replace_search_text(None, text, cx);
+            self.replace_search_text_as_typing(None, text, cx);
             cx.stop_propagation();
             cx.notify();
         }
@@ -225,6 +225,7 @@ impl ExplorerView {
         self.search.selected_range = end..end;
         self.search.selection_reversed = false;
         self.search.marked_range = None;
+        self.search.reset_history();
         self.cancel_recursive_search();
         self.apply_search_filter_preserving_selection(&selected_paths);
         self.scroll_to_top();
@@ -239,6 +240,7 @@ impl ExplorerView {
         self.search.selected_range = 0..0;
         self.search.selection_reversed = false;
         self.search.marked_range = None;
+        self.search.reset_history();
         self.cancel_recursive_search();
     }
 
@@ -410,11 +412,8 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.search.selected_range.is_empty() {
-            let offset = self.search.previous_boundary(self.search.cursor_offset());
-            self.search.select_to(offset);
-        }
-        self.replace_search_text(None, "", cx);
+        self.search.delete_backward();
+        self.refresh_search_filter(cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -437,11 +436,8 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.search.selected_range.is_empty() {
-            let offset = self.search.next_boundary(self.search.cursor_offset());
-            self.search.select_to(offset);
-        }
-        self.replace_search_text(None, "", cx);
+        self.search.delete_forward();
+        self.refresh_search_filter(cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -632,7 +628,7 @@ impl ExplorerView {
     ) {
         if let Some(text) = self.search.selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.replace_search_text(None, "", cx);
+            self.replace_search_text(None, "", EditableTextEditKind::Cut, cx);
         }
         cx.stop_propagation();
         cx.notify();
@@ -645,7 +641,12 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_search_text(None, &text.replace(['\r', '\n'], " "), cx);
+            self.replace_search_text(
+                None,
+                &text.replace(['\r', '\n'], " "),
+                EditableTextEditKind::Paste,
+                cx,
+            );
         }
         cx.stop_propagation();
         cx.notify();
@@ -720,13 +721,36 @@ impl ExplorerView {
         self.refresh_search_filter(cx);
     }
 
-    fn replace_search_text(
+    pub(super) fn undo_search_text(&mut self, cx: &mut Context<Self>) {
+        if self.search.undo() {
+            self.refresh_search_filter(cx);
+        }
+    }
+
+    pub(super) fn redo_search_text(&mut self, cx: &mut Context<Self>) {
+        if self.search.redo() {
+            self.refresh_search_filter(cx);
+        }
+    }
+
+    fn replace_search_text_as_typing(
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
         cx: &mut Context<Self>,
     ) {
-        self.search.replace_text(range, text);
+        self.search.replace_text_as_typing(range, text);
+        self.refresh_search_filter(cx);
+    }
+
+    fn replace_search_text(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        kind: EditableTextEditKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.search.replace_text_with_kind(range, text, kind);
         self.refresh_search_filter(cx);
     }
 
@@ -1192,6 +1216,23 @@ mod tests {
     }
 
     #[test]
+    fn programmatic_search_updates_reset_text_history() {
+        let mut view = test_view_with_entries(&["alpha.txt", "beta.txt"]);
+        view.search.replace_text_as_typing(None, "alpha");
+
+        view.set_search_query("beta".to_owned());
+
+        assert_eq!(view.search_query(), "beta");
+        assert!(!view.search.undo());
+
+        view.search.replace_text_as_typing(None, "!");
+        view.reset_search_for_navigation();
+
+        assert_eq!(view.search_query(), "");
+        assert!(!view.search.undo());
+    }
+
+    #[test]
     fn navigating_up_clears_active_filter_and_selects_origin() {
         let temp = TempDir::new();
         let child = temp.path().join("child");
@@ -1336,6 +1377,31 @@ mod tests {
                 );
 
                 assert_eq!(view.search_query(), "a");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn search_undo_and_redo_refresh_filtered_entries(cx: &mut TestAppContext) {
+        let (_temp, view, cx) = test_view_entity(cx, &["alpha.txt", "beta.txt", "alphabet.md"]);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.handle_search_edit(&SearchEdit, window, cx);
+                view.replace_search_text_as_typing(None, "alpha", cx);
+                assert_eq!(view.search_query(), "alpha");
+                assert_eq!(names(&view.entries), vec!["alpha.txt", "alphabet.md"]);
+
+                view.handle_text_input_undo(&crate::explorer::TextInputUndo, window, cx);
+                assert_eq!(view.search_query(), "");
+                assert_eq!(
+                    names(&view.entries),
+                    vec!["alpha.txt", "alphabet.md", "beta.txt"]
+                );
+
+                view.handle_text_input_redo(&crate::explorer::TextInputRedo, window, cx);
+                assert_eq!(view.search_query(), "alpha");
+                assert_eq!(names(&view.entries), vec!["alpha.txt", "alphabet.md"]);
             });
         });
     }

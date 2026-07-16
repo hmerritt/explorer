@@ -26,8 +26,8 @@ use crate::explorer::{
     navigation::HistoryMode,
     scrollbar::{ScrollbarDrag, ScrollbarMetrics},
     text_input::{
-        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextState, editable_text_runs,
-        scroll_offset_for_cursor,
+        EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextEditKind, EditableTextState,
+        editable_text_runs, scroll_offset_for_cursor,
     },
     view::ExplorerView,
 };
@@ -213,11 +213,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(address) = self.active_address_bar.as_mut() {
-            if address.selected_range.is_empty() {
-                let offset = address.previous_boundary(address.cursor_offset());
-                address.select_to(offset);
-            }
-            replace_address_text(address, None, "");
+            address.delete_backward();
             self.refresh_address_suggestions();
         }
         cx.stop_propagation();
@@ -242,11 +238,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(address) = self.active_address_bar.as_mut() {
-            if address.selected_range.is_empty() {
-                let offset = address.next_boundary(address.cursor_offset());
-                address.select_to(offset);
-            }
-            replace_address_text(address, None, "");
+            address.delete_forward();
             self.refresh_address_suggestions();
         }
         cx.stop_propagation();
@@ -456,7 +448,7 @@ impl ExplorerView {
         if let Some(text) = self.selected_address_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             if let Some(address) = self.active_address_bar.as_mut() {
-                replace_address_text(address, None, "");
+                replace_address_text(address, None, "", EditableTextEditKind::Cut);
                 self.refresh_address_suggestions();
             }
         }
@@ -473,7 +465,12 @@ impl ExplorerView {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
             && let Some(address) = self.active_address_bar.as_mut()
         {
-            replace_address_text(address, None, &text.replace(['\r', '\n'], " "));
+            replace_address_text(
+                address,
+                None,
+                &text.replace(['\r', '\n'], " "),
+                EditableTextEditKind::Paste,
+            );
             self.refresh_address_suggestions();
         }
         cx.stop_propagation();
@@ -605,6 +602,7 @@ impl ExplorerView {
             address.selected_range = address.content.len()..address.content.len();
             address.selection_reversed = false;
             address.marked_range = None;
+            address.reset_history();
             address.highlighted_suggestion = None;
             self.refresh_address_suggestions();
         }
@@ -688,6 +686,7 @@ impl ExplorerView {
         address.selected_range = address.content.len()..address.content.len();
         address.selection_reversed = false;
         address.marked_range = None;
+        address.reset_history();
         address.highlighted_suggestion = None;
         self.refresh_address_suggestions();
         true
@@ -799,6 +798,26 @@ impl ExplorerView {
                 &new_text,
                 new_selected_range_utf16,
             );
+            self.refresh_address_suggestions();
+        }
+    }
+
+    pub(super) fn undo_address_text(&mut self) {
+        if self
+            .active_address_bar
+            .as_mut()
+            .is_some_and(|address| address.undo())
+        {
+            self.refresh_address_suggestions();
+        }
+    }
+
+    pub(super) fn redo_address_text(&mut self) {
+        if self
+            .active_address_bar
+            .as_mut()
+            .is_some_and(|address| address.redo())
+        {
             self.refresh_address_suggestions();
         }
     }
@@ -1239,8 +1258,9 @@ fn replace_address_text(
     address: &mut AddressBarState,
     range: Option<Range<usize>>,
     new_text: &str,
+    kind: EditableTextEditKind,
 ) {
-    address.replace_text(range, new_text);
+    address.replace_text_with_kind(range, new_text, kind);
 }
 
 pub(super) struct AddressTextElement {
@@ -2172,6 +2192,52 @@ mod tests {
 
         let address = view.active_address_bar.as_ref().expect("address edit");
         assert_eq!(address.content, "child ");
+        assert_eq!(
+            address
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+    }
+
+    #[test]
+    fn address_undo_and_redo_refresh_suggestions() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child")).expect("create child");
+        fs::create_dir(temp.path().join("other")).expect("create other");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.active_address_bar = Some(AddressBarState::new(String::new(), None));
+
+        view.replace_address_text_in_range(None, "ch");
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.content, "ch");
+        assert_eq!(
+            address
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+
+        view.undo_address_text();
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.content, "");
+        assert_eq!(
+            address
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child", "other"]
+        );
+
+        view.redo_address_text();
+        let address = view.active_address_bar.as_ref().expect("address edit");
+        assert_eq!(address.content, "ch");
         assert_eq!(
             address
                 .suggestions

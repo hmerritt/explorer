@@ -68,7 +68,8 @@ pub use actions::{
     SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
     SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
     SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TrashSelected, UndoFileOperation,
+    SelectPreviousTab, SelectTabByIndex, TextInputRedo, TextInputUndo, TrashSelected,
+    UndoFileOperation,
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;

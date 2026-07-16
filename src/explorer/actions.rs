@@ -36,6 +36,8 @@ actions!(
         CutSelected,
         PasteClipboard,
         UndoFileOperation,
+        TextInputUndo,
+        TextInputRedo,
         TrashSelected,
         PermanentlyDeleteSelected,
         CreateNewFolder,
@@ -325,6 +327,10 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_text_input() {
+            cx.stop_propagation();
+            return;
+        }
         self.copy_selected_to_clipboard(cx);
         cx.notify();
     }
@@ -335,6 +341,10 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_text_input() {
+            cx.stop_propagation();
+            return;
+        }
         self.cut_selected_to_clipboard(cx);
         cx.notify();
     }
@@ -345,6 +355,10 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_text_input() {
+            cx.stop_propagation();
+            return;
+        }
         self.paste_clipboard(window, cx);
         cx.notify();
     }
@@ -355,6 +369,10 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.has_active_text_input() {
+            cx.stop_propagation();
+            return;
+        }
         self.undo_file_operation(cx);
         cx.notify();
     }
@@ -404,7 +422,11 @@ impl ExplorerView {
 mod tests {
     use super::*;
     use crate::explorer::{
-        clipboard::{FileClipboardOperation, file_clipboard_from_item},
+        clipboard::{
+            FileClipboard, FileClipboardOperation, clipboard_item_for_files,
+            file_clipboard_from_item,
+        },
+        file_commands::{FileOperationUndo, TrashUndo},
         test_support::{TempDir, selected_names, test_view_entity, test_view_entity_at_path},
     };
     use gpui::{AppContext, ClipboardItem, Image, ImageFormat, TestAppContext};
@@ -457,6 +479,46 @@ mod tests {
         let clipboard = file_clipboard_from_item(&item).expect("file clipboard");
         assert_eq!(clipboard.operation, FileClipboardOperation::Cut);
         assert_eq!(clipboard.paths, vec![cut_path]);
+    }
+
+    #[gpui::test]
+    fn active_text_input_blocks_file_clipboard_and_undo_handlers(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["a.txt"]);
+        let external = TempDir::new();
+        let external_path = external.path().join("external.txt");
+        fs::write(&external_path, b"external").expect("write external file");
+        let clipboard =
+            FileClipboard::new(FileClipboardOperation::Copy, vec![external_path.clone()]);
+        let item = clipboard_item_for_files(&clipboard).expect("file clipboard item");
+        cx.update(|_, app| app.write_to_clipboard(item));
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                view.handle_rename_selected(&RenameSelected, window, cx);
+                assert!(view.has_active_text_input());
+
+                view.file_operation_undo_stack
+                    .push(FileOperationUndo::Trash(TrashUndo::Unsupported {
+                        original_paths: vec![temp.path().join("deleted.txt")],
+                        reason: "file undo must remain untouched".to_owned(),
+                    }));
+
+                view.handle_paste_clipboard(&PasteClipboard, window, cx);
+                view.handle_copy_selected(&CopySelected, window, cx);
+                view.handle_cut_selected(&CutSelected, window, cx);
+                view.handle_undo_file_operation(&UndoFileOperation, window, cx);
+
+                assert!(view.cut_paths.is_empty());
+                assert_eq!(view.file_operation_undo_stack.len(), 1);
+                assert!(view.operation_notice.is_none());
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(!temp.path().join("external.txt").exists());
+        let item = cx.read_from_clipboard().expect("clipboard item");
+        assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
     }
 
     #[gpui::test]

@@ -3016,6 +3016,8 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_rename_cut))
             .on_action(cx.listener(Self::handle_rename_paste))
             .on_action(cx.listener(Self::handle_rename_noop))
+            .on_action(cx.listener(Self::handle_text_input_undo))
+            .on_action(cx.listener(Self::handle_text_input_redo))
             .on_action(cx.listener(Self::handle_address_edit))
             .on_action(cx.listener(Self::handle_address_commit))
             .on_action(cx.listener(Self::handle_address_cancel))

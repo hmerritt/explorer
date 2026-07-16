@@ -6,6 +6,34 @@ use gpui::{
 
 pub(super) const EDITABLE_TEXT_SELECTION_BACKGROUND: u32 = 0x0078d7;
 pub(super) const EDITABLE_TEXT_SELECTION_FOREGROUND: u32 = 0xffffff;
+const EDITABLE_TEXT_HISTORY_LIMIT: usize = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EditableTextEditKind {
+    Typing,
+    Backspace,
+    Delete,
+    Cut,
+    Paste,
+    Replacement,
+    Composition,
+}
+
+impl EditableTextEditKind {
+    fn can_coalesce(self) -> bool {
+        matches!(
+            self,
+            Self::Typing | Self::Backspace | Self::Delete | Self::Composition
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditableTextSnapshot {
+    content: String,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+}
 
 #[derive(Clone)]
 pub(super) struct EditableTextState {
@@ -17,6 +45,10 @@ pub(super) struct EditableTextState {
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) scroll_offset: Pixels,
     pub(super) is_selecting: bool,
+    undo_stack: Vec<EditableTextSnapshot>,
+    redo_stack: Vec<EditableTextSnapshot>,
+    active_edit_kind: Option<EditableTextEditKind>,
+    last_edit_state: Option<EditableTextSnapshot>,
 }
 
 impl EditableTextState {
@@ -35,6 +67,10 @@ impl EditableTextState {
             last_bounds: None,
             scroll_offset: px(0.0),
             is_selecting: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            active_edit_kind: None,
+            last_edit_state: None,
         }
     }
 
@@ -47,6 +83,7 @@ impl EditableTextState {
     }
 
     pub(super) fn move_to(&mut self, offset: usize) {
+        self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
@@ -54,6 +91,7 @@ impl EditableTextState {
     }
 
     pub(super) fn select_to(&mut self, offset: usize) {
+        self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         if self.selection_reversed {
             self.selected_range.start = offset;
@@ -69,12 +107,14 @@ impl EditableTextState {
     }
 
     pub(super) fn select_all(&mut self) {
+        self.finish_edit_group();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         self.scroll_cursor_into_view();
     }
 
     pub(super) fn select_word_at(&mut self, offset: usize) {
+        self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         let Some(word_offset) = self.word_offset_near(offset) else {
             self.move_to(offset);
@@ -315,24 +355,85 @@ impl EditableTextState {
             .then(|| self.content[self.selected_range.clone()].to_owned())
     }
 
-    pub(super) fn replace_text(&mut self, range: Option<Range<usize>>, new_text: &str) {
+    pub(super) fn replace_text_as_typing(&mut self, range: Option<Range<usize>>, new_text: &str) {
+        let effective_range = range
+            .clone()
+            .or(self.marked_range.clone())
+            .unwrap_or_else(|| self.selected_range.clone());
+        let kind = if self.marked_range.is_some() {
+            EditableTextEditKind::Composition
+        } else if effective_range.is_empty() {
+            EditableTextEditKind::Typing
+        } else {
+            EditableTextEditKind::Replacement
+        };
+        self.replace_text_with_kind(range, new_text, kind);
+    }
+
+    pub(super) fn replace_text_with_kind(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        kind: EditableTextEditKind,
+    ) {
         let range = range
             .or(self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
+        if range.is_empty() && new_text.is_empty() {
+            self.finish_edit_group();
+            return;
+        }
+
+        self.record_edit(kind);
         self.content.replace_range(range.clone(), new_text);
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_cursor_into_view();
+        self.finish_recorded_edit(kind);
+    }
+
+    pub(super) fn delete_backward(&mut self) {
+        let (range, kind) = if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let start = self.previous_boundary(cursor);
+            (start..cursor, EditableTextEditKind::Backspace)
+        } else {
+            (
+                self.selected_range.clone(),
+                EditableTextEditKind::Replacement,
+            )
+        };
+        self.replace_text_with_kind(Some(range), "", kind);
+    }
+
+    pub(super) fn delete_forward(&mut self) {
+        let (range, kind) = if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let end = self.next_boundary(cursor);
+            (cursor..end, EditableTextEditKind::Delete)
+        } else {
+            (
+                self.selected_range.clone(),
+                EditableTextEditKind::Replacement,
+            )
+        };
+        self.replace_text_with_kind(Some(range), "", kind);
     }
 
     pub(super) fn delete_previous_word_or_selection(&mut self) {
-        if self.selected_range.is_empty() {
-            let offset = self.previous_word_boundary(self.cursor_offset());
-            self.select_to(offset);
-        }
-        self.replace_text(None, "");
+        let (range, kind) = if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let start = self.previous_word_boundary(cursor);
+            (start..cursor, EditableTextEditKind::Backspace)
+        } else {
+            (
+                self.selected_range.clone(),
+                EditableTextEditKind::Replacement,
+            )
+        };
+        self.replace_text_with_kind(Some(range), "", kind);
     }
 
     pub(super) fn replace_text_in_range_utf16(
@@ -344,7 +445,7 @@ impl EditableTextState {
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone());
-        self.replace_text(range, new_text);
+        self.replace_text_as_typing(range, new_text);
     }
 
     pub(super) fn replace_and_mark_text_in_range_utf16(
@@ -358,6 +459,7 @@ impl EditableTextState {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
+        self.record_edit(EditableTextEditKind::Composition);
         self.content.replace_range(range.clone(), new_text);
         if new_text.is_empty() {
             self.marked_range = None;
@@ -371,6 +473,7 @@ impl EditableTextState {
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
         self.scroll_cursor_into_view();
+        self.finish_recorded_edit(EditableTextEditKind::Composition);
     }
 
     pub(super) fn selected_text_range_utf16(&self) -> UTF16Selection {
@@ -388,6 +491,84 @@ impl EditableTextState {
 
     pub(super) fn unmark_text(&mut self) {
         self.marked_range = None;
+        self.finish_edit_group();
+    }
+
+    pub(super) fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.finish_edit_group();
+            return false;
+        };
+        let current = self.snapshot();
+        Self::push_bounded(&mut self.redo_stack, current);
+        self.restore_snapshot(snapshot);
+        true
+    }
+
+    pub(super) fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.finish_edit_group();
+            return false;
+        };
+        let current = self.snapshot();
+        Self::push_bounded(&mut self.undo_stack, current);
+        self.restore_snapshot(snapshot);
+        true
+    }
+
+    pub(super) fn reset_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.finish_edit_group();
+    }
+
+    fn snapshot(&self) -> EditableTextSnapshot {
+        EditableTextSnapshot {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+
+    fn record_edit(&mut self, kind: EditableTextEditKind) {
+        let before = self.snapshot();
+        let coalesce = kind.can_coalesce()
+            && self.active_edit_kind == Some(kind)
+            && self.last_edit_state.as_ref() == Some(&before);
+        if !coalesce {
+            Self::push_bounded(&mut self.undo_stack, before);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn finish_recorded_edit(&mut self, kind: EditableTextEditKind) {
+        if kind.can_coalesce() {
+            self.active_edit_kind = Some(kind);
+            self.last_edit_state = Some(self.snapshot());
+        } else {
+            self.finish_edit_group();
+        }
+    }
+
+    fn finish_edit_group(&mut self) {
+        self.active_edit_kind = None;
+        self.last_edit_state = None;
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditableTextSnapshot) {
+        self.content = snapshot.content;
+        self.selected_range = snapshot.selected_range;
+        self.selection_reversed = snapshot.selection_reversed;
+        self.marked_range = None;
+        self.finish_edit_group();
+        self.scroll_cursor_into_view();
+    }
+
+    fn push_bounded(stack: &mut Vec<EditableTextSnapshot>, snapshot: EditableTextSnapshot) {
+        if stack.len() == EDITABLE_TEXT_HISTORY_LIMIT {
+            stack.remove(0);
+        }
+        stack.push(snapshot);
     }
 
     pub(super) fn bounds_for_range(
@@ -756,6 +937,129 @@ mod tests {
             Some("alpha ".len().."alpha delta".len())
         );
         assert_eq!(input.selected_range, "alpha d".len().."alpha del".len());
+    }
+
+    #[test]
+    fn contiguous_typing_undoes_and_redoes_as_one_group() {
+        let mut input = EditableTextState::with_selection(String::new(), 0..0);
+
+        input.replace_text_as_typing(None, "a");
+        input.replace_text_as_typing(None, "b");
+        input.replace_text_as_typing(None, "c");
+
+        assert_eq!(input.content, "abc");
+        assert!(input.undo());
+        assert_eq!(input.content, "");
+        assert_eq!(input.selected_range, 0..0);
+        assert!(input.redo());
+        assert_eq!(input.content, "abc");
+        assert_eq!(input.selected_range, 3..3);
+    }
+
+    #[test]
+    fn caret_movement_breaks_typing_groups_and_restores_selection() {
+        let mut input = EditableTextState::with_selection(String::new(), 0..0);
+        input.replace_text_as_typing(None, "a");
+        input.move_to(0);
+        input.replace_text_as_typing(None, "b");
+
+        assert_eq!(input.content, "ba");
+        assert!(input.undo());
+        assert_eq!(input.content, "a");
+        assert_eq!(input.selected_range, 0..0);
+        assert!(input.undo());
+        assert_eq!(input.content, "");
+    }
+
+    #[test]
+    fn same_direction_deletions_coalesce_but_direction_changes_do_not() {
+        let mut input = EditableTextState::with_selection("abcd".to_owned(), 4..4);
+        input.delete_backward();
+        input.delete_backward();
+
+        assert_eq!(input.content, "ab");
+        assert!(input.undo());
+        assert_eq!(input.content, "abcd");
+        assert_eq!(input.selected_range, 4..4);
+
+        input.move_to(1);
+        input.delete_forward();
+        input.delete_backward();
+        assert_eq!(input.content, "cd");
+        assert!(input.undo());
+        assert_eq!(input.content, "acd");
+        assert!(input.undo());
+        assert_eq!(input.content, "abcd");
+    }
+
+    #[test]
+    fn cut_and_paste_are_separate_undo_groups() {
+        let mut input = EditableTextState::with_selection("alpha beta".to_owned(), 0..5);
+        input.replace_text_with_kind(None, "", EditableTextEditKind::Cut);
+        input.replace_text_with_kind(None, "gamma", EditableTextEditKind::Paste);
+
+        assert_eq!(input.content, "gamma beta");
+        assert!(input.undo());
+        assert_eq!(input.content, " beta");
+        assert_eq!(input.selected_range, 0..0);
+        assert!(input.undo());
+        assert_eq!(input.content, "alpha beta");
+        assert_eq!(input.selected_range, 0..5);
+    }
+
+    #[test]
+    fn new_edit_after_undo_clears_redo_history() {
+        let mut input = EditableTextState::with_selection(String::new(), 0..0);
+        input.replace_text_as_typing(None, "alpha");
+        assert!(input.undo());
+
+        input.replace_text_as_typing(None, "beta");
+
+        assert!(!input.redo());
+        assert_eq!(input.content, "beta");
+    }
+
+    #[test]
+    fn undo_redo_preserve_utf8_content_and_byte_aligned_selection() {
+        let mut input = EditableTextState::with_selection("café".to_owned(), 0.."café".len());
+        input.replace_text_with_kind(None, "茶", EditableTextEditKind::Replacement);
+
+        assert!(input.undo());
+        assert_eq!(input.content, "café");
+        assert_eq!(input.selected_range, 0.."café".len());
+        assert!(input.redo());
+        assert_eq!(input.content, "茶");
+        assert_eq!(input.selected_range, "茶".len().."茶".len());
+    }
+
+    #[test]
+    fn ime_composition_updates_form_one_undo_group() {
+        let mut input = EditableTextState::with_selection(String::new(), 0..0);
+        input.replace_and_mark_text_in_range_utf16(None, "あ", Some(1..1));
+        input.replace_and_mark_text_in_range_utf16(None, "あい", Some(2..2));
+        input.unmark_text();
+
+        assert_eq!(input.content, "あい");
+        assert!(input.undo());
+        assert_eq!(input.content, "");
+        assert!(input.redo());
+        assert_eq!(input.content, "あい");
+        assert!(input.marked_range.is_none());
+    }
+
+    #[test]
+    fn editable_text_history_keeps_only_the_latest_hundred_groups() {
+        let mut input = EditableTextState::with_selection(String::new(), 0..0);
+        for _ in 0..(EDITABLE_TEXT_HISTORY_LIMIT + 1) {
+            input.replace_text_with_kind(None, "x", EditableTextEditKind::Replacement);
+        }
+
+        for _ in 0..EDITABLE_TEXT_HISTORY_LIMIT {
+            assert!(input.undo());
+        }
+
+        assert_eq!(input.content, "x");
+        assert!(!input.undo());
     }
 
     #[test]
