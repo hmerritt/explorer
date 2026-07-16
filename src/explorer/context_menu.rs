@@ -153,6 +153,7 @@ pub(super) enum ContextMenuCommand {
         executable: PathBuf,
         args: Vec<String>,
         targets: Vec<PathBuf>,
+        working_directory: PathBuf,
     },
     EjectMountedVolume {
         path: PathBuf,
@@ -292,9 +293,10 @@ impl ExplorerView {
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
+        let custom_working_directory = item_context_menu_working_directory(&entry.path, &self.path);
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
-            entry_context_menu_items_with_custom(
+            entry_context_menu_items_with_custom_in_directory(
                 selected_context.single_directory_open_target,
                 selected_context.selected_count,
                 selected_context.file_open_count,
@@ -305,6 +307,7 @@ impl ExplorerView {
                 &custom_items,
                 &targets,
                 &selected_entries,
+                &custom_working_directory,
             ),
             selected_context.native_icon_entry,
         ));
@@ -321,9 +324,9 @@ impl ExplorerView {
             return false;
         }
 
-        if self.focused_entry().is_none() {
+        let Some(focused_entry_path) = self.focused_entry().map(|entry| entry.path.clone()) else {
             return false;
-        }
+        };
 
         self.finish_search_edit();
         self.cancel_address_bar_edit();
@@ -336,9 +339,11 @@ impl ExplorerView {
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
+        let custom_working_directory =
+            item_context_menu_working_directory(&focused_entry_path, &self.path);
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
-            entry_context_menu_items_with_custom(
+            entry_context_menu_items_with_custom_in_directory(
                 selected_context.single_directory_open_target,
                 selected_context.selected_count,
                 selected_context.file_open_count,
@@ -349,6 +354,7 @@ impl ExplorerView {
                 &custom_items,
                 &targets,
                 &selected_entries,
+                &custom_working_directory,
             ),
             selected_context.native_icon_entry,
         ));
@@ -449,10 +455,11 @@ impl ExplorerView {
                 executable,
                 args,
                 targets,
+                working_directory,
             } => {
                 self.handle_custom_command_result(
                     &executable,
-                    run_custom_command(&executable, &args, &targets),
+                    run_custom_command(&executable, &args, &targets, &working_directory),
                 );
             }
             ContextMenuCommand::EjectMountedVolume { path } => {
@@ -691,17 +698,17 @@ fn run_custom_command(
     executable: &Path,
     args: &[String],
     targets: &[PathBuf],
+    working_directory: &Path,
 ) -> std::io::Result<()> {
     run_custom_command_with(
         executable,
         args,
         targets,
+        working_directory,
         |executable, arguments, working_directory| {
             let mut command = Command::new(executable);
             command.args(arguments);
-            if let Some(working_directory) = working_directory {
-                command.current_dir(working_directory);
-            }
+            command.current_dir(working_directory);
             command.spawn().map(|_| ())
         },
     )
@@ -745,25 +752,15 @@ fn run_custom_command_with(
     executable: &Path,
     args: &[String],
     targets: &[PathBuf],
-    spawn: impl FnOnce(&Path, &[OsString], Option<&Path>) -> std::io::Result<()>,
+    working_directory: &Path,
+    spawn: impl FnOnce(&Path, &[OsString], &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let command = custom_command_arguments(args, targets);
-    spawn(
-        executable,
-        &command.arguments,
-        command.working_directory.as_deref(),
-    )
+    let arguments = custom_command_arguments(args, targets);
+    spawn(executable, &arguments, working_directory)
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct CustomCommandArguments {
-    arguments: Vec<OsString>,
-    working_directory: Option<PathBuf>,
-}
-
-fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> CustomCommandArguments {
+fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsString> {
     let mut arguments = Vec::new();
-    let mut working_directory = None;
     let mut expanded_placeholder = false;
 
     for arg in args {
@@ -784,7 +781,6 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> CustomComma
             }
             "{cwd}" => {
                 expanded_placeholder = true;
-                working_directory = targets.first().cloned();
             }
             _ => arguments.push(OsString::from(arg)),
         }
@@ -798,10 +794,7 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> CustomComma
         );
     }
 
-    CustomCommandArguments {
-        arguments,
-        working_directory,
-    }
+    arguments
 }
 
 struct SelectedEntryContext {
@@ -1153,6 +1146,14 @@ fn linux_loop_device_from_loop_setup_stdout(stdout: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn item_context_menu_working_directory(item_path: &Path, current_directory: &Path) -> PathBuf {
+    item_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| current_directory.to_path_buf())
+}
+
 #[cfg(test)]
 pub(super) fn entry_context_menu_items(
     single_directory_open_target: Option<PathBuf>,
@@ -1236,6 +1237,7 @@ fn test_context_menu_entry(path: PathBuf, is_dir: bool) -> FileEntry {
     }
 }
 
+#[cfg(test)]
 fn entry_context_menu_items_with_custom(
     single_directory_open_target: Option<PathBuf>,
     selected_count: usize,
@@ -1247,6 +1249,38 @@ fn entry_context_menu_items_with_custom(
     custom_items: &[CustomContextMenuItem],
     targets: &[PathBuf],
     selected_entries: &[FileEntry],
+) -> Vec<ContextMenuItem> {
+    let working_directory = targets
+        .first()
+        .map(|target| item_context_menu_working_directory(target, Path::new(".")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    entry_context_menu_items_with_custom_in_directory(
+        single_directory_open_target,
+        selected_count,
+        selected_file_count,
+        selected_directory_count,
+        can_rename,
+        use_native_file_icon,
+        recursive_search_results_active,
+        custom_items,
+        targets,
+        selected_entries,
+        &working_directory,
+    )
+}
+
+fn entry_context_menu_items_with_custom_in_directory(
+    single_directory_open_target: Option<PathBuf>,
+    selected_count: usize,
+    selected_file_count: usize,
+    selected_directory_count: usize,
+    can_rename: bool,
+    use_native_file_icon: bool,
+    recursive_search_results_active: bool,
+    custom_items: &[CustomContextMenuItem],
+    targets: &[PathBuf],
+    selected_entries: &[FileEntry],
+    working_directory: &Path,
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
 
@@ -1354,6 +1388,7 @@ fn entry_context_menu_items_with_custom(
         targets,
         CustomContextMenuTarget::Entries(selected_entries),
         recursive_search_results_active,
+        working_directory,
     );
 
     items.extend([
@@ -1533,6 +1568,7 @@ fn folder_context_menu_items_with_custom(
             &[path.to_path_buf()],
             CustomContextMenuTarget::Directory,
             false,
+            path,
         );
     }
     items
@@ -1700,6 +1736,7 @@ fn insert_custom_items_after_first_separator(
     targets: &[PathBuf],
     target: CustomContextMenuTarget<'_>,
     recursive_search_results_active: bool,
+    working_directory: &Path,
 ) {
     let custom = configured
         .iter()
@@ -1711,6 +1748,7 @@ fn insert_custom_items_after_first_separator(
                 target,
                 recursive_search_results_active,
                 &index.to_string(),
+                working_directory,
             )
         })
         .collect::<Vec<_>>();
@@ -1736,6 +1774,7 @@ fn configured_context_menu_item(
     target: CustomContextMenuTarget<'_>,
     recursive_search_results_active: bool,
     id_suffix: &str,
+    working_directory: &Path,
 ) -> Option<ContextMenuItem> {
     match item {
         CustomContextMenuItem::Action {
@@ -1800,6 +1839,7 @@ fn configured_context_menu_item(
                     executable,
                     args: args.clone(),
                     targets: targets.to_vec(),
+                    working_directory: working_directory.to_path_buf(),
                 },
                 enabled: true,
             })
@@ -1815,6 +1855,7 @@ fn configured_context_menu_item(
                         target,
                         recursive_search_results_active,
                         &format!("{id_suffix}-{index}"),
+                        working_directory,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -3594,9 +3635,13 @@ mod tests {
     }
 
     #[test]
-    fn configured_entry_items_are_inserted_after_first_separator_with_selected_targets() {
+    fn configured_entry_items_include_selected_targets_and_invoked_item_working_directory() {
         let executable = configured_executable_path();
-        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+        let targets = vec![
+            PathBuf::from("first/a.txt"),
+            PathBuf::from("invoked/folder"),
+        ];
+        let working_directory = PathBuf::from("invoked");
         let configured = vec![
             CustomContextMenuItem::Item {
                 label: "Inspect".to_owned(),
@@ -3618,7 +3663,7 @@ mod tests {
             },
         ];
 
-        let items = entry_context_menu_items_with_custom(
+        let items = entry_context_menu_items_with_custom_in_directory(
             None,
             2,
             1,
@@ -3629,6 +3674,7 @@ mod tests {
             &configured,
             &targets,
             &[],
+            &working_directory,
         );
 
         assert!(matches!(items[2], ContextMenuItem::Separator));
@@ -3641,6 +3687,7 @@ mod tests {
                     executable: command,
                     args,
                     targets: command_targets,
+                    working_directory: command_working_directory,
                 },
                 ..
             } if label == "Inspect"
@@ -3648,6 +3695,7 @@ mod tests {
                 && command == &executable
                 && args == &vec!["--inspect".to_owned()]
                 && command_targets == &targets
+                && command_working_directory == &working_directory
         ));
         assert!(matches!(
             &items[4],
@@ -3655,9 +3703,14 @@ mod tests {
                 if label == "Tools" && matches!(
                     children.first(),
                     Some(ContextMenuItem::Action {
-                        command: ContextMenuCommand::RunCustom { targets: child_targets, .. },
+                        command: ContextMenuCommand::RunCustom {
+                            targets: child_targets,
+                            working_directory: child_working_directory,
+                            ..
+                        },
                         ..
                     }) if child_targets == &targets
+                        && child_working_directory == &working_directory
                 )
         ));
         assert!(matches!(items[5], ContextMenuItem::Separator));
@@ -4256,6 +4309,7 @@ mod tests {
                 CustomContextMenuTarget::Directory,
                 false,
                 "0",
+                Path::new("root"),
             )
             .is_none()
         );
@@ -4426,9 +4480,14 @@ mod tests {
         assert!(matches!(
             &items[4],
             ContextMenuItem::Action {
-                command: ContextMenuCommand::RunCustom { targets, .. },
+                command: ContextMenuCommand::RunCustom {
+                    targets,
+                    working_directory,
+                    ..
+                },
                 ..
-            } if targets == &[directory]
+            } if targets.as_slice() == std::slice::from_ref(&directory)
+                && working_directory == &directory
         ));
         assert!(menu_has_label(&items, "Png or directory"));
         assert!(matches!(items[6], ContextMenuItem::Separator));
@@ -4629,21 +4688,40 @@ mod tests {
     }
 
     #[test]
+    fn item_context_menu_working_directory_uses_item_parent_with_current_directory_fallback() {
+        let current_directory = PathBuf::from("current");
+
+        assert_eq!(
+            item_context_menu_working_directory(
+                Path::new("search/nested/result.txt"),
+                &current_directory,
+            ),
+            PathBuf::from("search/nested")
+        );
+        assert_eq!(
+            item_context_menu_working_directory(Path::new("result.txt"), &current_directory),
+            current_directory
+        );
+    }
+
+    #[test]
     fn custom_command_launches_once_with_all_targets_in_order() {
         let executable = configured_executable_path();
         let args = vec!["--inspect".to_owned()];
         let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+        let working_directory = PathBuf::from("current");
         let mut calls = Vec::new();
 
         run_custom_command_with(
             &executable,
             &args,
             &targets,
+            &working_directory,
             |actual_executable, actual_arguments, working_directory| {
                 calls.push((
                     actual_executable.to_path_buf(),
                     actual_arguments.to_vec(),
-                    working_directory.map(Path::to_path_buf),
+                    working_directory.to_path_buf(),
                 ));
                 Ok(())
             },
@@ -4659,7 +4737,7 @@ mod tests {
                     OsString::from("a.txt"),
                     OsString::from("folder")
                 ],
-                None,
+                working_directory,
             )]
         );
     }
@@ -4675,14 +4753,11 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            CustomCommandArguments {
-                arguments: vec![
-                    OsString::from("--open"),
-                    OsString::from("a.txt"),
-                    OsString::from("--literal={path}")
-                ],
-                working_directory: None,
-            }
+            vec![
+                OsString::from("--open"),
+                OsString::from("a.txt"),
+                OsString::from("--literal={path}")
+            ]
         );
     }
 
@@ -4693,14 +4768,11 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            CustomCommandArguments {
-                arguments: vec![
-                    OsString::from("--open"),
-                    OsString::from("a.txt"),
-                    OsString::from("folder")
-                ],
-                working_directory: None,
-            }
+            vec![
+                OsString::from("--open"),
+                OsString::from("a.txt"),
+                OsString::from("folder")
+            ]
         );
     }
 
@@ -4717,21 +4789,18 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            CustomCommandArguments {
-                arguments: vec![
-                    OsString::from("a"),
-                    OsString::from("-ad"),
-                    OsString::from("-saa"),
-                    OsString::from("archive me.txt"),
-                    OsString::from("archive me.txt"),
-                ],
-                working_directory: None,
-            }
+            vec![
+                OsString::from("a"),
+                OsString::from("-ad"),
+                OsString::from("-saa"),
+                OsString::from("archive me.txt"),
+                OsString::from("archive me.txt"),
+            ]
         );
     }
 
     #[test]
-    fn custom_command_arguments_use_exact_cwd_placeholder_as_working_directory() {
+    fn custom_command_arguments_consume_exact_cwd_placeholder_and_preserve_embedded_text() {
         let args = vec!["{cwd}".to_owned(), "--literal={cwd}".to_owned()];
         let targets = vec![
             PathBuf::from("first folder"),
@@ -4740,56 +4809,45 @@ mod tests {
 
         assert_eq!(
             custom_command_arguments(&args, &targets),
-            CustomCommandArguments {
-                arguments: vec![OsString::from("--literal={cwd}")],
-                working_directory: Some(PathBuf::from("first folder")),
-            }
+            vec![OsString::from("--literal={cwd}")]
         );
     }
 
     #[test]
-    fn ghostty_cwd_launch_uses_first_target_without_arguments() {
+    fn cwd_placeholder_does_not_override_contextual_working_directory() {
         let executable = PathBuf::from("ghostty");
         let args = vec!["{cwd}".to_owned()];
         let targets = vec![
             PathBuf::from("/home/user/First Project"),
             PathBuf::from("/home/user/Second Project"),
         ];
+        let working_directory = PathBuf::from("/home/user/Search Results");
         let mut calls = Vec::new();
 
         run_custom_command_with(
             &executable,
             &args,
             &targets,
+            &working_directory,
             |actual_executable, actual_arguments, working_directory| {
                 calls.push((
                     actual_executable.to_path_buf(),
                     actual_arguments.to_vec(),
-                    working_directory.map(Path::to_path_buf),
+                    working_directory.to_path_buf(),
                 ));
                 Ok(())
             },
         )
         .unwrap();
 
-        assert_eq!(
-            calls,
-            vec![(
-                executable,
-                Vec::new(),
-                Some(PathBuf::from("/home/user/First Project")),
-            )]
-        );
+        assert_eq!(calls, vec![(executable, Vec::new(), working_directory,)]);
     }
 
     #[test]
     fn custom_command_cwd_placeholder_suppresses_targets_when_selection_is_empty() {
         assert_eq!(
             custom_command_arguments(&["{cwd}".to_owned()], &[]),
-            CustomCommandArguments {
-                arguments: Vec::new(),
-                working_directory: None,
-            }
+            Vec::<OsString>::new()
         );
     }
 
