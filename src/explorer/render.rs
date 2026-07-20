@@ -9,11 +9,12 @@ use std::{
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, Div, DragMoveEvent, Entity, ExternalPaths, ExternalPathsDragCallback, FocusHandle,
-    Focusable, FontWeight, Image, IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div,
-    list, prelude::*, px, rgb, transparent_black, uniform_list,
+    CursorStyle, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths,
+    ExternalPathsDragCallback, FocusHandle, Focusable, FontWeight, Image, IntoElement,
+    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px,
+    rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -2668,24 +2669,46 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn details_name_item_hit_rights(&self, viewport_width: f32, window: &Window) -> Vec<f32> {
+    fn details_name_item_hit_right_at_pointer(
+        &self,
+        local_position: Point<Pixels>,
+        viewport_size: gpui::Size<Pixels>,
+        window: &Window,
+    ) -> Option<f32> {
+        if self.view_mode == FileViewMode::LargeIcons {
+            return None;
+        }
+
+        let viewport_width = f32::from(viewport_size.width);
         let name_column_width =
             self.effective_name_column_width(viewport_width + SCROLLBAR_GUTTER_WIDTH);
+        let content_x = f32::from(local_position.x) + self.visible_horizontal_scroll_offset();
+        if content_x < NAME_CELL_LEFT_PADDING || content_x >= name_column_width {
+            return None;
+        }
+
+        let ix = self.hovered_entry_index_for_list_position(local_position, viewport_size)?;
+        if self.entry_is_selected(ix) {
+            return None;
+        }
+
+        let entry = self.entries.get(ix)?;
+        #[cfg(test)]
+        self.details_name_hit_measurement_count
+            .set(self.details_name_hit_measurement_count.get() + 1);
         let show_full_path = self.recursive_search_results_active();
-        self.entries
-            .iter()
-            .map(|entry| {
-                let widths = details_name_widths(
-                    entry,
-                    self.show_file_name_extensions,
-                    show_full_path,
-                    name_column_width,
-                    &self.font,
-                    window,
-                );
-                details_name_item_hit_right(widths.hit_text_width, name_column_width)
-            })
-            .collect()
+        let widths = details_name_widths(
+            entry,
+            self.show_file_name_extensions,
+            show_full_path,
+            name_column_width,
+            &self.font,
+            window,
+        );
+        Some(details_name_item_hit_right(
+            widths.hit_text_width,
+            name_column_width,
+        ))
     }
 
     fn entry_is_hovered(&self, entry: &FileEntry) -> bool {
@@ -2808,7 +2831,10 @@ impl ExplorerView {
 
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, window, cx| {
+                    move |event: &MouseDownEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
                         if !matches!(event.button, MouseButton::Left | MouseButton::Right)
                             || !bounds.contains(&event.position)
                         {
@@ -2823,15 +2849,19 @@ impl ExplorerView {
                                 return;
                             }
 
-                            let details_name_item_hit_rights = this
-                                .details_name_item_hit_rights(f32::from(viewport_size.width), window);
+                            let details_name_item_hit_right = this
+                                .details_name_item_hit_right_at_pointer(
+                                    local_position,
+                                    viewport_size,
+                                    window,
+                                );
                             let outcome = this
-                                .begin_mouse_selection_drag_after_menu_dismissal_with_details_name_hit_targets(
+                                .begin_mouse_selection_drag_after_menu_dismissal_with_details_name_hit_target(
                                 event.button,
                                 local_position,
                                 viewport_size,
                                 modifiers,
-                                &details_name_item_hit_rights,
+                                details_name_item_hit_right,
                             );
                             if outcome.menu_closed || outcome.selection_started {
                                 cx.notify();
@@ -7294,6 +7324,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn selected_details_row_mouse_down_skips_name_measurement_in_large_folder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let names = (0..256)
+            .map(|ix| format!("file-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity(cx, &name_refs);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                cx.notify();
+            });
+        });
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["file-000.txt"]);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 0);
+        });
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn unselected_details_row_mouse_down_measures_only_clicked_name_in_large_folder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let names = (0..256)
+            .map(|ix| format!("file-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity(cx, &name_refs);
+        let position = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["file-000.txt"]);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 1);
+        });
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn blank_details_name_space_measures_only_its_row_in_large_folder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let names = (0..256)
+            .map(|ix| format!("file-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity(cx, &name_refs);
+        let name_bounds = run_until_debug_bounds(cx, "explorer-entry-name-0");
+        let hit_bounds = run_until_debug_bounds(cx, "explorer-entry-name-hit-0");
+        let position = gpui::point(hit_bounds.right() + gpui::px(12.0), hit_bounds.center().y);
+        assert!(position.x < name_bounds.right());
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.details_name_hit_measurement_count.get(), 1);
+            assert!(view.mouse_selection_drag.is_some());
+        });
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
     fn details_name_hit_drag_selects_unselected_item_without_rubber_band(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -7336,6 +7438,7 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.test_drag_payload_build_count(), 0);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 0);
         });
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(below_threshold, MouseButton::Left, Modifiers::default());
@@ -7348,6 +7451,7 @@ mod tests {
         cx.run_until_parked();
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.test_drag_payload_build_count(), 1);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 0);
         });
 
         for offset in [24.0, 30.0, 36.0, 42.0] {
@@ -7384,12 +7488,14 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.test_drag_payload_build_count(), 0);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 0);
         });
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.test_drag_payload_build_count(), 1);
+            assert_eq!(view.details_name_hit_measurement_count.get(), 0);
         });
 
         cx.simulate_mouse_up(activated, MouseButton::Left, Modifiers::default());
@@ -7716,6 +7822,7 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["a.txt", "b.txt"]);
             assert!(view.mouse_down_entry_selection.is_none());
+            assert!(view.details_name_hit_measurement_count.get() <= 1);
         });
     }
 
@@ -7738,6 +7845,7 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["a.txt", "b.txt", "c.txt"]);
             assert!(view.mouse_down_entry_selection.is_none());
+            assert!(view.details_name_hit_measurement_count.get() <= 1);
         });
     }
 

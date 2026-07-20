@@ -163,6 +163,8 @@ pub struct ExplorerView {
     pub(super) git_status_task: Option<Task<()>>,
     #[cfg(test)]
     pub(super) drag_payload_build_count: Cell<usize>,
+    #[cfg(test)]
+    pub(super) details_name_hit_measurement_count: Cell<usize>,
 }
 
 pub(super) struct FileOperationState {
@@ -537,6 +539,8 @@ impl ExplorerView {
             git_status_task: None,
             #[cfg(test)]
             drag_payload_build_count: Cell::new(0),
+            #[cfg(test)]
+            details_name_hit_measurement_count: Cell::new(0),
         }
     }
 
