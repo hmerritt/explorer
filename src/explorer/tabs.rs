@@ -1627,6 +1627,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn middle_clicking_breadcrumb_opens_ancestor_in_new_background_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let temp = TempDir::new();
+        let parent = temp.path().join("parent");
+        let current_path = parent.join("child");
+        fs::create_dir_all(&current_path).expect("create nested test directory");
+        let (tabs, cx) = test_tabs_at_path(cx, current_path.clone());
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
+        });
+        cx.run_until_parked();
+
+        let parent_position = cx
+            .debug_bounds("breadcrumb-segment-parent")
+            .expect("ancestor breadcrumb bounds")
+            .center();
+
+        cx.simulate_mouse_down(parent_position, MouseButton::Middle, Modifiers::default());
+        cx.simulate_mouse_up(parent_position, MouseButton::Middle, Modifiers::default());
+        cx.run_until_parked();
+
+        let new_tab_view = cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+            tabs.tabs[1].view.clone()
+        });
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, current_path);
+        });
+        cx.read_entity(&new_tab_view, |view, _| {
+            assert_eq!(view.path, parent);
+        });
+    }
+
+    #[gpui::test]
     fn configured_new_tab_focus_activates_and_focuses_last_created_tab(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);

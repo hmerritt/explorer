@@ -5465,7 +5465,10 @@ fn directory_bar_label(
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     let target = segment.target;
+    let label = segment.label;
+    let debug_label = label.clone();
     let navigation_target = target.clone();
+    let new_tab_target = target.clone();
     let destination = DropDestination::Directory {
         item_path: target.clone(),
         target_path: target,
@@ -5474,6 +5477,7 @@ fn directory_bar_label(
 
     div()
         .id(("breadcrumb-segment", index))
+        .debug_selector(move || format!("breadcrumb-segment-{debug_label}"))
         .min_w(px(0.0))
         .whitespace_nowrap()
         .text_size(px(DIRECTORY_BAR_TEXT_SIZE))
@@ -5549,7 +5553,17 @@ fn directory_bar_label(
             cx.stop_propagation();
             cx.notify();
         }))
-        .child(SharedString::from(segment.label))
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(
+                    new_tab_target.clone(),
+                ));
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(SharedString::from(label))
         .flex_shrink_0()
         .into_any_element()
 }
