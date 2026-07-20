@@ -1258,6 +1258,7 @@ pub fn run() {
         crate::http_client::initialize(cx);
         crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
+        crate::explorer::initialize_cache_directory();
         crate::explorer::initialize_native_icon_cache(cx);
         crate::explorer::initialize_image_thumbnail_cache(cx);
         crate::explorer::initialize_folder_size_cache(cx);

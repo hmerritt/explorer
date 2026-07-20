@@ -4,6 +4,7 @@ mod app_icons;
 mod archive_diagnostics;
 mod breadcrumb;
 mod cache_cleanup;
+mod cache_directory;
 mod clipboard;
 mod codebase_summary;
 mod columns;
@@ -73,6 +74,7 @@ pub use actions::{
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;
+pub(crate) use cache_directory::initialize as initialize_cache_directory;
 pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
 pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]
