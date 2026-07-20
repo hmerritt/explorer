@@ -12,8 +12,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
-use gpui::{App, Context, Global, RenderImage};
+use futures::{
+    StreamExt,
+    channel::mpsc::{self, Sender},
+    stream::FuturesUnordered,
+};
+use gpui::{App, BackgroundExecutor, Context, Global, RenderImage};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "windows")]
@@ -24,9 +28,9 @@ use crate::{
         entry::FileEntry,
         filesystem::path_is_remote_drive,
         image_preview::{
-            AnimatedImageSource, ImageThumbnailExtractionTimings, animated_gif_source_for_path,
-            encode_rgba_png_bytes, load_hover_image_preview_rgba_with_cancel_timed,
-            load_image_thumbnail_rgba_with_cancel_timed, path_may_have_image_preview,
+            AnimatedImageSource, ImageThumbnailExtractionTimings, ThumbnailSpec, ThumbnailStage,
+            animated_gif_source_for_path, load_thumbnail_rgba_with_cancel_timed,
+            path_may_have_image_preview,
         },
         image_resize::dimensions_for_longest_side,
         video::{
@@ -44,11 +48,15 @@ use crate::explorer::image_preview::{
     hover_image_preview_dimensions, load_image_thumbnail_png_with_cancel_timed,
 };
 
-const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v1";
+const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v2";
+const LEGACY_IMAGE_THUMBNAIL_CACHE_VERSIONS: &[&str] = &["image-thumbnails-v1"];
 const DISK_MANIFEST_FILE_NAME: &str = "manifest.json";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
+const IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY: usize = 64;
+const IMAGE_THUMBNAIL_CACHE_BATCH_DELAY: Duration = Duration::from_millis(8);
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const QOI_SIGNATURE: &[u8] = b"qoif";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -59,15 +67,23 @@ pub(super) struct ImageThumbnailCache {
 impl Global for ImageThumbnailCache {}
 
 impl ImageThumbnailCache {
-    fn new() -> Self {
+    fn new(
+        cache_dir: Option<PathBuf>,
+        cache_writer: Option<Sender<ImageThumbnailCacheWriteJob>>,
+    ) -> Self {
         Self {
-            inner: RefCell::new(ImageThumbnailCacheInner::new(image_thumbnail_cache_dir())),
+            inner: RefCell::new(ImageThumbnailCacheInner::with_writer(
+                cache_dir,
+                cache_writer,
+            )),
         }
     }
 }
 
 pub(crate) fn initialize(cx: &mut App) {
-    cx.set_global(ImageThumbnailCache::new());
+    let cache_dir = image_thumbnail_cache_dir();
+    let cache_writer = start_image_thumbnail_cache_writer(cache_dir.clone(), cx);
+    cx.set_global(ImageThumbnailCache::new(cache_dir, cache_writer));
 }
 
 #[cfg(test)]
@@ -125,6 +141,7 @@ impl ImageThumbnailUsage {
 
 struct ImageThumbnailCacheInner {
     cache_dir: Option<PathBuf>,
+    cache_writer: Option<Sender<ImageThumbnailCacheWriteJob>>,
     states: HashMap<String, ImageThumbnailState>,
     pending: VecDeque<String>,
     loader_running: bool,
@@ -183,17 +200,33 @@ struct ImageThumbnailCacheWriteJob {
     key: String,
     source_path: PathBuf,
     image: image::RgbaImage,
+    queued_at: Instant,
 }
 
 impl ImageThumbnailCacheInner {
+    #[cfg(test)]
     fn new(cache_dir: Option<PathBuf>) -> Self {
+        Self::with_writer(cache_dir, None)
+    }
+
+    fn with_writer(
+        cache_dir: Option<PathBuf>,
+        cache_writer: Option<Sender<ImageThumbnailCacheWriteJob>>,
+    ) -> Self {
         Self {
             cache_dir,
+            cache_writer,
             states: HashMap::new(),
             pending: VecDeque::new(),
             loader_running: false,
             loader_generation: 0,
         }
+    }
+
+    fn queue_cache_write(&mut self, job: ImageThumbnailCacheWriteJob) -> bool {
+        self.cache_writer
+            .as_mut()
+            .is_some_and(|writer| writer.try_send(job).is_ok())
     }
 
     fn thumbnail_for_request(
@@ -748,29 +781,108 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
             timings.record_request_total(request_started);
 
             if finished && let Some(cache_write) = cache_write {
-                let write_task = cx.background_executor().spawn(async move {
-                    encode_rgba_png_bytes(
-                        cache_write.image.as_raw(),
-                        cache_write.image.width(),
-                        cache_write.image.height(),
-                    )
-                    .is_some_and(|bytes| {
-                        write_cached_thumbnail_with_source(
-                            Some(&cache_write.cache_dir),
-                            &cache_write.key,
-                            &cache_write.source_path,
-                            &bytes,
-                        )
+                let queued = cx
+                    .update_global::<ImageThumbnailCache, _>(|cache, _| {
+                        cache.inner.borrow_mut().queue_cache_write(cache_write)
                     })
-                });
-                write_task.detach();
-                timings.record_cache_write_scheduled();
+                    .unwrap_or(false);
+                if queued {
+                    timings.record_cache_write_scheduled();
+                }
             }
         }
 
         timings.finish();
     })
     .detach();
+}
+
+fn start_image_thumbnail_cache_writer(
+    cache_dir: Option<PathBuf>,
+    cx: &App,
+) -> Option<Sender<ImageThumbnailCacheWriteJob>> {
+    let cache_dir = cache_dir?;
+    let (sender, receiver) = mpsc::channel(IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY);
+    let executor = cx.background_executor().clone();
+    let writer_executor = executor.clone();
+    executor
+        .spawn(async move {
+            run_image_thumbnail_cache_writer(cache_dir, receiver, writer_executor).await;
+        })
+        .detach();
+    Some(sender)
+}
+
+async fn run_image_thumbnail_cache_writer(
+    cache_dir: PathBuf,
+    mut receiver: mpsc::Receiver<ImageThumbnailCacheWriteJob>,
+    executor: BackgroundExecutor,
+) {
+    let mut manifest = load_disk_manifest(Some(&cache_dir)).unwrap_or_default();
+    while let Some(first) = receiver.next().await {
+        executor.timer(IMAGE_THUMBNAIL_CACHE_BATCH_DELAY).await;
+        let mut batch = Vec::with_capacity(IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY);
+        batch.push(first);
+        while batch.len() < IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY {
+            match receiver.try_recv() {
+                Ok(job) => batch.push(job),
+                Err(_) => break,
+            }
+        }
+        let metrics = write_image_thumbnail_cache_batch(&cache_dir, &mut manifest, batch);
+        if crate::debug_options::icon_timings_enabled() {
+            crate::debug_options::log_icon_timing(format_args!(
+                "image_thumbnails cache_writer count={} writer_queue={} cache_encode={} cache_write={} manifest_flush={}",
+                metrics.written,
+                format_image_thumbnail_timing_duration(metrics.queue_wait),
+                format_image_thumbnail_timing_duration(metrics.encode),
+                format_image_thumbnail_timing_duration(metrics.write),
+                format_image_thumbnail_timing_duration(metrics.manifest_flush),
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ImageThumbnailCacheWriteMetrics {
+    written: usize,
+    queue_wait: Duration,
+    encode: Duration,
+    write: Duration,
+    manifest_flush: Duration,
+}
+
+fn write_image_thumbnail_cache_batch(
+    cache_dir: &Path,
+    manifest: &mut DiskThumbnailManifest,
+    batch: Vec<ImageThumbnailCacheWriteJob>,
+) -> ImageThumbnailCacheWriteMetrics {
+    let mut metrics = ImageThumbnailCacheWriteMetrics::default();
+    for job in batch {
+        metrics.queue_wait += job.queued_at.elapsed();
+        let encode_started = Instant::now();
+        let encoded =
+            encode_rgba_qoi_bytes(job.image.as_raw(), job.image.width(), job.image.height());
+        metrics.encode += encode_started.elapsed();
+        let Some(bytes) = encoded else {
+            continue;
+        };
+
+        let write_started = Instant::now();
+        let did_write = write_cached_thumbnail(Some(&job.cache_dir), &job.key, &bytes);
+        metrics.write += write_started.elapsed();
+        if did_write {
+            manifest.mappings.insert(job.key, job.source_path);
+            metrics.written += 1;
+        }
+    }
+
+    let manifest_started = Instant::now();
+    if metrics.written > 0 {
+        let _ = save_disk_manifest(cache_dir, manifest);
+    }
+    metrics.manifest_flush = manifest_started.elapsed();
+    metrics
 }
 
 fn image_thumbnail_loader_concurrency() -> usize {
@@ -786,7 +898,7 @@ fn thumbnail_request_reads_remote_source(request: &ImageThumbnailRequest) -> boo
 }
 
 #[cfg(test)]
-fn load_or_create_thumbnail_png(
+fn load_or_create_thumbnail_cache_bytes(
     request: &ImageThumbnailRequest,
     cache_dir: Option<&Path>,
     cancel: &AtomicBool,
@@ -797,25 +909,14 @@ fn load_or_create_thumbnail_png(
     if request.source_policy == ThumbnailSourcePolicy::CacheOnly {
         return None;
     }
-    let extracted = match request.usage {
-        ImageThumbnailUsage::Standard => {
-            crate::explorer::image_preview::load_image_thumbnail_png_with_cancel_timed(
-                &request.path,
-                request.usage.size(),
-                cancel,
-                false,
-            )
-        }
-        ImageThumbnailUsage::HoverPreview => {
-            crate::explorer::image_preview::load_hover_image_preview_png_with_cancel_timed(
-                &request.path,
-                request.usage.size(),
-                cancel,
-                false,
-            )
-        }
+    let spec = match request.usage {
+        ImageThumbnailUsage::Standard => ThumbnailSpec::standard(request.usage.size()),
+        ImageThumbnailUsage::HoverPreview => ThumbnailSpec::hover(request.usage.size()),
     };
-    extracted.result.ok()
+    let image = load_thumbnail_rgba_with_cancel_timed(&request.path, spec, cancel, false)
+        .result
+        .ok()?;
+    encode_rgba_qoi_bytes(image.as_raw(), image.width(), image.height())
 }
 
 fn load_or_create_thumbnail_with_timings(
@@ -841,21 +942,20 @@ fn load_or_create_thumbnail_with_timings(
         }
 
         let decode_started = timings_enabled.then(Instant::now);
-        let image = decode_png_rgba(&bytes);
+        let image = decode_cached_thumbnail_rgba(&bytes);
         let cache_decode_elapsed = decode_started.map(|started| started.elapsed());
-        return match image {
-            Some(image) => ImageThumbnailLoadResult::cache_hit(
+        if let Some(image) = image {
+            return ImageThumbnailLoadResult::cache_hit(
                 image,
                 animated_source_for_request(request),
                 cache_read_elapsed,
                 cache_decode_elapsed,
-            ),
-            None => ImageThumbnailLoadResult::failed(
-                cache_read_elapsed,
-                None,
-                ImageThumbnailExtractionTimings::default(),
-            ),
-        };
+            );
+        }
+
+        if let Some(path) = thumbnail_file_path(cache_dir, &request.key) {
+            let _ = fs::remove_file(path);
+        }
     }
 
     if cancel.load(Ordering::Relaxed) {
@@ -873,22 +973,12 @@ fn load_or_create_thumbnail_with_timings(
     let extract_started = timings_enabled.then(Instant::now);
     let (result, extraction_timings) = match request.kind {
         ImageThumbnailKind::Image => {
-            let extracted = match request.usage {
-                ImageThumbnailUsage::Standard => load_image_thumbnail_rgba_with_cancel_timed(
-                    &request.path,
-                    request.usage.size(),
-                    cancel,
-                    timings_enabled,
-                ),
-                ImageThumbnailUsage::HoverPreview => {
-                    load_hover_image_preview_rgba_with_cancel_timed(
-                        &request.path,
-                        request.usage.size(),
-                        cancel,
-                        timings_enabled,
-                    )
-                }
+            let spec = match request.usage {
+                ImageThumbnailUsage::Standard => ThumbnailSpec::standard(request.usage.size()),
+                ImageThumbnailUsage::HoverPreview => ThumbnailSpec::hover(request.usage.size()),
             };
+            let extracted =
+                load_thumbnail_rgba_with_cancel_timed(&request.path, spec, cancel, timings_enabled);
             (extracted.result, extracted.timings)
         }
         ImageThumbnailKind::Video => {
@@ -1149,11 +1239,7 @@ struct ImageThumbnailLoadResult {
     image: Option<CachedThumbnailImage>,
     cache_image: Option<image::RgbaImage>,
     cache_hit: Option<bool>,
-    cache_read_elapsed: Option<Duration>,
-    cache_decode_elapsed: Option<Duration>,
-    extract_elapsed: Option<Duration>,
-    render_prepare_elapsed: Option<Duration>,
-    extraction_timings: ImageThumbnailExtractionTimings,
+    timings: ImageThumbnailExtractionTimings,
     outcome: ImageThumbnailLoadOutcome,
 }
 
@@ -1166,6 +1252,16 @@ enum ImageThumbnailLoadOutcome {
 }
 
 impl ImageThumbnailLoadResult {
+    fn empty(outcome: ImageThumbnailLoadOutcome) -> Self {
+        Self {
+            image: None,
+            cache_image: None,
+            cache_hit: None,
+            timings: ImageThumbnailExtractionTimings::default(),
+            outcome,
+        }
+    }
+
     fn cache_hit(
         image: image::RgbaImage,
         animated_source: Option<AnimatedImageSource>,
@@ -1174,16 +1270,15 @@ impl ImageThumbnailLoadResult {
     ) -> Self {
         let render_started = Instant::now();
         let image = cached_thumbnail_image_from_rgba_with_animated_source(image, animated_source);
+        let mut timings = ImageThumbnailExtractionTimings::default();
+        timings.set(ThumbnailStage::CacheRead, cache_read_elapsed);
+        timings.set(ThumbnailStage::CacheDecode, cache_decode_elapsed);
+        timings.record(ThumbnailStage::RenderPrepare, render_started.elapsed());
         Self {
             image: Some(image),
-            cache_image: None,
             cache_hit: Some(true),
-            cache_read_elapsed,
-            cache_decode_elapsed,
-            extract_elapsed: None,
-            render_prepare_elapsed: Some(render_started.elapsed()),
-            extraction_timings: ImageThumbnailExtractionTimings::default(),
-            outcome: ImageThumbnailLoadOutcome::CacheHit,
+            timings,
+            ..Self::empty(ImageThumbnailLoadOutcome::CacheHit)
         }
     }
 
@@ -1192,85 +1287,62 @@ impl ImageThumbnailLoadResult {
         animated_source: Option<AnimatedImageSource>,
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
-        extraction_timings: ImageThumbnailExtractionTimings,
+        mut timings: ImageThumbnailExtractionTimings,
     ) -> Self {
         let cache_image = image.clone();
         let render_started = Instant::now();
         let image = cached_thumbnail_image_from_rgba_with_animated_source(image, animated_source);
+        timings.set(ThumbnailStage::CacheRead, cache_read_elapsed);
+        timings.set(ThumbnailStage::Extract, extract_elapsed);
+        timings.record(ThumbnailStage::RenderPrepare, render_started.elapsed());
         Self {
             image: Some(image),
             cache_image: Some(cache_image),
             cache_hit: Some(false),
-            cache_read_elapsed,
-            cache_decode_elapsed: None,
-            extract_elapsed,
-            render_prepare_elapsed: Some(render_started.elapsed()),
-            extraction_timings,
-            outcome: ImageThumbnailLoadOutcome::Generated,
+            timings,
+            ..Self::empty(ImageThumbnailLoadOutcome::Generated)
         }
     }
 
     fn failed(
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
-        extraction_timings: ImageThumbnailExtractionTimings,
+        mut timings: ImageThumbnailExtractionTimings,
     ) -> Self {
+        timings.set(ThumbnailStage::CacheRead, cache_read_elapsed);
+        timings.set(ThumbnailStage::Extract, extract_elapsed);
         Self {
-            image: None,
-            cache_image: None,
             cache_hit: Some(false),
-            cache_read_elapsed,
-            cache_decode_elapsed: None,
-            extract_elapsed,
-            render_prepare_elapsed: None,
-            extraction_timings,
-            outcome: ImageThumbnailLoadOutcome::Failed,
+            timings,
+            ..Self::empty(ImageThumbnailLoadOutcome::Failed)
         }
     }
 
     fn cancelled() -> Self {
-        Self {
-            image: None,
-            cache_image: None,
-            cache_hit: None,
-            cache_read_elapsed: None,
-            cache_decode_elapsed: None,
-            extract_elapsed: None,
-            render_prepare_elapsed: None,
-            extraction_timings: ImageThumbnailExtractionTimings::default(),
-            outcome: ImageThumbnailLoadOutcome::Cancelled,
-        }
+        Self::empty(ImageThumbnailLoadOutcome::Cancelled)
     }
 
     fn cancelled_after_cache_read(cache_hit: bool, cache_read_elapsed: Option<Duration>) -> Self {
+        let mut timings = ImageThumbnailExtractionTimings::default();
+        timings.set(ThumbnailStage::CacheRead, cache_read_elapsed);
         Self {
-            image: None,
-            cache_image: None,
             cache_hit: Some(cache_hit),
-            cache_read_elapsed,
-            cache_decode_elapsed: None,
-            extract_elapsed: None,
-            render_prepare_elapsed: None,
-            extraction_timings: ImageThumbnailExtractionTimings::default(),
-            outcome: ImageThumbnailLoadOutcome::Cancelled,
+            timings,
+            ..Self::empty(ImageThumbnailLoadOutcome::Cancelled)
         }
     }
 
     fn cancelled_after_extract(
         cache_read_elapsed: Option<Duration>,
         extract_elapsed: Option<Duration>,
-        extraction_timings: ImageThumbnailExtractionTimings,
+        mut timings: ImageThumbnailExtractionTimings,
     ) -> Self {
+        timings.set(ThumbnailStage::CacheRead, cache_read_elapsed);
+        timings.set(ThumbnailStage::Extract, extract_elapsed);
         Self {
-            image: None,
-            cache_image: None,
             cache_hit: Some(false),
-            cache_read_elapsed,
-            cache_decode_elapsed: None,
-            extract_elapsed,
-            render_prepare_elapsed: None,
-            extraction_timings,
-            outcome: ImageThumbnailLoadOutcome::Cancelled,
+            timings,
+            ..Self::empty(ImageThumbnailLoadOutcome::Cancelled)
         }
     }
 
@@ -1284,11 +1356,12 @@ impl ImageThumbnailLoadResult {
             key: job.request.key.clone(),
             source_path: job.request.path.clone(),
             image: self.cache_image.clone()?,
+            queued_at: Instant::now(),
         })
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ImageThumbnailTimingBatch {
     enabled: bool,
     batch_started: Option<Instant>,
@@ -1300,29 +1373,25 @@ struct ImageThumbnailTimingBatch {
     cancelled: usize,
     discarded: usize,
     cache_writes_scheduled: usize,
-    queue_wait: ImageThumbnailStageTimingStats,
-    cache_read: ImageThumbnailStageTimingStats,
-    cache_decode: ImageThumbnailStageTimingStats,
-    extract: ImageThumbnailStageTimingStats,
-    embedded_thumbnail_scan: ImageThumbnailStageTimingStats,
-    embedded_thumbnail_decode: ImageThumbnailStageTimingStats,
-    source_read: ImageThumbnailStageTimingStats,
-    format_detect: ImageThumbnailStageTimingStats,
-    raster_decode: ImageThumbnailStageTimingStats,
-    rgba_convert: ImageThumbnailStageTimingStats,
-    tiff_ifd_scan: ImageThumbnailStageTimingStats,
-    tiff_raw_sample: ImageThumbnailStageTimingStats,
-    tiff_chunk_decode: ImageThumbnailStageTimingStats,
-    tiff_chunk_sample: ImageThumbnailStageTimingStats,
-    svg_parse: ImageThumbnailStageTimingStats,
-    svg_render: ImageThumbnailStageTimingStats,
-    svg_unpremultiply: ImageThumbnailStageTimingStats,
-    resize_canvas: ImageThumbnailStageTimingStats,
-    png_encode: ImageThumbnailStageTimingStats,
-    cache_write: ImageThumbnailStageTimingStats,
-    render_prepare: ImageThumbnailStageTimingStats,
-    commit: ImageThumbnailStageTimingStats,
-    request_total: ImageThumbnailStageTimingStats,
+    stages: [ImageThumbnailStageTimingStats; ThumbnailStage::COUNT],
+}
+
+impl Default for ImageThumbnailTimingBatch {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            batch_started: None,
+            requests: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            generated: 0,
+            failed: 0,
+            cancelled: 0,
+            discarded: 0,
+            cache_writes_scheduled: 0,
+            stages: std::array::from_fn(|_| ImageThumbnailStageTimingStats::default()),
+        }
+    }
 }
 
 impl ImageThumbnailTimingBatch {
@@ -1360,7 +1429,7 @@ impl ImageThumbnailTimingBatch {
 
     fn record_queue_wait(&mut self, elapsed: Duration) {
         if self.enabled {
-            self.queue_wait.record(elapsed);
+            self.record_stage(ThumbnailStage::QueueWait, elapsed);
         }
     }
 
@@ -1369,12 +1438,6 @@ impl ImageThumbnailTimingBatch {
             return;
         }
 
-        if let Some(elapsed) = result.cache_read_elapsed {
-            self.cache_read.record(elapsed);
-        }
-        if let Some(elapsed) = result.cache_decode_elapsed {
-            self.cache_decode.record(elapsed);
-        }
         if let Some(cache_hit) = result.cache_hit {
             if cache_hit {
                 self.cache_hits += 1;
@@ -1382,13 +1445,7 @@ impl ImageThumbnailTimingBatch {
                 self.cache_misses += 1;
             }
         }
-        if let Some(elapsed) = result.extract_elapsed {
-            self.extract.record(elapsed);
-        }
-        self.record_extraction_timings(&result.extraction_timings);
-        if let Some(elapsed) = result.render_prepare_elapsed {
-            self.render_prepare.record(elapsed);
-        }
+        self.record_timings(&result.timings);
 
         match result.outcome {
             ImageThumbnailLoadOutcome::CacheHit => {}
@@ -1404,41 +1461,16 @@ impl ImageThumbnailTimingBatch {
         }
 
         if let Some(started) = started {
-            self.commit.record(started.elapsed());
+            self.record_stage(ThumbnailStage::Commit, started.elapsed());
         }
     }
 
-    fn record_extraction_timings(&mut self, timings: &ImageThumbnailExtractionTimings) {
-        record_image_thumbnail_stage_if_some(
-            &mut self.embedded_thumbnail_scan,
-            timings.embedded_thumbnail_scan,
-        );
-        record_image_thumbnail_stage_if_some(
-            &mut self.embedded_thumbnail_decode,
-            timings.embedded_thumbnail_decode,
-        );
-        record_image_thumbnail_stage_if_some(&mut self.source_read, timings.source_read);
-        record_image_thumbnail_stage_if_some(&mut self.format_detect, timings.format_detect);
-        record_image_thumbnail_stage_if_some(&mut self.raster_decode, timings.raster_decode);
-        record_image_thumbnail_stage_if_some(&mut self.rgba_convert, timings.rgba_convert);
-        record_image_thumbnail_stage_if_some(&mut self.tiff_ifd_scan, timings.tiff_ifd_scan);
-        record_image_thumbnail_stage_if_some(&mut self.tiff_raw_sample, timings.tiff_raw_sample);
-        record_image_thumbnail_stage_if_some(
-            &mut self.tiff_chunk_decode,
-            timings.tiff_chunk_decode,
-        );
-        record_image_thumbnail_stage_if_some(
-            &mut self.tiff_chunk_sample,
-            timings.tiff_chunk_sample,
-        );
-        record_image_thumbnail_stage_if_some(&mut self.svg_parse, timings.svg_parse);
-        record_image_thumbnail_stage_if_some(&mut self.svg_render, timings.svg_render);
-        record_image_thumbnail_stage_if_some(
-            &mut self.svg_unpremultiply,
-            timings.svg_unpremultiply,
-        );
-        record_image_thumbnail_stage_if_some(&mut self.resize_canvas, timings.resize_canvas);
-        record_image_thumbnail_stage_if_some(&mut self.png_encode, timings.png_encode);
+    fn record_timings(&mut self, timings: &ImageThumbnailExtractionTimings) {
+        for (stage, elapsed) in timings.stages() {
+            if let Some(elapsed) = elapsed {
+                self.record_stage(stage, elapsed);
+            }
+        }
     }
 
     fn record_discarded(&mut self) {
@@ -1459,7 +1491,7 @@ impl ImageThumbnailTimingBatch {
         }
 
         if let Some(started) = started {
-            self.request_total.record(started.elapsed());
+            self.record_stage(ThumbnailStage::RequestTotal, started.elapsed());
         }
     }
 
@@ -1494,38 +1526,18 @@ impl ImageThumbnailTimingBatch {
             self.discarded,
             self.cache_writes_scheduled
         )];
-        push_image_thumbnail_stage_line(&mut lines, "queue_wait", &self.queue_wait);
-        push_image_thumbnail_stage_line(&mut lines, "cache_read", &self.cache_read);
-        push_image_thumbnail_stage_line(&mut lines, "cache_decode", &self.cache_decode);
-        push_image_thumbnail_stage_line(&mut lines, "extract", &self.extract);
-        push_image_thumbnail_stage_line(
-            &mut lines,
-            "embedded_thumbnail_scan",
-            &self.embedded_thumbnail_scan,
-        );
-        push_image_thumbnail_stage_line(
-            &mut lines,
-            "embedded_thumbnail_decode",
-            &self.embedded_thumbnail_decode,
-        );
-        push_image_thumbnail_stage_line(&mut lines, "source_read", &self.source_read);
-        push_image_thumbnail_stage_line(&mut lines, "format_detect", &self.format_detect);
-        push_image_thumbnail_stage_line(&mut lines, "raster_decode", &self.raster_decode);
-        push_image_thumbnail_stage_line(&mut lines, "rgba_convert", &self.rgba_convert);
-        push_image_thumbnail_stage_line(&mut lines, "tiff_ifd_scan", &self.tiff_ifd_scan);
-        push_image_thumbnail_stage_line(&mut lines, "tiff_raw_sample", &self.tiff_raw_sample);
-        push_image_thumbnail_stage_line(&mut lines, "tiff_chunk_decode", &self.tiff_chunk_decode);
-        push_image_thumbnail_stage_line(&mut lines, "tiff_chunk_sample", &self.tiff_chunk_sample);
-        push_image_thumbnail_stage_line(&mut lines, "svg_parse", &self.svg_parse);
-        push_image_thumbnail_stage_line(&mut lines, "svg_render", &self.svg_render);
-        push_image_thumbnail_stage_line(&mut lines, "svg_unpremultiply", &self.svg_unpremultiply);
-        push_image_thumbnail_stage_line(&mut lines, "resize_canvas", &self.resize_canvas);
-        push_image_thumbnail_stage_line(&mut lines, "png_encode", &self.png_encode);
-        push_image_thumbnail_stage_line(&mut lines, "cache_write", &self.cache_write);
-        push_image_thumbnail_stage_line(&mut lines, "render_prepare", &self.render_prepare);
-        push_image_thumbnail_stage_line(&mut lines, "commit", &self.commit);
-        push_image_thumbnail_stage_line(&mut lines, "request_total", &self.request_total);
+        for stage in ThumbnailStage::ALL {
+            push_image_thumbnail_stage_line(&mut lines, stage.name(), self.stage(stage));
+        }
         lines
+    }
+
+    fn record_stage(&mut self, stage: ThumbnailStage, elapsed: Duration) {
+        self.stages[stage as usize].record(elapsed);
+    }
+
+    fn stage(&self, stage: ThumbnailStage) -> &ImageThumbnailStageTimingStats {
+        &self.stages[stage as usize]
     }
 }
 
@@ -1567,15 +1579,6 @@ fn push_image_thumbnail_stage_line(
 ) {
     if let Some(line) = stats.format_line(stage) {
         lines.push(line);
-    }
-}
-
-fn record_image_thumbnail_stage_if_some(
-    stats: &mut ImageThumbnailStageTimingStats,
-    elapsed: Option<Duration>,
-) {
-    if let Some(elapsed) = elapsed {
-        stats.record(elapsed);
     }
 }
 
@@ -1681,7 +1684,7 @@ fn system_time_key(time: Option<SystemTime>) -> u64 {
 fn read_cached_thumbnail(cache_dir: Option<&Path>, key: &str) -> Option<Vec<u8>> {
     fs::read(thumbnail_file_path(cache_dir, key)?)
         .ok()
-        .and_then(valid_png_bytes)
+        .and_then(valid_qoi_bytes)
 }
 
 fn write_cached_thumbnail(cache_dir: Option<&Path>, key: &str, bytes: &[u8]) -> bool {
@@ -1691,6 +1694,7 @@ fn write_cached_thumbnail(cache_dir: Option<&Path>, key: &str, bytes: &[u8]) -> 
     write_atomic(&path, bytes).is_ok()
 }
 
+#[cfg(test)]
 fn write_cached_thumbnail_with_source(
     cache_dir: Option<&Path>,
     key: &str,
@@ -1719,7 +1723,7 @@ fn thumbnail_file_path(cache_dir: Option<&Path>, key: &str) -> Option<PathBuf> {
         return None;
     }
 
-    Some(cache_dir?.join(format!("{key}.png")))
+    Some(cache_dir?.join(format!("{key}.qoi")))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1748,7 +1752,20 @@ pub(super) fn cleanup_stale_path_cache_entries() -> ImageThumbnailCacheCleanupSu
     let Some(cache_dir) = image_thumbnail_cache_dir() else {
         return ImageThumbnailCacheCleanupSummary::default();
     };
+    cleanup_legacy_image_thumbnail_cache_dirs(&cache_dir);
     cleanup_stale_path_cache_entries_in_dir(&cache_dir)
+}
+
+fn cleanup_legacy_image_thumbnail_cache_dirs(current_cache_dir: &Path) {
+    let Some(parent) = current_cache_dir.parent() else {
+        return;
+    };
+    for version in LEGACY_IMAGE_THUMBNAIL_CACHE_VERSIONS {
+        let legacy = parent.join(version);
+        if legacy != current_cache_dir {
+            let _ = fs::remove_dir_all(legacy);
+        }
+    }
 }
 
 fn cleanup_stale_path_cache_entries_in_dir(cache_dir: &Path) -> ImageThumbnailCacheCleanupSummary {
@@ -1807,6 +1824,18 @@ fn cached_thumbnail_image_from_png_bytes(bytes: Vec<u8>) -> Option<CachedThumbna
     cached_thumbnail_image_from_rgba(decode_png_rgba(&bytes)?).into()
 }
 
+fn encode_rgba_qoi_bytes(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    qoi::encode_to_vec(rgba, width, height).ok()
+}
+
+fn decode_cached_thumbnail_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let (header, pixels) = qoi::decode_to_vec(bytes).ok()?;
+    header
+        .channels
+        .is_rgba()
+        .then(|| image::RgbaImage::from_raw(header.width, header.height, pixels))?
+}
+
 fn decode_png_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .ok()
@@ -1835,19 +1864,8 @@ fn cached_thumbnail_image_from_rgba_with_animated_source(
     }
 }
 
-#[cfg(test)]
-fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 24 || !bytes.starts_with(PNG_SIGNATURE) || &bytes[12..16] != b"IHDR" {
-        return None;
-    }
-
-    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-    (width > 0 && height > 0).then_some((width, height))
-}
-
-fn valid_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
-    bytes.starts_with(PNG_SIGNATURE).then_some(bytes)
+fn valid_qoi_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    bytes.starts_with(QOI_SIGNATURE).then_some(bytes)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -1906,9 +1924,57 @@ fn normalized_path_key(path: &Path) -> String {
 
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
+    use std::{
+        path::{Path, PathBuf},
+        time::Instant,
+    };
+
+    pub fn encode_cached_thumbnail_for_benchmark(image: image::RgbaImage) -> Option<Vec<u8>> {
+        super::encode_rgba_qoi_bytes(image.as_raw(), image.width(), image.height())
+    }
+
     pub fn prepare_cached_thumbnail_for_benchmark(bytes: Vec<u8>) -> Option<(u32, u32)> {
-        let image = super::cached_thumbnail_image_from_rgba(super::decode_png_rgba(&bytes)?);
+        let image =
+            super::cached_thumbnail_image_from_rgba(super::decode_cached_thumbnail_rgba(&bytes)?);
         Some((image.width, image.height))
+    }
+
+    pub fn write_cached_thumbnail_batch_for_benchmark(
+        cache_dir: &Path,
+        images: &[image::RgbaImage],
+    ) -> usize {
+        let jobs = images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| super::ImageThumbnailCacheWriteJob {
+                cache_dir: cache_dir.to_path_buf(),
+                key: format!("{index:016x}"),
+                source_path: cache_dir.join(format!("source-{index}.png")),
+                image: image.clone(),
+                queued_at: Instant::now(),
+            })
+            .collect();
+        let mut manifest = super::load_disk_manifest(Some(cache_dir)).unwrap_or_default();
+        super::write_image_thumbnail_cache_batch(cache_dir, &mut manifest, jobs).written
+    }
+
+    pub fn queue_and_cancel_thumbnails_for_benchmark(count: usize) -> usize {
+        let directory = PathBuf::from("benchmark-folder");
+        let mut cache = super::ImageThumbnailCacheInner::with_writer(None, None);
+        for index in 0..count {
+            let request = super::ImageThumbnailRequest {
+                kind: super::ImageThumbnailKind::Image,
+                usage: super::ImageThumbnailUsage::Standard,
+                source_policy: super::ThumbnailSourcePolicy::ReadSource,
+                key: format!("benchmark-{index}"),
+                path: directory.join(format!("image-{index}.png")),
+                directory: directory.clone(),
+            };
+            let _ = cache.thumbnail_for_request(request);
+        }
+        let queued = cache.pending.len();
+        let _ = cache.cancel_directory(&directory);
+        queued + cache.pending.len()
     }
 }
 
@@ -1952,7 +2018,7 @@ mod tests {
 
     #[test]
     fn thumbnail_cache_version_invalidates_prepared_render_images() {
-        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v1");
+        assert_eq!(IMAGE_THUMBNAIL_CACHE_VERSION, "image-thumbnails-v2");
     }
 
     #[test]
@@ -2078,7 +2144,7 @@ mod tests {
 
         assert_eq!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
-            "5a1de52252785a81"
+            "37df2f5441ec5ea6"
         );
     }
 
@@ -2173,8 +2239,8 @@ mod tests {
     fn image_thumbnail_timing_batch_formats_stage_totals_fastest_and_slowest() {
         let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
         batch.requests = 2;
-        batch.queue_wait.record(Duration::from_millis(2));
-        batch.queue_wait.record(Duration::from_micros(500));
+        batch.record_stage(ThumbnailStage::QueueWait, Duration::from_millis(2));
+        batch.record_stage(ThumbnailStage::QueueWait, Duration::from_micros(500));
 
         let lines = batch.format_lines(Duration::from_millis(3));
         let queue_wait = lines
@@ -2218,28 +2284,32 @@ mod tests {
     fn image_thumbnail_timing_batch_formats_extraction_stage_lines() {
         let mut batch = ImageThumbnailTimingBatch::enabled_for_test();
         batch.requests = 1;
+        let mut extraction_timings = ImageThumbnailExtractionTimings::default();
+        for (stage, millis) in [
+            (ThumbnailStage::SourceRead, 1),
+            (ThumbnailStage::FormatDetect, 2),
+            (ThumbnailStage::RasterDecode, 3),
+            (ThumbnailStage::RgbaConvert, 4),
+            (ThumbnailStage::SvgParse, 5),
+            (ThumbnailStage::SvgRender, 6),
+            (ThumbnailStage::SvgUnpremultiply, 7),
+            (ThumbnailStage::ResizeCanvas, 8),
+            (ThumbnailStage::PngEncode, 9),
+            (ThumbnailStage::EmbeddedThumbnailScan, 11),
+            (ThumbnailStage::EmbeddedThumbnailDecode, 12),
+            (ThumbnailStage::TiffIfdScan, 13),
+            (ThumbnailStage::TiffRawSample, 14),
+            (ThumbnailStage::TiffChunkDecode, 15),
+            (ThumbnailStage::TiffChunkSample, 16),
+        ] {
+            extraction_timings.record(stage, Duration::from_millis(millis));
+        }
         let result = ImageThumbnailLoadResult::generated(
             image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
             None,
             None,
             Some(Duration::from_millis(10)),
-            ImageThumbnailExtractionTimings {
-                embedded_thumbnail_scan: Some(Duration::from_millis(11)),
-                embedded_thumbnail_decode: Some(Duration::from_millis(12)),
-                source_read: Some(Duration::from_millis(1)),
-                format_detect: Some(Duration::from_millis(2)),
-                raster_decode: Some(Duration::from_millis(3)),
-                rgba_convert: Some(Duration::from_millis(4)),
-                tiff_ifd_scan: Some(Duration::from_millis(13)),
-                tiff_raw_sample: Some(Duration::from_millis(14)),
-                tiff_chunk_decode: Some(Duration::from_millis(15)),
-                tiff_chunk_sample: Some(Duration::from_millis(16)),
-                svg_parse: Some(Duration::from_millis(5)),
-                svg_render: Some(Duration::from_millis(6)),
-                svg_unpremultiply: Some(Duration::from_millis(7)),
-                resize_canvas: Some(Duration::from_millis(8)),
-                png_encode: Some(Duration::from_millis(9)),
-            },
+            extraction_timings,
         );
 
         batch.record_load_result(&result);
@@ -2345,10 +2415,10 @@ mod tests {
         assert_eq!(batch.cancelled, 3);
         assert_eq!(batch.cache_hits, 1);
         assert_eq!(batch.cache_misses, 3);
-        assert_eq!(batch.cache_read.count, 4);
-        assert_eq!(batch.extract.count, 3);
-        assert_eq!(batch.cache_write.count, 0);
-        assert_eq!(batch.render_prepare.count, 1);
+        assert_eq!(batch.stage(ThumbnailStage::CacheRead).count, 4);
+        assert_eq!(batch.stage(ThumbnailStage::Extract).count, 3);
+        assert_eq!(batch.stage(ThumbnailStage::CacheWrite).count, 0);
+        assert_eq!(batch.stage(ThumbnailStage::RenderPrepare).count, 1);
     }
 
     #[test]
@@ -2368,10 +2438,10 @@ mod tests {
         batch.record_request_total(batch.now());
 
         assert_eq!(batch.requests, 1);
-        assert_eq!(batch.queue_wait.count, 1);
+        assert_eq!(batch.stage(ThumbnailStage::QueueWait).count, 1);
         assert_eq!(batch.discarded, 1);
         assert_eq!(batch.cache_writes_scheduled, 1);
-        assert!(batch.request_total.count <= 1);
+        assert!(batch.stage(ThumbnailStage::RequestTotal).count <= 1);
 
         batch.finish();
     }
@@ -2407,14 +2477,19 @@ mod tests {
         };
         let cancel = AtomicBool::new(false);
 
-        let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
-        assert_eq!(png_dimensions(&generated), Some((128, 64)));
+        let generated =
+            load_or_create_thumbnail_cache_bytes(&request, Some(temp.path()), &cancel).unwrap();
+        assert_eq!(
+            decode_cached_thumbnail_rgba(&generated).map(|image| image.dimensions()),
+            Some((128, 64))
+        );
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             &request.key,
             &generated
         ));
-        let cached = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
+        let cached =
+            load_or_create_thumbnail_cache_bytes(&request, Some(temp.path()), &cancel).unwrap();
 
         assert_eq!(generated, cached);
         assert!(
@@ -2425,7 +2500,88 @@ mod tests {
     }
 
     #[test]
-    fn cache_only_thumbnail_returns_cached_png() {
+    fn corrupt_qoi_cache_entry_is_removed_and_regenerated() {
+        let temp = TempDir::new();
+        let source = temp.path().join("image.png");
+        fs::write(&source, png_bytes(4, 2)).unwrap();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Image,
+            usage: ImageThumbnailUsage::Standard,
+            source_policy: ThumbnailSourcePolicy::ReadSource,
+            key: "0123456789abcdef".to_owned(),
+            path: source,
+            directory: temp.path().to_path_buf(),
+        };
+        let cache_path = thumbnail_file_path(Some(temp.path()), &request.key).unwrap();
+        fs::write(&cache_path, b"qoif-corrupt").unwrap();
+
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
+
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Generated);
+        assert_eq!(
+            result.image.map(|image| (image.width, image.height)),
+            Some((128, 64))
+        );
+        assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn cache_writer_batches_qoi_files_and_one_manifest() {
+        let temp = TempDir::new();
+        let mut manifest = DiskThumbnailManifest::default();
+        let jobs = (0..3)
+            .map(|index| ImageThumbnailCacheWriteJob {
+                cache_dir: temp.path().to_path_buf(),
+                key: format!("{index:016x}"),
+                source_path: temp.path().join(format!("source-{index}.png")),
+                image: image::RgbaImage::from_pixel(4, 2, image::Rgba([index as u8, 40, 80, 255])),
+                queued_at: Instant::now(),
+            })
+            .collect();
+
+        let metrics = write_image_thumbnail_cache_batch(temp.path(), &mut manifest, jobs);
+
+        assert_eq!(metrics.written, 3);
+        assert_eq!(manifest.mappings.len(), 3);
+        assert_eq!(load_disk_manifest(Some(temp.path())), Some(manifest));
+        for index in 0..3 {
+            let bytes = read_cached_thumbnail(Some(temp.path()), &format!("{index:016x}"))
+                .expect("cached QOI");
+            let image = decode_cached_thumbnail_rgba(&bytes).expect("decode cached QOI");
+            assert_eq!(image.dimensions(), (4, 2));
+            assert_eq!(
+                image.get_pixel(0, 0),
+                &image::Rgba([index as u8, 40, 80, 255])
+            );
+        }
+    }
+
+    #[test]
+    fn saturated_cache_writer_drops_work_without_blocking() {
+        let temp = TempDir::new();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut cache =
+            ImageThumbnailCacheInner::with_writer(Some(temp.path().to_path_buf()), Some(sender));
+        let job = |key: &str| ImageThumbnailCacheWriteJob {
+            cache_dir: temp.path().to_path_buf(),
+            key: key.to_owned(),
+            source_path: temp.path().join("source.png"),
+            image: image::RgbaImage::new(1, 1),
+            queued_at: Instant::now(),
+        };
+
+        assert!(cache.queue_cache_write(job("0000000000000001")));
+        assert!(cache.queue_cache_write(job("0000000000000002")));
+        assert!(!cache.queue_cache_write(job("0000000000000003")));
+    }
+
+    #[test]
+    fn cache_only_thumbnail_returns_cached_qoi() {
         let temp = TempDir::new();
         let request = ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
@@ -2435,7 +2591,7 @@ mod tests {
             path: temp.path().join("missing.png"),
             directory: temp.path().to_path_buf(),
         };
-        write_cached_thumbnail(Some(temp.path()), &request.key, &png_bytes(4, 2));
+        write_cached_thumbnail(Some(temp.path()), &request.key, &qoi_bytes(4, 2));
 
         let result = load_or_create_thumbnail_with_timings(
             &request,
@@ -2452,7 +2608,7 @@ mod tests {
                 .map(|image| (image.width, image.height)),
             Some((4, 2))
         );
-        assert!(result.extract_elapsed.is_none());
+        assert!(result.timings.get(ThumbnailStage::Extract).is_none());
     }
 
     #[test]
@@ -2478,9 +2634,13 @@ mod tests {
 
         assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
         assert!(result.image.is_none());
-        assert!(result.extract_elapsed.is_none());
+        assert!(result.timings.get(ThumbnailStage::Extract).is_none());
         assert_eq!(
-            load_or_create_thumbnail_png(&request, Some(temp.path()), &AtomicBool::new(false)),
+            load_or_create_thumbnail_cache_bytes(
+                &request,
+                Some(temp.path()),
+                &AtomicBool::new(false)
+            ),
             None
         );
     }
@@ -2506,7 +2666,7 @@ mod tests {
 
         assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
         assert!(result.image.is_none());
-        assert!(result.extract_elapsed.is_none());
+        assert!(result.timings.get(ThumbnailStage::Extract).is_none());
     }
 
     #[test]
@@ -2591,8 +2751,10 @@ mod tests {
         };
         let cancel = AtomicBool::new(false);
 
-        let generated = load_or_create_thumbnail_png(&request, Some(temp.path()), &cancel).unwrap();
-        let image = cached_thumbnail_image_from_png_bytes(generated).unwrap();
+        let generated =
+            load_or_create_thumbnail_cache_bytes(&request, Some(temp.path()), &cancel).unwrap();
+        let image =
+            cached_thumbnail_image_from_rgba(decode_cached_thumbnail_rgba(&generated).unwrap());
 
         assert_eq!((image.width, image.height), (400, 200));
     }
@@ -2832,7 +2994,7 @@ mod tests {
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             &request.key,
-            &png_bytes(400, 200),
+            &qoi_bytes(400, 200),
         ));
         let cancel = AtomicBool::new(false);
 
@@ -2870,7 +3032,7 @@ mod tests {
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             &standard_request.key,
-            &png_bytes(128, 128)
+            &qoi_bytes(128, 128)
         ));
         let mut cache = ImageThumbnailCacheInner::new(Some(temp.path().to_path_buf()));
 
@@ -2914,7 +3076,7 @@ mod tests {
             if invalid_cache {
                 fs::write(
                     thumbnail_file_path(Some(temp.path()), &standard_request.key).unwrap(),
-                    b"not a png",
+                    b"not qoi",
                 )
                 .unwrap();
             }
@@ -3003,7 +3165,7 @@ mod tests {
             Some(temp.path()),
             key,
             &source,
-            &png_bytes(4, 2),
+            &qoi_bytes(4, 2),
         ));
 
         let summary = cleanup_stale_path_cache_entries_in_dir(temp.path());
@@ -3057,13 +3219,28 @@ mod tests {
         assert!(write_cached_thumbnail(
             Some(temp.path()),
             key,
-            &png_bytes(4, 2),
+            &qoi_bytes(4, 2),
         ));
 
         let summary = cleanup_stale_path_cache_entries_in_dir(temp.path());
 
         assert_eq!(summary, ImageThumbnailCacheCleanupSummary::default());
         assert!(thumbnail_file_path(Some(temp.path()), key).is_some_and(|path| path.exists()));
+    }
+
+    #[test]
+    fn scheduled_cleanup_removes_legacy_thumbnail_cache_versions() {
+        let temp = TempDir::new();
+        let current = temp.path().join(IMAGE_THUMBNAIL_CACHE_VERSION);
+        let legacy = temp.path().join("image-thumbnails-v1");
+        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("old.png"), b"old cache").unwrap();
+
+        cleanup_legacy_image_thumbnail_cache_dirs(&current);
+
+        assert!(current.is_dir());
+        assert!(!legacy.exists());
     }
 
     #[test]
@@ -3327,6 +3504,11 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
         bytes
+    }
+
+    fn qoi_bytes(width: u32, height: u32) -> Vec<u8> {
+        let image = image::RgbaImage::new(width, height);
+        encode_rgba_qoi_bytes(image.as_raw(), width, height).unwrap()
     }
 
     fn animated_gif_bytes(width: u32, height: u32) -> Vec<u8> {

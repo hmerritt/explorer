@@ -99,6 +99,7 @@ pub(super) fn resize_dynamic_to_rgba(
     }
 }
 
+#[cfg(feature = "benchmarks")]
 pub(super) fn resize_rgba_to_longest_side(
     image: image::RgbaImage,
     longest_side: u32,

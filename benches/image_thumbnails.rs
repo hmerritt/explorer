@@ -12,16 +12,21 @@ use std::{
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use explorer::benchmark_support::{
-    load_image_thumbnail_for_benchmark, load_image_thumbnail_ready_for_benchmark,
-    prepare_cached_thumbnail_for_benchmark, resize_rgba_for_benchmark,
+    encode_cached_thumbnail_for_benchmark, load_image_thumbnail_ready_for_benchmark,
+    prepare_cached_thumbnail_for_benchmark, queue_and_cancel_thumbnails_for_benchmark,
+    resize_rgba_for_benchmark, write_cached_thumbnail_batch_for_benchmark,
 };
 
-const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v5";
+const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v6";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
 const LARGE_HEIGHT: u32 = 1200;
 const WIDE_TIFF_WIDTH: u32 = 400_000;
 const WIDE_TIFF_HEIGHT: u32 = 2;
+const PHOTO_TIFF_WIDTH: u32 = 4_000;
+const PHOTO_TIFF_HEIGHT: u32 = 3_000;
+const HUGE_TIFF_WIDTH: u32 = 8_000;
+const HUGE_TIFF_HEIGHT: u32 = 6_000;
 const BATCH_COUNT: usize = 32;
 
 struct Fixture {
@@ -31,6 +36,8 @@ struct Fixture {
     photo_jpeg: PathBuf,
     large_tiff: PathBuf,
     large_deflate_tiff: PathBuf,
+    photo_lzw_tiff: PathBuf,
+    huge_deflate_tiff: PathBuf,
     wide_tiff: PathBuf,
     large_webp: PathBuf,
     large_svg: PathBuf,
@@ -58,6 +65,18 @@ impl Fixture {
             create_jpeg(&root.join("photo-12mp.jpg"), 4000, 3000, 1);
             create_tiff(&root.join("large.tif"), LARGE_WIDTH, LARGE_HEIGHT);
             create_deflate_tiff(&root.join("large-deflate.tif"), LARGE_WIDTH, LARGE_HEIGHT);
+            create_compressed_tiff(
+                &root.join("photo-lzw.tif"),
+                PHOTO_TIFF_WIDTH,
+                PHOTO_TIFF_HEIGHT,
+                tiff::encoder::Compression::Lzw,
+            );
+            create_compressed_tiff(
+                &root.join("huge-deflate.tif"),
+                HUGE_TIFF_WIDTH,
+                HUGE_TIFF_HEIGHT,
+                tiff::encoder::Compression::Deflate(tiff::encoder::DeflateLevel::Fast),
+            );
             create_tiff(&root.join("wide.tif"), WIDE_TIFF_WIDTH, WIDE_TIFF_HEIGHT);
             create_webp(&root.join("large.webp"), LARGE_WIDTH, LARGE_HEIGHT);
             create_svg(&root.join("large.svg"));
@@ -79,6 +98,8 @@ impl Fixture {
             photo_jpeg: root.join("photo-12mp.jpg"),
             large_tiff: root.join("large.tif"),
             large_deflate_tiff: root.join("large-deflate.tif"),
+            photo_lzw_tiff: root.join("photo-lzw.tif"),
+            huge_deflate_tiff: root.join("huge-deflate.tif"),
             wide_tiff: root.join("wide.tif"),
             large_webp: root.join("large.webp"),
             large_svg: root.join("large.svg"),
@@ -157,15 +178,27 @@ fn create_tiff(path: &Path, width: u32, height: u32) {
 }
 
 fn create_deflate_tiff(path: &Path, width: u32, height: u32) {
+    create_compressed_tiff(
+        path,
+        width,
+        height,
+        tiff::encoder::Compression::Deflate(tiff::encoder::DeflateLevel::Fast),
+    );
+}
+
+fn create_compressed_tiff(
+    path: &Path,
+    width: u32,
+    height: u32,
+    compression: tiff::encoder::Compression,
+) {
     let image = gradient_rgb(width, height, 2);
     let mut bytes = Vec::new();
     {
         let cursor = std::io::Cursor::new(&mut bytes);
         let mut encoder = tiff::encoder::TiffEncoder::new(cursor)
             .expect("create compressed tiff encoder")
-            .with_compression(tiff::encoder::Compression::Deflate(
-                tiff::encoder::DeflateLevel::Fast,
-            ));
+            .with_compression(compression);
         let mut image_encoder = encoder
             .new_image::<tiff::encoder::colortype::RGB8>(width, height)
             .expect("create compressed benchmark tiff image");
@@ -220,8 +253,10 @@ fn gradient_rgb(width: u32, height: u32, seed: u8) -> image::RgbImage {
 }
 
 fn load_thumbnail(path: &Path) -> usize {
-    load_image_thumbnail_for_benchmark(path, THUMBNAIL_SIZE)
-        .expect("load benchmark thumbnail")
+    let image = load_image_thumbnail_ready_for_benchmark(path, THUMBNAIL_SIZE)
+        .expect("load benchmark thumbnail");
+    encode_cached_thumbnail_for_benchmark(image)
+        .expect("encode benchmark cache thumbnail")
         .len()
 }
 
@@ -231,9 +266,16 @@ fn load_ready_thumbnail(path: &Path, size: u32) -> usize {
         .len()
 }
 
-fn load_batch(paths: &[PathBuf], parallelism: usize) -> usize {
+fn load_batch(paths: &[PathBuf], parallelism: usize, encode_cache: bool) -> usize {
+    let load = |path: &Path| {
+        if encode_cache {
+            load_thumbnail(path)
+        } else {
+            load_ready_thumbnail(path, THUMBNAIL_SIZE)
+        }
+    };
     if parallelism <= 1 {
-        return paths.iter().map(|path| load_thumbnail(path)).sum();
+        return paths.iter().map(|path| load(path)).sum();
     }
 
     let paths = Arc::new(paths.to_vec());
@@ -250,7 +292,7 @@ fn load_batch(paths: &[PathBuf], parallelism: usize) -> usize {
                     let Some(path) = paths.get(index) else {
                         break;
                     };
-                    total.fetch_add(load_thumbnail(path), Ordering::Relaxed);
+                    total.fetch_add(load(path), Ordering::Relaxed);
                 }
             });
         }
@@ -300,6 +342,8 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("jpeg_12mp", &fixture.photo_jpeg),
         ("tiff_large_uncompressed", &fixture.large_tiff),
         ("tiff_large_deflate", &fixture.large_deflate_tiff),
+        ("tiff_photo_lzw", &fixture.photo_lzw_tiff),
+        ("tiff_huge_deflate", &fixture.huge_deflate_tiff),
         ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("webp_large", &fixture.large_webp),
         ("svg_large", &fixture.large_svg),
@@ -320,6 +364,8 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("jpeg_large", &fixture.large_jpeg),
         ("tiff_large_uncompressed", &fixture.large_tiff),
         ("tiff_large_deflate", &fixture.large_deflate_tiff),
+        ("tiff_photo_lzw", &fixture.photo_lzw_tiff),
+        ("tiff_huge_deflate", &fixture.huge_deflate_tiff),
         ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("svg_large", &fixture.large_svg),
     ] {
@@ -332,19 +378,92 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
     }
     single.finish();
 
-    let cached_png = load_image_thumbnail_for_benchmark(&fixture.large_png, THUMBNAIL_SIZE)
-        .expect("create cache decode fixture");
+    let cached_qoi = encode_cached_thumbnail_for_benchmark(
+        load_image_thumbnail_ready_for_benchmark(&fixture.large_png, THUMBNAIL_SIZE)
+            .expect("create cache decode fixture"),
+    )
+    .expect("encode cache decode fixture");
     let mut cache = criterion.benchmark_group("image_thumbnails/disk_cache_decode");
     cache.sample_size(20);
     cache.measurement_time(Duration::from_secs(5));
-    cache.bench_function("png_to_render_image", |bencher| {
+    cache.bench_function("qoi_to_render_image", |bencher| {
         bencher.iter_batched(
-            || cached_png.clone(),
+            || cached_qoi.clone(),
             |bytes| black_box(prepare_cached_thumbnail_for_benchmark(bytes)),
             BatchSize::SmallInput,
         );
     });
     cache.finish();
+
+    let cache_encode_image =
+        load_image_thumbnail_ready_for_benchmark(&fixture.large_png, THUMBNAIL_SIZE)
+            .expect("create cache encode fixture");
+    let mut cache_encode = criterion.benchmark_group("image_thumbnails/cache_encode");
+    cache_encode.sample_size(20);
+    cache_encode.measurement_time(Duration::from_secs(5));
+    cache_encode.bench_function("qoi_128_rgba", |bencher| {
+        bencher.iter_batched(
+            || cache_encode_image.clone(),
+            |image| black_box(encode_cached_thumbnail_for_benchmark(image)),
+            BatchSize::SmallInput,
+        );
+    });
+    cache_encode.finish();
+
+    let cache_write_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("image-thumbnail-cache-write-benchmark-v1");
+    fs::create_dir_all(&cache_write_dir).expect("create cache write benchmark directory");
+    let cache_write_image =
+        load_image_thumbnail_ready_for_benchmark(&fixture.large_png, THUMBNAIL_SIZE)
+            .expect("create cache write image");
+    let cache_write_images = vec![cache_write_image; BATCH_COUNT];
+    let mut cache_write = criterion.benchmark_group("image_thumbnails/disk_cache_write");
+    cache_write.sample_size(10);
+    cache_write.measurement_time(Duration::from_secs(5));
+    cache_write.bench_function("qoi_batch_32_with_manifest", |bencher| {
+        bencher.iter(|| {
+            black_box(write_cached_thumbnail_batch_for_benchmark(
+                black_box(&cache_write_dir),
+                black_box(&cache_write_images),
+            ))
+        });
+    });
+    cache_write.finish();
+
+    let mixed_paths = vec![
+        fixture.large_png.clone(),
+        fixture.large_transparent_png.clone(),
+        fixture.large_jpeg.clone(),
+        fixture.large_tiff.clone(),
+        fixture.large_deflate_tiff.clone(),
+        fixture.photo_lzw_tiff.clone(),
+        fixture.large_webp.clone(),
+        fixture.large_svg.clone(),
+    ];
+    let mut mixed = criterion.benchmark_group("image_thumbnails/cold_mixed_folder");
+    mixed.sample_size(10);
+    mixed.measurement_time(Duration::from_secs(5));
+    for parallelism in [2, 4] {
+        mixed.bench_with_input(
+            BenchmarkId::from_parameter(parallelism),
+            &parallelism,
+            |b, p| {
+                b.iter(|| black_box(load_batch(black_box(&mixed_paths), black_box(*p), false)));
+            },
+        );
+    }
+    mixed.finish();
+
+    let mut queue = criterion.benchmark_group("image_thumbnails/queue_cancel");
+    queue.sample_size(20);
+    queue.measurement_time(Duration::from_secs(5));
+    for count in [32, 256] {
+        queue.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, count| {
+            b.iter(|| black_box(queue_and_cancel_thumbnails_for_benchmark(*count)));
+        });
+    }
+    queue.finish();
 
     let total_bytes = fixture
         .batch_jpegs
@@ -364,6 +483,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
                     black_box(load_batch(
                         black_box(&fixture.batch_jpegs),
                         black_box(*parallelism),
+                        true,
                     ))
                 });
             },

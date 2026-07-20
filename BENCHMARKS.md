@@ -33,11 +33,13 @@ cargo bench --features benchmarks --bench recursive_search -- --baseline before
 The navigation benchmark creates its fixture under
 `target/navigation-pipeline-benchmark-v1`.
 
-The image-thumbnail benchmark measures isolated Bilinear RGBA resizing,
-ready-for-display extraction at 128px and 400px, PNG disk-cache decoding, full
-PNG-encoded cache generation, and parallel JPEG batches. Fixtures cover opaque
-and transparent PNG, JPEG (including 12MP), TIFF, WebP, and SVG under
-`target/image-thumbnails-benchmark-v4`.
+The image-thumbnail benchmark measures isolated Catmull-Rom RGBA resizing,
+ready-for-display extraction at 128px and 400px, QOI disk-cache encoding and
+decoding, batched cache writes with manifest persistence, full cache generation,
+mixed-folder time-to-ready, queue cancellation, and parallel JPEG batches.
+Fixtures cover opaque and transparent PNG, JPEG
+(including 12MP), uncompressed/Deflate/LZW TIFF up to 48MP, pathological wide
+TIFF, WebP, and SVG under `target/image-thumbnails-benchmark-v6`.
 
 The image-viewer benchmark compares ICC-tagged native opens with synchronous
 ICC, deferred first-ready opens, and ICC ignored; it also measures no-ICC native
