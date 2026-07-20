@@ -25,6 +25,8 @@ const WIDE_TIFF_WIDTH: u32 = 400_000;
 const WIDE_TIFF_HEIGHT: u32 = 2;
 const PHOTO_TIFF_WIDTH: u32 = 4_000;
 const PHOTO_TIFF_HEIGHT: u32 = 3_000;
+const PYRAMID_TIFF_WIDTH: u32 = 4_732;
+const PYRAMID_TIFF_HEIGHT: u32 = 3_309;
 const HUGE_TIFF_WIDTH: u32 = 8_000;
 const HUGE_TIFF_HEIGHT: u32 = 6_000;
 const BATCH_COUNT: usize = 32;
@@ -37,6 +39,7 @@ struct Fixture {
     large_tiff: PathBuf,
     large_deflate_tiff: PathBuf,
     photo_lzw_tiff: PathBuf,
+    pyramidal_lzw_tiff: PathBuf,
     huge_deflate_tiff: PathBuf,
     wide_tiff: PathBuf,
     large_webp: PathBuf,
@@ -90,6 +93,10 @@ impl Fixture {
             }
             fs::write(&marker, FIXTURE_VERSION).expect("write thumbnail fixture marker");
         }
+        let pyramidal_lzw_tiff = root.join("pyramidal-lzw.tif");
+        if !pyramidal_lzw_tiff.exists() {
+            create_pyramidal_lzw_tiff(&pyramidal_lzw_tiff);
+        }
 
         Self {
             large_png: root.join("large.png"),
@@ -99,6 +106,7 @@ impl Fixture {
             large_tiff: root.join("large.tif"),
             large_deflate_tiff: root.join("large-deflate.tif"),
             photo_lzw_tiff: root.join("photo-lzw.tif"),
+            pyramidal_lzw_tiff,
             huge_deflate_tiff: root.join("huge-deflate.tif"),
             wide_tiff: root.join("wide.tif"),
             large_webp: root.join("large.webp"),
@@ -210,6 +218,93 @@ fn create_compressed_tiff(
             .expect("encode compressed benchmark tiff");
     }
     fs::write(path, bytes).expect("write compressed benchmark tiff");
+}
+
+fn create_pyramidal_lzw_tiff(path: &Path) {
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let mut encoder = tiff::encoder::TiffEncoder::new(cursor)
+            .expect("create pyramidal tiff encoder")
+            .with_compression(tiff::encoder::Compression::Lzw);
+        let mut sub_ifd_offsets = Vec::new();
+
+        for (width, height, seed) in [(2366, 1655, 3), (1183, 828, 5), (592, 414, 7)] {
+            let data = gradient_rgb(width, height, seed);
+            let mut directory = encoder
+                .extra_directory()
+                .expect("create reduced tiff directory");
+            let strip_offset = directory
+                .write_data(data.as_raw().as_slice())
+                .expect("write reduced tiff pixels");
+            directory
+                .write_tag(tiff::tags::Tag::NewSubfileType, 1u32)
+                .expect("mark reduced tiff directory");
+            directory
+                .write_tag(tiff::tags::Tag::ImageWidth, width)
+                .expect("write reduced width");
+            directory
+                .write_tag(tiff::tags::Tag::ImageLength, height)
+                .expect("write reduced height");
+            directory
+                .write_tag(tiff::tags::Tag::BitsPerSample, &[8u16, 8, 8][..])
+                .expect("write reduced bit depth");
+            directory
+                .write_tag(tiff::tags::Tag::Compression, 1u16)
+                .expect("write reduced compression");
+            directory
+                .write_tag(tiff::tags::Tag::PhotometricInterpretation, 2u16)
+                .expect("write reduced photometric interpretation");
+            directory
+                .write_tag(tiff::tags::Tag::StripOffsets, strip_offset as u32)
+                .expect("write reduced strip offset");
+            directory
+                .write_tag(tiff::tags::Tag::RowsPerStrip, height)
+                .expect("write reduced rows per strip");
+            directory
+                .write_tag(tiff::tags::Tag::StripByteCounts, data.len() as u32)
+                .expect("write reduced strip size");
+            directory
+                .write_tag(tiff::tags::Tag::SamplesPerPixel, 3u16)
+                .expect("write reduced samples per pixel");
+            directory
+                .write_tag(tiff::tags::Tag::PlanarConfiguration, 1u16)
+                .expect("write reduced planar configuration");
+            directory
+                .write_tag(tiff::tags::Tag::SampleFormat, &[1u16, 1, 1][..])
+                .expect("write reduced sample format");
+            sub_ifd_offsets.push(
+                directory
+                    .finish_with_offsets()
+                    .expect("finish reduced tiff directory")
+                    .offset,
+            );
+        }
+
+        let mut primary =
+            Vec::with_capacity((PYRAMID_TIFF_WIDTH as usize) * (PYRAMID_TIFF_HEIGHT as usize) * 3);
+        for y in 0..PYRAMID_TIFF_HEIGHT {
+            for x in 0..PYRAMID_TIFF_WIDTH {
+                primary.push(((x % 256) as u16) * 257);
+                primary.push(((y % 256) as u16) * 257);
+                primary.push((((x / 3 + y / 5) % 256) as u16) * 257);
+            }
+        }
+        let mut image = encoder
+            .new_image::<tiff::encoder::colortype::RGB16>(PYRAMID_TIFF_WIDTH, PYRAMID_TIFF_HEIGHT)
+            .expect("create primary pyramidal tiff image");
+        image
+            .encoder()
+            .write_tag(tiff::tags::Tag::SubIfd, sub_ifd_offsets.as_slice())
+            .expect("link reduced tiff directories");
+        image
+            .rows_per_strip(9)
+            .expect("set primary pyramidal tiff strip size");
+        image
+            .write_data(primary.as_slice())
+            .expect("encode primary pyramidal tiff image");
+    }
+    fs::write(path, bytes).expect("write pyramidal benchmark tiff");
 }
 
 fn create_svg(path: &Path) {
@@ -343,6 +438,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("tiff_large_uncompressed", &fixture.large_tiff),
         ("tiff_large_deflate", &fixture.large_deflate_tiff),
         ("tiff_photo_lzw", &fixture.photo_lzw_tiff),
+        ("tiff_pyramidal_lzw", &fixture.pyramidal_lzw_tiff),
         ("tiff_huge_deflate", &fixture.huge_deflate_tiff),
         ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("webp_large", &fixture.large_webp),
@@ -365,6 +461,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         ("tiff_large_uncompressed", &fixture.large_tiff),
         ("tiff_large_deflate", &fixture.large_deflate_tiff),
         ("tiff_photo_lzw", &fixture.photo_lzw_tiff),
+        ("tiff_pyramidal_lzw", &fixture.pyramidal_lzw_tiff),
         ("tiff_huge_deflate", &fixture.huge_deflate_tiff),
         ("tiff_wide_uncompressed", &fixture.wide_tiff),
         ("svg_large", &fixture.large_svg),
@@ -438,6 +535,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         fixture.large_tiff.clone(),
         fixture.large_deflate_tiff.clone(),
         fixture.photo_lzw_tiff.clone(),
+        fixture.pyramidal_lzw_tiff.clone(),
         fixture.large_webp.clone(),
         fixture.large_svg.clone(),
     ];
