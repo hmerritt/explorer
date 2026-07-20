@@ -2728,17 +2728,18 @@ mod tests {
 
         right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-delete");
+        cx.run_until_parked();
 
         assert!(!path.exists());
         assert!(temp.path().join("b").exists());
         cx.read_entity(&view, |view, _| {
-            assert!(selected_names(view).is_empty());
+            assert_eq!(selected_names(view), vec!["b"]);
             assert!(view.context_menu.is_none());
         });
     }
 
     #[gpui::test]
-    fn confirmed_trash_clears_multi_selection(cx: &mut TestAppContext) {
+    fn confirmed_trash_selects_the_next_surviving_item(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
         let view = active_test_view(&tabs, cx);
         let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
@@ -2752,17 +2753,18 @@ mod tests {
                 view.confirm_pending_trash(cx);
             });
         });
+        cx.run_until_parked();
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
         assert!(temp.path().join("c.txt").exists());
         cx.read_entity(&view, |view, _| {
-            assert!(selected_names(view).is_empty());
+            assert_eq!(selected_names(view), vec!["c.txt"]);
         });
     }
 
     #[gpui::test]
-    fn confirmed_permanent_delete_clears_multi_selection(cx: &mut TestAppContext) {
+    fn confirmed_permanent_delete_selects_the_next_surviving_item(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
         let view = active_test_view(&tabs, cx);
         let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
@@ -2776,12 +2778,13 @@ mod tests {
                 view.confirm_pending_permanent_delete(cx);
             });
         });
+        cx.run_until_parked();
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
         assert!(temp.path().join("c.txt").exists());
         cx.read_entity(&view, |view, _| {
-            assert!(selected_names(view).is_empty());
+            assert_eq!(selected_names(view), vec!["c.txt"]);
         });
     }
 

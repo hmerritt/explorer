@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -69,6 +69,34 @@ impl ExplorerView {
             .iter()
             .filter_map(|ix| self.entries.get(*ix).map(|entry| entry.path.clone()))
             .collect()
+    }
+
+    pub(super) fn selection_after_removing_paths(
+        &self,
+        removed_paths: &[PathBuf],
+    ) -> Option<PathBuf> {
+        let removed_paths = removed_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<HashSet<_>>();
+        let last_removed_index = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, entry)| removed_paths.contains(entry.path.as_path()).then_some(ix))
+            .next_back()?;
+
+        self.entries
+            .iter()
+            .skip(last_removed_index + 1)
+            .find(|entry| !removed_paths.contains(entry.path.as_path()))
+            .or_else(|| {
+                self.entries[..last_removed_index]
+                    .iter()
+                    .rev()
+                    .find(|entry| !removed_paths.contains(entry.path.as_path()))
+            })
+            .map(|entry| entry.path.clone())
     }
 
     pub(super) fn restore_selection_from_paths(&mut self, paths: &[PathBuf]) {
@@ -402,6 +430,56 @@ mod tests {
 
         view.clear_selection();
         assert!(view.selected_paths().is_empty());
+    }
+
+    #[test]
+    fn selection_after_removing_paths_prefers_first_survivor_after_last_removed_row() {
+        let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]);
+
+        assert_eq!(
+            view.selection_after_removing_paths(&[PathBuf::from("b.txt"), PathBuf::from("d.txt"),]),
+            Some(PathBuf::from("e.txt"))
+        );
+    }
+
+    #[test]
+    fn selection_after_removing_paths_falls_back_to_nearest_survivor_above() {
+        let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+        assert_eq!(
+            view.selection_after_removing_paths(&[PathBuf::from("c.txt"), PathBuf::from("d.txt"),]),
+            Some(PathBuf::from("b.txt"))
+        );
+    }
+
+    #[test]
+    fn selection_after_removing_paths_returns_none_when_no_visible_row_survives() {
+        let view = test_view_with_entries(&["a.txt", "b.txt"]);
+
+        assert_eq!(
+            view.selection_after_removing_paths(&[PathBuf::from("a.txt"), PathBuf::from("b.txt"),]),
+            None
+        );
+        assert_eq!(
+            view.selection_after_removing_paths(&[PathBuf::from("not-visible.txt")]),
+            None
+        );
+    }
+
+    #[test]
+    fn selection_after_removing_paths_treats_folders_and_files_as_rows() {
+        let mut view = test_view_with_entries(&[]);
+        view.entries = vec![
+            FileEntry::test("folder-a", true, None, None),
+            FileEntry::test("file-b.txt", false, Some(1), None),
+            FileEntry::test("folder-c", true, None, None),
+        ];
+        view.all_entries = view.entries.clone();
+
+        assert_eq!(
+            view.selection_after_removing_paths(&[PathBuf::from("file-b.txt")]),
+            Some(PathBuf::from("folder-c"))
+        );
     }
 
     #[test]

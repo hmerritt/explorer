@@ -1230,6 +1230,26 @@ impl ExplorerView {
         );
     }
 
+    pub(super) fn reload_after_successful_delete(
+        &mut self,
+        select_after_load: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_async_with_options_preserving_live_selection(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: true,
+                preserve_context_menu: false,
+            },
+            select_after_load.into_iter().collect(),
+            true,
+            false,
+            false,
+            cx,
+        );
+        self.clear_selection();
+    }
+
     pub(super) fn refresh_with_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) {
         self.refresh_async_with_entry_metadata_resolution(false, cx);
     }

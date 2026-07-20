@@ -245,13 +245,13 @@ impl ExplorerView {
             return;
         }
 
+        let selection_after_delete = self.selection_after_removing_paths(&paths);
         let trash_undo = TrashUndoCapture::before_delete(&paths);
         match trash_paths(&paths) {
             Ok(()) => {
                 self.push_file_operation_undo(trash_undo.after_delete());
                 self.remove_cut_paths(&paths);
-                self.reload_with_entry_metadata_resolution(cx);
-                self.clear_selection();
+                self.reload_after_successful_delete(selection_after_delete, cx);
                 self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
@@ -281,13 +281,13 @@ impl ExplorerView {
             return;
         };
 
+        let selection_after_delete = self.selection_after_removing_paths(&pending.paths);
         let trash_undo = TrashUndoCapture::before_delete(&pending.paths);
         match trash_paths(&pending.paths) {
             Ok(()) => {
                 self.push_file_operation_undo(trash_undo.after_delete());
                 self.remove_cut_paths(&pending.paths);
-                self.reload_with_entry_metadata_resolution(cx);
-                self.clear_selection();
+                self.reload_after_successful_delete(selection_after_delete, cx);
                 self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
@@ -318,11 +318,11 @@ impl ExplorerView {
             return;
         };
 
+        let selection_after_delete = self.selection_after_removing_paths(&pending.paths);
         match remove_paths_permanently(&pending.paths) {
             Ok(()) => {
                 self.remove_cut_paths(&pending.paths);
-                self.reload_with_entry_metadata_resolution(cx);
-                self.clear_selection();
+                self.reload_after_successful_delete(selection_after_delete, cx);
                 self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
@@ -2268,30 +2268,41 @@ mod tests {
         });
     }
 
-    #[test]
-    fn successful_delete_reload_can_leave_surviving_rows_deselected() {
+    #[gpui::test]
+    fn successful_delete_selects_and_reveals_the_next_row_in_a_large_folder(
+        cx: &mut TestAppContext,
+    ) {
         let temp = TempDir::new();
-        let a = temp.path().join("a.txt");
-        let b = temp.path().join("b.txt");
-        let c = temp.path().join("c.txt");
-        fs::write(&a, b"a").expect("create a");
-        fs::write(&b, b"b").expect("create b");
-        fs::write(&c, b"c").expect("create c");
-        let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.select_single_path(&b);
+        for ix in 0..80 {
+            fs::write(temp.path().join(format!("item-{ix:03}.txt")), b"file")
+                .expect("create test file");
+        }
+        let deleted = temp.path().join("item-040.txt");
+        let next = temp.path().join("item-041.txt");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
 
-        remove_paths_permanently(std::slice::from_ref(&b)).expect("delete b");
-        view.reload();
-        view.clear_selection();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.restore_selection_from_paths(std::slice::from_ref(&deleted));
+                view.pending_permanent_delete = Some(PendingPermanentDelete {
+                    paths: vec![deleted.clone()],
+                });
+                view.confirm_pending_permanent_delete(cx);
+            });
+        });
+        cx.run_until_parked();
 
-        assert_eq!(selected_names(&view), Vec::<String>::new());
-        assert_eq!(
-            view.entries
-                .iter()
-                .map(|entry| entry.name.clone())
-                .collect::<Vec<_>>(),
-            vec!["a.txt", "c.txt"]
-        );
+        assert!(!deleted.exists());
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![next]);
+            assert_eq!(view.selection.focused_index, Some(40));
+            assert!(
+                view.scrollbar_metrics()
+                    .is_some_and(|metrics| metrics.scroll_top > 0.0),
+                "the replacement selection should be revealed below the top of the list"
+            );
+        });
     }
 
     fn test_tiff_bytes() -> Vec<u8> {
