@@ -35,24 +35,65 @@ use windows::{
 };
 
 use crate::*;
+use super::text_services::TsfCaretContext;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SystemCaretGeometry {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+pub(super) struct SystemCaretGeometry {
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) width: i32,
+    pub(super) height: i32,
 }
 
-fn system_caret_geometry(bounds: Bounds<Pixels>, scale_factor: f32) -> SystemCaretGeometry {
+pub(super) fn system_caret_geometry(
+    bounds: Bounds<Pixels>,
+    scale_factor: f32,
+) -> SystemCaretGeometry {
     let scale = |value: Pixels| (value.0 * scale_factor).round() as i32;
     SystemCaretGeometry {
         x: scale(bounds.origin.x),
         y: scale(bounds.origin.y),
         width: scale(px(1.0)).max(1),
         height: scale(bounds.size.height).max(1),
+    }
+}
+
+struct SystemCaretBitmap(HBITMAP);
+
+impl SystemCaretBitmap {
+    fn new() -> Option<Self> {
+        // A shown caret is discoverable by Windows text services. Supplying a
+        // zeroed monochrome bitmap keeps that system caret visually transparent
+        // while GPUI continues to render its own caret.
+        let bits = 0_u32;
+        let bitmap = unsafe {
+            CreateBitmap(
+                2,
+                2,
+                1,
+                1,
+                Some(std::ptr::from_ref(&bits).cast()),
+            )
+        };
+        if bitmap.is_invalid() {
+            log::error!(
+                "failed to create transparent system caret bitmap: {}",
+                windows::core::Error::from_win32()
+            );
+            None
+        } else {
+            Some(Self(bitmap))
+        }
+    }
+}
+
+impl Drop for SystemCaretBitmap {
+    fn drop(&mut self) {
+        if !unsafe { DeleteObject(self.0.into()) }.as_bool() {
+            log::error!("failed to delete transparent system caret bitmap");
+        }
     }
 }
 
@@ -72,7 +113,7 @@ pub struct WindowsWindowState {
     pub last_reported_modifiers: Option<Modifiers>,
     pub last_reported_capslock: Option<Capslock>,
     pub system_key_handled: bool,
-    pub system_caret_size: Option<(i32, i32)>,
+    pub system_caret_created: bool,
     pub hovered: bool,
 
     pub renderer: DirectXRenderer,
@@ -95,6 +136,8 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) hide_title_bar: bool,
+    system_caret_bitmap: Option<SystemCaretBitmap>,
+    tsf_caret_context: Option<TsfCaretContext>,
     pub(crate) is_movable: bool,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) windows_version: WindowsVersion,
@@ -140,7 +183,7 @@ impl WindowsWindowState {
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
         let system_key_handled = false;
-        let system_caret_size = None;
+        let system_caret_created = false;
         let hovered = false;
         let click_state = ClickState::new();
         let nc_button_pressed = None;
@@ -162,7 +205,7 @@ impl WindowsWindowState {
             last_reported_modifiers,
             last_reported_capslock,
             system_key_handled,
-            system_caret_size,
+            system_caret_created,
             hovered,
             renderer,
             click_state,
@@ -236,12 +279,12 @@ impl WindowsWindowState {
 
 impl WindowsWindowInner {
     pub(super) fn destroy_system_caret(&self) {
-        let had_system_caret = self
-            .state
-            .borrow_mut()
-            .system_caret_size
-            .take()
-            .is_some();
+        if let Some(context) = self.tsf_caret_context.as_ref() {
+            context.clear_caret();
+        }
+        let had_system_caret = std::mem::take(
+            &mut self.state.borrow_mut().system_caret_created,
+        );
         if had_system_caret
             && let Err(error) = unsafe { DestroyCaret() }
         {
@@ -250,6 +293,8 @@ impl WindowsWindowInner {
     }
 
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
+        let system_caret_bitmap = SystemCaretBitmap::new();
+        let tsf_caret_context = TsfCaretContext::new(hwnd).log_err();
         let state = RefCell::new(WindowsWindowState::new(
             hwnd,
             &context.directx_devices,
@@ -268,6 +313,8 @@ impl WindowsWindowInner {
             state,
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
+            system_caret_bitmap,
+            tsf_caret_context,
             is_movable: context.is_movable,
             executor: context.executor.clone(),
             windows_version: context.windows_version,
@@ -937,22 +984,35 @@ impl PlatformWindow for WindowsWindow {
 
         let scale_factor = self.0.state.borrow().scale_factor;
         let geometry = system_caret_geometry(bounds, scale_factor);
-        let size = (geometry.width, geometry.height);
-        let current_size = self.0.state.borrow().system_caret_size;
+        let caret_created = self.0.state.borrow().system_caret_created;
 
-        if current_size != Some(size) {
-            if let Err(error) = unsafe {
-                CreateCaret(self.0.hwnd, None, geometry.width, geometry.height)
-            } {
-                self.0.state.borrow_mut().system_caret_size = None;
+        if !caret_created {
+            let Some(bitmap) = self.0.system_caret_bitmap.as_ref() else {
+                return;
+            };
+            if let Err(error) = unsafe { CreateCaret(self.0.hwnd, Some(bitmap.0), 0, 0) } {
                 log::error!("failed to create system caret: {error}");
                 return;
             }
-            self.0.state.borrow_mut().system_caret_size = Some(size);
+            self.0.state.borrow_mut().system_caret_created = true;
         }
 
         if let Err(error) = unsafe { SetCaretPos(geometry.x, geometry.y) } {
             log::error!("failed to position system caret: {error}");
+            self.0.destroy_system_caret();
+            return;
+        }
+
+        if let Some(context) = self.0.tsf_caret_context.as_ref() {
+            context.set_caret(geometry);
+        }
+
+        // ShowCaret is cumulative, so call it exactly once for each successful
+        // CreateCaret. The bitmap above makes the shown caret transparent.
+        if !caret_created
+            && let Err(error) = unsafe { ShowCaret(Some(self.0.hwnd)) }
+        {
+            log::error!("failed to show transparent system caret: {error}");
             self.0.destroy_system_caret();
         }
     }
@@ -1971,7 +2031,7 @@ fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32
 #[cfg(test)]
 mod tests {
     use super::{ClickState, SystemCaretGeometry, system_caret_geometry};
-    use crate::{Bounds, DevicePixels, MouseButton, point, px, size};
+    use crate::{Bounds, DevicePixels, MouseButton, UTF16Selection, point, px, size};
     use std::time::Duration;
 
     #[test]
@@ -2067,5 +2127,20 @@ mod tests {
                 height: 1,
             }
         );
+    }
+
+    #[test]
+    fn utf16_selection_head_uses_the_active_edge() {
+        let forward = UTF16Selection {
+            range: 4..9,
+            reversed: false,
+        };
+        let reversed = UTF16Selection {
+            range: 4..9,
+            reversed: true,
+        };
+
+        assert_eq!(forward.head(), 9);
+        assert_eq!(reversed.head(), 4);
     }
 }

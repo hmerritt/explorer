@@ -973,15 +973,9 @@ impl PlatformInputHandler {
 
     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
         let selection = self.handler.selected_text_range(true, window, cx)?;
-        self.handler.bounds_for_range(
-            if selection.reversed {
-                selection.range.start..selection.range.start
-            } else {
-                selection.range.end..selection.range.end
-            },
-            window,
-            cx,
-        )
+        let head = selection.head();
+        self.handler
+            .bounds_for_range(head..head, window, cx)
     }
 
     #[allow(unused)]
@@ -1003,6 +997,16 @@ pub struct UTF16Selection {
     /// Whether the head of this selection is at the start (true), or end (false)
     /// of the range
     pub reversed: bool,
+}
+
+impl UTF16Selection {
+    pub(crate) fn head(&self) -> usize {
+        if self.reversed {
+            self.range.start
+        } else {
+            self.range.end
+        }
+    }
 }
 
 /// Zed's interface for handling text input from the platform's IME system

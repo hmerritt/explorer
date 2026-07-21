@@ -18,6 +18,7 @@ use windows::{
 };
 
 use crate::*;
+use super::{SystemCaretGeometry, system_caret_geometry};
 
 pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;
 pub(crate) const WM_GPUI_CLOSE_ONE_WINDOW: u32 = WM_USER + 2;
@@ -103,6 +104,7 @@ impl WindowsWindowInner {
             WM_KEYUP => self.handle_keyup_msg(handle, wparam, lparam),
             WM_CHAR => self.handle_char_msg(wparam),
             WM_DEADCHAR => self.handle_dead_char_msg(wparam),
+            WM_IME_REQUEST => self.handle_ime_request(handle, wparam, lparam),
             WM_IME_STARTCOMPOSITION => self.handle_ime_position(handle),
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
@@ -618,17 +620,74 @@ impl WindowsWindowInner {
         if handled { Some(0) } else { Some(1) }
     }
 
-    fn retrieve_caret_position(&self) -> Option<POINT> {
+    fn retrieve_caret_geometry(&self) -> Option<SystemCaretGeometry> {
         self.with_input_handler_and_scale_factor(|input_handler, scale_factor| {
-            let caret_range = input_handler.selected_text_range(false)?;
-            let caret_position = input_handler.bounds_for_range(caret_range.range)?;
-            Some(POINT {
-                // logical to physical
-                x: (caret_position.origin.x.0 * scale_factor) as i32,
-                y: (caret_position.origin.y.0 * scale_factor) as i32
-                    + ((caret_position.size.height.0 * scale_factor) as i32 / 2),
-            })
+            let selection = input_handler.selected_text_range(false)?;
+            let head = selection.head();
+            let bounds = input_handler.bounds_for_range(head..head)?;
+            Some(system_caret_geometry(bounds, scale_factor))
         })
+    }
+
+    fn retrieve_caret_position(&self) -> Option<POINT> {
+        let geometry = self.retrieve_caret_geometry()?;
+        Some(POINT {
+            x: geometry.x,
+            y: geometry.y + geometry.height / 2,
+        })
+    }
+
+    fn handle_ime_request(
+        &self,
+        handle: HWND,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
+        if wparam.0 != IMR_QUERYCHARPOSITION as usize || lparam.0 == 0 {
+            return None;
+        }
+
+        let geometry = self.retrieve_caret_geometry()?;
+        let mut caret = POINT {
+            x: geometry.x,
+            y: geometry.y,
+        };
+        let mut document = RECT::default();
+
+        unsafe {
+            ClientToScreen(handle, &mut caret)
+                .as_bool()
+                .then_some(())?;
+            GetClientRect(handle, &mut document).ok()?;
+
+            let mut document_top_left = POINT {
+                x: document.left,
+                y: document.top,
+            };
+            let mut document_bottom_right = POINT {
+                x: document.right,
+                y: document.bottom,
+            };
+            ClientToScreen(handle, &mut document_top_left)
+                .as_bool()
+                .then_some(())?;
+            ClientToScreen(handle, &mut document_bottom_right)
+                .as_bool()
+                .then_some(())?;
+
+            let character_position = &mut *(lparam.0 as *mut IMECHARPOSITION);
+            character_position.dwSize = std::mem::size_of::<IMECHARPOSITION>() as u32;
+            character_position.pt = caret;
+            character_position.cLineHeight = geometry.height as u32;
+            character_position.rcDocument = RECT {
+                left: document_top_left.x,
+                top: document_top_left.y,
+                right: document_bottom_right.x,
+                bottom: document_bottom_right.y,
+            };
+        }
+
+        Some(1)
     }
 
     fn handle_ime_position(&self, handle: HWND) -> Option<isize> {
