@@ -1976,9 +1976,16 @@ impl Window {
         self.next_frame.window_active = self.active.get();
 
         // Register requested input handler with the platform window.
-        if let Some(input_handler) = self.next_frame.input_handlers.pop() {
-            self.platform_window
-                .set_input_handler(input_handler.unwrap());
+        let mut input_handler = self.next_frame.input_handlers.pop().flatten();
+        #[cfg(target_os = "windows")]
+        {
+            let caret_bounds = input_handler
+                .as_mut()
+                .and_then(|input_handler| input_handler.selected_bounds(self, cx));
+            self.platform_window.update_system_caret(caret_bounds);
+        }
+        if let Some(input_handler) = input_handler {
+            self.platform_window.set_input_handler(input_handler);
         }
 
         self.layout_engine.as_mut().unwrap().clear();

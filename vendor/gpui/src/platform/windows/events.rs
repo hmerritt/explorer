@@ -40,6 +40,10 @@ impl WindowsWindowInner {
     ) -> LRESULT {
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
+            WM_KILLFOCUS => {
+                self.destroy_system_caret();
+                None
+            }
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
             WM_SIZE => self.handle_size_msg(wparam, lparam),
@@ -261,6 +265,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        self.destroy_system_caret();
         let callback = {
             let mut lock = self.state.borrow_mut();
             lock.callbacks.close.take()

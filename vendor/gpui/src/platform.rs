@@ -551,6 +551,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 
+    #[cfg(target_os = "windows")]
+    fn update_system_caret(&self, _bounds: Option<Bounds<Pixels>>) {}
+
     fn start_external_paths_drag(&self, _paths: ExternalPaths) -> ExternalPathsDragStartResult {
         ExternalPathsDragStartResult::Failed
     }

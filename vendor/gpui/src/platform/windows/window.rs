@@ -38,6 +38,24 @@ use crate::*;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SystemCaretGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn system_caret_geometry(bounds: Bounds<Pixels>, scale_factor: f32) -> SystemCaretGeometry {
+    let scale = |value: Pixels| (value.0 * scale_factor).round() as i32;
+    SystemCaretGeometry {
+        x: scale(bounds.origin.x),
+        y: scale(bounds.origin.y),
+        width: scale(px(1.0)).max(1),
+        height: scale(bounds.size.height).max(1),
+    }
+}
+
 pub struct WindowsWindowState {
     pub origin: Point<Pixels>,
     pub logical_size: Size<Pixels>,
@@ -54,6 +72,7 @@ pub struct WindowsWindowState {
     pub last_reported_modifiers: Option<Modifiers>,
     pub last_reported_capslock: Option<Capslock>,
     pub system_key_handled: bool,
+    pub system_caret_size: Option<(i32, i32)>,
     pub hovered: bool,
 
     pub renderer: DirectXRenderer,
@@ -121,6 +140,7 @@ impl WindowsWindowState {
         let last_reported_modifiers = None;
         let last_reported_capslock = None;
         let system_key_handled = false;
+        let system_caret_size = None;
         let hovered = false;
         let click_state = ClickState::new();
         let nc_button_pressed = None;
@@ -142,6 +162,7 @@ impl WindowsWindowState {
             last_reported_modifiers,
             last_reported_capslock,
             system_key_handled,
+            system_caret_size,
             hovered,
             renderer,
             click_state,
@@ -214,6 +235,20 @@ impl WindowsWindowState {
 }
 
 impl WindowsWindowInner {
+    pub(super) fn destroy_system_caret(&self) {
+        let had_system_caret = self
+            .state
+            .borrow_mut()
+            .system_caret_size
+            .take()
+            .is_some();
+        if had_system_caret
+            && let Err(error) = unsafe { DestroyCaret() }
+        {
+            log::error!("failed to destroy system caret: {error}");
+        }
+    }
+
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         let state = RefCell::new(WindowsWindowState::new(
             hwnd,
@@ -892,6 +927,34 @@ impl PlatformWindow for WindowsWindow {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         // There is no such thing on Windows.
+    }
+
+    fn update_system_caret(&self, bounds: Option<Bounds<Pixels>>) {
+        let Some(bounds) = bounds.filter(|_| unsafe { GetFocus() } == self.0.hwnd) else {
+            self.0.destroy_system_caret();
+            return;
+        };
+
+        let scale_factor = self.0.state.borrow().scale_factor;
+        let geometry = system_caret_geometry(bounds, scale_factor);
+        let size = (geometry.width, geometry.height);
+        let current_size = self.0.state.borrow().system_caret_size;
+
+        if current_size != Some(size) {
+            if let Err(error) = unsafe {
+                CreateCaret(self.0.hwnd, None, geometry.width, geometry.height)
+            } {
+                self.0.state.borrow_mut().system_caret_size = None;
+                log::error!("failed to create system caret: {error}");
+                return;
+            }
+            self.0.state.borrow_mut().system_caret_size = Some(size);
+        }
+
+        if let Err(error) = unsafe { SetCaretPos(geometry.x, geometry.y) } {
+            log::error!("failed to position system caret: {error}");
+            self.0.destroy_system_caret();
+        }
     }
 }
 
@@ -1907,8 +1970,8 @@ fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32
 
 #[cfg(test)]
 mod tests {
-    use super::ClickState;
-    use crate::{DevicePixels, MouseButton, point};
+    use super::{ClickState, SystemCaretGeometry, system_caret_geometry};
+    use crate::{Bounds, DevicePixels, MouseButton, point, px, size};
     use std::time::Duration;
 
     #[test]
@@ -1955,6 +2018,54 @@ mod tests {
         assert_eq!(
             state.update(MouseButton::Right, point(DevicePixels(10), DevicePixels(0))),
             1
+        );
+    }
+
+    #[test]
+    fn system_caret_geometry_scales_to_device_pixels() {
+        let bounds = Bounds::new(point(px(10.25), px(20.5)), size(px(0.0), px(18.0)));
+
+        assert_eq!(
+            system_caret_geometry(bounds, 1.0),
+            SystemCaretGeometry {
+                x: 10,
+                y: 21,
+                width: 1,
+                height: 18,
+            }
+        );
+        assert_eq!(
+            system_caret_geometry(bounds, 1.5),
+            SystemCaretGeometry {
+                x: 15,
+                y: 31,
+                width: 2,
+                height: 27,
+            }
+        );
+        assert_eq!(
+            system_caret_geometry(bounds, 2.0),
+            SystemCaretGeometry {
+                x: 21,
+                y: 41,
+                width: 2,
+                height: 36,
+            }
+        );
+    }
+
+    #[test]
+    fn system_caret_geometry_has_nonzero_size() {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)));
+
+        assert_eq!(
+            system_caret_geometry(bounds, 0.5),
+            SystemCaretGeometry {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }
         );
     }
 }
