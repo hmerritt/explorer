@@ -19,6 +19,8 @@ pub(crate) const DEFAULT_DATE_FORMAT: &str = "%Y/%m/%d %H:%M";
 pub(crate) const DEFAULT_FILESYSTEM_NAME: &str = "Filesystem";
 pub(crate) const DEFAULT_FONT: &str = "default";
 pub(crate) const DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS: u32 = 30;
+pub(crate) const DEFAULT_MEDIA_PREVIEW_SIZE: u32 = 400;
+pub(crate) const MAX_MEDIA_PREVIEW_SIZE: u32 = 4096;
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -661,6 +663,11 @@ pub struct ViewSettings {
     pub filesystem_name: String,
     #[serde(default = "default_font")]
     pub font: String,
+    #[serde(
+        default = "default_media_preview_size",
+        deserialize_with = "deserialize_media_preview_size"
+    )]
+    pub media_preview_size: u32,
     pub mode: FileViewMode,
     #[serde(default = "default_media_view_mode")]
     pub mode_media: FileViewMode,
@@ -796,6 +803,7 @@ impl Default for ViewSettings {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             filesystem_name: default_filesystem_name(),
             font: default_font(),
+            media_preview_size: default_media_preview_size(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
             remote_mode_media: FileViewMode::Details,
@@ -1062,6 +1070,10 @@ pub(crate) fn normalized_file_column_width(value: u32) -> u32 {
 
 pub(crate) fn normalized_name_column_width(value: u32) -> u32 {
     value.max(crate::explorer::constants::COLUMN_NAME_MIN_WIDTH as u32)
+}
+
+pub(crate) fn normalized_media_preview_size(value: u32) -> u32 {
+    value.clamp(1, MAX_MEDIA_PREVIEW_SIZE)
 }
 
 pub(crate) fn normalized_cache_cleanup_interval_days(value: u32) -> u32 {
@@ -2084,6 +2096,10 @@ fn default_font() -> String {
     DEFAULT_FONT.to_owned()
 }
 
+fn default_media_preview_size() -> u32 {
+    DEFAULT_MEDIA_PREVIEW_SIZE
+}
+
 fn default_cache_cleanup_interval_days() -> u32 {
     DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
 }
@@ -2373,6 +2389,13 @@ where
     u32::deserialize(deserializer).map(normalized_sidebar_width)
 }
 
+fn deserialize_media_preview_size<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(normalized_media_preview_size)
+}
+
 fn deserialize_cache_cleanup_interval_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2457,6 +2480,7 @@ mod tests {
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        assert_eq!(settings.view.media_preview_size, DEFAULT_MEDIA_PREVIEW_SIZE);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
         #[cfg(target_os = "windows")]
@@ -3044,6 +3068,24 @@ mod tests {
         assert_eq!(normalized_sidebar_width(99), SIDEBAR_MIN_WIDTH);
         assert_eq!(normalized_sidebar_width(100), SIDEBAR_MIN_WIDTH);
         assert_eq!(normalized_sidebar_width(250), 250);
+    }
+
+    #[test]
+    fn media_preview_size_defaults_normalizes_and_round_trips() {
+        let missing: ExplorerSettings =
+            serde_json::from_str(r#"{"view":{}}"#).expect("deserialize default media preview size");
+        assert_eq!(missing.view.media_preview_size, DEFAULT_MEDIA_PREVIEW_SIZE);
+
+        for (configured, expected) in [(0, 1), (640, 640), (u32::MAX, MAX_MEDIA_PREVIEW_SIZE)] {
+            let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+                "view": {"media_preview_size": configured}
+            }))
+            .expect("deserialize media preview size");
+            assert_eq!(settings.view.media_preview_size, expected);
+
+            let value = serde_json::to_value(settings).expect("serialize media preview size");
+            assert_eq!(value["view"]["media_preview_size"], expected);
+        }
     }
 
     #[test]

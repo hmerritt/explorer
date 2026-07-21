@@ -103,6 +103,7 @@ Minimal example:
         "start": "~/Downloads"
     },
     "view": {
+        "media_preview_size": 400,
         "mode": "details",
         "search_mode": "detailed",
         "show_extensions": true,

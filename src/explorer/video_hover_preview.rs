@@ -25,7 +25,6 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
-const VIDEO_HOVER_PREVIEW_SIZE: u32 = 400;
 const VIDEO_HOVER_PREVIEW_FPS: u32 = 15;
 const VIDEO_HOVER_PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -33,6 +32,7 @@ type SharedFfmpegChild = Arc<Mutex<Option<FfmpegChild>>>;
 
 pub(super) struct VideoHoverPreviewSession {
     path: PathBuf,
+    size: u32,
     generation: u64,
     cancel: Arc<AtomicBool>,
     child: SharedFfmpegChild,
@@ -99,11 +99,12 @@ impl ExplorerView {
             return Some(VideoHoverPreviewLookup::Failed);
         }
 
+        let preview_size = self.media_preview_size;
         let loading_thumbnail = self.ready_standard_video_thumbnail_for_entry(entry, cx);
         if self
             .video_hover_preview
             .as_ref()
-            .is_none_or(|session| session.path != entry.path)
+            .is_none_or(|session| session.path != entry.path || session.size != preview_size)
         {
             self.start_video_hover_preview(entry, loading_thumbnail.clone(), cx);
         } else if let Some(session) = self.video_hover_preview.as_mut()
@@ -125,9 +126,9 @@ impl ExplorerView {
         let (width, height) = thumbnail
             .as_ref()
             .and_then(|thumbnail| {
-                dimensions_for_preview(thumbnail.width, thumbnail.height, VIDEO_HOVER_PREVIEW_SIZE)
+                dimensions_for_preview(thumbnail.width, thumbnail.height, preview_size)
             })
-            .unwrap_or((VIDEO_HOVER_PREVIEW_SIZE, VIDEO_HOVER_PREVIEW_SIZE));
+            .unwrap_or((preview_size, preview_size));
 
         Some(VideoHoverPreviewLookup::Loading {
             width,
@@ -147,10 +148,12 @@ impl ExplorerView {
         self.video_hover_preview_generation = self.video_hover_preview_generation.wrapping_add(1);
         let generation = self.video_hover_preview_generation;
         let path = entry.path.clone();
+        let size = self.media_preview_size;
         let cancel = Arc::new(AtomicBool::new(false));
         let child = Arc::new(Mutex::new(None));
         let task = start_video_hover_preview_task(
             path.clone(),
+            size,
             generation,
             cancel.clone(),
             child.clone(),
@@ -159,6 +162,7 @@ impl ExplorerView {
 
         self.video_hover_preview = Some(VideoHoverPreviewSession {
             path,
+            size,
             generation,
             cancel,
             child,
@@ -198,6 +202,7 @@ impl ExplorerView {
 
 fn start_video_hover_preview_task(
     path: PathBuf,
+    size: u32,
     generation: u64,
     cancel: Arc<AtomicBool>,
     child: SharedFfmpegChild,
@@ -211,7 +216,7 @@ fn start_video_hover_preview_task(
             let child = child.clone();
             let shared = shared.clone();
             async move {
-                run_video_hover_preview_worker(&path, &cancel, &child, &shared);
+                run_video_hover_preview_worker(&path, size, &cancel, &child, &shared);
             }
         });
 
@@ -278,11 +283,12 @@ fn start_video_hover_preview_task(
 
 fn run_video_hover_preview_worker(
     path: &Path,
+    size: u32,
     cancel: &AtomicBool,
     child: &SharedFfmpegChild,
     shared: &VideoHoverPreviewShared,
 ) {
-    let mut ffmpeg = match spawn_video_hover_preview_ffmpeg(path) {
+    let mut ffmpeg = match spawn_video_hover_preview_ffmpeg(path, size) {
         Ok(ffmpeg) => ffmpeg,
         Err(_) => {
             shared.failed.store(true, Ordering::Relaxed);
@@ -354,12 +360,12 @@ fn run_video_hover_preview_worker(
     shared.finished.store(true, Ordering::Relaxed);
 }
 
-fn spawn_video_hover_preview_ffmpeg(path: &Path) -> Result<FfmpegChild, String> {
+fn spawn_video_hover_preview_ffmpeg(path: &Path, size: u32) -> Result<FfmpegChild, String> {
     if !path_may_have_video_metadata(path) {
         return Err("Path is not a recognized video.".to_owned());
     }
     let mut command = FfmpegCommand::new_with_path(ffmpeg_executable_path());
-    for arg in video_hover_preview_ffmpeg_args(path) {
+    for arg in video_hover_preview_ffmpeg_args(path, size) {
         command.arg(arg);
     }
     command
@@ -367,7 +373,7 @@ fn spawn_video_hover_preview_ffmpeg(path: &Path) -> Result<FfmpegChild, String> 
         .map_err(|error| format!("could not start ffmpeg: {error}"))
 }
 
-pub(super) fn video_hover_preview_ffmpeg_args(path: &Path) -> Vec<OsString> {
+pub(super) fn video_hover_preview_ffmpeg_args(path: &Path, size: u32) -> Vec<OsString> {
     vec![
         OsString::from("-stream_loop"),
         OsString::from("-1"),
@@ -380,10 +386,7 @@ pub(super) fn video_hover_preview_ffmpeg_args(path: &Path) -> Vec<OsString> {
         OsString::from("-sn"),
         OsString::from("-dn"),
         OsString::from("-vf"),
-        OsString::from(video_hover_preview_filter(
-            VIDEO_HOVER_PREVIEW_SIZE,
-            VIDEO_HOVER_PREVIEW_FPS,
-        )),
+        OsString::from(video_hover_preview_filter(size, VIDEO_HOVER_PREVIEW_FPS)),
         OsString::from("-f"),
         OsString::from("rawvideo"),
         OsString::from("-pix_fmt"),
@@ -448,7 +451,10 @@ pub mod benchmark_support {
 
     pub fn load_video_hover_first_frame_for_benchmark(path: &Path) -> u128 {
         let started = Instant::now();
-        let Ok(mut child) = super::spawn_video_hover_preview_ffmpeg(path) else {
+        let Ok(mut child) = super::spawn_video_hover_preview_ffmpeg(
+            path,
+            crate::settings::DEFAULT_MEDIA_PREVIEW_SIZE,
+        ) else {
             return 0;
         };
         let Ok(mut events) = child.iter() else {
@@ -516,7 +522,7 @@ mod tests {
 
     #[test]
     fn video_hover_preview_args_loop_silent_and_emit_bgra_rawvideo() {
-        let args = video_hover_preview_ffmpeg_args(Path::new("clip.mp4"));
+        let args = video_hover_preview_ffmpeg_args(Path::new("clip.mp4"), 720);
         let args: Vec<_> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -530,6 +536,7 @@ mod tests {
         assert!(args.contains(&"-dn".to_owned()));
         assert!(args.windows(2).any(|args| args == ["-f", "rawvideo"]));
         assert!(args.windows(2).any(|args| args == ["-pix_fmt", "bgra"]));
+        assert!(args.iter().any(|arg| arg.contains("scale=720:720")));
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.contains(&"-v".to_owned()));
     }

@@ -105,6 +105,7 @@ pub struct ExplorerView {
     pub(super) sidebar_resize_drag: Option<SidebarResizeDrag>,
     pub(super) image_hover_preview: Option<ImageHoverPreview>,
     pub(super) image_hover_preview_alt: bool,
+    pub(super) media_preview_size: u32,
     pub(super) animated_image_asset_evictions: BTreeSet<String>,
     pub(super) video_hover_preview: Option<VideoHoverPreviewSession>,
     pub(super) video_hover_preview_generation: u64,
@@ -481,6 +482,7 @@ impl ExplorerView {
             sidebar_resize_drag: None,
             image_hover_preview: None,
             image_hover_preview_alt: false,
+            media_preview_size: settings.view.media_preview_size,
             animated_image_asset_evictions: BTreeSet::new(),
             video_hover_preview: None,
             video_hover_preview_generation: 0,
@@ -552,6 +554,8 @@ impl ExplorerView {
         let filesystem_name_changed = self.filesystem_name != filesystem_name;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
         let file_sort_changed = self.file_sort != settings.view.sort;
+        let media_preview_size_changed =
+            self.media_preview_size != settings.view.media_preview_size;
         self.date_format.clone_from(&settings.view.date_format);
         self.filesystem_name = filesystem_name;
         self.font = crate::settings::app_font(settings);
@@ -561,6 +565,7 @@ impl ExplorerView {
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
         self.file_sort = settings.view.sort;
+        self.media_preview_size = settings.view.media_preview_size;
         #[cfg(target_os = "windows")]
         {
             self.address_slash = settings.view.address_slash;
@@ -581,6 +586,10 @@ impl ExplorerView {
             && self.thumbnail_source_policy == ThumbnailSourcePolicy::CacheOnly
         {
             self.cancel_standard_image_thumbnail_extraction(cx);
+        }
+        if media_preview_size_changed {
+            self.cancel_hover_image_preview_extraction(cx);
+            self.cancel_video_hover_preview(cx);
         }
         if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
@@ -2624,6 +2633,34 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.font.family, "Inter");
+        });
+    }
+
+    #[gpui::test]
+    fn apply_settings_updates_media_preview_size(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("settings"), focus_handle)
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.apply_settings(
+                    &ExplorerSettings {
+                        view: crate::settings::ViewSettings {
+                            media_preview_size: 960,
+                            ..crate::settings::ViewSettings::default()
+                        },
+                        ..ExplorerSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.media_preview_size, 960);
         });
     }
 

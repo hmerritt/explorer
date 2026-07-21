@@ -154,7 +154,6 @@ const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
-const IMAGE_HOVER_PREVIEW_MAX_SIZE: f32 = 500.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_RADIUS: f32 = 15.0;
@@ -3564,8 +3563,8 @@ fn local_context_menu_origin(
 fn image_hover_preview_render_size(width: u32, height: u32, window_size: (f32, f32)) -> (f32, f32) {
     let width = width.max(1) as f32;
     let height = height.max(1) as f32;
-    let max_width = IMAGE_HOVER_PREVIEW_MAX_SIZE.min(window_size.0.max(1.0));
-    let max_height = IMAGE_HOVER_PREVIEW_MAX_SIZE.min(window_size.1.max(1.0));
+    let max_width = window_size.0.max(1.0);
+    let max_height = window_size.1.max(1.0);
     let scale = (max_width / width).min(max_height / height).min(1.0);
 
     ((width * scale).max(1.0), (height * scale).max(1.0))
@@ -9650,6 +9649,10 @@ mod tests {
         assert_eq!(
             image_hover_preview_render_size(400, 200, (300.0, 300.0)),
             (300.0, 150.0)
+        );
+        assert_eq!(
+            image_hover_preview_render_size(1200, 600, (1600.0, 900.0)),
+            (1200.0, 600.0)
         );
     }
 
