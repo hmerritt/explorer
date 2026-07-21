@@ -13,8 +13,8 @@ use gpui::{
     ExternalPathsDragCallback, FocusHandle, Focusable, FontWeight, Image, IntoElement,
     ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
-    RenderImage, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px,
+    rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -81,7 +81,7 @@ use crate::explorer::{
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
-        pinned_group_icon, render_image_icon, sshfs_drive_icon,
+        pinned_group_icon, sshfs_drive_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -976,9 +976,6 @@ impl ExplorerView {
             || self.mouse_selection_drag.is_some()
             || self.active_drop_indicator.is_some()
         {
-            if let Some(preview) = self.image_hover_preview.clone() {
-                self.release_hover_image_preview_for_entry(&preview.entry, cx);
-            }
             self.cancel_video_hover_preview(cx);
             return None;
         }
@@ -1049,7 +1046,7 @@ impl ExplorerView {
                 .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                 .overflow_hidden()
                 .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                    if this.update_image_hover_preview_alt(event.modifiers.alt, cx) {
+                    if this.update_image_hover_preview_alt(event.modifiers.alt) {
                         if !event.modifiers.alt {
                             this.cancel_video_hover_preview(cx);
                         }
@@ -1067,7 +1064,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(source) = preview.animated_source.clone() {
-            self.prepare_animated_image_source(&source, cx);
+            self.evict_animated_image_source_once(&source, cx);
             return animated_gif_preview_content(
                 &source,
                 preview.image,
@@ -1076,7 +1073,6 @@ impl ExplorerView {
             );
         }
 
-        self.release_current_animated_image_asset(cx);
         gpui::img(preview.image)
             .size_full()
             .object_fit(ObjectFit::Contain)
@@ -1084,19 +1080,16 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn prepare_animated_image_source(
+    fn evict_animated_image_source_once(
         &mut self,
         source: &AnimatedImageSource,
         cx: &mut Context<Self>,
     ) {
         if self
-            .animated_image_asset_source
-            .as_ref()
-            .is_none_or(|current| current.cache_key != source.cache_key)
+            .animated_image_asset_evictions
+            .insert(source.cache_key.clone())
         {
-            self.release_current_animated_image_asset(cx);
             evict_animated_image_source_asset(source, cx);
-            self.animated_image_asset_source = Some(source.clone());
         }
     }
 
@@ -1105,11 +1098,10 @@ impl ExplorerView {
         entry: &FileEntry,
         position: Point<Pixels>,
         alt: bool,
-        cx: &mut Context<Self>,
     ) -> bool {
-        let mut changed = self.update_image_hover_preview_alt(alt, cx);
+        let mut changed = self.update_image_hover_preview_alt(alt);
         if !entry_may_have_hover_media_preview(entry) {
-            return self.clear_image_hover_preview(cx) || changed;
+            return self.clear_image_hover_preview() || changed;
         }
 
         let next = ImageHoverPreview {
@@ -1117,50 +1109,32 @@ impl ExplorerView {
             position,
         };
         if self.image_hover_preview.as_ref() != Some(&next) {
-            if let Some(previous) = self.image_hover_preview.as_ref()
-                && previous.entry.path != next.entry.path
-            {
-                let previous_entry = previous.entry.clone();
-                self.release_hover_image_preview_for_entry(&previous_entry, cx);
-            }
             self.image_hover_preview = Some(next);
             changed = true;
         }
         changed
     }
 
-    fn update_image_hover_preview_alt(&mut self, alt: bool, cx: &mut Context<Self>) -> bool {
+    fn update_image_hover_preview_alt(&mut self, alt: bool) -> bool {
         if self.image_hover_preview_alt == alt {
             return false;
         }
 
         self.image_hover_preview_alt = alt;
-        if !alt && let Some(preview) = self.image_hover_preview.clone() {
-            self.release_hover_image_preview_for_entry(&preview.entry, cx);
-        }
         true
     }
 
-    fn clear_image_hover_preview(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(preview) = self.image_hover_preview.take() else {
-            return false;
-        };
-        self.release_hover_image_preview_for_entry(&preview.entry, cx);
-        true
+    fn clear_image_hover_preview(&mut self) -> bool {
+        self.image_hover_preview.take().is_some()
     }
 
-    fn clear_image_hover_preview_for_entry(
-        &mut self,
-        entry: &FileEntry,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn clear_image_hover_preview_for_entry(&mut self, entry: &FileEntry) -> bool {
         if self
             .image_hover_preview
             .as_ref()
             .is_some_and(|preview| preview.entry.path == entry.path)
         {
-            let preview = self.image_hover_preview.take().expect("hover preview");
-            self.release_hover_image_preview_for_entry(&preview.entry, cx);
+            self.image_hover_preview = None;
             return true;
         }
 
@@ -3137,8 +3111,7 @@ impl Render for ExplorerView {
             )
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 let drop_indicator_changed = this.update_drop_indicator_modifiers(event.modifiers);
-                let image_hover_changed =
-                    this.update_image_hover_preview_alt(event.modifiers.alt, cx);
+                let image_hover_changed = this.update_image_hover_preview_alt(event.modifiers.alt);
                 if !event.modifiers.alt {
                     this.cancel_video_hover_preview(cx);
                 }
@@ -4003,21 +3976,16 @@ fn add_entry_hover_preview(
         .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
             let changed = if event.pressed_button.is_some() {
                 this.cancel_video_hover_preview(cx);
-                this.clear_image_hover_preview(cx)
+                this.clear_image_hover_preview()
             } else {
-                this.update_image_hover_preview(
-                    &move_entry,
-                    event.position,
-                    event.modifiers.alt,
-                    cx,
-                )
+                this.update_image_hover_preview(&move_entry, event.position, event.modifiers.alt)
             };
             if changed {
                 cx.notify();
             }
         }))
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            if !*hovered && this.clear_image_hover_preview_for_entry(&entry, cx) {
+            if !*hovered && this.clear_image_hover_preview_for_entry(&entry) {
                 this.cancel_video_hover_preview(cx);
                 cx.notify();
             }
@@ -4472,8 +4440,8 @@ fn render_context_menu_level(
     window: &Window,
     cx: &mut Context<ExplorerView>,
     elements: &mut Vec<AnyElement>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) {
     let menu_width = context_menu_width(items, window);
@@ -4570,8 +4538,8 @@ fn render_context_menu_item(
     path: Vec<usize>,
     hovered_path: &[usize],
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let visually_active = context_menu_item_is_visually_active(item, hovered_path, &path);
@@ -4636,8 +4604,8 @@ fn context_menu_action_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
@@ -4671,8 +4639,8 @@ fn context_menu_submenu_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
@@ -4698,7 +4666,7 @@ fn context_menu_detail_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let id = match label {
@@ -4742,8 +4710,8 @@ fn context_menu_row_base(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> gpui::Stateful<Div> {
     let id = id.to_owned();
@@ -4887,8 +4855,8 @@ fn context_menu_separator() -> Div {
 
 fn context_menu_icon_slot(
     icon: Option<ContextMenuIcon>,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> Div {
     div()
@@ -4908,8 +4876,8 @@ fn context_menu_icon_slot(
 
 fn context_menu_icon_element(
     icon: ContextMenuIcon,
-    native_file_icon: Option<&Arc<RenderImage>>,
-    native_path_icons: &HashMap<PathBuf, Arc<RenderImage>>,
+    native_file_icon: Option<&Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> Option<AnyElement> {
     Some(match icon {
@@ -4963,9 +4931,7 @@ fn context_menu_icon_element(
             .into_any_element(),
         ContextMenuIcon::File => file_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
         ContextMenuIcon::NativeFile => native_file_icon
-            .map(|icon| {
-                render_image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE)
-            })
+            .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| file_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::Folder => folder_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element(),
         ContextMenuIcon::FolderKind(kind) => kind
@@ -5001,15 +4967,11 @@ fn context_menu_icon_element(
             .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NativePath(path) => native_path_icons
             .get(&path)
-            .map(|icon| {
-                render_image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE)
-            })
+            .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NativePathOptional(path) => native_path_icons
             .get(&path)
-            .map(|icon| {
-                render_image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE)
-            })
+            .map(|icon| image_icon(icon.clone(), CONTEXT_MENU_ICON_SIZE, CONTEXT_MENU_ICON_SIZE))
             .unwrap_or_else(|| div().into_any_element()),
         ContextMenuIcon::NewTab => gpui::img(NEW_TAB_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
@@ -6035,7 +5997,7 @@ fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
 fn name_cell_visual(
     ix: usize,
     entry: &FileEntry,
-    app_icon: Option<Arc<RenderImage>>,
+    app_icon: Option<Arc<Image>>,
     show_file_name_extensions: bool,
     show_full_path: bool,
     widths: DetailsNameWidths,
@@ -6249,7 +6211,7 @@ fn details_name_text(
 
 fn rename_name_cell(
     entry: &FileEntry,
-    app_icon: Option<Arc<RenderImage>>,
+    app_icon: Option<Arc<Image>>,
     focus_handle: Option<FocusHandle>,
     name_column_width: f32,
     manual_width: bool,
@@ -6329,13 +6291,13 @@ fn rename_name_cell(
     cell.child(entry_icon(entry, app_icon)).child(input)
 }
 
-fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<RenderImage>>) -> AnyElement {
+fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     if entry.uses_directory_shortcut_icon() {
         return directory_shortcut_icon().into_any_element();
     }
 
     if let Some(app_icon) = app_icon {
-        return render_image_icon(app_icon, FILE_ICON_SLOT_WIDTH, FILE_ICON_SLOT_HEIGHT);
+        return image_icon(app_icon, FILE_ICON_SLOT_WIDTH, FILE_ICON_SLOT_HEIGHT);
     }
 
     if entry.is_directory_like() {
@@ -6365,7 +6327,7 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<RenderImage>>) -> AnyEleme
 fn large_entry_icon(
     entry: &FileEntry,
     image_thumbnail: Option<Arc<gpui::RenderImage>>,
-    app_icon: Option<Arc<RenderImage>>,
+    app_icon: Option<Arc<Image>>,
 ) -> AnyElement {
     if let Some(image_thumbnail) = image_thumbnail {
         return gpui::img(image_thumbnail)
@@ -6381,7 +6343,7 @@ fn large_entry_icon(
     }
 
     if let Some(app_icon) = app_icon {
-        return render_image_icon(app_icon, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
+        return image_icon(app_icon, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
     }
 
     if entry.is_directory_like() {
@@ -9937,21 +9899,9 @@ mod tests {
             run_until_image_hover_preview(cx).size.width,
             gpui::px(400.0)
         );
-        cx.update(|_, app| {
-            view.update(app, |view, cx| {
-                let entry = view.entries[0].clone();
-                assert!(view.hover_image_preview_cached_for_test(&entry, cx));
-            });
-        });
 
         cx.simulate_modifiers_change(Modifiers::default());
         cx.run_until_parked();
-        cx.update(|_, app| {
-            view.update(app, |view, cx| {
-                let entry = view.entries[0].clone();
-                assert!(!view.hover_image_preview_cached_for_test(&entry, cx));
-            });
-        });
         cx.read_entity(&view, |view, _| {
             assert!(!view.image_hover_preview_alt);
         });

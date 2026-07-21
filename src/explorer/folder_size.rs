@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fs::{self, Metadata},
     path::{Component, Path, PathBuf},
@@ -14,11 +14,9 @@ use gpui::{App, Global};
 use jwalk::{Parallelism, WalkDirGeneric};
 
 const FOLDER_SIZE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const FOLDER_SIZE_CACHE_ENTRY_LIMIT: usize = 4096;
 
 pub(super) struct FolderSizeCache {
     entries: RefCell<HashMap<PathBuf, CachedFolderSize>>,
-    access_generation: Cell<u64>,
 }
 
 impl Global for FolderSizeCache {}
@@ -27,14 +25,12 @@ impl Global for FolderSizeCache {}
 struct CachedFolderSize {
     size: u64,
     calculated_at: Instant,
-    last_access: u64,
 }
 
 impl FolderSizeCache {
     pub(super) fn new() -> Self {
         Self {
             entries: RefCell::new(HashMap::new()),
-            access_generation: Cell::new(0),
         }
     }
 
@@ -43,14 +39,13 @@ impl FolderSizeCache {
     }
 
     fn get_at(&self, path: &Path, now: Instant) -> Option<u64> {
-        let mut entries = self.entries.borrow_mut();
-        entries.retain(|_, cached| {
-            now.saturating_duration_since(cached.calculated_at) < FOLDER_SIZE_CACHE_TTL
-        });
-        let access = self.next_access();
-        let cached = entries.get_mut(path)?;
-        cached.last_access = access;
-        Some(cached.size)
+        let cached = self.entries.borrow().get(path).copied()?;
+        if now.saturating_duration_since(cached.calculated_at) < FOLDER_SIZE_CACHE_TTL {
+            Some(cached.size)
+        } else {
+            self.entries.borrow_mut().remove(path);
+            None
+        }
     }
 
     pub(super) fn insert(&self, path: PathBuf, size: u64) {
@@ -58,45 +53,13 @@ impl FolderSizeCache {
     }
 
     fn insert_at(&self, path: PathBuf, size: u64, calculated_at: Instant) {
-        self.insert_at_with_limit(path, size, calculated_at, FOLDER_SIZE_CACHE_ENTRY_LIMIT);
-    }
-
-    fn insert_at_with_limit(
-        &self,
-        path: PathBuf,
-        size: u64,
-        calculated_at: Instant,
-        entry_limit: usize,
-    ) {
-        let mut entries = self.entries.borrow_mut();
-        entries.retain(|_, cached| {
-            calculated_at.saturating_duration_since(cached.calculated_at) < FOLDER_SIZE_CACHE_TTL
-        });
-        while !entries.contains_key(&path) && entries.len() >= entry_limit {
-            let Some(oldest) = entries
-                .iter()
-                .min_by_key(|(_, cached)| cached.last_access)
-                .map(|(path, _)| path.clone())
-            else {
-                break;
-            };
-            entries.remove(&oldest);
-        }
-        let last_access = self.next_access();
-        entries.insert(
+        self.entries.borrow_mut().insert(
             path,
             CachedFolderSize {
                 size,
                 calculated_at,
-                last_access,
             },
         );
-    }
-
-    fn next_access(&self) -> u64 {
-        let access = self.access_generation.get().wrapping_add(1);
-        self.access_generation.set(access);
-        access
     }
 
     pub(super) fn invalidate<'a>(&self, paths: impl IntoIterator<Item = &'a PathBuf>) {
@@ -473,39 +436,6 @@ mod tests {
 
         assert_eq!(cache.get(&first), None);
         assert_eq!(cache.get(&second), Some(2));
-    }
-
-    #[test]
-    fn folder_size_cache_prunes_expired_entries_eagerly() {
-        let cache = FolderSizeCache::new();
-        let now = Instant::now();
-        cache.insert_at(PathBuf::from("stale"), 1, now);
-
-        cache.insert_at(PathBuf::from("fresh"), 2, now + FOLDER_SIZE_CACHE_TTL);
-
-        assert_eq!(cache.entries.borrow().len(), 1);
-        assert_eq!(
-            cache.get_at(&PathBuf::from("fresh"), now + FOLDER_SIZE_CACHE_TTL),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn folder_size_cache_evicts_least_recently_used_entry_at_limit() {
-        let cache = FolderSizeCache::new();
-        let now = Instant::now();
-        let first = PathBuf::from("first");
-        let second = PathBuf::from("second");
-        let third = PathBuf::from("third");
-        cache.insert_at_with_limit(first.clone(), 1, now, 2);
-        cache.insert_at_with_limit(second.clone(), 2, now, 2);
-        assert_eq!(cache.get_at(&first, now), Some(1));
-
-        cache.insert_at_with_limit(third.clone(), 3, now, 2);
-
-        assert_eq!(cache.get_at(&first, now), Some(1));
-        assert_eq!(cache.get_at(&second, now), None);
-        assert_eq!(cache.get_at(&third, now), Some(3));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -241,7 +242,7 @@ pub(crate) struct ImageViewer {
     horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     wheel_zoom_delta: f32,
     last_surface_size: Option<gpui::Size<Pixels>>,
-    animated_gif_asset_eviction: Option<String>,
+    animated_gif_asset_evictions: BTreeSet<String>,
 }
 
 impl EventEmitter<ImageViewerEvent> for ImageViewer {}
@@ -472,7 +473,7 @@ impl ImageViewer {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
-            animated_gif_asset_eviction: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         };
         viewer.start_decode(cx);
         viewer
@@ -576,25 +577,15 @@ impl ImageViewer {
     }
 
     fn drop_decoded_image(&mut self, cx: &mut App) {
-        let (image, animated_path) = match &self.state {
-            ImageViewerState::Ready(decoded) => match &decoded.source {
-                DecodedImageSource::Raster(image) => (Some(image.clone()), None),
-                DecodedImageSource::AnimatedGif(source) => (
-                    Some(source.fallback_image.clone()),
-                    Some(source.path.clone()),
-                ),
-                DecodedImageSource::Svg(_) => (None, None),
-            },
-            ImageViewerState::Loading | ImageViewerState::Failed(_) => (None, None),
-        };
-        if let Some(image) = image {
-            cx.drop_image(image, None);
+        if let ImageViewerState::Ready(decoded) = &self.state {
+            match &decoded.source {
+                DecodedImageSource::Raster(image) => cx.drop_image(image.clone(), None),
+                DecodedImageSource::AnimatedGif(source) => {
+                    cx.drop_image(source.fallback_image.clone(), None);
+                }
+                DecodedImageSource::Svg(_) => {}
+            }
         }
-        if let Some(path) = animated_path {
-            let resource: gpui::Resource = path.into();
-            cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
-        }
-        self.animated_gif_asset_eviction = None;
     }
 
     fn ensure_svg_rendered_image(
@@ -1504,10 +1495,12 @@ impl ImageViewer {
         source: &AnimatedGifSource,
         cx: &mut Context<Self>,
     ) {
-        if self.animated_gif_asset_eviction.as_deref() != Some(&source.cache_key) {
+        if self
+            .animated_gif_asset_evictions
+            .insert(source.cache_key.clone())
+        {
             let resource: gpui::Resource = source.path.clone().into();
             cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
-            self.animated_gif_asset_eviction = Some(source.cache_key.clone());
         }
     }
 
@@ -3414,7 +3407,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 60.0,
             last_surface_size: None,
-            animated_gif_asset_eviction: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         });
 
         viewer.update(cx, |viewer, _| {
@@ -3455,7 +3448,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
-            animated_gif_asset_eviction: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         });
 
         viewer.update(cx, |viewer, _| {
@@ -3694,10 +3687,7 @@ mod tests {
         cx.debug_bounds("image-viewer-animated-gif-image")
             .expect("animated gif image bounds");
         viewer.update(cx, |viewer, _| {
-            assert_eq!(
-                viewer.animated_gif_asset_eviction.as_deref(),
-                Some(cache_key)
-            );
+            assert!(viewer.animated_gif_asset_evictions.contains(cache_key));
         });
     }
 
@@ -3730,7 +3720,7 @@ mod tests {
                 horizontal_scrollbar_drag: None,
                 wheel_zoom_delta: 0.0,
                 last_surface_size: None,
-                animated_gif_asset_eviction: None,
+                animated_gif_asset_evictions: BTreeSet::new(),
             }
         });
 
@@ -4081,7 +4071,7 @@ mod tests {
             horizontal_scrollbar_drag: None,
             wheel_zoom_delta: 0.0,
             last_surface_size: None,
-            animated_gif_asset_eviction: None,
+            animated_gif_asset_evictions: BTreeSet::new(),
         }
     }
 

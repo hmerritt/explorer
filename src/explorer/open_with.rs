@@ -424,7 +424,7 @@ impl ExplorerView {
 
 fn refresh_file_type_icons_after_default_app_may_have_changed(
     path: &Path,
-    cx: &mut (impl gpui::BorrowAppContext + std::borrow::BorrowMut<gpui::App>),
+    cx: &mut impl gpui::BorrowAppContext,
 ) {
     #[cfg(target_os = "windows")]
     windows_notify_association_changed();
