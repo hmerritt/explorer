@@ -16,6 +16,7 @@ Run it with:
 cargo bench --features benchmarks --bench recursive_search
 cargo bench --features benchmarks --bench navigation_pipeline
 cargo bench --features benchmarks --bench image_thumbnails
+cargo bench --features benchmarks --bench video_thumbnails
 cargo bench --features benchmarks --bench image_viewer
 cargo bench --features benchmarks --bench properties
 cargo bench --features benchmarks --bench resumable_copy
@@ -41,6 +42,12 @@ Fixtures cover opaque and transparent PNG, JPEG
 (including 12MP), uncompressed/Deflate/LZW TIFF up to 48MP, pathological wide
 TIFF, WebP, and SVG under `target/image-thumbnails-benchmark-v6`.
 
+The video-thumbnail benchmark measures uncached sub-second, ordinary, long,
+and malformed video thumbnails, a 24-video folder batch, the 20-frame
+Properties strip, and Alt-hover time to first frame. It generates MPEG-4
+fixtures with FFmpeg under `target/video-thumbnails-benchmark-v1`; `ffmpeg` and
+`ffprobe` must be available on `PATH`.
+
 The image-viewer benchmark compares ICC-tagged native opens with synchronous
 ICC, deferred first-ready opens, and ICC ignored; it also measures no-ICC native
 opens, deferred ICC correction plus corrected `RenderImage` construction, and
@@ -55,6 +62,7 @@ Use the release profile when comparing shipped application performance:
 
 ```sh
 cargo bench --profile release --features benchmarks --bench image_thumbnails
+cargo bench --profile release --features benchmarks --bench video_thumbnails
 ```
 
 The properties benchmark creates a deterministic large directory fixture under

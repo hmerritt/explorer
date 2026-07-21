@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ffmpeg_sidecar::{
@@ -21,7 +21,7 @@ use crate::explorer::{
         CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
         entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
     },
-    video::{ffmpeg_executable_path, ffmpeg_is_installed, path_may_have_video_metadata},
+    video::{ffmpeg_executable_path, path_may_have_video_metadata},
     view::ExplorerView,
 };
 
@@ -60,11 +60,24 @@ pub(super) enum VideoHoverPreviewLookup {
     Failed,
 }
 
-#[derive(Default)]
 struct VideoHoverPreviewShared {
     latest_frame: Mutex<Option<RawVideoHoverPreviewFrame>>,
     failed: AtomicBool,
     finished: AtomicBool,
+    started: Instant,
+    first_frame_reported: AtomicBool,
+}
+
+impl Default for VideoHoverPreviewShared {
+    fn default() -> Self {
+        Self {
+            latest_frame: Mutex::new(None),
+            failed: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            started: Instant::now(),
+            first_frame_reported: AtomicBool::new(false),
+        }
+    }
 }
 
 struct RawVideoHoverPreviewFrame {
@@ -300,6 +313,15 @@ fn run_video_hover_preview_worker(
         match event {
             FfmpegEvent::OutputFrame(frame) => {
                 if let Some(frame) = raw_video_hover_preview_frame_from_output(frame) {
+                    if !shared.first_frame_reported.swap(true, Ordering::Relaxed)
+                        && crate::debug_options::icon_timings_enabled()
+                    {
+                        crate::debug_options::log_icon_timing(format_args!(
+                            "video_hover_preview path={} first_frame={:.3}ms",
+                            path.display(),
+                            shared.started.elapsed().as_secs_f64() * 1000.0
+                        ));
+                    }
                     if let Ok(mut latest_frame) = shared.latest_frame.lock() {
                         *latest_frame = Some(frame);
                     }
@@ -336,10 +358,6 @@ fn spawn_video_hover_preview_ffmpeg(path: &Path) -> Result<FfmpegChild, String> 
     if !path_may_have_video_metadata(path) {
         return Err("Path is not a recognized video.".to_owned());
     }
-    if !ffmpeg_is_installed() {
-        return Err("ffmpeg is not available.".to_owned());
-    }
-
     let mut command = FfmpegCommand::new_with_path(ffmpeg_executable_path());
     for arg in video_hover_preview_ffmpeg_args(path) {
         command.arg(arg);
@@ -420,6 +438,38 @@ pub(super) fn entry_may_have_hover_media_preview(entry: &FileEntry) -> bool {
 
 pub(super) fn hover_preview_is_video(entry: &FileEntry) -> bool {
     entry_may_have_hover_video_preview(entry)
+}
+
+#[cfg(feature = "benchmarks")]
+pub mod benchmark_support {
+    use std::{path::Path, time::Instant};
+
+    use ffmpeg_sidecar::event::FfmpegEvent;
+
+    pub fn load_video_hover_first_frame_for_benchmark(path: &Path) -> u128 {
+        let started = Instant::now();
+        let Ok(mut child) = super::spawn_video_hover_preview_ffmpeg(path) else {
+            return 0;
+        };
+        let Ok(mut events) = child.iter() else {
+            let _ = child.kill();
+            return 0;
+        };
+        for event in &mut events {
+            if matches!(event, FfmpegEvent::OutputFrame(_)) {
+                let elapsed = started.elapsed().as_micros();
+                let _ = child.kill();
+                let _ = child.wait();
+                return elapsed;
+            }
+            if matches!(event, FfmpegEvent::Error(_) | FfmpegEvent::Done) {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        0
+    }
 }
 
 #[cfg(test)]

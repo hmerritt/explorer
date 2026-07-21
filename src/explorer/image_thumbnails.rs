@@ -1,10 +1,8 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
-    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -20,9 +18,6 @@ use futures::{
 use gpui::{App, BackgroundExecutor, Context, Global, RenderImage};
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 use crate::{
     explorer::{
         entry::FileEntry,
@@ -33,11 +28,8 @@ use crate::{
             path_may_have_image_preview,
         },
         image_resize::dimensions_for_longest_side,
-        video::{
-            ffmpeg_executable_path, ffmpeg_is_installed, ffmpeg_seek_argument,
-            ffprobe_duration_seconds_from_probe, ffprobe_executable_path, ffprobe_is_installed,
-            path_may_have_video_metadata, video_thumbnail_frame_seek_seconds,
-        },
+        video::path_may_have_video_metadata,
+        video_thumbnails::load_video_thumbnail_rgba,
         view::ExplorerView,
     },
     settings::{ConfigPlatform, config_dir_for},
@@ -55,10 +47,7 @@ const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY: usize = 64;
 const IMAGE_THUMBNAIL_CACHE_BATCH_DELAY: Duration = Duration::from_millis(8);
-const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const QOI_SIGNATURE: &[u8] = b"qoif";
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub(super) struct ImageThumbnailCache {
     inner: RefCell<ImageThumbnailCacheInner>,
@@ -885,7 +874,7 @@ fn write_image_thumbnail_cache_batch(
     metrics
 }
 
-fn image_thumbnail_loader_concurrency() -> usize {
+pub(super) fn image_thumbnail_loader_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(4)
@@ -982,12 +971,9 @@ fn load_or_create_thumbnail_with_timings(
             (extracted.result, extracted.timings)
         }
         ImageThumbnailKind::Video => {
-            let result =
-                load_video_thumbnail_png_with_cancel(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
-                    .and_then(|bytes| {
-                        decode_png_rgba(&bytes)
-                            .ok_or_else(|| "Failed to decode video thumbnail.".to_owned())
-                    });
+            let result = load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
+                .map(|extraction| extraction.value)
+                .map_err(|error| error.to_string());
             (result, ImageThumbnailExtractionTimings::default())
         }
     };
@@ -1034,205 +1020,6 @@ fn animated_source_for_request(request: &ImageThumbnailRequest) -> Option<Animat
     }
 
     animated_gif_source_for_path(&request.path, request.key.clone())
-}
-
-fn load_video_thumbnail_png_with_cancel(
-    path: &Path,
-    size: u32,
-    cancel: &AtomicBool,
-) -> Result<Vec<u8>, String> {
-    if size == 0 {
-        return Err("Thumbnail target has no dimensions.".to_owned());
-    }
-
-    check_thumbnail_cancelled(cancel)?;
-    if !ffprobe_is_installed() {
-        return Err(
-            "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
-                .to_owned(),
-        );
-    }
-    if !ffmpeg_is_installed() {
-        return Err(
-            "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
-                .to_owned(),
-        );
-    }
-
-    check_thumbnail_cancelled(cancel)?;
-    let duration = video_thumbnail_duration_seconds(path)?;
-    let seek = video_thumbnail_frame_seek_seconds(duration)
-        .ok_or_else(|| "Video duration is not long enough to extract a thumbnail.".to_owned())?;
-    check_thumbnail_cancelled(cancel)?;
-
-    let fast_result = ffmpeg_video_thumbnail_png_output(path, seek, size, true);
-    match fast_result {
-        Ok(png) if png.starts_with(PNG_SIGNATURE) => return Ok(png),
-        Ok(png) => {
-            check_thumbnail_cancelled(cancel)?;
-            let fast_error = format!("ffmpeg returned {} bytes, but not a PNG image", png.len());
-            retry_video_thumbnail_png(path, seek, size, fast_error)
-        }
-        Err(fast_error) => {
-            check_thumbnail_cancelled(cancel)?;
-            retry_video_thumbnail_png(path, seek, size, fast_error)
-        }
-    }
-}
-
-fn retry_video_thumbnail_png(
-    path: &Path,
-    seek_seconds: f64,
-    size: u32,
-    fast_error: String,
-) -> Result<Vec<u8>, String> {
-    match ffmpeg_video_thumbnail_png_output(path, seek_seconds, size, false) {
-        Ok(png) if png.starts_with(PNG_SIGNATURE) => Ok(png),
-        Ok(png) => Err(format!(
-            "ffmpeg returned {} bytes, but not a PNG image; fast attempt also failed: {fast_error}",
-            png.len()
-        )),
-        Err(error) => Err(format!("{error}; fast attempt also failed: {fast_error}")),
-    }
-}
-
-fn video_thumbnail_duration_seconds(path: &Path) -> Result<f64, String> {
-    let output = ffprobe_video_duration_json_output(path)
-        .map_err(|error| format!("ffprobe failed: {error}"))?;
-    let probe: serde_json::Value = serde_json::from_slice(&output)
-        .map_err(|error| format!("ffprobe returned unreadable duration data: {error}"))?;
-    ffprobe_duration_seconds_from_probe(&probe)
-        .ok_or_else(|| "Video duration is not available.".to_owned())
-}
-
-fn ffprobe_video_duration_json_output(path: &Path) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffprobe_executable_path());
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-select_streams")
-        .arg("v:0")
-        .arg("-show_entries")
-        .arg("format=duration:stream=codec_type,duration")
-        .arg("-of")
-        .arg("json")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("could not start ffprobe: {error}"))?;
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-
-    let stderr = command_error_output_label(&output.stderr);
-    if stderr.is_empty() {
-        Err(format!("ffprobe exited with {}", output.status))
-    } else {
-        Err(format!("ffprobe exited with {}: {stderr}", output.status))
-    }
-}
-
-fn ffmpeg_video_thumbnail_png_output(
-    path: &Path,
-    seek_seconds: f64,
-    size: u32,
-    keyframe_only: bool,
-) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_executable_path());
-    for arg in ffmpeg_video_thumbnail_args(path, seek_seconds, size, keyframe_only) {
-        command.arg(arg);
-    }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("could not start ffmpeg: {error}"))?;
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-
-    let stderr = command_error_output_label(&output.stderr);
-    if stderr.is_empty() {
-        Err(format!("ffmpeg exited with {}", output.status))
-    } else {
-        Err(format!("ffmpeg exited with {}: {stderr}", output.status))
-    }
-}
-
-fn ffmpeg_video_thumbnail_args(
-    path: &Path,
-    seek_seconds: f64,
-    size: u32,
-    keyframe_only: bool,
-) -> Vec<OsString> {
-    let mut args = vec![
-        OsString::from("-v"),
-        OsString::from("error"),
-        OsString::from("-nostdin"),
-        OsString::from("-noaccurate_seek"),
-    ];
-    if keyframe_only {
-        args.push(OsString::from("-skip_frame"));
-        args.push(OsString::from("nokey"));
-    }
-    args.extend([
-        OsString::from("-ss"),
-        OsString::from(ffmpeg_seek_argument(seek_seconds)),
-        OsString::from("-i"),
-        path.as_os_str().to_owned(),
-        OsString::from("-map"),
-        OsString::from("0:v:0"),
-        OsString::from("-frames:v"),
-        OsString::from("1"),
-        OsString::from("-vf"),
-        OsString::from(video_thumbnail_scale_filter(size)),
-        OsString::from("-f"),
-        OsString::from("image2pipe"),
-        OsString::from("-vcodec"),
-        OsString::from("png"),
-        OsString::from("-"),
-    ]);
-    args
-}
-
-fn video_thumbnail_scale_filter(size: u32) -> String {
-    format!("scale={size}:{size}:force_original_aspect_ratio=decrease:flags=fast_bilinear")
-}
-
-fn command_error_output_label(stderr: &[u8]) -> String {
-    let label = String::from_utf8_lossy(stderr).trim().to_owned();
-    if label.chars().count() <= 300 {
-        label
-    } else {
-        let mut truncated: String = label.chars().take(300).collect();
-        truncated.push_str("...");
-        truncated
-    }
-}
-
-fn check_thumbnail_cancelled(cancel: &AtomicBool) -> Result<(), String> {
-    if cancel.load(Ordering::Relaxed) {
-        Err("Thumbnail loading was cancelled.".to_owned())
-    } else {
-        Ok(())
-    }
 }
 
 struct ImageThumbnailLoadResult {
@@ -1836,6 +1623,7 @@ fn decode_cached_thumbnail_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
         .then(|| image::RgbaImage::from_raw(header.width, header.height, pixels))?
 }
 
+#[cfg(test)]
 fn decode_png_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .ok()
@@ -2444,22 +2232,6 @@ mod tests {
         assert!(batch.stage(ThumbnailStage::RequestTotal).count <= 1);
 
         batch.finish();
-    }
-
-    #[test]
-    fn thumbnail_errors_are_truncated_and_cancel_flag_is_reported() {
-        let long = "x".repeat(350);
-        let label = command_error_output_label(long.as_bytes());
-        assert_eq!(label.chars().count(), 303);
-        assert!(label.ends_with("..."));
-
-        let cancel = AtomicBool::new(false);
-        assert!(check_thumbnail_cancelled(&cancel).is_ok());
-        cancel.store(true, Ordering::Relaxed);
-        assert_eq!(
-            check_thumbnail_cancelled(&cancel),
-            Err("Thumbnail loading was cancelled.".to_owned())
-        );
     }
 
     #[test]
@@ -3430,39 +3202,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn fast_video_thumbnail_args_use_input_seek_and_keyframes() {
-        let args = ffmpeg_video_thumbnail_args(Path::new("clip.mp4"), 5.0, 128, true);
-        let args = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-
-        let ss = arg_index(&args, "-ss");
-        let input = arg_index(&args, "-i");
-        assert!(ss < input);
-        assert_eq!(args[ss + 1], "5.000");
-        assert!(args.iter().any(|arg| arg == "-noaccurate_seek"));
-        assert_eq!(args[arg_index(&args, "-skip_frame") + 1], "nokey");
-        assert_eq!(
-            args[arg_index(&args, "-vf") + 1],
-            "scale=128:128:force_original_aspect_ratio=decrease:flags=fast_bilinear"
-        );
-    }
-
-    #[test]
-    fn fallback_video_thumbnail_args_keep_fast_seek_without_keyframe_filter() {
-        let args = ffmpeg_video_thumbnail_args(Path::new("clip.mp4"), 1.0, 128, false);
-        let args = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-
-        assert!(arg_index(&args, "-ss") < arg_index(&args, "-i"));
-        assert!(args.iter().any(|arg| arg == "-noaccurate_seek"));
-        assert!(!args.iter().any(|arg| arg == "-skip_frame"));
-    }
-
     fn request(key: &str, directory: &str) -> ImageThumbnailRequest {
         ImageThumbnailRequest {
             kind: ImageThumbnailKind::Image,
@@ -3485,12 +3224,6 @@ mod tests {
                 loading_thumbnail: None,
             },
         );
-    }
-
-    fn arg_index(args: &[String], expected: &str) -> usize {
-        args.iter()
-            .position(|arg| arg == expected)
-            .unwrap_or_else(|| panic!("missing arg {expected} in {args:?}"))
     }
 
     fn one_pixel_png_bytes() -> Vec<u8> {

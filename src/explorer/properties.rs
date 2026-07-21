@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime},
@@ -64,17 +64,20 @@ use crate::explorer::{
     scrollbar::{ScrollbarArrow, ScrollbarDrag, ScrollbarMetrics, scrollbar_arrow_button},
     tooltip::explorer_tooltip,
     video::{
-        ffmpeg_executable_path, ffmpeg_is_installed, ffmpeg_seek_argument,
-        ffprobe_duration_seconds_from_probe, ffprobe_executable_path, ffprobe_is_installed,
-        ffprobe_scalar_value_label, parse_positive_f64, path_may_have_audio_metadata,
-        path_may_have_video_metadata, safe_video_frame_seek_seconds, video_frame_inset_seconds,
-        video_frame_timestamp_label,
+        ffmpeg_executable_path, ffmpeg_is_installed, ffmpeg_seek_argument, ffprobe_executable_path,
+        ffprobe_is_installed, ffprobe_scalar_value_label, parse_positive_f64,
+        path_may_have_audio_metadata, path_may_have_video_metadata, probe_video_duration_seconds,
+        safe_video_frame_seek_seconds, video_frame_inset_seconds, video_frame_timestamp_label,
     },
+    video_thumbnails::{VideoFrameRgba, extract_video_frame_batch},
     view::ExplorerView,
 };
 use crate::image_viewer::{ImageViewerEvent, ImageViewerSurface, new_embedded_image_viewer};
 use crate::loaders::{LinearProgressStyle, linear_indeterminate};
 use crate::settings::SettingsState;
+
+#[cfg(test)]
+use crate::explorer::video::ffprobe_duration_seconds_from_probe;
 
 const PROPERTIES_WIDTH: f32 = 408.0;
 const PROPERTIES_HEIGHT: f32 = 520.0;
@@ -486,6 +489,13 @@ struct PropertyFrameThumbnail {
     aspect_ratio: f32,
 }
 
+#[derive(Default)]
+struct VideoFrameBatchShared {
+    pending: Mutex<Vec<PropertyFrameThumbnail>>,
+    error: Mutex<Option<String>>,
+    finished: AtomicBool,
+}
+
 #[derive(Clone, Debug)]
 struct PropertyCoverImage {
     label: String,
@@ -716,6 +726,7 @@ pub(super) struct PropertiesDialog {
     spectrum_task: Option<Task<()>>,
     spectrum_cancel: Option<Arc<AtomicBool>>,
     frames_task: Option<Task<()>>,
+    frames_cancel: Option<Arc<AtomicBool>>,
     apply_task: Option<Task<()>>,
     default_app_task: Option<Task<()>>,
     #[cfg(target_os = "linux")]
@@ -843,6 +854,7 @@ impl PropertiesDialog {
             spectrum_task: None,
             spectrum_cancel: None,
             frames_task: None,
+            frames_cancel: None,
             apply_task: None,
             default_app_task: None,
             #[cfg(target_os = "linux")]
@@ -981,14 +993,21 @@ impl PropertiesDialog {
     }
 
     fn reset_frames_state(&mut self) {
+        self.cancel_frames_task();
         self.frames_generation = self.frames_generation.wrapping_add(1);
         self.frames_state = PropertyFramesState::NotStarted;
-        self.frames_task = None;
         self.frames_scrollbar_drag = None;
         self.image_copy_context_menu = None;
         let offset = self.frames_scroll_handle.offset();
         self.frames_scroll_handle
             .set_offset(point(offset.x, px(0.0)));
+    }
+
+    fn cancel_frames_task(&mut self) {
+        if let Some(cancel) = self.frames_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.frames_task = None;
     }
 
     fn set_ready_snapshot(&mut self, snapshot: PropertySnapshot, cx: &mut Context<Self>) {
@@ -1758,6 +1777,8 @@ impl PropertiesDialog {
 
         self.frames_state = PropertyFramesState::Loading(Vec::new());
         let generation = self.frames_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.frames_cancel = Some(cancel.clone());
         crate::debug_options::log_property_marker(format_args!(
             "video frames task started path={} generation={}",
             path.display(),
@@ -1786,6 +1807,7 @@ impl PropertiesDialog {
                     let _ = this.update(cx, |dialog, cx| {
                         if dialog.frames_generation == generation {
                             dialog.frames_task = None;
+                            dialog.frames_cancel = None;
                             dialog.frames_state = PropertyFramesState::Failed(error);
                             cx.notify();
                         }
@@ -1815,6 +1837,7 @@ impl PropertiesDialog {
                     let _ = this.update(cx, |dialog, cx| {
                         if dialog.frames_generation == generation {
                             dialog.frames_task = None;
+                            dialog.frames_cancel = None;
                             dialog.frames_state = PropertyFramesState::Failed(error);
                             cx.notify();
                         }
@@ -1823,85 +1846,110 @@ impl PropertiesDialog {
                 }
             };
 
-            let mut errors = Vec::new();
-            let mut frame_count = 0usize;
             let request_count = requests.len();
-            for request in requests {
-                let frame = cx
-                    .background_executor()
-                    .spawn({
-                        let path = path.clone();
-                        async move {
-                            extract_video_frame_png(&path, request)
-                                .and_then(prepare_video_frame_thumbnail)
-                        }
-                    })
-                    .await;
-
-                match frame {
-                    Ok(thumbnail) => {
-                        let should_continue = this
-                            .update(cx, |dialog, cx| {
-                                if dialog.frames_generation != generation {
-                                    crate::debug_options::log_property_marker(format_args!(
-                                        "video frames cancelled path={} generation={} current_generation={} successes={} failures={} attempts={}",
-                                        path.display(),
-                                        generation,
-                                        dialog.frames_generation,
-                                        frame_count,
-                                        errors.len(),
-                                        frame_count + errors.len()
-                                    ));
-                                    return false;
-                                }
-                                let PropertyFramesState::Loading(frames) = &mut dialog.frames_state
-                                else {
-                                    crate::debug_options::log_property_marker(format_args!(
-                                        "video frames cancelled path={} generation={} state={} successes={} failures={} attempts={}",
-                                        path.display(),
-                                        generation,
-                                        property_frames_state_label(&dialog.frames_state),
-                                        frame_count,
-                                        errors.len(),
-                                        frame_count + errors.len()
-                                    ));
-                                    return false;
-                                };
-                                frames.push(thumbnail);
-                                frame_count = frames.len();
-                                cx.notify();
-                                true
-                            })
-                            .unwrap_or(false);
-                        if !should_continue {
-                            return;
-                        }
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(
-                                VIDEO_FRAME_PUBLISH_INTERVAL_MS,
-                            ))
-                            .await;
+            let shared = Arc::new(VideoFrameBatchShared::default());
+            let worker = cx.background_executor().spawn({
+                let path = path.clone();
+                let requests = requests.clone();
+                let cancel = cancel.clone();
+                let shared = shared.clone();
+                async move {
+                    let seeks = requests
+                        .iter()
+                        .map(|request| request.seek_seconds)
+                        .collect::<Vec<_>>();
+                    let result = extract_video_frame_batch(
+                        &path,
+                        &seeks,
+                        &cancel,
+                        |index, frame| {
+                            let Some(request) = requests.get(index) else {
+                                return;
+                            };
+                            let label = video_frame_timestamp_label(request.label_seconds);
+                            let thumbnail = prepare_video_frame_thumbnail_rgba(label, frame);
+                            if let Ok(mut pending) = shared.pending.lock() {
+                                pending.push(thumbnail);
+                            }
+                        },
+                    );
+                    if let Ok(metrics) = result.as_ref() {
+                        crate::debug_options::log_property_timing(
+                            metrics.total,
+                            format_args!(
+                                "video frame batch extracted path={} processes={} first_frame={:.3}ms stream_parse={:.3}ms render_prepare={:.3}ms",
+                                path.display(),
+                                metrics.processes,
+                                metrics.first_frame.unwrap_or_default().as_secs_f64() * 1000.0,
+                                metrics.stream_parse.as_secs_f64() * 1000.0,
+                                metrics.render_prepare.as_secs_f64() * 1000.0,
+                            ),
+                        );
+                    } else if let Err(error) = result
+                        && !error.is_cancelled()
+                        && let Ok(mut shared_error) = shared.error.lock()
+                    {
+                        *shared_error = Some(error.to_string());
                     }
-                    Err(error) => errors.push(error),
+                    shared.finished.store(true, Ordering::Release);
                 }
-            }
+            });
 
-            let failed = frame_count == 0;
-            let error = failed.then(|| {
+            let mut frame_count = 0usize;
+            loop {
+                let mut pending = shared
+                    .pending
+                    .lock()
+                    .map(|mut pending| std::mem::take(&mut *pending))
+                    .unwrap_or_default();
+                let finished = shared.finished.load(Ordering::Acquire);
+                let should_continue = this
+                    .update(cx, |dialog, cx| {
+                        if dialog.frames_generation != generation
+                            || cancel.load(Ordering::Relaxed)
+                        {
+                            return false;
+                        }
+                        let PropertyFramesState::Loading(frames) = &mut dialog.frames_state else {
+                            return false;
+                        };
+                        if !pending.is_empty() {
+                            frames.append(&mut pending);
+                            frame_count = frames.len();
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    cancel.store(true, Ordering::Relaxed);
+                    worker.await;
+                    return;
+                }
+                if finished {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(VIDEO_FRAME_PUBLISH_INTERVAL_MS))
+                    .await;
+            }
+            worker.await;
+
+            let extraction_error = shared.error.lock().ok().and_then(|error| error.clone());
+            let error = (frame_count == 0).then(|| {
                 format!(
                     "ffmpeg failed to extract video frames: {}",
-                    frame_extraction_error_summary(&errors)
+                    extraction_error.unwrap_or_else(|| "no frame data was returned".to_owned())
                 )
             });
             if let Some(error) = error.as_ref() {
                 crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "video frames failed path={} attempts={} successes={} failures={} error={}",
+                        "video frames failed path={} attempts={} successes={} error={}",
                         path.display(),
                         request_count,
                         frame_count,
-                        errors.len(),
                         error
                     ),
                 );
@@ -1909,11 +1957,10 @@ impl PropertiesDialog {
                 crate::debug_options::log_property_timing(
                     started.elapsed(),
                     format_args!(
-                        "video frames ready path={} attempts={} successes={} failures={}",
+                        "video frames ready path={} attempts={} successes={}",
                         path.display(),
                         request_count,
                         frame_count,
-                        errors.len()
                     ),
                 );
             }
@@ -1921,6 +1968,7 @@ impl PropertiesDialog {
             let _ = this.update(cx, |dialog, cx| {
                 if dialog.frames_generation == generation {
                     dialog.frames_task = None;
+                    dialog.frames_cancel = None;
                     dialog.frames_state = if let Some(error) = error {
                         PropertyFramesState::Failed(error)
                     } else {
@@ -2023,6 +2071,7 @@ impl PropertiesDialog {
         self.cancel_checksum_task();
         self.cancel_spectrum_task();
         self.cancel_spectrum_refinement_task();
+        self.cancel_frames_task();
         window.remove_window();
     }
 
@@ -2032,6 +2081,7 @@ impl PropertiesDialog {
         self.cancel_checksum_task();
         self.cancel_spectrum_task();
         self.cancel_spectrum_refinement_task();
+        self.cancel_frames_task();
         #[cfg(target_os = "linux")]
         if let Some(handle) = self.default_app_picker.take() {
             let _ = handle.update(_cx, |_, window, _| window.remove_window());
@@ -5946,6 +5996,7 @@ struct VideoFrameRequest {
     seek_seconds: f64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VideoFramePng {
     label: String,
@@ -5953,68 +6004,16 @@ struct VideoFramePng {
 }
 
 fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, String> {
-    let availability_started = Instant::now();
-    let ffprobe_installed = ffprobe_is_installed();
+    let probe_started = Instant::now();
+    let duration =
+        probe_video_duration_seconds(path).map_err(|error| format!("ffprobe failed: {error}"))?;
     crate::debug_options::log_property_timing(
-        availability_started.elapsed(),
+        probe_started.elapsed(),
         format_args!(
-            "video frames ffprobe availability path={} installed={}",
-            path.display(),
-            ffprobe_installed
+            "video frames duration probed path={} duration={duration:.3}",
+            path.display()
         ),
     );
-    if !ffprobe_installed {
-        return Err(
-            "ffprobe is not available. Install FFmpeg/ffprobe or place ffprobe beside Explorer."
-                .to_owned(),
-        );
-    }
-    let availability_started = Instant::now();
-    let ffmpeg_installed = ffmpeg_is_installed();
-    crate::debug_options::log_property_timing(
-        availability_started.elapsed(),
-        format_args!(
-            "video frames ffmpeg availability path={} installed={}",
-            path.display(),
-            ffmpeg_installed
-        ),
-    );
-    if !ffmpeg_installed {
-        return Err(
-            "ffmpeg is not available. Install FFmpeg/ffprobe or place ffmpeg beside Explorer."
-                .to_owned(),
-        );
-    }
-
-    let output = ffprobe_json_output(path).map_err(|error| format!("ffprobe failed: {error}"))?;
-    let parse_started = Instant::now();
-    let probe: serde_json::Value = match serde_json::from_slice(&output) {
-        Ok(probe) => {
-            crate::debug_options::log_property_timing(
-                parse_started.elapsed(),
-                format_args!(
-                    "video frames ffprobe json parsed path={} stdout_bytes={}",
-                    path.display(),
-                    output.len()
-                ),
-            );
-            probe
-        }
-        Err(error) => {
-            crate::debug_options::log_property_timing(
-                parse_started.elapsed(),
-                format_args!(
-                    "video frames ffprobe json parse failed path={} stdout_bytes={} error={}",
-                    path.display(),
-                    output.len(),
-                    error
-                ),
-            );
-            return Err(format!("ffprobe returned unreadable metadata: {error}"));
-        }
-    };
-    let duration = ffprobe_duration_seconds_from_probe(&probe)
-        .ok_or_else(|| "Video duration is not available.".to_owned())?;
     let requests = video_frame_requests(duration);
     crate::debug_options::log_property_marker(format_args!(
         "video frames planned path={} {}",
@@ -6028,59 +6027,7 @@ fn prepare_video_frame_requests(path: &Path) -> Result<Vec<VideoFrameRequest>, S
     Ok(requests)
 }
 
-fn extract_video_frame_png(
-    path: &Path,
-    request: VideoFrameRequest,
-) -> Result<VideoFramePng, String> {
-    let label = video_frame_timestamp_label(request.label_seconds);
-    let seek = request.seek_seconds;
-    let started = Instant::now();
-    match ffmpeg_frame_png_output(path, seek) {
-        Ok(png) if png.starts_with(FFMPEG_PNG_SIGNATURE) => {
-            crate::debug_options::log_property_timing(
-                started.elapsed(),
-                format_args!(
-                    "video frame extracted path={} label={} seek={} stdout_bytes={}",
-                    path.display(),
-                    label,
-                    ffmpeg_seek_argument(seek),
-                    png.len()
-                ),
-            );
-            Ok(VideoFramePng { label, png })
-        }
-        Ok(png) => {
-            crate::debug_options::log_property_timing(
-                started.elapsed(),
-                format_args!(
-                    "video frame rejected path={} label={} seek={} stdout_bytes={} error=not-png",
-                    path.display(),
-                    label,
-                    ffmpeg_seek_argument(seek),
-                    png.len()
-                ),
-            );
-            Err(format!(
-                "{label}: ffmpeg returned {} bytes, but not a PNG image",
-                png.len()
-            ))
-        }
-        Err(error) => {
-            crate::debug_options::log_property_timing(
-                started.elapsed(),
-                format_args!(
-                    "video frame failed path={} label={} seek={} error={}",
-                    path.display(),
-                    label,
-                    ffmpeg_seek_argument(seek),
-                    error
-                ),
-            );
-            Err(format!("{label}: {error}"))
-        }
-    }
-}
-
+#[cfg(test)]
 fn prepare_video_frame_thumbnail(frame: VideoFramePng) -> Result<PropertyFrameThumbnail, String> {
     let mut image = image::load_from_memory_with_format(&frame.png, image::ImageFormat::Png)
         .map_err(|error| {
@@ -6110,6 +6057,25 @@ fn prepare_video_frame_thumbnail(frame: VideoFramePng) -> Result<PropertyFrameTh
         height,
         aspect_ratio: width as f32 / height as f32,
     })
+}
+
+fn prepare_video_frame_thumbnail_rgba(
+    label: String,
+    frame: VideoFrameRgba,
+) -> PropertyFrameThumbnail {
+    let mut image = frame.image;
+    let width = image.width();
+    let height = image.height();
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    PropertyFrameThumbnail {
+        label,
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        width,
+        height,
+        aspect_ratio: width as f32 / height as f32,
+    }
 }
 
 #[cfg(test)]
@@ -6186,49 +6152,6 @@ fn evenly_spaced_seconds(start: f64, end: f64, count: usize) -> Vec<f64> {
                 .map(|index| start + step * index as f64)
                 .collect()
         }
-    }
-}
-
-fn ffmpeg_frame_png_output(path: &Path, seek_seconds: f64) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_executable_path());
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-nostdin")
-        .arg("-ss")
-        .arg(ffmpeg_seek_argument(seek_seconds))
-        .arg("-i")
-        .arg(path)
-        .arg("-map")
-        .arg("0:v:0")
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-f")
-        .arg("image2pipe")
-        .arg("-vcodec")
-        .arg("png")
-        .arg("-")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("could not start ffmpeg: {error}"))?;
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-
-    let stderr = command_error_output_label(&output.stderr);
-    if stderr.is_empty() {
-        Err(format!("ffmpeg exited with {}", output.status))
-    } else {
-        Err(format!("ffmpeg exited with {}: {stderr}", output.status))
     }
 }
 
@@ -7248,14 +7171,6 @@ fn spectrum_range_button(
         .on_click(on_click)
         .child(label)
         .into_any_element()
-}
-
-fn frame_extraction_error_summary(errors: &[String]) -> String {
-    match errors {
-        [] => "no frame data was returned".to_owned(),
-        [error] => error.clone(),
-        [first, ..] => format!("{first} ({} frame attempts failed)", errors.len()),
-    }
 }
 
 #[derive(Default)]
@@ -10691,7 +10606,7 @@ pub mod benchmark_support {
 
     use super::{
         PropertyTarget, PropertyValue, collect_property_snapshot_fast_with_date_format,
-        collect_property_snapshot_full_with_date_format,
+        collect_property_snapshot_full_with_date_format, prepare_video_frame_requests,
     };
 
     pub fn collect_properties_fast(path: &Path) -> u64 {
@@ -10715,6 +10630,25 @@ pub mod benchmark_support {
             &cancel,
         )
         .map(snapshot_fingerprint)
+        .unwrap_or_default()
+    }
+
+    pub fn load_video_properties_frames_for_benchmark(path: &Path) -> usize {
+        let Ok(requests) = prepare_video_frame_requests(path) else {
+            return 0;
+        };
+        let seeks = requests
+            .iter()
+            .map(|request| request.seek_seconds)
+            .collect::<Vec<_>>();
+        let mut frames = 0usize;
+        crate::explorer::video_thumbnails::extract_video_frame_batch(
+            path,
+            &seeks,
+            &AtomicBool::new(false),
+            |_, _| frames += 1,
+        )
+        .map(|_| frames)
         .unwrap_or_default()
     }
 

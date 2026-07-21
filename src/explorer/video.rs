@@ -232,11 +232,48 @@ pub(super) fn ffprobe_scalar_value_label(value: &serde_json::Value) -> Option<St
     }
 }
 
+pub(super) fn probe_video_duration_seconds(path: &Path) -> Result<f64, String> {
+    let mut command = Command::new(ffprobe_executable_path());
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("format=duration:stream=codec_type,duration")
+        .arg("-of")
+        .arg("json")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not start ffprobe: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return if stderr.is_empty() {
+            Err(format!("ffprobe exited with {}", output.status))
+        } else {
+            Err(format!("ffprobe exited with {}: {stderr}", output.status))
+        };
+    }
+    let probe: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ffprobe returned unreadable duration data: {error}"))?;
+    ffprobe_duration_seconds_from_probe(&probe)
+        .ok_or_else(|| "Video duration is not available.".to_owned())
+}
+
 pub(super) fn parse_positive_f64(value: &str) -> Option<f64> {
     let value = value.trim().parse::<f64>().ok()?;
     (value.is_finite() && value > 0.0).then_some(value)
 }
 
+#[cfg(test)]
 pub(super) fn video_thumbnail_frame_seek_seconds(duration_seconds: f64) -> Option<f64> {
     (duration_seconds.is_finite() && duration_seconds > 0.0).then(|| {
         safe_video_frame_seek_seconds(

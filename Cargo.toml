@@ -101,6 +101,11 @@ harness = false
 required-features = ["benchmarks"]
 
 [[bench]]
+name = "video_thumbnails"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
 name = "image_viewer"
 harness = false
 required-features = ["benchmarks"]

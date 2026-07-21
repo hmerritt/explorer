@@ -45,6 +45,7 @@ mod text_input;
 mod tooltip;
 mod video;
 mod video_hover_preview;
+mod video_thumbnails;
 mod view;
 mod watcher;
 #[cfg(target_os = "windows")]
@@ -106,6 +107,8 @@ pub mod benchmark_support {
     pub use super::image_thumbnails::benchmark_support::*;
     pub use super::properties::benchmark_support::*;
     pub use super::recursive_search::benchmark_support::*;
+    pub use super::video_hover_preview::benchmark_support::*;
+    pub use super::video_thumbnails::benchmark_support::*;
 
     pub fn set_archive_diagnostics(enabled: bool, verbose: bool) {
         crate::debug_options::set_archive_debug_for_benchmark(enabled, verbose);
