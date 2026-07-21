@@ -57,7 +57,7 @@ use crate::explorer::{
     git_status::{GitDivergence, GitRepositoryCodeInfo, scan_git_repository_code_info},
     icons::{
         COPY_ICON, NavIcon, copy_file_dialog_icon_sized, directory_shortcut_icon_sized,
-        file_icon_for_path_sized, folder_icon_sized, image_icon, nav_icon_font,
+        file_icon_for_path_sized, folder_icon_sized, nav_icon_font, render_image_icon,
     },
     image_preview::{PropertyImagePreview, path_may_have_image_preview},
     open_with::{DefaultAppChangeOutcome, DefaultApplication, default_application_for_file},
@@ -3112,7 +3112,11 @@ impl PropertiesDialog {
     fn render_item_icon(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
         if let PropertyIconSource::Single(path) = property_icon_source(snapshot) {
             if let Some(icon) = self.native_icon_for_path(&path, cx) {
-                return image_icon(icon, PROPERTIES_ITEM_ICON_SIZE, PROPERTIES_ITEM_ICON_SIZE);
+                return render_image_icon(
+                    icon,
+                    PROPERTIES_ITEM_ICON_SIZE,
+                    PROPERTIES_ITEM_ICON_SIZE,
+                );
             }
             return fallback_property_icon(snapshot.item_kind, &path, PROPERTIES_ITEM_ICON_SIZE);
         }
@@ -3203,7 +3207,7 @@ impl PropertiesDialog {
 
         self.native_icon_for_path(path, cx)
             .map(|icon| {
-                image_icon(
+                render_image_icon(
                     icon,
                     PROPERTIES_OPEN_WITH_ICON_SIZE,
                     PROPERTIES_OPEN_WITH_ICON_SIZE,
@@ -3214,7 +3218,11 @@ impl PropertiesDialog {
             })
     }
 
-    fn native_icon_for_path(&self, path: &Path, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+    fn native_icon_for_path(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         self.explorer
             .update(cx, |explorer, cx| {
                 explorer.native_icon_for_path(path, NativeIconSize::Details, cx)

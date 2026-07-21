@@ -13,8 +13,8 @@ use crate::explorer::{
     },
 };
 use gpui::{
-    AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, StyledImage, div, font, img,
-    prelude::*, px,
+    AnyElement, Div, FontFallbacks, Image, ImageFormat, ObjectFit, RenderImage, StyledImage, div,
+    font, img, prelude::*, px,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -536,6 +536,15 @@ pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyEl
 }
 
 pub(super) fn image_icon(image: Arc<Image>, width: f32, height: f32) -> AnyElement {
+    img(image)
+        .w(px(width))
+        .h(px(height))
+        .flex_shrink_0()
+        .object_fit(ObjectFit::Contain)
+        .into_any_element()
+}
+
+pub(super) fn render_image_icon(image: Arc<RenderImage>, width: f32, height: f32) -> AnyElement {
     img(image)
         .w(px(width))
         .h(px(height))

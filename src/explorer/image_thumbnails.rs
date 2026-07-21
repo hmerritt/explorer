@@ -24,8 +24,8 @@ use crate::{
         filesystem::path_is_remote_drive,
         image_preview::{
             AnimatedImageSource, ImageThumbnailExtractionTimings, ThumbnailSpec, ThumbnailStage,
-            animated_gif_source_for_path, load_thumbnail_rgba_with_cancel_timed,
-            path_may_have_image_preview,
+            animated_gif_source_for_path, evict_animated_image_source_asset,
+            load_thumbnail_rgba_with_cancel_timed, path_may_have_image_preview,
         },
         image_resize::dimensions_for_longest_side,
         video::path_may_have_video_metadata,
@@ -44,6 +44,8 @@ const IMAGE_THUMBNAIL_CACHE_VERSION: &str = "image-thumbnails-v2";
 const LEGACY_IMAGE_THUMBNAIL_CACHE_VERSIONS: &[&str] = &["image-thumbnails-v1"];
 const DISK_MANIFEST_FILE_NAME: &str = "manifest.json";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
+const IMAGE_THUMBNAIL_MEMORY_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+const IMAGE_THUMBNAIL_COMPLETED_RECORD_LIMIT: usize = 1024;
 #[cfg(test)]
 const HOVER_IMAGE_PREVIEW_SIZE: u32 = crate::settings::DEFAULT_MEDIA_PREVIEW_SIZE;
 const IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY: usize = 64;
@@ -130,6 +132,7 @@ struct ImageThumbnailCacheInner {
     pending: VecDeque<String>,
     loader_running: bool,
     loader_generation: u64,
+    access_generation: u64,
 }
 
 enum ImageThumbnailState {
@@ -146,10 +149,25 @@ enum ImageThumbnailState {
         preview_dimensions: Option<(u32, u32)>,
         loading_thumbnail: Option<CachedThumbnailImage>,
     },
-    Ready(CachedThumbnailImage),
+    Ready {
+        request: ImageThumbnailRequest,
+        image: CachedThumbnailImage,
+        last_access: u64,
+    },
     Failed {
         request: ImageThumbnailRequest,
+        last_access: u64,
     },
+}
+
+struct ImageThumbnailFinish {
+    finished: bool,
+    evicted: Vec<Arc<RenderImage>>,
+}
+
+struct ImageThumbnailCancellation {
+    loader_generation: Option<u64>,
+    evicted: Vec<Arc<RenderImage>>,
 }
 
 #[derive(Clone, Debug)]
@@ -204,7 +222,13 @@ impl ImageThumbnailCacheInner {
             pending: VecDeque::new(),
             loader_running: false,
             loader_generation: 0,
+            access_generation: 0,
         }
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_generation = self.access_generation.wrapping_add(1);
+        self.access_generation
     }
 
     fn queue_cache_write(&mut self, job: ImageThumbnailCacheWriteJob) -> bool {
@@ -220,12 +244,12 @@ impl ImageThumbnailCacheInner {
         if let Some(state) = self.states.get(&request.key) {
             if state.should_retry_for_request(&request) {
                 self.states.remove(&request.key);
-            } else {
-                return (state.thumbnail(), None);
             }
         }
 
-        if let Some(state) = self.states.get(&request.key) {
+        let access = self.next_access();
+        if let Some(state) = self.states.get_mut(&request.key) {
+            state.touch(access);
             return (state.thumbnail(), None);
         }
 
@@ -252,9 +276,13 @@ impl ImageThumbnailCacheInner {
         if let Some(state) = self.states.get(&request.key) {
             if state.should_retry_for_request(&request) {
                 self.states.remove(&request.key);
-            } else {
-                return (state.hover_preview(), None);
             }
+        }
+
+        let access = self.next_access();
+        if let Some(state) = self.states.get_mut(&request.key) {
+            state.touch(access);
+            return (state.hover_preview(), None);
         }
 
         let loading_thumbnail = self
@@ -378,7 +406,7 @@ impl ImageThumbnailCacheInner {
         request: ImageThumbnailRequest,
         generation: u64,
         image: Option<CachedThumbnailImage>,
-    ) -> bool {
+    ) -> ImageThumbnailFinish {
         let should_finish = self.states.get(&request.key).is_some_and(|state| {
             matches!(
                 state,
@@ -391,18 +419,34 @@ impl ImageThumbnailCacheInner {
         });
 
         if !should_finish {
-            return false;
+            return ImageThumbnailFinish {
+                finished: false,
+                evicted: Vec::new(),
+            };
         }
 
+        let last_access = self.next_access();
         let state = match image {
-            Some(image) => ImageThumbnailState::Ready(image),
+            Some(image) => ImageThumbnailState::Ready {
+                request: request.clone(),
+                image,
+                last_access,
+            },
             None => ImageThumbnailState::Failed {
                 request: request.clone(),
+                last_access,
             },
         };
 
         self.states.insert(request.key, state);
-        true
+        let evicted = self.prune_completed_standard_states(
+            IMAGE_THUMBNAIL_MEMORY_BUDGET_BYTES,
+            IMAGE_THUMBNAIL_COMPLETED_RECORD_LIMIT,
+        );
+        ImageThumbnailFinish {
+            finished: true,
+            evicted,
+        }
     }
 
     #[cfg(test)]
@@ -417,23 +461,30 @@ impl ImageThumbnailCacheInner {
             generation,
             bytes.and_then(cached_thumbnail_image_from_png_bytes),
         )
+        .finished
     }
 
-    fn cancel_directory(&mut self, directory: &Path) -> Option<u64> {
-        self.cancel_directory_matching(directory, |_| true)
+    fn cancel_directory(&mut self, directory: &Path) -> ImageThumbnailCancellation {
+        self.cancel_directory_matching(directory, |_| true, false)
     }
 
-    fn cancel_standard_thumbnail_requests(&mut self, directory: &Path) -> Option<u64> {
-        self.cancel_directory_matching(directory, |request| {
-            request.usage == ImageThumbnailUsage::Standard
-        })
+    fn cancel_standard_thumbnail_requests(
+        &mut self,
+        directory: &Path,
+    ) -> ImageThumbnailCancellation {
+        self.cancel_directory_matching(
+            directory,
+            |request| request.usage == ImageThumbnailUsage::Standard,
+            false,
+        )
     }
 
     fn cancel_directory_matching(
         &mut self,
         directory: &Path,
         mut should_cancel: impl FnMut(&ImageThumbnailRequest) -> bool,
-    ) -> Option<u64> {
+        remove_completed: bool,
+    ) -> ImageThumbnailCancellation {
         self.pending.retain(|key| {
             !matches!(
                 self.states.get(key),
@@ -443,6 +494,7 @@ impl ImageThumbnailCacheInner {
         });
 
         let mut cancelled_loading = false;
+        let mut evicted = Vec::new();
         self.states.retain(|_, state| match state {
             ImageThumbnailState::Pending { request, .. }
                 if request.directory == directory && should_cancel(request) =>
@@ -456,6 +508,21 @@ impl ImageThumbnailCacheInner {
                 cancelled_loading = true;
                 false
             }
+            ImageThumbnailState::Ready { request, image, .. }
+                if request.directory == directory
+                    && should_cancel(request)
+                    && (remove_completed || request.usage == ImageThumbnailUsage::HoverPreview) =>
+            {
+                evicted.push(image.image.clone());
+                false
+            }
+            ImageThumbnailState::Failed { request, .. }
+                if request.directory == directory
+                    && should_cancel(request)
+                    && (remove_completed || request.usage == ImageThumbnailUsage::HoverPreview) =>
+            {
+                false
+            }
             _ => true,
         });
 
@@ -464,16 +531,128 @@ impl ImageThumbnailCacheInner {
             self.loader_generation = self.loader_generation.wrapping_add(1);
         }
 
-        self.start_loader()
+        ImageThumbnailCancellation {
+            loader_generation: self.start_loader(),
+            evicted,
+        }
+    }
+
+    fn remove_hover_preview(
+        &mut self,
+        request: &ImageThumbnailRequest,
+    ) -> ImageThumbnailCancellation {
+        self.pending.retain(|key| key != &request.key);
+        let mut cancelled_loading = false;
+        let mut evicted = Vec::new();
+        if let Some(state) = self.states.remove(&request.key) {
+            match state {
+                ImageThumbnailState::Loading { cancel, .. } => {
+                    cancel.store(true, Ordering::Relaxed);
+                    cancelled_loading = true;
+                }
+                ImageThumbnailState::Ready { image, .. } => evicted.push(image.image),
+                ImageThumbnailState::Pending { .. } | ImageThumbnailState::Failed { .. } => {}
+            }
+        }
+        if cancelled_loading {
+            self.loader_running = false;
+            self.loader_generation = self.loader_generation.wrapping_add(1);
+        }
+        ImageThumbnailCancellation {
+            loader_generation: self.start_loader(),
+            evicted,
+        }
+    }
+
+    fn prune_completed_standard_states(
+        &mut self,
+        byte_limit: usize,
+        record_limit: usize,
+    ) -> Vec<Arc<RenderImage>> {
+        let mut completed = self
+            .states
+            .iter()
+            .filter_map(|(key, state)| state.standard_completion().map(|data| (key.clone(), data)))
+            .collect::<Vec<_>>();
+        let mut bytes = completed.iter().map(|(_, data)| data.bytes).sum::<usize>();
+        if bytes <= byte_limit && completed.len() <= record_limit {
+            return Vec::new();
+        }
+        completed.sort_unstable_by_key(|(_, data)| data.last_access);
+        let mut evicted = Vec::new();
+        for (key, data) in completed {
+            if bytes <= byte_limit && self.completed_standard_state_count() <= record_limit {
+                break;
+            }
+            bytes = bytes.saturating_sub(data.bytes);
+            if let Some(ImageThumbnailState::Ready { image, .. }) = self.states.remove(&key) {
+                evicted.push(image.image);
+            } else {
+                self.states.remove(&key);
+            }
+        }
+        evicted
+    }
+
+    fn completed_standard_state_count(&self) -> usize {
+        self.states
+            .values()
+            .filter(|state| state.standard_completion().is_some())
+            .count()
     }
 }
 
+#[derive(Clone, Copy)]
+struct StandardCompletion {
+    bytes: usize,
+    last_access: u64,
+}
+
 impl ImageThumbnailState {
+    fn touch(&mut self, access: u64) {
+        match self {
+            Self::Ready { last_access, .. } | Self::Failed { last_access, .. } => {
+                *last_access = access;
+            }
+            Self::Pending { .. } | Self::Loading { .. } => {}
+        }
+    }
+
+    fn request(&self) -> &ImageThumbnailRequest {
+        match self {
+            Self::Pending { request, .. }
+            | Self::Loading { request, .. }
+            | Self::Ready { request, .. }
+            | Self::Failed { request, .. } => request,
+        }
+    }
+
+    fn standard_completion(&self) -> Option<StandardCompletion> {
+        let request = self.request();
+        if request.usage != ImageThumbnailUsage::Standard {
+            return None;
+        }
+        match self {
+            Self::Ready {
+                image, last_access, ..
+            } => Some(StandardCompletion {
+                bytes: render_image_bytes(&image.image),
+                last_access: *last_access,
+            }),
+            Self::Failed { last_access, .. } => Some(StandardCompletion {
+                bytes: 0,
+                last_access: *last_access,
+            }),
+            Self::Pending { .. } | Self::Loading { .. } => None,
+        }
+    }
+
     fn should_retry_for_request(&self, request: &ImageThumbnailRequest) -> bool {
         matches!(
             self,
             Self::Failed {
-                request: failed_request
+                request: failed_request,
+                ..
             } if failed_request.source_policy == ThumbnailSourcePolicy::CacheOnly
                 && request.source_policy == ThumbnailSourcePolicy::ReadSource
         )
@@ -481,7 +660,7 @@ impl ImageThumbnailState {
 
     fn thumbnail(&self) -> Option<CachedThumbnailImage> {
         match self {
-            Self::Ready(image) => Some(image.clone()),
+            Self::Ready { image, .. } => Some(image.clone()),
             Self::Pending { .. } | Self::Loading { .. } | Self::Failed { .. } => None,
         }
     }
@@ -502,11 +681,33 @@ impl ImageThumbnailState {
                 height: *height,
                 thumbnail: loading_thumbnail.clone(),
             },
-            Self::Ready(image) => HoverImagePreviewLookup::Ready(image.clone()),
+            Self::Ready { image, .. } => HoverImagePreviewLookup::Ready(image.clone()),
             Self::Pending { .. } | Self::Loading { .. } | Self::Failed { .. } => {
                 HoverImagePreviewLookup::Failed
             }
         }
+    }
+}
+
+fn render_image_bytes(image: &RenderImage) -> usize {
+    (0..image.frame_count())
+        .filter_map(|frame| image.as_bytes(frame))
+        .map(<[u8]>::len)
+        .sum()
+}
+
+fn apply_thumbnail_cancellation(
+    cancellation: Option<ImageThumbnailCancellation>,
+    cx: &mut Context<ExplorerView>,
+) {
+    let Some(cancellation) = cancellation else {
+        return;
+    };
+    for image in cancellation.evicted {
+        cx.drop_image(image, None);
+    }
+    if let Some(generation) = cancellation.loader_generation {
+        start_image_thumbnail_loader(cx, generation);
     }
 }
 
@@ -566,7 +767,7 @@ impl ExplorerView {
     }
 
     pub(super) fn ready_standard_video_thumbnail_for_entry(
-        &self,
+        &mut self,
         entry: &FileEntry,
         cx: &mut Context<Self>,
     ) -> Option<CachedThumbnailImage> {
@@ -578,54 +779,66 @@ impl ExplorerView {
             return None;
         }
 
-        cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
-            cache
-                .inner
-                .borrow()
-                .states
-                .get(&request.key)
-                .and_then(ImageThumbnailState::thumbnail)
-        })
+        cx.try_global::<ImageThumbnailCache>()
+            .and_then(|cache| cache.inner.borrow_mut().thumbnail_for_request(request).0)
     }
 
     pub(super) fn cancel_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
         let directory = self.path.clone();
-        let loader_generation = cx
+        let cancellation = cx
             .try_global::<ImageThumbnailCache>()
-            .and_then(|cache| cache.inner.borrow_mut().cancel_directory(&directory));
-
-        if let Some(generation) = loader_generation {
-            start_image_thumbnail_loader(cx, generation);
-        }
+            .map(|cache| cache.inner.borrow_mut().cancel_directory(&directory));
+        apply_thumbnail_cancellation(cancellation, cx);
+        self.release_current_animated_image_asset(cx);
     }
 
     pub(super) fn cancel_standard_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
         let directory = self.path.clone();
-        let loader_generation = cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
+        let cancellation = cx.try_global::<ImageThumbnailCache>().map(|cache| {
             cache
                 .inner
                 .borrow_mut()
                 .cancel_standard_thumbnail_requests(&directory)
         });
-
-        if let Some(generation) = loader_generation {
-            start_image_thumbnail_loader(cx, generation);
-        }
+        apply_thumbnail_cancellation(cancellation, cx);
     }
 
     pub(super) fn cancel_hover_image_preview_extraction(&mut self, cx: &mut Context<Self>) {
         let directory = self.path.clone();
-        let loader_generation = cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
-            cache
-                .inner
-                .borrow_mut()
-                .cancel_directory_matching(&directory, |request| {
-                    request.usage == ImageThumbnailUsage::HoverPreview
-                })
+        let cancellation = cx.try_global::<ImageThumbnailCache>().map(|cache| {
+            cache.inner.borrow_mut().cancel_directory_matching(
+                &directory,
+                |request| request.usage == ImageThumbnailUsage::HoverPreview,
+                true,
+            )
         });
+        apply_thumbnail_cancellation(cancellation, cx);
+        self.release_current_animated_image_asset(cx);
+    }
 
-        if let Some(generation) = loader_generation {
-            start_image_thumbnail_loader(cx, generation);
+    pub(super) fn release_hover_image_preview_for_entry(
+        &mut self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) {
+        self.release_current_animated_image_asset(cx);
+        let Some(request) = hover_image_preview_request_for_entry(
+            entry,
+            &self.path,
+            self.thumbnail_source_policy,
+            self.media_preview_size,
+        ) else {
+            return;
+        };
+        let cancellation = cx
+            .try_global::<ImageThumbnailCache>()
+            .map(|cache| cache.inner.borrow_mut().remove_hover_preview(&request));
+        apply_thumbnail_cancellation(cancellation, cx);
+    }
+
+    pub(super) fn release_current_animated_image_asset(&mut self, cx: &mut Context<Self>) {
+        if let Some(source) = self.animated_image_asset_source.take() {
+            evict_animated_image_source_asset(&source, cx);
         }
     }
 
@@ -659,6 +872,24 @@ impl ExplorerView {
                 },
             );
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hover_image_preview_cached_for_test(
+        &self,
+        entry: &FileEntry,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(request) = hover_image_preview_request_for_entry(
+            entry,
+            &self.path,
+            ThumbnailSourcePolicy::ReadSource,
+            self.media_preview_size,
+        ) else {
+            return false;
+        };
+        cx.try_global::<ImageThumbnailCache>()
+            .is_some_and(|cache| cache.inner.borrow().states.contains_key(&request.key))
     }
 
     #[cfg(test)]
@@ -697,9 +928,14 @@ impl ExplorerView {
         if let (Some(cache), Some(thumbnail)) = (cx.try_global::<ImageThumbnailCache>(), thumbnail)
         {
             let mut cache = cache.inner.borrow_mut();
+            let last_access = cache.next_access();
             cache.states.insert(
-                standard_request.key,
-                ImageThumbnailState::Ready(thumbnail.clone()),
+                standard_request.key.clone(),
+                ImageThumbnailState::Ready {
+                    request: standard_request,
+                    image: thumbnail.clone(),
+                    last_access,
+                },
             );
             cache.states.insert(
                 request.key.clone(),
@@ -772,7 +1008,7 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
             let cache_write = thumbnail.cache_write_job(&job);
 
             let commit_started = timings.now();
-            let finished = cx
+            let finish = cx
                 .update_global::<ImageThumbnailCache, _>(|cache, _| {
                     cache.inner.borrow_mut().finish_prepared_request(
                         job.request,
@@ -780,7 +1016,13 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
                         thumbnail.image,
                     )
                 })
-                .unwrap_or(false);
+                .ok();
+            let finished = finish.as_ref().is_some_and(|finish| finish.finished);
+            if let Some(finish) = finish {
+                for image in finish.evicted {
+                    let _ = cx.update(|cx| cx.drop_image(image, None));
+                }
+            }
             timings.record_commit(commit_started);
             if !finished {
                 timings.record_discarded();
@@ -2705,10 +2947,7 @@ mod tests {
         let thumbnail =
             cached_thumbnail_image_from_png_bytes(png_bytes(128, 128)).expect("thumbnail");
         let mut cache = ImageThumbnailCacheInner::new(None);
-        cache.states.insert(
-            standard_request.key.clone(),
-            ImageThumbnailState::Ready(thumbnail),
-        );
+        insert_ready(&mut cache, standard_request.clone(), thumbnail);
 
         let (lookup, generation) =
             cache.hover_preview_for_request(hover_request, standard_request.clone());
@@ -2729,7 +2968,7 @@ mod tests {
         assert_eq!(cache.pending.len(), 1);
         assert!(matches!(
             cache.states.get(&standard_request.key),
-            Some(ImageThumbnailState::Ready(_))
+            Some(ImageThumbnailState::Ready { .. })
         ));
     }
 
@@ -2759,10 +2998,7 @@ mod tests {
         let thumbnail =
             cached_thumbnail_image_from_png_bytes(png_bytes(128, 128)).expect("thumbnail");
         let mut cache = ImageThumbnailCacheInner::new(None);
-        cache.states.insert(
-            standard_request.key.clone(),
-            ImageThumbnailState::Ready(thumbnail),
-        );
+        insert_ready(&mut cache, standard_request.clone(), thumbnail);
         let (_, generation) =
             cache.hover_preview_for_request(hover_request.clone(), standard_request.clone());
         let generation = generation.expect("loader generation");
@@ -3157,16 +3393,16 @@ mod tests {
         push_pending(&mut cache, old_one.clone());
         push_pending(&mut cache, current.clone());
         push_pending(&mut cache, old_two.clone());
-        cache.states.insert(
-            "ready".to_owned(),
-            ImageThumbnailState::Ready(
-                cached_thumbnail_image_from_png_bytes(one_pixel_png_bytes()).unwrap(),
-            ),
+        let ready = request("ready", "ready-directory");
+        insert_ready(
+            &mut cache,
+            ready,
+            cached_thumbnail_image_from_png_bytes(one_pixel_png_bytes()).unwrap(),
         );
 
         let generation = cache.cancel_directory(Path::new("old"));
 
-        assert!(generation.is_some());
+        assert!(generation.loader_generation.is_some());
         assert_eq!(cache.pending.iter().collect::<Vec<_>>(), vec![&current.key]);
         assert!(!cache.states.contains_key(&old_one.key));
         assert!(!cache.states.contains_key(&old_two.key));
@@ -3176,7 +3412,7 @@ mod tests {
         ));
         assert!(matches!(
             cache.states.get("ready"),
-            Some(ImageThumbnailState::Ready(_))
+            Some(ImageThumbnailState::Ready { .. })
         ));
     }
 
@@ -3198,7 +3434,7 @@ mod tests {
 
         let generation = cache.cancel_standard_thumbnail_requests(Path::new("old"));
 
-        assert!(generation.is_some());
+        assert!(generation.loader_generation.is_some());
         assert_eq!(cache.pending.iter().collect::<Vec<_>>(), vec![&hover.key]);
         assert!(!cache.states.contains_key(&standard.key));
         assert!(matches!(
@@ -3218,7 +3454,10 @@ mod tests {
         let generation = cache.start_loader().unwrap();
         let job = cache.next_load_job(generation).unwrap();
 
-        let next_generation = cache.cancel_directory(Path::new("old")).unwrap();
+        let next_generation = cache
+            .cancel_directory(Path::new("old"))
+            .loader_generation
+            .unwrap();
 
         assert!(job.cancel.load(Ordering::Relaxed));
         assert_ne!(next_generation, generation);
@@ -3240,7 +3479,10 @@ mod tests {
         let first_job = cache.next_load_job(generation).unwrap();
         let second_job = cache.next_load_job(generation).unwrap();
 
-        let next_generation = cache.cancel_directory(Path::new("old")).unwrap();
+        let next_generation = cache
+            .cancel_directory(Path::new("old"))
+            .loader_generation
+            .unwrap();
 
         assert!(first_job.cancel.load(Ordering::Relaxed));
         assert!(second_job.cancel.load(Ordering::Relaxed));
@@ -3252,6 +3494,54 @@ mod tests {
     }
 
     #[test]
+    fn navigation_or_tab_close_removes_completed_hover_preview_only() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let standard = request("standard", "folder");
+        let hover = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            size: HOVER_IMAGE_PREVIEW_SIZE,
+            key: "hover".to_owned(),
+            ..request("hover-source", "folder")
+        };
+        insert_ready(
+            &mut cache,
+            standard.clone(),
+            cached_thumbnail_image_from_png_bytes(one_pixel_png_bytes()).unwrap(),
+        );
+        insert_ready(
+            &mut cache,
+            hover.clone(),
+            cached_thumbnail_image_from_png_bytes(one_pixel_png_bytes()).unwrap(),
+        );
+
+        let cancellation = cache.cancel_directory(Path::new("folder"));
+
+        assert!(cache.states.contains_key(&standard.key));
+        assert!(!cache.states.contains_key(&hover.key));
+        assert_eq!(cancellation.evicted.len(), 1);
+    }
+
+    #[test]
+    fn releasing_loading_hover_preview_cancels_and_rejects_stale_completion() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let hover = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            size: HOVER_IMAGE_PREVIEW_SIZE,
+            key: "hover".to_owned(),
+            ..request("hover-source", "folder")
+        };
+        push_pending(&mut cache, hover.clone());
+        let generation = cache.start_loader().unwrap();
+        let job = cache.next_load_job(generation).unwrap();
+
+        cache.remove_hover_preview(&hover);
+
+        assert!(job.cancel.load(Ordering::Relaxed));
+        assert!(!cache.states.contains_key(&hover.key));
+        assert!(!cache.finish_request(hover, generation, Some(one_pixel_png_bytes())));
+    }
+
+    #[test]
     fn stale_completion_after_cancellation_does_not_overwrite_new_request() {
         let mut cache = ImageThumbnailCacheInner::new(None);
         let old = request("shared", "old");
@@ -3260,7 +3550,12 @@ mod tests {
         let old_generation = cache.start_loader().unwrap();
         let _old_job = cache.next_load_job(old_generation).unwrap();
 
-        assert!(cache.cancel_directory(Path::new("old")).is_none());
+        assert!(
+            cache
+                .cancel_directory(Path::new("old"))
+                .loader_generation
+                .is_none()
+        );
         let (_, new_generation) = cache.thumbnail_for_request(current.clone());
         let new_generation = new_generation.unwrap();
 
@@ -3275,8 +3570,81 @@ mod tests {
         assert!(cache.finish_request(current.clone(), new_generation, Some(one_pixel_png_bytes())));
         assert!(matches!(
             cache.states.get(&current.key),
-            Some(ImageThumbnailState::Ready(_))
+            Some(ImageThumbnailState::Ready { .. })
         ));
+    }
+
+    #[test]
+    fn completed_standard_thumbnails_use_byte_bounded_lru_eviction() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let first = request("first", "folder");
+        let second = request("second", "folder");
+        let third = request("third", "folder");
+        for request in [first.clone(), second.clone(), third.clone()] {
+            insert_ready(
+                &mut cache,
+                request,
+                cached_thumbnail_image_from_png_bytes(png_bytes(2, 2)).unwrap(),
+            );
+        }
+        assert!(cache.thumbnail_for_request(first.clone()).0.is_some());
+
+        let evicted = cache.prune_completed_standard_states(32, 2);
+
+        assert_eq!(evicted.len(), 1);
+        assert!(cache.states.contains_key(&first.key));
+        assert!(!cache.states.contains_key(&second.key));
+        assert!(cache.states.contains_key(&third.key));
+    }
+
+    #[test]
+    fn completed_standard_failure_records_are_count_bounded() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        for key in ["first", "second", "third"] {
+            let request = request(key, "folder");
+            let last_access = cache.next_access();
+            cache.states.insert(
+                request.key.clone(),
+                ImageThumbnailState::Failed {
+                    request,
+                    last_access,
+                },
+            );
+        }
+
+        let evicted = cache.prune_completed_standard_states(usize::MAX, 2);
+
+        assert!(evicted.is_empty());
+        assert!(!cache.states.contains_key("first"));
+        assert_eq!(cache.completed_standard_state_count(), 2);
+    }
+
+    #[test]
+    fn releasing_hover_preview_preserves_standard_thumbnail() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let standard = request("standard", "folder");
+        let hover = ImageThumbnailRequest {
+            key: "hover".to_owned(),
+            usage: ImageThumbnailUsage::HoverPreview,
+            size: HOVER_IMAGE_PREVIEW_SIZE,
+            ..request("hover-source", "folder")
+        };
+        insert_ready(
+            &mut cache,
+            standard.clone(),
+            cached_thumbnail_image_from_png_bytes(png_bytes(2, 2)).unwrap(),
+        );
+        insert_ready(
+            &mut cache,
+            hover.clone(),
+            cached_thumbnail_image_from_png_bytes(png_bytes(4, 4)).unwrap(),
+        );
+
+        let cancellation = cache.remove_hover_preview(&hover);
+
+        assert_eq!(cancellation.evicted.len(), 1);
+        assert!(cache.states.contains_key(&standard.key));
+        assert!(!cache.states.contains_key(&hover.key));
     }
 
     fn request(key: &str, directory: &str) -> ImageThumbnailRequest {
@@ -3300,6 +3668,22 @@ mod tests {
                 queued_at: Instant::now(),
                 preview_dimensions: None,
                 loading_thumbnail: None,
+            },
+        );
+    }
+
+    fn insert_ready(
+        cache: &mut ImageThumbnailCacheInner,
+        request: ImageThumbnailRequest,
+        image: CachedThumbnailImage,
+    ) {
+        let last_access = cache.next_access();
+        cache.states.insert(
+            request.key.clone(),
+            ImageThumbnailState::Ready {
+                request,
+                image,
+                last_access,
             },
         );
     }

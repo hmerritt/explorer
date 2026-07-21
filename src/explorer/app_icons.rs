@@ -1,4 +1,5 @@
 use std::{
+    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
@@ -9,7 +10,7 @@ use std::{
 };
 
 use futures::AsyncReadExt;
-use gpui::{App, BorrowAppContext, Context, Global, Image};
+use gpui::{App, BorrowAppContext, Context, Global, RenderImage};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -26,6 +27,8 @@ const DISK_ICON_DIR_NAME: &str = "icons";
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const NATIVE_ICON_UNDERSIZED_RATIO: f32 = 0.75;
 const NATIVE_ICON_CENTER_TOLERANCE_RATIO: f32 = 0.08;
+const NATIVE_ICON_MEMORY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const NATIVE_ICON_COMPLETED_RECORD_LIMIT: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NativeIconSize {
@@ -141,6 +144,8 @@ struct NativeIconCacheInner {
     pending: VecDeque<String>,
     loader_running: bool,
     next_load_id: u64,
+    access_generation: u64,
+    evicted_images: Vec<Arc<RenderImage>>,
     store: DiskIconStore,
 }
 
@@ -151,10 +156,16 @@ enum NativeIconState {
     },
     Loading {
         load_id: u64,
-        icon: Option<Arc<Image>>,
+        icon: Option<Arc<RenderImage>>,
     },
-    Ready(Arc<Image>),
-    Failed(Option<Arc<Image>>),
+    Ready {
+        icon: Arc<RenderImage>,
+        last_access: u64,
+    },
+    Failed {
+        icon: Option<Arc<RenderImage>>,
+        last_access: u64,
+    },
 }
 
 struct NativeIconLoadJob {
@@ -191,12 +202,21 @@ impl NativeIconCacheInner {
             pending: VecDeque::new(),
             loader_running: false,
             next_load_id: 0,
+            access_generation: 0,
+            evicted_images: Vec::new(),
             store,
         }
     }
 
-    fn icon_for_request(&mut self, request: NativeIconRequest) -> (Option<Arc<Image>>, bool) {
-        if let Some(state) = self.states.get(&request.key) {
+    fn next_access(&mut self) -> u64 {
+        self.access_generation = self.access_generation.wrapping_add(1);
+        self.access_generation
+    }
+
+    fn icon_for_request(&mut self, request: NativeIconRequest) -> (Option<Arc<RenderImage>>, bool) {
+        let access = self.next_access();
+        if let Some(state) = self.states.get_mut(&request.key) {
+            state.touch(access);
             return (state.icon(), false);
         }
 
@@ -254,7 +274,7 @@ impl NativeIconCacheInner {
     }
 
     fn publish_stale_icon(&mut self, key: &str, load_id: u64, bytes: Vec<u8>) -> bool {
-        let Some(icon) = valid_png_bytes(bytes).map(image_from_png_bytes) else {
+        let Some(icon) = render_image_from_png_bytes(&bytes) else {
             return false;
         };
         let Some(NativeIconState::Loading {
@@ -288,6 +308,7 @@ impl NativeIconCacheInner {
             Some(NativeIconState::Loading {
                 load_id: current_load_id,
                 icon,
+                ..
             }) if current_load_id == load_id => icon,
             Some(state) => {
                 self.states.insert(request.key, state);
@@ -296,16 +317,30 @@ impl NativeIconCacheInner {
             None => return false,
         };
 
+        let last_access = self.next_access();
         let state =
             match bytes.and_then(|bytes| normalize_native_icon_png_bytes(request.size, bytes)) {
                 Some(bytes) => {
                     self.store.write_mapping(&request.key, &bytes);
-                    NativeIconState::Ready(image_from_png_bytes(bytes))
+                    match render_image_from_png_bytes(&bytes) {
+                        Some(icon) => NativeIconState::Ready { icon, last_access },
+                        None => NativeIconState::Failed {
+                            icon: stale_icon,
+                            last_access,
+                        },
+                    }
                 }
-                None => NativeIconState::Failed(stale_icon),
+                None => NativeIconState::Failed {
+                    icon: stale_icon,
+                    last_access,
+                },
             };
 
         self.states.insert(request.key, state);
+        self.prune_completed_states(
+            NATIVE_ICON_MEMORY_BUDGET_BYTES,
+            NATIVE_ICON_COMPLETED_RECORD_LIMIT,
+        );
         true
     }
 
@@ -324,11 +359,46 @@ impl NativeIconCacheInner {
         changed |= self.pending.len() != before_pending_len;
 
         for key in &keys {
-            changed |= self.states.remove(key).is_some();
+            if let Some(state) = self.states.remove(key) {
+                if let Some(image) = state.into_icon() {
+                    self.evicted_images.push(image);
+                }
+                changed = true;
+            }
         }
         changed |= self.store.remove_mappings(keys.iter().map(String::as_str));
 
         changed
+    }
+
+    fn prune_completed_states(&mut self, byte_limit: usize, record_limit: usize) {
+        let mut completed = self
+            .states
+            .iter()
+            .filter_map(|(key, state)| state.completion().map(|data| (key.clone(), data)))
+            .collect::<Vec<_>>();
+        let mut bytes = completed.iter().map(|(_, data)| data.bytes).sum::<usize>();
+        if bytes <= byte_limit && completed.len() <= record_limit {
+            return;
+        }
+        completed.sort_unstable_by_key(|(_, data)| data.last_access);
+        let mut count = completed.len();
+        for (key, data) in completed {
+            if bytes <= byte_limit && count <= record_limit {
+                break;
+            }
+            bytes = bytes.saturating_sub(data.bytes);
+            count -= 1;
+            if let Some(state) = self.states.remove(&key)
+                && let Some(image) = state.into_icon()
+            {
+                self.evicted_images.push(image);
+            }
+        }
+    }
+
+    fn take_evicted_images(&mut self) -> Vec<Arc<RenderImage>> {
+        std::mem::take(&mut self.evicted_images)
     }
 }
 
@@ -403,30 +473,80 @@ impl UrlIconCacheInner {
 }
 
 impl NativeIconState {
-    fn icon(&self) -> Option<Arc<Image>> {
+    fn touch(&mut self, access: u64) {
         match self {
-            Self::Ready(icon) => Some(icon.clone()),
+            Self::Ready { last_access, .. } | Self::Failed { last_access, .. } => {
+                *last_access = access;
+            }
+            Self::Pending { .. } | Self::Loading { .. } => {}
+        }
+    }
+
+    fn icon(&self) -> Option<Arc<RenderImage>> {
+        match self {
+            Self::Ready { icon, .. } => Some(icon.clone()),
             Self::Loading {
                 icon: Some(icon), ..
             } => Some(icon.clone()),
-            Self::Failed(Some(icon)) => Some(icon.clone()),
-            Self::Pending { .. } | Self::Loading { icon: None, .. } | Self::Failed(None) => None,
+            Self::Failed {
+                icon: Some(icon), ..
+            } => Some(icon.clone()),
+            Self::Pending { .. }
+            | Self::Loading { icon: None, .. }
+            | Self::Failed { icon: None, .. } => None,
+        }
+    }
+
+    fn completion(&self) -> Option<NativeIconCompletion> {
+        match self {
+            Self::Ready {
+                icon, last_access, ..
+            } => Some(NativeIconCompletion {
+                bytes: render_image_bytes(icon),
+                last_access: *last_access,
+            }),
+            Self::Failed {
+                icon, last_access, ..
+            } => Some(NativeIconCompletion {
+                bytes: icon.as_ref().map_or(0, |icon| render_image_bytes(icon)),
+                last_access: *last_access,
+            }),
+            Self::Pending { .. } | Self::Loading { .. } => None,
+        }
+    }
+
+    fn into_icon(self) -> Option<Arc<RenderImage>> {
+        match self {
+            Self::Ready { icon, .. } => Some(icon),
+            Self::Loading { icon, .. } | Self::Failed { icon, .. } => icon,
+            Self::Pending { .. } => None,
         }
     }
 }
 
+#[derive(Clone, Copy)]
+struct NativeIconCompletion {
+    bytes: usize,
+    last_access: u64,
+}
+
 pub(super) fn invalidate_native_file_type_icons_for_path(
     path: &Path,
-    cx: &mut impl BorrowAppContext,
+    cx: &mut (impl BorrowAppContext + BorrowMut<App>),
 ) {
     let requests = native_file_type_icon_requests_for_path(path);
     if requests.is_empty() {
         return;
     }
 
-    cx.update_global::<NativeIconCache, _>(|cache, _| {
-        cache.inner.borrow_mut().invalidate_requests(&requests);
+    let evicted = cx.update_global::<NativeIconCache, _>(|cache, _| {
+        let mut cache = cache.inner.borrow_mut();
+        cache.invalidate_requests(&requests);
+        cache.take_evicted_images()
     });
+    for image in evicted {
+        cx.borrow_mut().drop_image(image, None);
+    }
 }
 
 impl ExplorerView {
@@ -442,7 +562,7 @@ impl ExplorerView {
         entry: &FileEntry,
         size: NativeIconSize,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         self.native_icon_for_request(native_icon_request_for_entry(entry, size), cx)
     }
 
@@ -451,7 +571,7 @@ impl ExplorerView {
         path: &Path,
         size: NativeIconSize,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         self.native_icon_for_request(native_icon_request_for_path(path, size), cx)
     }
 
@@ -476,7 +596,7 @@ impl ExplorerView {
         &mut self,
         request: Option<NativeIconRequest>,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         if !self.resolve_icons {
             return None;
         }
@@ -556,11 +676,12 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
             timings.record_platform_extract(platform_extract_started, fresh_ok);
 
             let fresh_commit_started = timings.now();
-            let _committed = cx.update_global::<NativeIconCache, _>(|cache, _| {
-                cache
-                    .inner
-                    .borrow_mut()
-                    .finish_request(job.request, job.load_id, icon);
+            let _committed = cx.update_global::<NativeIconCache, _>(|cache, cx| {
+                let mut cache = cache.inner.borrow_mut();
+                cache.finish_request(job.request, job.load_id, icon);
+                for image in cache.take_evicted_images() {
+                    cx.drop_image(image, None);
+                }
             });
             timings.record_fresh_commit(fresh_commit_started);
             timings.record_request_total(request_started);
@@ -1840,8 +1961,21 @@ unsafe fn png_from_ns_image(icon: cocoa::base::id, size: NativeIconSize) -> Opti
     valid_png_bytes(bytes)
 }
 
-fn image_from_png_bytes(bytes: Vec<u8>) -> Arc<Image> {
-    Arc::new(Image::from_bytes(gpui::ImageFormat::Png, bytes))
+fn render_image_from_png_bytes(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let mut image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+}
+
+fn render_image_bytes(image: &RenderImage) -> usize {
+    (0..image.frame_count())
+        .filter_map(|frame| image.as_bytes(frame))
+        .map(<[u8]>::len)
+        .sum()
 }
 
 fn valid_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
@@ -2735,6 +2869,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_native_icons_use_byte_bounded_lru_eviction() {
+        let mut cache = cache_with_dir(None);
+        for key in ["first", "second", "third"] {
+            let request = test_request(key);
+            let job = start_load_job(&mut cache, request.clone());
+            assert!(cache.finish_request(request, job.load_id, Some(one_pixel_png_bytes())));
+        }
+        assert!(cache.icon_for_request(test_request("first")).0.is_some());
+
+        let two_details_icons = 2 * 32 * 32 * 4;
+        cache.prune_completed_states(two_details_icons, 2);
+
+        assert!(cache.states.contains_key("first"));
+        assert!(!cache.states.contains_key("second"));
+        assert!(cache.states.contains_key("third"));
+        assert_eq!(cache.take_evicted_images().len(), 1);
+    }
+
+    #[test]
+    fn failed_native_icon_records_are_count_bounded() {
+        let mut cache = cache_with_dir(None);
+        for key in ["first", "second", "third"] {
+            let request = test_request(key);
+            let job = start_load_job(&mut cache, request.clone());
+            assert!(cache.finish_request(request, job.load_id, None));
+        }
+
+        cache.prune_completed_states(usize::MAX, 2);
+
+        assert!(!cache.states.contains_key("first"));
+        assert_eq!(cache.states.len(), 2);
+        assert!(cache.take_evicted_images().is_empty());
+    }
+
+    #[test]
     fn invalidating_file_type_icons_removes_ready_states_and_disk_mappings() {
         let temp = TempDir::new();
         let cache_dir = temp.path().join("cache");
@@ -2751,7 +2920,7 @@ mod tests {
             ));
             assert!(matches!(
                 cache.states.get(&request.key),
-                Some(NativeIconState::Ready(_))
+                Some(NativeIconState::Ready { .. })
             ));
             assert!(cache.store.icon_hash(&request.key).is_some());
         }
@@ -2761,6 +2930,7 @@ mod tests {
                 "notes.txt"
             )))
         );
+        assert_eq!(cache.take_evicted_images().len(), requests.len());
 
         for request in &requests {
             assert!(!cache.states.contains_key(&request.key));
@@ -2822,7 +2992,7 @@ mod tests {
         ));
         assert!(matches!(
             cache.states.get(&request.key),
-            Some(NativeIconState::Ready(_))
+            Some(NativeIconState::Ready { .. })
         ));
     }
 
