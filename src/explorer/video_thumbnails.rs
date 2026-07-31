@@ -18,8 +18,8 @@ use crate::explorer::video::{ffmpeg_executable_path, ffmpeg_seek_argument};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const STATIC_THUMBNAIL_SEEK_SECONDS: f64 = 1.0;
-const STATIC_THUMBNAIL_DECODER_THREADS: u32 = 2;
+const STATIC_THUMBNAIL_FALLBACK_SEEK_SECONDS: f64 = 1.0;
+const STATIC_THUMBNAIL_DECODER_THREADS: u32 = 1;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(4);
 const STDERR_LIMIT: u64 = 64 * 1024;
 const MAX_PPM_DIMENSION: u32 = 16_384;
@@ -83,10 +83,7 @@ impl VideoExtractionError {
     }
 
     fn permits_fallback(&self) -> bool {
-        matches!(
-            self.kind,
-            VideoExtractionErrorKind::Process | VideoExtractionErrorKind::InvalidFrame
-        )
+        self.kind == VideoExtractionErrorKind::InvalidFrame
     }
 }
 
@@ -112,7 +109,7 @@ pub(super) fn load_video_thumbnail_rgba(
     }
 
     let total_started = Instant::now();
-    let fast_args = static_video_thumbnail_args(path, STATIC_THUMBNAIL_SEEK_SECONDS, size, true);
+    let fast_args = static_video_thumbnail_args(path, None, size);
     let fast = run_ffmpeg_ppm_stream(&fast_args, cancel, |_, frame| Some(frame));
     match fast {
         Ok(mut extraction) => {
@@ -133,7 +130,11 @@ pub(super) fn load_video_thumbnail_rgba(
             if cancel.load(Ordering::Relaxed) {
                 return Err(VideoExtractionError::cancelled());
             }
-            let fallback_args = static_video_thumbnail_args(path, 0.0, size, false);
+            let fallback_args = static_video_thumbnail_args(
+                path,
+                Some(STATIC_THUMBNAIL_FALLBACK_SEEK_SECONDS),
+                size,
+            );
             let mut extraction =
                 run_ffmpeg_ppm_stream(&fallback_args, cancel, |_, frame| Some(frame))?;
             let image = extraction.value.pop().ok_or_else(|| {
@@ -216,24 +217,23 @@ fn merge_metrics(total: &mut VideoExtractionMetrics, next: VideoExtractionMetric
 
 pub(super) fn static_video_thumbnail_args(
     path: &Path,
-    seek_seconds: f64,
+    seek_seconds: Option<f64>,
     size: u32,
-    keyframe_only: bool,
 ) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-v"),
         OsString::from("error"),
         OsString::from("-nostdin"),
-        OsString::from("-noaccurate_seek"),
-    ];
-    if keyframe_only {
-        args.extend([OsString::from("-skip_frame"), OsString::from("nokey")]);
-    }
-    args.extend([
         OsString::from("-threads"),
         OsString::from(STATIC_THUMBNAIL_DECODER_THREADS.to_string()),
-        OsString::from("-ss"),
-        OsString::from(ffmpeg_seek_argument(seek_seconds)),
+    ];
+    if let Some(seek_seconds) = seek_seconds {
+        args.extend([
+            OsString::from("-ss"),
+            OsString::from(ffmpeg_seek_argument(seek_seconds)),
+        ]);
+    }
+    args.extend([
         OsString::from("-i"),
         path.as_os_str().to_owned(),
         OsString::from("-map"),
@@ -245,7 +245,7 @@ pub(super) fn static_video_thumbnail_args(
         OsString::from("1"),
         OsString::from("-vf"),
         OsString::from(format!(
-            "scale={size}:{size}:force_original_aspect_ratio=decrease:flags=fast_bilinear,setsar=1"
+            "scale={size}:{size}:force_original_aspect_ratio=decrease:flags=fast_bilinear,setsar=1,format=rgb24"
         )),
         OsString::from("-f"),
         OsString::from("image2pipe"),
@@ -680,10 +680,17 @@ pub mod benchmark_support {
                         let Some(path) = paths.get(index) else {
                             break;
                         };
-                        if super::load_video_thumbnail_rgba(path, size, &AtomicBool::new(false))
-                            .is_ok()
+                        match super::load_video_thumbnail_rgba(path, size, &AtomicBool::new(false))
                         {
-                            ready.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(_) => {
+                                ready.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "video thumbnail benchmark failed for {}: {error}",
+                                    path.display()
+                                );
+                            }
                         }
                     }
                 });
@@ -773,8 +780,29 @@ mod tests {
     }
 
     #[test]
-    fn static_thumbnail_args_seek_before_input_and_emit_ppm() {
-        let args = static_video_thumbnail_args(Path::new("clip.mp4"), 1.0, 128, true);
+    fn static_thumbnail_primary_args_decode_opening_frame_with_one_thread() {
+        let args = static_video_thumbnail_args(Path::new("clip.mp4"), None, 128);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let index = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
+
+        assert!(!args.iter().any(|arg| arg == "-ss"));
+        assert!(!args.iter().any(|arg| arg == "-noaccurate_seek"));
+        assert!(!args.iter().any(|arg| arg == "-skip_frame"));
+        assert_eq!(args[index("-threads") + 1], "1");
+        assert_eq!(args[index("-i") + 1], "clip.mp4");
+        assert_eq!(args[index("-map") + 1], "0:v:0");
+        assert_eq!(args[index("-frames:v") + 1], "1");
+        assert_eq!(args[index("-vcodec") + 1], "ppm");
+        assert!(args[index("-vf") + 1].contains("fast_bilinear"));
+        assert!(args[index("-vf") + 1].contains("format=rgb24"));
+    }
+
+    #[test]
+    fn static_thumbnail_fallback_seeks_before_input_without_keyframe_filtering() {
+        let args = static_video_thumbnail_args(Path::new("clip.mp4"), Some(1.0), 128);
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -783,10 +811,34 @@ mod tests {
 
         assert!(index("-ss") < index("-i"));
         assert_eq!(args[index("-ss") + 1], "1.000");
-        assert_eq!(args[index("-threads") + 1], "2");
-        assert_eq!(args[index("-skip_frame") + 1], "nokey");
-        assert_eq!(args[index("-vcodec") + 1], "ppm");
-        assert!(args[index("-vf") + 1].contains("fast_bilinear"));
+        assert!(!args.iter().any(|arg| arg == "-noaccurate_seek"));
+        assert!(!args.iter().any(|arg| arg == "-skip_frame"));
+    }
+
+    #[test]
+    fn only_unusable_frame_errors_permit_a_second_extraction_attempt() {
+        for kind in [
+            VideoExtractionErrorKind::Cancelled,
+            VideoExtractionErrorKind::Spawn,
+            VideoExtractionErrorKind::Process,
+        ] {
+            assert!(!VideoExtractionError::new(kind, "error").permits_fallback());
+        }
+        assert!(
+            VideoExtractionError::new(VideoExtractionErrorKind::InvalidFrame, "error")
+                .permits_fallback()
+        );
+    }
+
+    #[test]
+    fn zero_sized_thumbnail_is_rejected_before_starting_ffmpeg() {
+        let error = load_video_thumbnail_rgba(
+            Path::new("definitely-missing-explorer-video.mp4"),
+            0,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, VideoExtractionErrorKind::InvalidFrame);
     }
 
     #[test]

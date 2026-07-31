@@ -43,10 +43,18 @@ Fixtures cover opaque and transparent PNG, JPEG
 TIFF, WebP, and SVG under `target/image-thumbnails-benchmark-v6`.
 
 The video-thumbnail benchmark measures uncached sub-second, ordinary, long,
-and malformed video thumbnails, a 24-video folder batch, the 20-frame
-Properties strip, and Alt-hover time to first frame. It generates MPEG-4
-fixtures with FFmpeg under `target/video-thumbnails-benchmark-v1`; `ffmpeg` and
-`ffprobe` must be available on `PATH`.
+long-GOP Matroska, and malformed video thumbnails, a 24-video folder batch,
+the 20-frame Properties strip, and Alt-hover time to first frame. It generates
+MPEG-4 fixtures with FFmpeg under `target/video-thumbnails-benchmark-v2`;
+`ffmpeg` and `ffprobe` must be available on `PATH`.
+
+Set `EXPLORER_VIDEO_THUMBNAIL_BENCH_DIR` to include an optional real video
+directory in the same benchmark run:
+
+```sh
+EXPLORER_VIDEO_THUMBNAIL_BENCH_DIR=/path/to/videos \
+  cargo bench --profile release --features benchmarks --bench video_thumbnails
+```
 
 The image-viewer benchmark compares ICC-tagged native opens with synchronous
 ICC, deferred first-ready opens, and ICC ignored; it also measures no-ICC native
