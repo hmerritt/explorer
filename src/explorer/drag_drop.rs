@@ -60,10 +60,11 @@ struct InternalDragSourceFacts {
     selected_paths: HashSet<PathBuf>,
     directory_paths: Vec<PathBuf>,
     source_dir: PathBuf,
+    volume_probe_paths: Vec<PathBuf>,
     analysis: OnceLock<ResolvedInternalDragSourceFacts>,
-    cached_resolutions: Mutex<HashMap<InternalDropResolutionKey, CachedResolutionState>>,
+    cached_target_facts: Mutex<HashMap<InternalDropTargetKey, CachedTargetFactsState>>,
     #[cfg(test)]
-    resolution_computations: AtomicUsize,
+    target_fact_computations: AtomicUsize,
     #[cfg(test)]
     volume_key_computations: AtomicUsize,
 }
@@ -89,33 +90,22 @@ struct DirectoryPathIndex {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct InternalDropResolutionKey {
+struct InternalDropTargetKey {
     destination: DropDestination,
     current_directory: PathBuf,
-    modifiers: DropModifierState,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CachedResolutionState {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CachedTargetFactsState {
     Pending,
-    Ready(DraggedValueDropResolution),
+    Ready(InternalDropTargetFacts),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct DropModifierState {
-    secondary: bool,
-    shift: bool,
-    alt: bool,
-}
-
-impl From<Modifiers> for DropModifierState {
-    fn from(modifiers: Modifiers) -> Self {
-        Self {
-            secondary: modifiers.secondary(),
-            shift: modifiers.shift,
-            alt: modifiers.alt,
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InternalDropTargetFacts {
+    base_valid: bool,
+    same_source_destination: bool,
+    destination_volume_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -371,10 +361,11 @@ impl InternalDragSourceFacts {
             selected_paths: paths.iter().cloned().collect(),
             directory_paths,
             source_dir: source_dir.to_path_buf(),
+            volume_probe_paths: source_volume_probe_paths(paths, source_dir),
             analysis: OnceLock::new(),
-            cached_resolutions: Mutex::new(HashMap::new()),
+            cached_target_facts: Mutex::new(HashMap::new()),
             #[cfg(test)]
-            resolution_computations: AtomicUsize::new(0),
+            target_fact_computations: AtomicUsize::new(0),
             #[cfg(test)]
             volume_key_computations: AtomicUsize::new(0),
         }
@@ -388,7 +379,7 @@ impl InternalDragSourceFacts {
                 directory_paths: DirectoryPathIndex::new(self.directory_paths.clone()),
                 source_dir: DropPathIdentity::new(self.source_dir.clone()),
                 volume_keys: self
-                    .selected_paths
+                    .volume_probe_paths
                     .iter()
                     .filter_map(|source| path_volume_key(source))
                     .collect(),
@@ -396,68 +387,79 @@ impl InternalDragSourceFacts {
         })
     }
 
-    fn resolution_key(
+    fn target_key(
         destination: &DropDestination,
         current_directory: &Path,
-        modifiers: Modifiers,
-    ) -> InternalDropResolutionKey {
-        InternalDropResolutionKey {
+    ) -> InternalDropTargetKey {
+        InternalDropTargetKey {
             destination: destination.clone(),
             current_directory: current_directory.to_path_buf(),
-            modifiers: DropModifierState::from(modifiers),
         }
     }
 
-    fn cached_resolution(
+    fn cached_target_facts(
         &self,
         destination: &DropDestination,
         current_directory: &Path,
-        modifiers: Modifiers,
-    ) -> Option<DraggedValueDropResolution> {
-        let key = Self::resolution_key(destination, current_directory, modifiers);
+    ) -> Option<InternalDropTargetFacts> {
+        let key = Self::target_key(destination, current_directory);
         let cache = self
-            .cached_resolutions
+            .cached_target_facts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match cache.get(&key) {
-            Some(CachedResolutionState::Ready(resolution)) => Some(*resolution),
-            Some(CachedResolutionState::Pending) | None => None,
+            Some(CachedTargetFactsState::Ready(facts)) => Some(facts.clone()),
+            Some(CachedTargetFactsState::Pending) | None => None,
         }
     }
 
-    fn mark_resolution_pending(
+    fn mark_target_facts_pending(
         &self,
         destination: &DropDestination,
         current_directory: &Path,
-        modifiers: Modifiers,
     ) -> bool {
-        let key = Self::resolution_key(destination, current_directory, modifiers);
+        let key = Self::target_key(destination, current_directory);
         let mut cache = self
-            .cached_resolutions
+            .cached_target_facts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if cache.contains_key(&key) {
             false
         } else {
-            cache.insert(key, CachedResolutionState::Pending);
+            cache.insert(key, CachedTargetFactsState::Pending);
             true
         }
     }
 
-    fn store_resolution(
+    fn store_target_facts(
         &self,
         destination: &DropDestination,
         current_directory: &Path,
-        modifiers: Modifiers,
-        resolution: DraggedValueDropResolution,
+        facts: InternalDropTargetFacts,
     ) {
-        let key = Self::resolution_key(destination, current_directory, modifiers);
+        let key = Self::target_key(destination, current_directory);
         let mut cache = self
-            .cached_resolutions
+            .cached_target_facts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.insert(key, CachedResolutionState::Ready(resolution));
+        cache.insert(key, CachedTargetFactsState::Ready(facts));
     }
+}
+
+fn source_volume_probe_paths(paths: &[PathBuf], source_dir: &Path) -> Vec<PathBuf> {
+    let mut parents = paths
+        .iter()
+        .map(|path| {
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(source_dir)
+                .to_path_buf()
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    parents.sort();
+    parents
 }
 
 impl DraggedEntries {
@@ -503,33 +505,50 @@ impl DraggedEntries {
         )
     }
 
-    fn compute_drop_resolution(
+    fn compute_drop_target_facts(
         &self,
         destination: &DropDestination,
         current_directory: &Path,
-        modifiers: Modifiers,
-    ) -> DraggedValueDropResolution {
+    ) -> InternalDropTargetFacts {
         #[cfg(test)]
         self.source_facts
-            .resolution_computations
+            .target_fact_computations
             .fetch_add(1, Ordering::Relaxed);
 
         let source_analysis = self.source_facts.analysis();
         let destination_item = destination.item_path(current_directory);
         let resolved_destination = destination.resolve(current_directory);
-        let validity = internal_drop_target_validity(
+        internal_drop_target_facts(
             &destination_item,
             &resolved_destination,
             self,
             source_analysis,
-            modifiers,
-        );
+        )
+    }
+
+    fn resolution_from_target_facts(
+        &self,
+        facts: &InternalDropTargetFacts,
+        modifiers: Modifiers,
+    ) -> DraggedValueDropResolution {
+        let validity = if facts.base_valid {
+            drop_target_validity_for_same_source_destination(
+                facts.same_source_destination,
+                modifiers,
+            )
+        } else {
+            DropTargetValidity {
+                valid: false,
+                explicit_operation_required: false,
+            }
+        };
+        let source_analysis = self.source_facts.analysis();
         DraggedValueDropResolution {
-            resolved: resolve_drop_operation_for_internal_drag(
+            resolved: resolve_drop_operation_for_internal_facts(
                 modifiers,
                 validity.valid,
                 source_analysis,
-                &resolved_destination,
+                facts.destination_volume_key.as_deref(),
             ),
             explicit_operation_required: validity.explicit_operation_required,
         }
@@ -541,17 +560,17 @@ impl DraggedEntries {
         current_directory: &Path,
         modifiers: Modifiers,
     ) -> DraggedValueDropResolution {
-        if let Some(resolution) =
-            self.source_facts
-                .cached_resolution(destination, current_directory, modifiers)
+        if let Some(facts) = self
+            .source_facts
+            .cached_target_facts(destination, current_directory)
         {
-            return resolution;
+            return self.resolution_from_target_facts(&facts, modifiers);
         }
 
-        let resolution = self.compute_drop_resolution(destination, current_directory, modifiers);
+        let facts = self.compute_drop_target_facts(destination, current_directory);
         self.source_facts
-            .store_resolution(destination, current_directory, modifiers, resolution);
-        resolution
+            .store_target_facts(destination, current_directory, facts.clone());
+        self.resolution_from_target_facts(&facts, modifiers)
     }
 
     fn provisional_drop_resolution(
@@ -560,11 +579,11 @@ impl DraggedEntries {
         current_directory: &Path,
         modifiers: Modifiers,
     ) -> DraggedValueDropResolution {
-        if let Some(resolution) =
-            self.source_facts
-                .cached_resolution(destination, current_directory, modifiers)
+        if let Some(facts) = self
+            .source_facts
+            .cached_target_facts(destination, current_directory)
         {
-            return resolution;
+            return self.resolution_from_target_facts(&facts, modifiers);
         }
 
         let destination_item = destination.item_path(current_directory);
@@ -579,7 +598,7 @@ impl DraggedEntries {
             resolved: resolve_provisional_internal_drop_operation(
                 modifiers,
                 validity.valid,
-                &self.paths,
+                &self.source_facts.volume_probe_paths,
                 &resolved_destination,
             ),
             explicit_operation_required: validity.explicit_operation_required,
@@ -588,21 +607,21 @@ impl DraggedEntries {
 
     fn drop_should_copy_by_default(
         source_analysis: &ResolvedInternalDragSourceFacts,
-        destination: &Path,
+        destination_key: Option<&str>,
     ) -> bool {
-        let Some(destination_key) = path_volume_key(destination) else {
+        let Some(destination_key) = destination_key else {
             return false;
         };
         source_analysis
             .volume_keys
             .iter()
-            .any(|source| source != &destination_key)
+            .any(|source| source.as_str() != destination_key)
     }
 
     #[cfg(test)]
-    fn test_resolution_computations(&self) -> usize {
+    fn test_target_fact_computations(&self) -> usize {
         self.source_facts
-            .resolution_computations
+            .target_fact_computations
             .load(Ordering::Relaxed)
     }
 
@@ -616,6 +635,11 @@ impl DraggedEntries {
     #[cfg(test)]
     fn test_source_analysis_initialized(&self) -> bool {
         self.source_facts.analysis.get().is_some()
+    }
+
+    #[cfg(test)]
+    fn test_source_volume_probe_count(&self) -> usize {
+        self.source_facts.volume_probe_paths.len()
     }
 
     #[cfg(test)]
@@ -738,6 +762,9 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> bool {
+        #[cfg(test)]
+        self.drop_predicate_evaluation_count
+            .set(self.drop_predicate_evaluation_count.get() + 1);
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
             return dragged
                 .provisional_drop_resolution(destination, &self.path, modifiers)
@@ -799,7 +826,7 @@ impl ExplorerView {
 
         if dragged
             .source_facts
-            .mark_resolution_pending(destination, &current_directory, modifiers)
+            .mark_target_facts_pending(destination, &current_directory)
         {
             let dragged = dragged.clone();
             let destination = destination.clone();
@@ -807,22 +834,18 @@ impl ExplorerView {
                 let resolver_dragged = dragged.clone();
                 let resolver_destination = destination.clone();
                 let resolver_current_directory = current_directory.clone();
-                let resolution = cx
+                let facts = cx
                     .background_executor()
                     .spawn(async move {
-                        resolver_dragged.compute_drop_resolution(
+                        resolver_dragged.compute_drop_target_facts(
                             &resolver_destination,
                             &resolver_current_directory,
-                            modifiers,
                         )
                     })
                     .await;
-                dragged.source_facts.store_resolution(
-                    &destination,
-                    &current_directory,
-                    modifiers,
-                    resolution,
-                );
+                dragged
+                    .source_facts
+                    .store_target_facts(&destination, &current_directory, facts);
                 let _ = this.update(cx, |_, cx| cx.notify());
             })
             .detach();
@@ -1127,6 +1150,21 @@ fn resolve_drop_operation_for_internal_drag(
     source_analysis: &ResolvedInternalDragSourceFacts,
     destination: &Path,
 ) -> ResolvedDrop {
+    let destination_key = path_volume_key(destination);
+    resolve_drop_operation_for_internal_facts(
+        modifiers,
+        valid_target,
+        source_analysis,
+        destination_key.as_deref(),
+    )
+}
+
+fn resolve_drop_operation_for_internal_facts(
+    modifiers: Modifiers,
+    valid_target: bool,
+    source_analysis: &ResolvedInternalDragSourceFacts,
+    destination_volume_key: Option<&str>,
+) -> ResolvedDrop {
     if !valid_target {
         return ResolvedDrop::Invalid;
     }
@@ -1139,7 +1177,7 @@ fn resolve_drop_operation_for_internal_drag(
         ResolvedDrop::Copy
     } else if modifiers.shift {
         ResolvedDrop::Move
-    } else if DraggedEntries::drop_should_copy_by_default(source_analysis, destination) {
+    } else if DraggedEntries::drop_should_copy_by_default(source_analysis, destination_volume_key) {
         ResolvedDrop::Copy
     } else {
         ResolvedDrop::Move
@@ -1149,7 +1187,7 @@ fn resolve_drop_operation_for_internal_drag(
 fn resolve_provisional_internal_drop_operation(
     modifiers: Modifiers,
     valid_target: bool,
-    source_paths: &[PathBuf],
+    source_volume_paths: &[PathBuf],
     destination: &Path,
 ) -> ResolvedDrop {
     if !valid_target {
@@ -1167,7 +1205,7 @@ fn resolve_provisional_internal_drop_operation(
     }
 
     #[cfg(windows)]
-    if provisional_drop_crosses_windows_volume(source_paths, destination) {
+    if provisional_drop_crosses_windows_volume(source_volume_paths, destination) {
         return ResolvedDrop::Copy;
     }
 
@@ -1266,10 +1304,33 @@ fn internal_drop_target_validity(
     source_analysis: &ResolvedInternalDragSourceFacts,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
-    if !drop_destination_is_dir(resolved_destination) {
+    let facts = internal_drop_target_facts(
+        destination_item,
+        resolved_destination,
+        dragged,
+        source_analysis,
+    );
+    if !facts.base_valid {
         return DropTargetValidity {
             valid: false,
             explicit_operation_required: false,
+        };
+    }
+
+    drop_target_validity_for_same_source_destination(facts.same_source_destination, modifiers)
+}
+
+fn internal_drop_target_facts(
+    destination_item: &Path,
+    resolved_destination: &Path,
+    dragged: &DraggedEntries,
+    source_analysis: &ResolvedInternalDragSourceFacts,
+) -> InternalDropTargetFacts {
+    if !drop_destination_is_dir(resolved_destination) {
+        return InternalDropTargetFacts {
+            base_valid: false,
+            same_source_destination: false,
+            destination_volume_key: None,
         };
     }
 
@@ -1282,16 +1343,21 @@ fn internal_drop_target_validity(
             .directory_paths
             .contains_same_or_ancestor(resolved_destination, canonical_destination.as_deref())
     {
-        return DropTargetValidity {
-            valid: false,
-            explicit_operation_required: false,
+        return InternalDropTargetFacts {
+            base_valid: false,
+            same_source_destination: false,
+            destination_volume_key: None,
         };
     }
 
     let same_source_destination = source_analysis
         .source_dir
         .matches(resolved_destination, canonical_destination.as_deref());
-    drop_target_validity_for_same_source_destination(same_source_destination, modifiers)
+    InternalDropTargetFacts {
+        base_valid: true,
+        same_source_destination,
+        destination_volume_key: path_volume_key(resolved_destination),
+    }
 }
 
 fn provisional_internal_drop_target_validity(
@@ -1691,6 +1757,30 @@ mod tests {
         assert_eq!(dragged.test_volume_key_computations(), 0);
     }
 
+    #[test]
+    fn source_volume_analysis_deduplicates_files_by_parent_directory() {
+        let source_dir = PathBuf::from("remote");
+        let paths = (0..512)
+            .map(|ix| source_dir.join(format!("file-{ix:03}.txt")))
+            .collect::<Vec<_>>();
+        let dragged = DraggedEntries::test_from_parts(paths, source_dir, "file-000.txt", 0);
+
+        assert_eq!(dragged.test_source_volume_probe_count(), 1);
+    }
+
+    #[test]
+    fn source_volume_analysis_keeps_one_probe_per_distinct_parent() {
+        let paths = vec![
+            PathBuf::from("first/a.txt"),
+            PathBuf::from("first/b.txt"),
+            PathBuf::from("second/c.txt"),
+        ];
+        let dragged =
+            DraggedEntries::test_from_parts(paths, PathBuf::from("search-root"), "a.txt", 0);
+
+        assert_eq!(dragged.test_source_volume_probe_count(), 2);
+    }
+
     #[gpui::test]
     fn internal_drop_feedback_resolves_source_analysis_in_background(
         cx: &mut gpui::TestAppContext,
@@ -1735,20 +1825,38 @@ mod tests {
 
         assert!(dragged.test_source_analysis_initialized());
         assert_eq!(dragged.test_volume_key_computations(), 1);
-        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert_eq!(dragged.test_target_fact_computations(), 1);
         assert!(
             dragged
                 .source_facts
-                .cached_resolution(
+                .cached_target_facts(
                     &DropDestination::Directory {
                         item_path: destination.clone(),
-                        target_path: destination,
+                        target_path: destination.clone(),
                     },
                     temp.path(),
-                    Modifiers::default(),
                 )
                 .is_some()
         );
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let (cursor, indicator) = view.request_internal_drop_feedback(
+                    &dragged,
+                    &DropDestination::Directory {
+                        item_path: destination.clone(),
+                        target_path: destination.clone(),
+                    },
+                    Modifiers::secondary_key(),
+                    gpui::point(px(10.0), px(10.0)),
+                    cx,
+                );
+                assert_eq!(cursor, CursorStyle::DragCopy);
+                assert_eq!(indicator.unwrap().operation, FileOperationKind::Copy);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(dragged.test_target_fact_computations(), 1);
     }
 
     #[test]
@@ -2190,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_many_item_feedback_reuses_source_analysis_and_drop_resolution() {
+    fn repeated_many_item_feedback_reuses_source_and_modifier_independent_target_facts() {
         let temp = TempDir::new();
         let source_dir = temp.path().join("source");
         let first_target = temp.path().join("first-target");
@@ -2230,7 +2338,7 @@ mod tests {
             assert_eq!(cursor, CursorStyle::Arrow);
             assert_eq!(indicator.unwrap().operation, FileOperationKind::Move);
         }
-        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert_eq!(dragged.test_target_fact_computations(), 1);
         assert_eq!(dragged.test_volume_key_computations(), 1);
 
         let function_only = Modifiers {
@@ -2238,19 +2346,19 @@ mod tests {
             ..Modifiers::default()
         };
         assert!(view.can_drop_value(&dragged, &first_destination, function_only));
-        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert_eq!(dragged.test_target_fact_computations(), 1);
 
         assert!(view.can_drop_value(&dragged, &first_destination, Modifiers::secondary_key(),));
-        assert_eq!(dragged.test_resolution_computations(), 2);
+        assert_eq!(dragged.test_target_fact_computations(), 1);
         assert_eq!(dragged.test_volume_key_computations(), 1);
 
         assert!(view.can_drop_value(&dragged, &second_destination, Modifiers::default(),));
-        assert_eq!(dragged.test_resolution_computations(), 3);
+        assert_eq!(dragged.test_target_fact_computations(), 2);
         assert_eq!(dragged.test_volume_key_computations(), 1);
 
         view.path = alternate_current_directory;
         assert!(view.can_drop_value(&dragged, &second_destination, Modifiers::default(),));
-        assert_eq!(dragged.test_resolution_computations(), 4);
+        assert_eq!(dragged.test_target_fact_computations(), 3);
         assert_eq!(dragged.test_volume_key_computations(), 1);
     }
 
@@ -2272,7 +2380,7 @@ mod tests {
         let mut view = ExplorerView::new(temp.path().to_path_buf());
 
         assert!(view.can_drop_value(&dragged, &destination, Modifiers::default()));
-        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert_eq!(dragged.test_target_fact_computations(), 1);
         fs::remove_dir(&target).expect("remove cached target");
 
         view.drop_internal_entries(&dragged, destination, Modifiers::default());

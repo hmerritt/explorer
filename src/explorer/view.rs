@@ -166,6 +166,8 @@ pub struct ExplorerView {
     #[cfg(test)]
     pub(super) drag_payload_build_count: Cell<usize>,
     #[cfg(test)]
+    pub(super) drop_predicate_evaluation_count: Cell<usize>,
+    #[cfg(test)]
     pub(super) details_name_hit_measurement_count: Cell<usize>,
 }
 
@@ -547,6 +549,8 @@ impl ExplorerView {
             git_status_task: None,
             #[cfg(test)]
             drag_payload_build_count: Cell::new(0),
+            #[cfg(test)]
+            drop_predicate_evaluation_count: Cell::new(0),
             #[cfg(test)]
             details_name_hit_measurement_count: Cell::new(0),
         }

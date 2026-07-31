@@ -7515,6 +7515,11 @@ mod tests {
             assert_eq!(view.test_drag_payload_build_count(), 1);
             assert_eq!(view.details_name_hit_measurement_count.get(), 0);
             assert!(app.has_active_drag());
+            assert!(
+                view.drop_predicate_evaluation_count.get() <= 8,
+                "drop eligibility should only be evaluated for hovered targets, got {} evaluations",
+                view.drop_predicate_evaluation_count.get()
+            );
         });
 
         for offset in [24.0, 30.0, 36.0, 42.0] {

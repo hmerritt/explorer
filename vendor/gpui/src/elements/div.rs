@@ -2715,26 +2715,44 @@ impl Interactivity {
             }
 
             if let Some(drag) = cx.active_drag.take() {
-                let mut can_drop = true;
-                if let Some(can_drop_predicate) = &self.can_drop_predicate {
-                    can_drop = can_drop_predicate(drag.value.as_ref(), window, cx);
-                }
+                let drag_type = drag.value.as_ref().type_id();
+                let direct_drag_over_hovered = hitbox.is_hovered(window)
+                    && self
+                        .drag_over_styles
+                        .iter()
+                        .any(|(state_type, _)| *state_type == drag_type);
+                let group_drag_over_hovered = self.group_drag_over_styles.iter().any(
+                    |(state_type, group_drag_style)| {
+                        *state_type == drag_type
+                            && GroupHitboxes::get(&group_drag_style.group, cx)
+                                .is_some_and(|group_hitbox_id| group_hitbox_id.is_hovered(window))
+                    },
+                );
 
-                if can_drop {
-                    for (state_type, group_drag_style) in &self.group_drag_over_styles {
-                        if let Some(group_hitbox_id) =
-                            GroupHitboxes::get(&group_drag_style.group, cx)
-                            && *state_type == drag.value.as_ref().type_id()
-                            && group_hitbox_id.is_hovered(window)
-                        {
-                            style.refine(&group_drag_style.style);
+                if direct_drag_over_hovered || group_drag_over_hovered {
+                    let can_drop = self
+                        .can_drop_predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate(drag.value.as_ref(), window, cx));
+                    if can_drop {
+                        for (state_type, group_drag_style) in &self.group_drag_over_styles {
+                            if let Some(group_hitbox_id) =
+                                GroupHitboxes::get(&group_drag_style.group, cx)
+                                && *state_type == drag_type
+                                && group_hitbox_id.is_hovered(window)
+                            {
+                                style.refine(&group_drag_style.style);
+                            }
                         }
-                    }
 
-                    for (state_type, build_drag_over_style) in &self.drag_over_styles {
-                        if *state_type == drag.value.as_ref().type_id() && hitbox.is_hovered(window)
-                        {
-                            style.refine(&build_drag_over_style(drag.value.as_ref(), window, cx));
+                        for (state_type, build_drag_over_style) in &self.drag_over_styles {
+                            if *state_type == drag_type && hitbox.is_hovered(window) {
+                                style.refine(&build_drag_over_style(
+                                    drag.value.as_ref(),
+                                    window,
+                                    cx,
+                                ));
+                            }
                         }
                     }
                 }
