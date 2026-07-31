@@ -76,7 +76,7 @@ pub struct ExplorerView {
     pub(super) volume_eject_task: Option<Task<()>>,
     pub(super) image_mount_task: Option<Task<()>>,
     #[cfg(target_os = "windows")]
-    pub(super) sshfs_connect_task: Option<Task<()>>,
+    pub(super) network_connect_task: Option<Task<()>>,
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) forward_stack: Vec<PathBuf>,
     pub(super) scroll_handle: UniformListScrollHandle,
@@ -355,7 +355,7 @@ impl ExplorerView {
                 let _ = parent_window;
                 None
             };
-            if view.connect_sshfs_remote_path_with_watcher(
+            if view.connect_network_path_with_watcher(
                 view.path.clone(),
                 crate::explorer::navigation::HistoryMode::Preserve,
                 parent,
@@ -452,7 +452,7 @@ impl ExplorerView {
             volume_eject_task: None,
             image_mount_task: None,
             #[cfg(target_os = "windows")]
-            sshfs_connect_task: None,
+            network_connect_task: None,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -1647,7 +1647,7 @@ impl ExplorerView {
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
-        self.has_active_file_operation() || self.sshfs_connection_is_working()
+        self.has_active_file_operation() || self.network_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -2011,17 +2011,17 @@ impl ExplorerView {
 
     pub(super) fn is_directory_loading(&self) -> bool {
         self.loading_path.as_deref() == Some(self.path.as_path())
-            && (self.directory_load_task.is_some() || self.sshfs_connection_is_working())
+            && (self.directory_load_task.is_some() || self.network_connection_is_working())
     }
 
     pub(super) fn should_show_empty_folder_message(&self) -> bool {
         self.all_entries.is_empty() && self.read_error.is_none() && !self.is_directory_loading()
     }
 
-    pub(super) fn sshfs_connection_is_working(&self) -> bool {
+    pub(super) fn network_connection_is_working(&self) -> bool {
         #[cfg(target_os = "windows")]
         {
-            self.sshfs_connect_task.is_some()
+            self.network_connect_task.is_some()
         }
 
         #[cfg(not(target_os = "windows"))]

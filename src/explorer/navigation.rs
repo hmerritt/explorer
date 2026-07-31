@@ -103,7 +103,7 @@ impl ExplorerView {
         select_after_load: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if self.connect_sshfs_remote_path_with_watcher_selecting(
+        if self.connect_network_path_with_watcher_selecting(
             path.clone(),
             history_mode,
             parent,
@@ -341,7 +341,7 @@ impl ExplorerView {
     }
 
     #[cfg(target_os = "windows")]
-    pub(super) fn connect_sshfs_remote_path_with_watcher(
+    pub(super) fn connect_network_path_with_watcher(
         &mut self,
         path: PathBuf,
         history_mode: HistoryMode,
@@ -349,7 +349,7 @@ impl ExplorerView {
         initial_load: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.connect_sshfs_remote_path_with_watcher_selecting(
+        self.connect_network_path_with_watcher_selecting(
             path,
             history_mode,
             parent,
@@ -360,7 +360,7 @@ impl ExplorerView {
     }
 
     #[cfg(target_os = "windows")]
-    fn connect_sshfs_remote_path_with_watcher_selecting(
+    fn connect_network_path_with_watcher_selecting(
         &mut self,
         path: PathBuf,
         history_mode: HistoryMode,
@@ -369,11 +369,11 @@ impl ExplorerView {
         initial_load: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(target) = crate::explorer::filesystem::sshfs_connection_target_for_path(&path)
+        let Some(target) = crate::explorer::filesystem::network_connection_target_for_path(&path)
         else {
             return false;
         };
-        if self.sshfs_connect_task.is_some() {
+        if self.network_connect_task.is_some() {
             return true;
         }
 
@@ -390,12 +390,12 @@ impl ExplorerView {
                 .spawn(async move {
                     let parent =
                         parent.map(|parent| windows::Win32::Foundation::HWND(parent as *mut _));
-                    crate::explorer::filesystem::connect_sshfs_target(&target, parent)
+                    crate::explorer::filesystem::connect_network_target(&target, parent)
                 })
                 .await;
 
             let _ = this.update(cx, |explorer, cx| {
-                explorer.sshfs_connect_task = None;
+                explorer.network_connect_task = None;
                 if initial_load && explorer.loading_path.as_deref() == Some(path.as_path()) {
                     explorer.loading_path = None;
                 }
@@ -420,7 +420,7 @@ impl ExplorerView {
                 cx.notify();
             });
         });
-        self.sshfs_connect_task = Some(task);
+        self.network_connect_task = Some(task);
         true
     }
 
@@ -862,17 +862,17 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     #[cfg(target_os = "windows")]
-    fn sshfs_test_target() -> crate::explorer::filesystem::SshfsConnectionTarget {
-        crate::explorer::filesystem::SshfsConnectionTarget {
-            label: "ada@example.com (S:)".to_owned(),
-            remote_name: r"\\sshfs\ada@example.com".to_owned(),
+    fn network_test_target() -> crate::explorer::filesystem::NetworkConnectionTarget {
+        crate::explorer::filesystem::NetworkConnectionTarget {
+            label: "Team Share (S:)".to_owned(),
+            remote_name: r"\\server\share".to_owned(),
             local_name: Some("S:".to_owned()),
         }
     }
 
     #[cfg(target_os = "windows")]
-    fn sshfs_test_connector_failure(
-        _: &crate::explorer::filesystem::SshfsConnectionTarget,
+    fn network_test_connector_failure(
+        _: &crate::explorer::filesystem::NetworkConnectionTarget,
         _: Option<windows::Win32::Foundation::HWND>,
     ) -> std::io::Result<()> {
         Err(std::io::Error::new(
@@ -882,12 +882,12 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn sshfs_test_connector_slow_failure(
-        target: &crate::explorer::filesystem::SshfsConnectionTarget,
+    fn network_test_connector_slow_failure(
+        target: &crate::explorer::filesystem::NetworkConnectionTarget,
         parent: Option<windows::Win32::Foundation::HWND>,
     ) -> std::io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(250));
-        sshfs_test_connector_failure(target, parent)
+        network_test_connector_failure(target, parent)
     }
 
     #[test]
@@ -1662,15 +1662,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[gpui::test]
-    fn sshfs_sidebar_navigation_sets_info_notice_before_background_work(
+    fn network_sidebar_navigation_sets_info_notice_before_background_work(
         cx: &mut gpui::TestAppContext,
     ) {
-        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
-        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
-            sshfs_test_target(),
+        let _guard = crate::explorer::filesystem::network_connection_test_guard();
+        crate::explorer::filesystem::set_network_connection_targets_for_test(Some(vec![
+            network_test_target(),
         ]));
-        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
-            sshfs_test_connector_failure,
+        crate::explorer::filesystem::set_network_connector_for_test(Some(
+            network_test_connector_failure,
         ));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
@@ -1681,19 +1681,19 @@ mod tests {
                 &crate::settings::ExplorerSettings::default(),
             )
         });
-        let path = PathBuf::from(r"\\sshfs\ada@example.com");
+        let path = PathBuf::from(r"S:\");
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 view.navigate_to_sidebar_path_with_watcher(path, cx);
 
-                assert!(view.sshfs_connect_task.is_some());
+                assert!(view.network_connect_task.is_some());
                 let notice = view.operation_notice.as_ref().expect("connecting notice");
                 assert_eq!(
                     notice.kind,
                     crate::explorer::view::OperationNoticeKind::Info
                 );
-                assert_eq!(notice.text, "Connecting to ada@example.com (S:)...");
+                assert_eq!(notice.text, "Connecting to Team Share (S:)...");
             });
         });
         cx.run_until_parked();
@@ -1701,15 +1701,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[gpui::test]
-    fn failed_sshfs_sidebar_navigation_keeps_current_path_and_history(
+    fn failed_network_sidebar_navigation_keeps_current_path_and_history(
         cx: &mut gpui::TestAppContext,
     ) {
-        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
-        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
-            sshfs_test_target(),
+        let _guard = crate::explorer::filesystem::network_connection_test_guard();
+        crate::explorer::filesystem::set_network_connection_targets_for_test(Some(vec![
+            network_test_target(),
         ]));
-        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
-            sshfs_test_connector_failure,
+        crate::explorer::filesystem::set_network_connector_for_test(Some(
+            network_test_connector_failure,
         ));
         let (view, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
@@ -1720,7 +1720,7 @@ mod tests {
                 &crate::settings::ExplorerSettings::default(),
             )
         });
-        let path = PathBuf::from(r"\\sshfs\ada@example.com\photos");
+        let path = PathBuf::from(r"S:\photos");
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
@@ -1739,11 +1739,7 @@ mod tests {
                     notice.kind,
                     crate::explorer::view::OperationNoticeKind::Error
                 );
-                assert!(
-                    notice
-                        .text
-                        .contains("Could not connect to ada@example.com (S:)")
-                );
+                assert!(notice.text.contains("Could not connect to Team Share (S:)"));
                 assert!(notice.text.contains("network path missing"));
                 assert!(view.read_error.is_none());
             });
@@ -1752,15 +1748,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[gpui::test]
-    fn initial_sshfs_load_starts_connection_before_directory_load(cx: &mut gpui::TestAppContext) {
-        let _guard = crate::explorer::filesystem::sshfs_connection_test_guard();
-        crate::explorer::filesystem::set_sshfs_connection_targets_for_test(Some(vec![
-            sshfs_test_target(),
+    fn initial_network_load_starts_connection_before_directory_load(cx: &mut gpui::TestAppContext) {
+        let _guard = crate::explorer::filesystem::network_connection_test_guard();
+        crate::explorer::filesystem::set_network_connection_targets_for_test(Some(vec![
+            network_test_target(),
         ]));
-        crate::explorer::filesystem::set_sshfs_connector_for_test(Some(
-            sshfs_test_connector_slow_failure,
+        crate::explorer::filesystem::set_network_connector_for_test(Some(
+            network_test_connector_slow_failure,
         ));
-        let path = PathBuf::from(r"\\sshfs\ada@example.com");
+        let path = PathBuf::from(r"S:\");
         let (view, cx) = cx.add_window_view({
             let path = path.clone();
             move |window, cx| {
@@ -1776,14 +1772,14 @@ mod tests {
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                assert!(view.connect_sshfs_remote_path_with_watcher(
+                assert!(view.connect_network_path_with_watcher(
                     path.clone(),
                     HistoryMode::Preserve,
                     None,
                     true,
                     cx,
                 ));
-                assert!(view.sshfs_connect_task.is_some());
+                assert!(view.network_connect_task.is_some());
                 assert!(view.directory_load_task.is_none());
                 assert_eq!(view.loading_path.as_deref(), Some(path.as_path()));
                 assert_eq!(
@@ -1798,10 +1794,10 @@ mod tests {
         cx.update(|_, app| {
             view.read_with(app, |view, _| {
                 assert_eq!(view.path, path);
-                assert!(view.sshfs_connect_task.is_none());
+                assert!(view.network_connect_task.is_none());
                 assert!(view.directory_load_task.is_none());
                 assert!(view.read_error.as_deref().is_some_and(|error| {
-                    error.contains("Could not connect to ada@example.com (S:)")
+                    error.contains("Could not connect to Team Share (S:)")
                         && error.contains("network path missing")
                 }));
                 assert_eq!(

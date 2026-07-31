@@ -76,6 +76,7 @@ pub enum DriveHideKind {
 pub enum SidebarGroupKind {
     Pinned,
     Drives,
+    Network,
     Wsl,
 }
 
@@ -2158,6 +2159,7 @@ fn sidebar_group_kind_from_str(value: &str) -> Option<SidebarGroupKind> {
     match value {
         "pinned" => Some(SidebarGroupKind::Pinned),
         "drives" => Some(SidebarGroupKind::Drives),
+        "network" => Some(SidebarGroupKind::Network),
         "wsl" => Some(SidebarGroupKind::Wsl),
         _ => None,
     }
@@ -3049,13 +3051,17 @@ mod tests {
     #[test]
     fn sidebar_expanded_groups_deserialize_and_ignore_unknown_values() {
         let settings: ExplorerSettings = serde_json::from_str(
-            r#"{"sidebar":{"expanded_groups":["drives","future_group",42,"wsl","drives","macos"]}}"#,
+            r#"{"sidebar":{"expanded_groups":["drives","network","future_group",42,"wsl","drives","macos"]}}"#,
         )
         .expect("deserialize sidebar expanded group settings");
 
         assert_eq!(
             settings.sidebar.expanded_groups,
-            vec![SidebarGroupKind::Drives, SidebarGroupKind::Wsl]
+            vec![
+                SidebarGroupKind::Drives,
+                SidebarGroupKind::Network,
+                SidebarGroupKind::Wsl
+            ]
         );
     }
 

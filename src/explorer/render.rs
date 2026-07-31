@@ -67,7 +67,7 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
-    filesystem::{SshfsMountState, drive_root_is_ejectable, wsl_distro_kind_for_path},
+    filesystem::{NetworkDriveState, drive_root_is_ejectable, wsl_distro_kind_for_path},
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitRepositoryStatus},
     icons::{
@@ -81,7 +81,7 @@ use crate::explorer::{
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
-        pinned_group_icon, sshfs_drive_icon,
+        network_drive_icon, network_group_icon, pinned_group_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -1551,6 +1551,37 @@ impl ExplorerView {
                     ));
                 }
             }
+            previous_group_expanded = Some(expanded);
+        }
+
+        if !sections.network_drives.is_empty() {
+            if let Some(previous_group_expanded) = previous_group_expanded {
+                children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
+            }
+            let expanded =
+                sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Network);
+            children.push(self.render_sidebar_group_header(
+                SidebarGroupKind::Network,
+                "Network",
+                network_group_icon(),
+                expanded,
+                cx,
+            ));
+
+            if expanded {
+                children.push(sidebar_item_gap().into_any_element());
+                for (index, item) in sections.network_drives.iter().cloned().enumerate() {
+                    if index > 0 {
+                        children.push(sidebar_item_gap().into_any_element());
+                    }
+                    children.push(self.render_sidebar_row(
+                        index + 3_000,
+                        item,
+                        SIDEBAR_GROUP_CHILD_INDENT,
+                        cx,
+                    ));
+                }
+            }
             #[cfg(target_os = "windows")]
             {
                 previous_group_expanded = Some(expanded);
@@ -1578,7 +1609,7 @@ impl ExplorerView {
                         children.push(sidebar_item_gap().into_any_element());
                     }
                     children.push(self.render_sidebar_row(
-                        index + 3_000,
+                        index + 4_000,
                         item,
                         SIDEBAR_GROUP_CHILD_INDENT,
                         cx,
@@ -1898,7 +1929,7 @@ impl ExplorerView {
                 | SidebarItemKind::CustomDirectory
                 | SidebarItemKind::Drive
                 | SidebarItemKind::DriveWindows
-                | SidebarItemKind::DriveSshfs(SshfsMountState::Connected)
+                | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
                 | SidebarItemKind::DriveWsl
         );
         let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
@@ -3364,6 +3395,7 @@ fn sidebar_group_header_id(kind: SidebarGroupKind) -> &'static str {
     match kind {
         SidebarGroupKind::Pinned => "explorer-sidebar-group-pinned",
         SidebarGroupKind::Drives => "explorer-sidebar-group-drives",
+        SidebarGroupKind::Network => "explorer-sidebar-group-network",
         SidebarGroupKind::Wsl => "explorer-sidebar-group-wsl",
     }
 }
@@ -3424,11 +3456,13 @@ fn sidebar_context_menu_target(
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
-        SidebarItemKind::DriveSshfs(_) => Some(DirectoryKind::Drive),
+        SidebarItemKind::DriveNetwork(_) => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
     };
     let can_eject = match item.kind {
-        SidebarItemKind::Drive => drive_root_is_ejectable(&item.path),
+        SidebarItemKind::Drive | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected) => {
+            drive_root_is_ejectable(&item.path)
+        }
         _ => false,
     };
     (
@@ -3488,7 +3522,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::Drive if drive_root_is_ejectable(path) => drive_disc_icon_for_path(path),
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
-        SidebarItemKind::DriveSshfs(state) => sshfs_drive_icon(state).into_any_element(),
+        SidebarItemKind::DriveNetwork(state) => network_drive_icon(state).into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
     }
 }
@@ -6957,7 +6991,7 @@ mod tests {
             NAV_BUTTON_ACTIVE_OPACITY,
         },
         entry::FileEntry,
-        filesystem::SshfsMountState,
+        filesystem::NetworkDriveState,
         git_status::{GitDivergence, GitRepositoryStatus},
         navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
@@ -8282,10 +8316,10 @@ mod tests {
             kind: SidebarItemKind::DriveWindows,
             configured_index: None,
         };
-        let sshfs_drive = SidebarItem {
-            label: "hbox".to_owned(),
-            path: PathBuf::from(r"\\sshfs\ada@example.com"),
-            kind: SidebarItemKind::DriveSshfs(SshfsMountState::Disconnected),
+        let network_drive = SidebarItem {
+            label: "Team Share (S:)".to_owned(),
+            path: PathBuf::from(r"S:\"),
+            kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Disconnected),
             configured_index: None,
         };
         let wsl_drive = SidebarItem {
@@ -8326,9 +8360,9 @@ mod tests {
             )
         );
         assert_eq!(
-            sidebar_context_menu_target(&sshfs_drive),
+            sidebar_context_menu_target(&network_drive),
             (
-                PathBuf::from(r"\\sshfs\ada@example.com"),
+                PathBuf::from(r"S:\"),
                 None,
                 Some(DirectoryKind::Drive),
                 false
@@ -8462,6 +8496,53 @@ mod tests {
         );
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
         assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_none());
+    }
+
+    #[gpui::test]
+    fn sidebar_renders_network_group_below_drives_and_tracks_expansion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Network];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: PathBuf::from(r"C:\"),
+                    kind: SidebarItemKind::DriveWindows,
+                    configured_index: None,
+                }],
+                network_drives: vec![SidebarItem {
+                    label: "Team Share (S:)".to_owned(),
+                    path: PathBuf::from(r"S:\"),
+                    kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Disconnected),
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        let drives = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drives group bounds");
+        let network = cx
+            .debug_bounds("explorer-sidebar-group-network")
+            .expect("network group bounds");
+        assert!(network.origin.y > drives.origin.y);
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_some());
     }
 
     #[gpui::test]
@@ -8739,7 +8820,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_some());
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -8772,7 +8853,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_none());
-        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_none());
     }
 
     #[gpui::test]

@@ -8,7 +8,7 @@ use std::{
 use crate::explorer::{
     directory_kind::DirectoryKind,
     filesystem::{
-        DriveDiscKind, SshfsMountState, WslDistroKind, archive_path_is_supported,
+        DriveDiscKind, NetworkDriveState, WslDistroKind, archive_path_is_supported,
         drive_root_disc_kind, wsl_distro_kind_for_path,
     },
 };
@@ -135,6 +135,7 @@ png_icon!(FOLDER_ICON, "folders", "folder.png");
 png_icon!(FOLDER_SHORTCUT_ICON, "folders", "shortcut.png");
 png_icon!(ARCHIVE_FILE_ICON, "folders", "zip.png");
 png_icon!(PINNED_GROUP_ICON, "emblems", "star.png");
+png_icon!(NETWORK_GROUP_ICON, "folders", "network.png");
 
 png_icon!(
     APPLICATIONS_SIDEBAR_ICON,
@@ -403,6 +404,10 @@ pub(super) fn drives_group_icon() -> AnyElement {
     image_sidebar_icon(DRIVES_GROUP_ICON.clone())
 }
 
+pub(super) fn network_group_icon() -> AnyElement {
+    image_sidebar_icon(NETWORK_GROUP_ICON.clone())
+}
+
 pub(super) fn desktop_folder_icon() -> AnyElement {
     image_sidebar_icon(DESKTOP_SIDEBAR_ICON.clone())
 }
@@ -478,14 +483,14 @@ pub(super) fn drive_wsl_icon_sized_for_path(path: &Path, size: f32) -> AnyElemen
     image_icon(wsl_distro_image(kind), size, size)
 }
 
-pub(super) fn sshfs_drive_icon(state: SshfsMountState) -> AnyElement {
-    image_sidebar_icon(sshfs_drive_image_for_state(state))
+pub(super) fn network_drive_icon(state: NetworkDriveState) -> AnyElement {
+    image_sidebar_icon(network_drive_image_for_state(state))
 }
 
-fn sshfs_drive_image_for_state(state: SshfsMountState) -> Arc<Image> {
+fn network_drive_image_for_state(state: NetworkDriveState) -> Arc<Image> {
     match state {
-        SshfsMountState::Connected => NETWORK_DRIVE_ICON.clone(),
-        SshfsMountState::Disconnected => NETWORK_DRIVE_DISCONNECTED_ICON.clone(),
+        NetworkDriveState::Connected => NETWORK_DRIVE_ICON.clone(),
+        NetworkDriveState::Disconnected => NETWORK_DRIVE_DISCONNECTED_ICON.clone(),
     }
 }
 
@@ -595,13 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn sshfs_drive_icons_use_connected_image_only_for_connected_state() {
+    fn network_drive_icons_use_connected_image_only_for_connected_state() {
         assert_eq!(
-            sshfs_drive_image_for_state(SshfsMountState::Connected).id(),
+            network_drive_image_for_state(NetworkDriveState::Connected).id(),
             NETWORK_DRIVE_ICON.clone().id()
         );
         assert_eq!(
-            sshfs_drive_image_for_state(SshfsMountState::Disconnected).id(),
+            network_drive_image_for_state(NetworkDriveState::Disconnected).id(),
             NETWORK_DRIVE_DISCONNECTED_ICON.clone().id()
         );
     }

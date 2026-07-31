@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::explorer::filesystem::{
-    SshfsMount, SshfsMountState, sshfs_mounts, windows_local_os_drive_root,
+    NetworkDrive, NetworkDriveState, network_drives, path_is_remote_drive,
+    windows_local_os_drive_root,
 };
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
@@ -22,7 +23,7 @@ pub(super) enum SidebarItemKind {
     CustomDirectory,
     Drive,
     DriveWindows,
-    DriveSshfs(SshfsMountState),
+    DriveNetwork(NetworkDriveState),
     DriveWsl,
 }
 
@@ -30,11 +31,15 @@ pub(super) fn sidebar_sections(
     settings: &SidebarSettings,
     filesystem_name: &str,
 ) -> SidebarSections {
+    let (network_roots, drive_roots) = local_drive_roots()
+        .into_iter()
+        .partition(|path| path_is_remote_drive(path));
     sidebar_sections_from_roots_internal(
         settings,
         filesystem_name,
-        local_drive_roots(),
-        sshfs_mounts(),
+        drive_roots,
+        network_roots,
+        network_drives(),
         wsl_drive_roots(),
     )
 }
@@ -43,15 +48,17 @@ fn sidebar_sections_from_roots_internal(
     settings: &SidebarSettings,
     filesystem_name: &str,
     drive_roots: Vec<PathBuf>,
-    sshfs_mounts: Vec<SshfsMount>,
+    network_roots: Vec<PathBuf>,
+    discovered_network_drives: Vec<NetworkDrive>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
-    let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
-    drives.extend(sshfs_drive_items(sshfs_mounts));
+    let mut network_drives = network_drive_items_from_roots(network_roots, filesystem_name);
+    network_drives.extend(network_drive_items(discovered_network_drives));
     SidebarSections {
         user_directories: configured_sidebar_items(&settings.items, filesystem_name),
-        drives,
+        drives: drive_items_from_roots(drive_roots, filesystem_name),
+        network_drives,
         wsl_drives: if hide_wsl_drives {
             Vec::new()
         } else {
@@ -72,6 +79,7 @@ fn sidebar_sections_from_roots(
         filesystem_name,
         drive_roots,
         Vec::new(),
+        Vec::new(),
         wsl_roots,
     )
 }
@@ -81,14 +89,16 @@ fn sidebar_sections_from_sources(
     settings: &SidebarSettings,
     filesystem_name: &str,
     drive_roots: Vec<PathBuf>,
-    sshfs_mounts: Vec<SshfsMount>,
+    network_roots: Vec<PathBuf>,
+    network_drives: Vec<NetworkDrive>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     sidebar_sections_from_roots_internal(
         settings,
         filesystem_name,
         drive_roots,
-        sshfs_mounts,
+        network_roots,
+        network_drives,
         wsl_roots,
     )
 }
@@ -97,6 +107,7 @@ fn sidebar_sections_from_sources(
 pub(super) struct SidebarSections {
     pub(super) user_directories: Vec<SidebarItem>,
     pub(super) drives: Vec<SidebarItem>,
+    pub(super) network_drives: Vec<SidebarItem>,
     pub(super) wsl_drives: Vec<SidebarItem>,
 }
 
@@ -187,7 +198,7 @@ fn sidebar_item_label_for_path(
         SidebarItemKind::Drive | SidebarItemKind::DriveWindows => {
             sidebar_drive_label(path, filesystem_name)
         }
-        SidebarItemKind::DriveSshfs(_) => home_sidebar_label(path),
+        SidebarItemKind::DriveNetwork(_) => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
     }
@@ -221,13 +232,25 @@ fn drive_items_from_roots(roots: Vec<PathBuf>, filesystem_name: &str) -> Vec<Sid
         .collect()
 }
 
-fn sshfs_drive_items(mounts: Vec<SshfsMount>) -> Vec<SidebarItem> {
-    mounts
+fn network_drive_items(drives: Vec<NetworkDrive>) -> Vec<SidebarItem> {
+    drives
         .into_iter()
-        .map(|mount| SidebarItem {
-            label: mount.label,
-            path: mount.path,
-            kind: SidebarItemKind::DriveSshfs(mount.state),
+        .map(|drive| SidebarItem {
+            label: drive.label,
+            path: drive.path,
+            kind: SidebarItemKind::DriveNetwork(drive.state),
+            configured_index: None,
+        })
+        .collect()
+}
+
+fn network_drive_items_from_roots(roots: Vec<PathBuf>, filesystem_name: &str) -> Vec<SidebarItem> {
+    roots
+        .into_iter()
+        .map(|path| SidebarItem {
+            label: sidebar_drive_label(&path, filesystem_name),
+            path,
+            kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Connected),
             configured_index: None,
         })
         .collect()
@@ -534,8 +557,9 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_sections_append_sshfs_mounts_after_local_drives_before_wsl() {
-        let sshfs_path = PathBuf::from(r"\\sshfs\ada@example.com");
+    fn sidebar_sections_keep_network_drives_separate_from_local_drives_and_wsl() {
+        let mapped_path = PathBuf::from(r"S:\");
+        let mounted_path = PathBuf::from("/mnt/team");
         let sections = sidebar_sections_from_sources(
             &SidebarSettings {
                 items: Vec::new(),
@@ -543,24 +567,32 @@ mod tests {
             },
             "Filesystem",
             vec![PathBuf::from("X:\\")],
-            vec![SshfsMount {
-                label: "hbox".to_owned(),
-                path: sshfs_path.clone(),
-                state: SshfsMountState::Connected,
+            vec![mounted_path.clone()],
+            vec![NetworkDrive {
+                label: "Team Share (S:)".to_owned(),
+                path: mapped_path.clone(),
+                state: NetworkDriveState::Connected,
                 local_name: Some("S:".to_owned()),
+                remote_name: r"\\server\team".to_owned(),
             }],
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
 
-        assert_eq!(sections.drives.len(), 2);
+        assert_eq!(sections.drives.len(), 1);
         assert_eq!(sections.drives[0].path, PathBuf::from("X:\\"));
         assert_eq!(sections.drives[0].kind, SidebarItemKind::Drive);
+        assert_eq!(sections.network_drives.len(), 2);
+        assert_eq!(sections.network_drives[0].path, mounted_path);
         assert_eq!(
-            sections.drives[1],
+            sections.network_drives[0].kind,
+            SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
+        );
+        assert_eq!(
+            sections.network_drives[1],
             SidebarItem {
-                label: "hbox".to_owned(),
-                path: sshfs_path,
-                kind: SidebarItemKind::DriveSshfs(SshfsMountState::Connected),
+                label: "Team Share (S:)".to_owned(),
+                path: mapped_path,
+                kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Connected),
                 configured_index: None,
             }
         );
