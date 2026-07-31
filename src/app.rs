@@ -617,6 +617,18 @@ fn start_single_instance_request_handler(
     .detach();
 }
 
+fn install_single_instance_server(primary: SingleInstancePrimary, cx: &mut App) {
+    start_single_instance_request_handler(primary.requests, cx);
+    cx.set_global(SingleInstanceServer {
+        _guard: primary.guard,
+    });
+    cx.on_app_quit(|cx| {
+        drop(cx.remove_global::<SingleInstanceServer>());
+        async {}
+    })
+    .detach();
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn launch_requests_from_open_urls(urls: impl IntoIterator<Item = String>) -> Vec<LaunchRequest> {
     urls.into_iter()
@@ -1267,10 +1279,7 @@ pub fn run() {
         cx.bind_keys(platform_key_bindings());
 
         if let Some(primary) = single_instance_primary {
-            start_single_instance_request_handler(primary.requests, cx);
-            cx.set_global(SingleInstanceServer {
-                _guard: primary.guard,
-            });
+            install_single_instance_server(primary, cx);
         }
 
         #[cfg(target_os = "macos")]
@@ -2300,6 +2309,24 @@ mod tests {
             Some(request)
         );
         drop(primary);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn clean_shutdown_removes_single_instance_files(cx: &mut TestAppContext) {
+        let dir = unique_temp_dir("single-instance-clean-shutdown");
+        let paths = single_instance_paths(&dir);
+        let primary = start_single_instance_primary(paths.clone()).expect("start primary");
+        assert!(paths.lock_path.is_file());
+        assert!(paths.endpoint_path.is_file());
+
+        cx.update(|cx| install_single_instance_server(primary, cx));
+        cx.quit();
+
+        assert!(!paths.lock_path.exists());
+        assert!(!paths.endpoint_path.exists());
+        let replacement = start_single_instance_primary(paths).expect("start replacement primary");
+        drop(replacement);
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -2117,7 +2117,11 @@ impl ExplorerView {
                     let entity = entity.clone();
                     move |dragged_value, window, cx| {
                         entity.update(cx, |this, _| {
-                            this.can_drop_value(dragged_value, &destination, window.modifiers())
+                            this.can_drop_value_nonblocking(
+                                dragged_value,
+                                &destination,
+                                window.modifiers(),
+                            )
                         })
                     }
                 })
@@ -4188,7 +4192,7 @@ fn add_drop_handlers(
             let entity = entity.clone();
             move |dragged_value, window, cx| {
                 entity.update(cx, |this, _| {
-                    this.can_drop_value(dragged_value, &destination, window.modifiers())
+                    this.can_drop_value_nonblocking(dragged_value, &destination, window.modifiers())
                 })
             }
         });
@@ -5525,7 +5529,7 @@ fn directory_bar_label(
             let entity = entity.clone();
             move |dragged_value, window, cx| {
                 entity.update(cx, |this, _| {
-                    this.can_drop_value(dragged_value, &destination, window.modifiers())
+                    this.can_drop_value_nonblocking(dragged_value, &destination, window.modifiers())
                 })
             }
         })
@@ -5612,13 +5616,24 @@ fn update_drag_cursor_if_hovered<T: 'static>(
         return;
     }
 
-    let (cursor, indicator) = entity.update(cx, |this, _| {
-        this.drop_feedback_for_value(
-            event.dragged_item(),
-            destination,
-            window.modifiers(),
-            event.event.position,
-        )
+    let (cursor, indicator) = entity.update(cx, |this, cx| {
+        let dragged_value = event.dragged_item() as &dyn Any;
+        if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+            this.request_internal_drop_feedback(
+                dragged,
+                destination,
+                window.modifiers(),
+                event.event.position,
+                cx,
+            )
+        } else {
+            this.drop_feedback_for_value(
+                dragged_value,
+                destination,
+                window.modifiers(),
+                event.event.position,
+            )
+        }
     });
     cx.set_active_drag_cursor_style(cursor, window);
 
@@ -7496,9 +7511,10 @@ mod tests {
 
         cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
-        cx.read_entity(&view, |view, _| {
+        cx.read_entity(&view, |view, app| {
             assert_eq!(view.test_drag_payload_build_count(), 1);
             assert_eq!(view.details_name_hit_measurement_count.get(), 0);
+            assert!(app.has_active_drag());
         });
 
         for offset in [24.0, 30.0, 36.0, 42.0] {

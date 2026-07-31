@@ -116,6 +116,7 @@ pub struct ExplorerView {
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
+    pub(super) pending_drop_task: Option<Task<()>>,
     pub(super) active_file_operation: Option<FileOperationState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
     pub(super) active_rename: Option<RenameState>,
@@ -371,10 +372,17 @@ impl ExplorerView {
         {
             let _ = parent_window;
         }
-        view.reload_async_with_options(
+        view.start_initial_directory_load(cx);
+        view.observe_icon_caches(cx);
+        view.observe_image_thumbnail_cache(cx);
+        view
+    }
+
+    fn start_initial_directory_load(&mut self, cx: &mut Context<Self>) {
+        self.reload_async_with_options(
             ReloadMode {
                 preserve_selection: false,
-                rebuild_sidebar: true,
+                rebuild_sidebar: false,
                 preserve_context_menu: false,
             },
             Vec::new(),
@@ -383,9 +391,6 @@ impl ExplorerView {
             true,
             cx,
         );
-        view.observe_icon_caches(cx);
-        view.observe_image_thumbnail_cache(cx);
-        view
     }
 
     #[cfg(test)]
@@ -493,6 +498,7 @@ impl ExplorerView {
             pending_permanent_delete: None,
             pending_trash: None,
             pending_file_conflict: None,
+            pending_drop_task: None,
             active_file_operation: None,
             active_dialog_window: None,
             active_rename: None,
@@ -1920,6 +1926,7 @@ impl ExplorerView {
         self.pending_permanent_delete = None;
         self.pending_trash = None;
         self.pending_file_conflict = None;
+        self.pending_drop_task = None;
 
         if self.active_file_operation.is_none()
             && let Some(handle) = self.active_dialog_window.take()
@@ -3677,6 +3684,41 @@ mod tests {
                 ));
                 assert!(view.entries.is_empty());
             });
+        });
+    }
+
+    #[gpui::test]
+    fn initial_async_directory_load_preserves_constructor_sidebar(cx: &mut gpui::TestAppContext) {
+        let temp = crate::explorer::test_support::TempDir::new();
+        let path = temp.path().to_path_buf();
+        let mut constructor_sidebar = SidebarSections::default();
+        constructor_sidebar
+            .drives
+            .push(crate::explorer::sidebar::SidebarItem {
+                label: "Constructor drive".to_owned(),
+                path: PathBuf::from("/constructor-drive"),
+                kind: crate::explorer::sidebar::SidebarItemKind::Drive,
+                configured_index: None,
+            });
+        let expected_sidebar = constructor_sidebar.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_unloaded_inner_with_settings(
+                path,
+                Some(focus_handle),
+                &ExplorerSettings::default(),
+            );
+            view.sidebar_sections = constructor_sidebar;
+            view.start_initial_directory_load(cx);
+            view
+        });
+
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.sidebar_sections, expected_sidebar);
+            assert!(view.loading_path.is_none());
         });
     }
 

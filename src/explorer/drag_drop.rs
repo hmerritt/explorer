@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
@@ -19,8 +19,9 @@ use crate::explorer::{
     entry::FileEntry,
     explorer_fs::ExplorerFs,
     filesystem::{
-        path_volume_key, paths_are_on_same_volume, prepare_copy_paths_to_directory_with_copy_names,
-        prepare_create_links_to_directory, prepare_move_paths_to_directory,
+        PreparedFileOperation, path_volume_key, paths_are_on_same_volume,
+        prepare_copy_paths_to_directory_with_copy_names, prepare_create_links_to_directory,
+        prepare_move_paths_to_directory,
     },
     view::ExplorerView,
 };
@@ -57,14 +58,21 @@ impl Eq for DraggedEntries {}
 #[derive(Debug)]
 struct InternalDragSourceFacts {
     selected_paths: HashSet<PathBuf>,
-    directory_paths: DirectoryPathIndex,
-    source_dir: DropPathIdentity,
-    volume_keys: OnceLock<HashSet<String>>,
-    cached_resolution: Mutex<Option<CachedInternalDropResolution>>,
+    directory_paths: Vec<PathBuf>,
+    source_dir: PathBuf,
+    analysis: OnceLock<ResolvedInternalDragSourceFacts>,
+    cached_resolutions: Mutex<HashMap<InternalDropResolutionKey, CachedResolutionState>>,
     #[cfg(test)]
     resolution_computations: AtomicUsize,
     #[cfg(test)]
     volume_key_computations: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct ResolvedInternalDragSourceFacts {
+    directory_paths: DirectoryPathIndex,
+    source_dir: DropPathIdentity,
+    volume_keys: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,15 +88,20 @@ struct DirectoryPathIndex {
     lexical_without_canonical: HashSet<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CachedInternalDropResolution {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct InternalDropResolutionKey {
     destination: DropDestination,
     current_directory: PathBuf,
     modifiers: DropModifierState,
-    resolution: DraggedValueDropResolution,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CachedResolutionState {
+    Pending,
+    Ready(DraggedValueDropResolution),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DropModifierState {
     secondary: bool,
     shift: bool,
@@ -105,7 +118,7 @@ impl From<Modifiers> for DropModifierState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) enum DropDestination {
     CurrentDirectory,
     Directory {
@@ -356,14 +369,42 @@ impl InternalDragSourceFacts {
     fn new(paths: &[PathBuf], directory_paths: Vec<PathBuf>, source_dir: &Path) -> Self {
         Self {
             selected_paths: paths.iter().cloned().collect(),
-            directory_paths: DirectoryPathIndex::new(directory_paths),
-            source_dir: DropPathIdentity::new(source_dir.to_path_buf()),
-            volume_keys: OnceLock::new(),
-            cached_resolution: Mutex::new(None),
+            directory_paths,
+            source_dir: source_dir.to_path_buf(),
+            analysis: OnceLock::new(),
+            cached_resolutions: Mutex::new(HashMap::new()),
             #[cfg(test)]
             resolution_computations: AtomicUsize::new(0),
             #[cfg(test)]
             volume_key_computations: AtomicUsize::new(0),
+        }
+    }
+
+    fn analysis(&self) -> &ResolvedInternalDragSourceFacts {
+        self.analysis.get_or_init(|| {
+            #[cfg(test)]
+            self.volume_key_computations.fetch_add(1, Ordering::Relaxed);
+            ResolvedInternalDragSourceFacts {
+                directory_paths: DirectoryPathIndex::new(self.directory_paths.clone()),
+                source_dir: DropPathIdentity::new(self.source_dir.clone()),
+                volume_keys: self
+                    .selected_paths
+                    .iter()
+                    .filter_map(|source| path_volume_key(source))
+                    .collect(),
+            }
+        })
+    }
+
+    fn resolution_key(
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> InternalDropResolutionKey {
+        InternalDropResolutionKey {
+            destination: destination.clone(),
+            current_directory: current_directory.to_path_buf(),
+            modifiers: DropModifierState::from(modifiers),
         }
     }
 
@@ -373,17 +414,34 @@ impl InternalDragSourceFacts {
         current_directory: &Path,
         modifiers: Modifiers,
     ) -> Option<DraggedValueDropResolution> {
-        let modifiers = DropModifierState::from(modifiers);
+        let key = Self::resolution_key(destination, current_directory, modifiers);
         let cache = self
-            .cached_resolution
+            .cached_resolutions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.as_ref().and_then(|cached| {
-            (cached.destination == *destination
-                && cached.current_directory == current_directory
-                && cached.modifiers == modifiers)
-                .then_some(cached.resolution)
-        })
+        match cache.get(&key) {
+            Some(CachedResolutionState::Ready(resolution)) => Some(*resolution),
+            Some(CachedResolutionState::Pending) | None => None,
+        }
+    }
+
+    fn mark_resolution_pending(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> bool {
+        let key = Self::resolution_key(destination, current_directory, modifiers);
+        let mut cache = self
+            .cached_resolutions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.contains_key(&key) {
+            false
+        } else {
+            cache.insert(key, CachedResolutionState::Pending);
+            true
+        }
     }
 
     fn store_resolution(
@@ -393,17 +451,12 @@ impl InternalDragSourceFacts {
         modifiers: Modifiers,
         resolution: DraggedValueDropResolution,
     ) {
-        let modifiers = DropModifierState::from(modifiers);
+        let key = Self::resolution_key(destination, current_directory, modifiers);
         let mut cache = self
-            .cached_resolution
+            .cached_resolutions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *cache = Some(CachedInternalDropResolution {
-            destination: destination.clone(),
-            current_directory: current_directory.to_path_buf(),
-            modifiers,
-            resolution,
-        });
+        cache.insert(key, CachedResolutionState::Ready(resolution));
     }
 }
 
@@ -450,6 +503,38 @@ impl DraggedEntries {
         )
     }
 
+    fn compute_drop_resolution(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> DraggedValueDropResolution {
+        #[cfg(test)]
+        self.source_facts
+            .resolution_computations
+            .fetch_add(1, Ordering::Relaxed);
+
+        let source_analysis = self.source_facts.analysis();
+        let destination_item = destination.item_path(current_directory);
+        let resolved_destination = destination.resolve(current_directory);
+        let validity = internal_drop_target_validity(
+            &destination_item,
+            &resolved_destination,
+            self,
+            source_analysis,
+            modifiers,
+        );
+        DraggedValueDropResolution {
+            resolved: resolve_drop_operation_for_internal_drag(
+                modifiers,
+                validity.valid,
+                source_analysis,
+                &resolved_destination,
+            ),
+            explicit_operation_required: validity.explicit_operation_required,
+        }
+    }
+
     fn resolve_drop(
         &self,
         destination: &DropDestination,
@@ -463,50 +548,55 @@ impl DraggedEntries {
             return resolution;
         }
 
-        #[cfg(test)]
-        self.source_facts
-            .resolution_computations
-            .fetch_add(1, Ordering::Relaxed);
-
-        let destination_item = destination.item_path(current_directory);
-        let resolved_destination = destination.resolve(current_directory);
-        let validity = internal_drop_target_validity(
-            destination,
-            current_directory,
-            &destination_item,
-            &resolved_destination,
-            self,
-            modifiers,
-        );
-        let resolution = DraggedValueDropResolution {
-            resolved: resolve_drop_operation_for_internal_drag(
-                modifiers,
-                validity.valid,
-                self,
-                &resolved_destination,
-            ),
-            explicit_operation_required: validity.explicit_operation_required,
-        };
+        let resolution = self.compute_drop_resolution(destination, current_directory, modifiers);
         self.source_facts
             .store_resolution(destination, current_directory, modifiers, resolution);
         resolution
     }
 
-    fn drop_should_copy_by_default(&self, destination: &Path) -> bool {
+    fn provisional_drop_resolution(
+        &self,
+        destination: &DropDestination,
+        current_directory: &Path,
+        modifiers: Modifiers,
+    ) -> DraggedValueDropResolution {
+        if let Some(resolution) =
+            self.source_facts
+                .cached_resolution(destination, current_directory, modifiers)
+        {
+            return resolution;
+        }
+
+        let destination_item = destination.item_path(current_directory);
+        let resolved_destination = destination.resolve(current_directory);
+        let validity = provisional_internal_drop_target_validity(
+            &destination_item,
+            &resolved_destination,
+            self,
+            modifiers,
+        );
+        DraggedValueDropResolution {
+            resolved: resolve_provisional_internal_drop_operation(
+                modifiers,
+                validity.valid,
+                &self.paths,
+                &resolved_destination,
+            ),
+            explicit_operation_required: validity.explicit_operation_required,
+        }
+    }
+
+    fn drop_should_copy_by_default(
+        source_analysis: &ResolvedInternalDragSourceFacts,
+        destination: &Path,
+    ) -> bool {
         let Some(destination_key) = path_volume_key(destination) else {
             return false;
         };
-        let source_keys = self.source_facts.volume_keys.get_or_init(|| {
-            #[cfg(test)]
-            self.source_facts
-                .volume_key_computations
-                .fetch_add(1, Ordering::Relaxed);
-            self.paths
-                .iter()
-                .filter_map(|source| path_volume_key(source))
-                .collect()
-        });
-        source_keys.iter().any(|source| source != &destination_key)
+        source_analysis
+            .volume_keys
+            .iter()
+            .any(|source| source != &destination_key)
     }
 
     #[cfg(test)]
@@ -521,6 +611,11 @@ impl DraggedEntries {
         self.source_facts
             .volume_key_computations
             .load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn test_source_analysis_initialized(&self) -> bool {
+        self.source_facts.analysis.get().is_some()
     }
 
     #[cfg(test)]
@@ -637,6 +732,23 @@ impl ExplorerView {
             .is_some()
     }
 
+    pub(super) fn can_drop_value_nonblocking(
+        &self,
+        dragged_value: &dyn Any,
+        destination: &DropDestination,
+        modifiers: Modifiers,
+    ) -> bool {
+        if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
+            return dragged
+                .provisional_drop_resolution(destination, &self.path, modifiers)
+                .resolved
+                .operation()
+                .is_some();
+        }
+
+        self.can_drop_value(dragged_value, destination, modifiers)
+    }
+
     pub(super) fn can_trash_drop_value(&self, dragged_value: &dyn Any) -> bool {
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
             return !dragged.paths.is_empty();
@@ -670,6 +782,55 @@ impl ExplorerView {
         let cursor = resolution.resolved.cursor_style();
         let indicator =
             self.drop_indicator_from_resolution(destination, resolution, mouse_position);
+        (cursor, indicator)
+    }
+
+    pub(super) fn request_internal_drop_feedback(
+        &mut self,
+        dragged: &DraggedEntries,
+        destination: &DropDestination,
+        modifiers: Modifiers,
+        mouse_position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> (CursorStyle, Option<DropIndicator>) {
+        let current_directory = self.path.clone();
+        let provisional =
+            dragged.provisional_drop_resolution(destination, &current_directory, modifiers);
+
+        if dragged
+            .source_facts
+            .mark_resolution_pending(destination, &current_directory, modifiers)
+        {
+            let dragged = dragged.clone();
+            let destination = destination.clone();
+            cx.spawn(async move |this, cx| {
+                let resolver_dragged = dragged.clone();
+                let resolver_destination = destination.clone();
+                let resolver_current_directory = current_directory.clone();
+                let resolution = cx
+                    .background_executor()
+                    .spawn(async move {
+                        resolver_dragged.compute_drop_resolution(
+                            &resolver_destination,
+                            &resolver_current_directory,
+                            modifiers,
+                        )
+                    })
+                    .await;
+                dragged.source_facts.store_resolution(
+                    &destination,
+                    &current_directory,
+                    modifiers,
+                    resolution,
+                );
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+
+        let cursor = provisional.resolved.cursor_style();
+        let indicator =
+            self.drop_indicator_from_resolution(destination, provisional, mouse_position);
         (cursor, indicator)
     }
 
@@ -736,12 +897,12 @@ impl ExplorerView {
     ) {
         let destination_item = destination.item_path(&self.path);
         let resolved_destination = destination.resolve(&self.path);
+        let source_analysis = dragged.source_facts.analysis();
         let validity = internal_drop_target_validity(
-            &destination,
-            &self.path,
             &destination_item,
             &resolved_destination,
             dragged,
+            source_analysis,
             modifiers,
         );
         if !validity.valid {
@@ -758,26 +919,35 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let destination_item = destination.item_path(&self.path);
-        let resolved_destination = destination.resolve(&self.path);
-        let validity = internal_drop_target_validity(
-            &destination,
-            &self.path,
-            &destination_item,
-            &resolved_destination,
-            dragged,
-            modifiers,
-        );
-        if !validity.valid {
+        if self.pending_drop_task.is_some() || self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
 
-        self.perform_file_drop_and_open_dialog(
-            &dragged.paths,
-            &resolved_destination,
-            modifiers,
-            cx,
-        );
+        let dragged = dragged.clone();
+        let current_directory = self.path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    prepare_internal_file_drop(
+                        &dragged,
+                        &destination,
+                        &current_directory,
+                        modifiers,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.pending_drop_task = None;
+                if let Some(result) = result {
+                    explorer.handle_prepared_file_command_result_and_open_dialog(result, cx);
+                }
+                cx.notify();
+            });
+        });
+        self.pending_drop_task = Some(task);
     }
 
     #[cfg(test)]
@@ -864,30 +1034,62 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         let valid_target = drop_destination_is_dir(destination);
-        match resolve_drop_operation_for_paths(modifiers, valid_target, paths, destination) {
-            ResolvedDrop::Move => {
-                self.handle_prepared_file_command_result_and_open_dialog(
-                    prepare_move_paths_to_directory(paths, destination),
-                    cx,
-                );
-            }
-            ResolvedDrop::Copy => {
-                self.handle_prepared_file_command_result_and_open_dialog(
-                    prepare_copy_paths_to_directory_with_copy_names(paths, destination),
-                    cx,
-                );
-            }
-            ResolvedDrop::Link => {
-                self.handle_prepared_file_command_result_and_open_dialog(
-                    prepare_create_links_to_directory(paths, destination),
-                    cx,
-                );
-            }
-            ResolvedDrop::Invalid => {
-                self.set_error_notice("This drop target is not valid.".to_owned());
-            }
-        }
+        let result =
+            match resolve_drop_operation_for_paths(modifiers, valid_target, paths, destination) {
+                ResolvedDrop::Move => prepare_move_paths_to_directory(paths, destination),
+                ResolvedDrop::Copy => {
+                    prepare_copy_paths_to_directory_with_copy_names(paths, destination)
+                }
+                ResolvedDrop::Link => prepare_create_links_to_directory(paths, destination),
+                ResolvedDrop::Invalid => {
+                    self.set_error_notice("This drop target is not valid.".to_owned());
+                    return;
+                }
+            };
+        self.handle_prepared_file_command_result_and_open_dialog(result, cx);
     }
+}
+
+fn prepare_internal_file_drop(
+    dragged: &DraggedEntries,
+    destination: &DropDestination,
+    current_directory: &Path,
+    modifiers: Modifiers,
+) -> Option<Result<PreparedFileOperation, String>> {
+    let destination_item = destination.item_path(current_directory);
+    let resolved_destination = destination.resolve(current_directory);
+    let source_analysis = dragged.source_facts.analysis();
+    let validity = internal_drop_target_validity(
+        &destination_item,
+        &resolved_destination,
+        dragged,
+        source_analysis,
+        modifiers,
+    );
+    if !validity.valid {
+        return None;
+    }
+
+    Some(
+        match resolve_drop_operation_for_internal_drag(
+            modifiers,
+            true,
+            source_analysis,
+            &resolved_destination,
+        ) {
+            ResolvedDrop::Move => {
+                prepare_move_paths_to_directory(&dragged.paths, &resolved_destination)
+            }
+            ResolvedDrop::Copy => prepare_copy_paths_to_directory_with_copy_names(
+                &dragged.paths,
+                &resolved_destination,
+            ),
+            ResolvedDrop::Link => {
+                prepare_create_links_to_directory(&dragged.paths, &resolved_destination)
+            }
+            ResolvedDrop::Invalid => return None,
+        },
+    )
 }
 
 pub(super) fn resolve_drop_operation(modifiers: Modifiers, valid_target: bool) -> ResolvedDrop {
@@ -922,7 +1124,7 @@ pub(super) fn resolve_drop_operation_for_paths(
 fn resolve_drop_operation_for_internal_drag(
     modifiers: Modifiers,
     valid_target: bool,
-    dragged: &DraggedEntries,
+    source_analysis: &ResolvedInternalDragSourceFacts,
     destination: &Path,
 ) -> ResolvedDrop {
     if !valid_target {
@@ -937,11 +1139,69 @@ fn resolve_drop_operation_for_internal_drag(
         ResolvedDrop::Copy
     } else if modifiers.shift {
         ResolvedDrop::Move
-    } else if dragged.drop_should_copy_by_default(destination) {
+    } else if DraggedEntries::drop_should_copy_by_default(source_analysis, destination) {
         ResolvedDrop::Copy
     } else {
         ResolvedDrop::Move
     }
+}
+
+fn resolve_provisional_internal_drop_operation(
+    modifiers: Modifiers,
+    valid_target: bool,
+    source_paths: &[PathBuf],
+    destination: &Path,
+) -> ResolvedDrop {
+    if !valid_target {
+        return ResolvedDrop::Invalid;
+    }
+
+    if modifiers.alt || (modifiers.secondary() && modifiers.shift) {
+        return ResolvedDrop::Link;
+    }
+    if modifiers.secondary() {
+        return ResolvedDrop::Copy;
+    }
+    if modifiers.shift {
+        return ResolvedDrop::Move;
+    }
+
+    #[cfg(windows)]
+    if provisional_drop_crosses_windows_volume(source_paths, destination) {
+        return ResolvedDrop::Copy;
+    }
+
+    ResolvedDrop::Move
+}
+
+#[cfg(windows)]
+fn provisional_drop_crosses_windows_volume(source_paths: &[PathBuf], destination: &Path) -> bool {
+    let Some(destination_key) = lexical_windows_volume_key(destination) else {
+        return false;
+    };
+    source_paths.iter().any(|source| {
+        lexical_windows_volume_key(source).is_some_and(|source_key| source_key != destination_key)
+    })
+}
+
+#[cfg(windows)]
+fn lexical_windows_volume_key(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    Some(match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            char::from(letter).to_ascii_uppercase().to_string()
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+            r"\\{}\{}",
+            server.to_string_lossy().to_ascii_lowercase(),
+            share.to_string_lossy().to_ascii_lowercase()
+        ),
+        _ => prefix.as_os_str().to_string_lossy().to_ascii_lowercase(),
+    })
 }
 
 fn resolve_dragged_value_drop(
@@ -1000,11 +1260,10 @@ fn drop_should_copy_by_default(source_paths: &[PathBuf], destination: &Path) -> 
 }
 
 fn internal_drop_target_validity(
-    _destination: &DropDestination,
-    _current_directory: &Path,
     destination_item: &Path,
     resolved_destination: &Path,
     dragged: &DraggedEntries,
+    source_analysis: &ResolvedInternalDragSourceFacts,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
     if !drop_destination_is_dir(resolved_destination) {
@@ -1019,8 +1278,7 @@ fn internal_drop_target_validity(
         .source_facts
         .selected_paths
         .contains(destination_item)
-        || dragged
-            .source_facts
+        || source_analysis
             .directory_paths
             .contains_same_or_ancestor(resolved_destination, canonical_destination.as_deref())
     {
@@ -1030,11 +1288,38 @@ fn internal_drop_target_validity(
         };
     }
 
-    let same_source_destination = dragged
-        .source_facts
+    let same_source_destination = source_analysis
         .source_dir
         .matches(resolved_destination, canonical_destination.as_deref());
     drop_target_validity_for_same_source_destination(same_source_destination, modifiers)
+}
+
+fn provisional_internal_drop_target_validity(
+    destination_item: &Path,
+    resolved_destination: &Path,
+    dragged: &DraggedEntries,
+    modifiers: Modifiers,
+) -> DropTargetValidity {
+    if dragged
+        .source_facts
+        .selected_paths
+        .contains(destination_item)
+        || dragged
+            .source_facts
+            .directory_paths
+            .iter()
+            .any(|path| resolved_destination.starts_with(path))
+    {
+        return DropTargetValidity {
+            valid: false,
+            explicit_operation_required: false,
+        };
+    }
+
+    drop_target_validity_for_same_source_destination(
+        dragged.source_facts.source_dir == resolved_destination,
+        modifiers,
+    )
 }
 
 fn external_drop_target_validity(
@@ -1163,7 +1448,7 @@ mod tests {
         constants::ROW_HEIGHT,
         entry::{DirectoryLinkKind, FileEntry, ShellShortcutTargetKind},
         selection::SelectionModifiers,
-        test_support::{TempDir, selected_names, test_view_with_entries},
+        test_support::{TempDir, selected_names, test_view_entity_at_path, test_view_with_entries},
     };
     use std::fs;
 
@@ -1369,6 +1654,101 @@ mod tests {
         assert_eq!(dragged.file_count, 2);
         assert_eq!(drag_preview_label(&dragged), "2 files");
         assert_eq!(selected_names(&view), vec!["a.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn drag_payload_defers_filesystem_source_analysis() {
+        let temp = TempDir::new();
+        let selected = temp.path().join("selected");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&selected).expect("create selected directory");
+        fs::create_dir(&destination).expect("create destination directory");
+
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.select_single_path(&selected);
+        let selected_index = view
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected entry");
+        let dragged = view
+            .test_dragged_entries_for_index(selected_index)
+            .expect("drag payload");
+
+        assert!(!dragged.test_source_analysis_initialized());
+        assert_eq!(dragged.test_volume_key_computations(), 0);
+
+        let provisional = dragged.provisional_drop_resolution(
+            &DropDestination::Directory {
+                item_path: destination.clone(),
+                target_path: destination,
+            },
+            temp.path(),
+            Modifiers::default(),
+        );
+        assert_eq!(provisional.resolved, ResolvedDrop::Move);
+        assert!(!dragged.test_source_analysis_initialized());
+        assert_eq!(dragged.test_volume_key_computations(), 0);
+    }
+
+    #[gpui::test]
+    fn internal_drop_feedback_resolves_source_analysis_in_background(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"source").expect("create source file");
+        fs::create_dir(&destination).expect("create destination directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        let dragged = cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&source);
+                let source_index = view
+                    .entries
+                    .iter()
+                    .position(|entry| entry.path == source)
+                    .expect("source entry");
+                let dragged = view
+                    .test_dragged_entries_for_index(source_index)
+                    .expect("drag payload");
+                let (cursor, indicator) = view.request_internal_drop_feedback(
+                    &dragged,
+                    &DropDestination::Directory {
+                        item_path: destination.clone(),
+                        target_path: destination.clone(),
+                    },
+                    Modifiers::default(),
+                    gpui::point(px(10.0), px(10.0)),
+                    cx,
+                );
+                assert_eq!(cursor, CursorStyle::Arrow);
+                assert_eq!(indicator.unwrap().operation, FileOperationKind::Move);
+                assert!(!dragged.test_source_analysis_initialized());
+                dragged
+            })
+        });
+
+        cx.run_until_parked();
+
+        assert!(dragged.test_source_analysis_initialized());
+        assert_eq!(dragged.test_volume_key_computations(), 1);
+        assert_eq!(dragged.test_resolution_computations(), 1);
+        assert!(
+            dragged
+                .source_facts
+                .cached_resolution(
+                    &DropDestination::Directory {
+                        item_path: destination.clone(),
+                        target_path: destination,
+                    },
+                    temp.path(),
+                    Modifiers::default(),
+                )
+                .is_some()
+        );
     }
 
     #[test]
@@ -1899,6 +2279,45 @@ mod tests {
 
         assert_eq!(fs::read(&source).unwrap(), b"data");
         assert!(!target.exists());
+    }
+
+    #[gpui::test]
+    fn committed_internal_drop_prepares_without_blocking_the_caller(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let source_dir = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir(&source_dir).expect("create source folder");
+        fs::create_dir(&target).expect("create target folder");
+        let source = source_dir.join("file.txt");
+        fs::write(&source, b"data").expect("create source file");
+        let dragged =
+            DraggedEntries::test_from_parts(vec![source.clone()], source_dir, "file.txt", 0);
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.drop_internal_entries_and_open_dialog(
+                    &dragged,
+                    DropDestination::Directory {
+                        item_path: target.clone(),
+                        target_path: target.clone(),
+                    },
+                    Modifiers::default(),
+                    cx,
+                );
+                assert!(view.pending_drop_task.is_some());
+                assert!(source.exists());
+            });
+        });
+
+        cx.run_until_parked();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(target.join("file.txt")).unwrap(), b"data");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.pending_drop_task.is_none());
+        });
     }
 
     #[test]

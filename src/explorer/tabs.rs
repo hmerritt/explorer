@@ -235,7 +235,11 @@ impl ExplorerTabs {
         };
 
         view.update(cx, |view, _| {
-            view.can_drop_value(dragged_value, &DropDestination::CurrentDirectory, modifiers)
+            view.can_drop_value_nonblocking(
+                dragged_value,
+                &DropDestination::CurrentDirectory,
+                modifiers,
+            )
         })
     }
 
