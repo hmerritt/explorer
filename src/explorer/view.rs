@@ -14,6 +14,8 @@ use std::{
 use std::cell::Cell;
 
 use futures::FutureExt;
+#[cfg(not(test))]
+use futures::StreamExt;
 use gpui::{
     AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Subscription, Task,
     UniformListScrollHandle, Window, point, px,
@@ -150,6 +152,10 @@ pub struct ExplorerView {
     pub(super) context_menu: Option<ContextMenuState>,
     pub(super) view_origin: Point<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
+    #[allow(dead_code)]
+    pub(super) device_catalog_poll_task: Option<Task<()>>,
+    #[allow(dead_code)]
+    pub(super) portable_hotplug_task: Option<Task<()>>,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
     pub(super) shell_shortcut_resolution_generation: u64,
@@ -365,6 +371,7 @@ impl ExplorerView {
                 true,
                 cx,
             ) {
+                view.start_device_catalog_tasks(cx);
                 view.observe_icon_caches(cx);
                 view.observe_image_thumbnail_cache(cx);
                 return view;
@@ -375,6 +382,7 @@ impl ExplorerView {
             let _ = parent_window;
         }
         view.start_initial_directory_load(cx);
+        view.start_device_catalog_tasks(cx);
         view.observe_icon_caches(cx);
         view.observe_image_thumbnail_cache(cx);
         view
@@ -534,6 +542,8 @@ impl ExplorerView {
             context_menu: None,
             view_origin: point(px(0.0), px(0.0)),
             directory_watcher: None,
+            device_catalog_poll_task: None,
+            portable_hotplug_task: None,
             sidebar_settings: settings.sidebar.clone(),
             sidebar_sections: sidebar_sections(&settings.sidebar, &filesystem_name),
             shell_shortcut_resolution_generation: 0,
@@ -1292,7 +1302,8 @@ impl ExplorerView {
         self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
         let generation = self.codebase_summary_generation;
         let path = self.path.clone();
-        if path_is_wsl_unc_root(&path) {
+        if crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        {
             let changed = self.codebase_summary.take().is_some();
             self.codebase_summary_task = None;
             return changed;
@@ -1336,7 +1347,8 @@ impl ExplorerView {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         let path = self.path.clone();
-        if path_is_wsl_unc_root(&path) {
+        if crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        {
             let changed = self.git_status.take().is_some();
             self.git_status_task = None;
             return changed;
@@ -1381,6 +1393,10 @@ impl ExplorerView {
             self.shell_shortcut_resolution_generation.wrapping_add(1);
         let generation = self.shell_shortcut_resolution_generation;
         let path = self.path.clone();
+        if crate::explorer::portable_devices::is_portable_path(&path) {
+            self.shell_shortcut_resolution_task = None;
+            return;
+        }
         let pending_targets = self.pending_shell_shortcut_targets();
 
         if pending_targets.is_empty() {
@@ -1414,7 +1430,10 @@ impl ExplorerView {
         if !self.show_folder_size {
             return false;
         }
-        if path_is_filesystem_root(&self.path) || path_is_wsl_unc_root(&self.path) {
+        if crate::explorer::portable_devices::is_portable_path(&self.path)
+            || path_is_filesystem_root(&self.path)
+            || path_is_wsl_unc_root(&self.path)
+        {
             return false;
         }
 
@@ -1636,6 +1655,9 @@ impl ExplorerView {
         self.directory_watcher = match refresh_driver {
             ExplorerRefreshDriver::Notify => DirectoryWatcher::start(self.path.clone(), cx),
             ExplorerRefreshDriver::Poll => DirectoryWatcher::start_polling(self.path.clone(), cx),
+            ExplorerRefreshDriver::Events => {
+                DirectoryWatcher::start_portable_events(self.path.clone(), cx)
+            }
         };
         let ok = self.directory_watcher.is_some();
         crate::debug_options::log_nav_timing(
@@ -1646,6 +1668,62 @@ impl ExplorerView {
             ),
         );
         ok
+    }
+
+    fn start_device_catalog_tasks(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        let _ = cx;
+        #[cfg(not(test))]
+        {
+            let poll_task = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    let sections = this.update(cx, |explorer, cx| {
+                        explorer.refresh_device_catalog(cx);
+                    });
+                    if sections.is_err() {
+                        break;
+                    }
+                }
+            });
+            self.device_catalog_poll_task = Some(poll_task);
+
+            let hotplug_task = cx.spawn(async move |this, cx| {
+                let Ok(mut events) = mtp_rs::mtp::watch_devices() else {
+                    return;
+                };
+                while events.next().await.is_some() {
+                    if this
+                        .update(cx, |explorer, cx| explorer.refresh_device_catalog(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            self.portable_hotplug_task = Some(hotplug_task);
+        }
+    }
+
+    #[allow(dead_code)]
+    fn refresh_device_catalog(&mut self, cx: &mut Context<Self>) {
+        let sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+        if sections != self.sidebar_sections {
+            self.sidebar_sections = sections;
+            cx.notify();
+        }
+
+        let Some(root) = crate::explorer::portable_devices::device_root_for_path(&self.path) else {
+            return;
+        };
+        let connected = self
+            .sidebar_sections
+            .drives
+            .iter()
+            .any(|item| item.path == root);
+        if !connected {
+            self.redirect_after_mounted_volume_ejected_with_watcher(&root, cx);
+        }
     }
 
     pub(super) fn tab_label(&self) -> String {

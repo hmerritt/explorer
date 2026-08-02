@@ -239,6 +239,25 @@ impl ExplorerView {
             return;
         }
 
+        let paths = match paths
+            .into_iter()
+            .map(|path| {
+                if crate::explorer::portable_devices::is_portable_path(&path) {
+                    crate::explorer::portable_devices::materialize_for_open(&path)
+                } else {
+                    Ok(path)
+                }
+            })
+            .collect::<io::Result<Vec<_>>>()
+        {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.set_error_notice(format!("Could not open the portable file: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+
         #[cfg(target_os = "linux")]
         {
             let _ = window;

@@ -60,6 +60,10 @@ scoop install hmerritt/explorer
 - [x] Tabs
 - [x] Arrow keys navigation
 - [x] Sidebar custom pins (drag-to-pin)
+- [x] Removable and portable storage
+    - [x] Native mounted volumes, USB mass storage, and optical media
+    - [x] Android phones, cameras, and media players using MTP/PTP
+    - [x] In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
 - [x] Key bindings for ~~everything~~ most things
 - [x] Fast image and video previews on `Alt+hover`
 - [x] Git support

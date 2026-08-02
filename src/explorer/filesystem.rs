@@ -1732,6 +1732,9 @@ pub(super) fn load_entries(
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
     let visibility = visibility.into();
+    if crate::explorer::portable_devices::is_portable_path(path) {
+        return crate::explorer::explorer_fs::ExplorerFs::new().list_dir(path, visibility);
+    }
     load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility))
 }
 
@@ -3162,13 +3165,22 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     }
 
     for path in paths {
-        if !path.exists() {
+        let exists = if crate::explorer::portable_devices::is_portable_path(path) {
+            crate::explorer::portable_devices::exists(path)
+        } else {
+            path.exists()
+        };
+        if !exists {
             return Err(format!("Could not find {}.", path_display_name(path)));
         }
     }
 
     for path in paths {
-        remove_source(path).map_err(|error| format_path_error("delete", path, error))?;
+        if crate::explorer::portable_devices::is_portable_path(path) {
+            crate::explorer::portable_devices::delete(path)?;
+        } else {
+            remove_source(path).map_err(|error| format_path_error("delete", path, error))?;
+        }
     }
 
     Ok(())
@@ -3178,6 +3190,13 @@ pub(super) fn remove_existing_paths_permanently(paths: &[PathBuf]) -> Result<boo
     let mut removed_any = false;
 
     for path in paths {
+        if crate::explorer::portable_devices::is_portable_path(path) {
+            if crate::explorer::portable_devices::exists(path) {
+                crate::explorer::portable_devices::delete(path)?;
+                removed_any = true;
+            }
+            continue;
+        }
         match path.try_exists() {
             Ok(true) => {
                 remove_source(path).map_err(|error| format_path_error("delete", path, error))?;

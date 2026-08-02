@@ -43,12 +43,25 @@ pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<Clip
     let metadata = serde_json::to_string(&metadata)
         .map_err(|error| format!("Could not write Explorer clipboard data: {error}"))?;
 
-    Ok(ClipboardItem::new_files_with_metadata(
-        clipboard.paths.clone(),
-        native_clipboard_operation(clipboard.operation),
-        clipboard_text(&clipboard.paths),
-        metadata,
-    ))
+    if clipboard
+        .paths
+        .iter()
+        .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+    {
+        // Synthetic portable locations are meaningful only inside Explorer. Keep
+        // them in our metadata without advertising them as native filesystem paths.
+        Ok(ClipboardItem::new_string_with_metadata(
+            clipboard_text(&clipboard.paths),
+            metadata,
+        ))
+    } else {
+        Ok(ClipboardItem::new_files_with_metadata(
+            clipboard.paths.clone(),
+            native_clipboard_operation(clipboard.operation),
+            clipboard_text(&clipboard.paths),
+            metadata,
+        ))
+    }
 }
 
 pub(super) fn file_clipboard_from_item(item: &ClipboardItem) -> Option<FileClipboard> {
@@ -217,5 +230,18 @@ mod tests {
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
         assert!(!clipboard_item_can_paste(Some(&plain_item)));
         assert!(!clipboard_item_can_paste(None));
+    }
+
+    #[test]
+    fn portable_clipboard_round_trips_only_through_explorer_metadata() {
+        let path = crate::explorer::portable_devices::virtual_root()
+            .join("device-1")
+            .join("storage-g1-1")
+            .join("object-1-photo.jpg");
+        let clipboard = FileClipboard::new(FileClipboardOperation::Copy, vec![path]);
+        let item = clipboard_item_for_files(&clipboard).expect("clipboard item");
+
+        assert!(item.files().is_none());
+        assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
     }
 }

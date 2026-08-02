@@ -63,6 +63,45 @@ impl DirectoryWatcher {
             _task: task,
         })
     }
+
+    pub(super) fn start_portable_events(
+        path: PathBuf,
+        cx: &mut Context<ExplorerView>,
+    ) -> Option<Self> {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let event_path = path.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::explorer::portable_devices::wait_for_object_event(&event_path)
+                    })
+                    .await;
+                let changed = match result {
+                    Ok(changed) => changed,
+                    Err(_) => break,
+                };
+                if !changed {
+                    continue;
+                }
+                if this
+                    .update(cx, |explorer, cx| {
+                        if explorer.path() == path {
+                            explorer.reload_async_with_entry_metadata_resolution(cx);
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Some(Self {
+            _watcher: None,
+            _task: task,
+        })
+    }
 }
 
 fn spawn_watcher_task(

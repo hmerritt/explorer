@@ -542,7 +542,11 @@ impl ExplorerView {
         else {
             return false;
         };
-        crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&entry.path)
+        if crate::explorer::portable_devices::is_portable_path(&entry.path) {
+            crate::explorer::portable_devices::capabilities(&entry.path).can_rename
+        } else {
+            crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&entry.path)
+        }
     }
 
     pub(super) fn can_start_rename_from_name_click(
@@ -1415,7 +1419,15 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
 }
 
 fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
-    rename_local_path(original_path, target_path)
+    if crate::explorer::portable_devices::is_portable_path(original_path) {
+        let name = target_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
+        crate::explorer::portable_devices::rename(original_path, name).map_err(io::Error::other)
+    } else {
+        rename_local_path(original_path, target_path)
+    }
 }
 
 fn rename_local_path(original_path: &Path, target_path: &Path) -> io::Result<()> {

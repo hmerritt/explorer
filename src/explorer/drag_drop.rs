@@ -499,6 +499,13 @@ impl DraggedEntries {
     }
 
     pub(super) fn external_paths(&self) -> gpui::ExternalPaths {
+        if self
+            .paths
+            .iter()
+            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        {
+            return gpui::ExternalPaths::new(Vec::new());
+        }
         gpui::ExternalPaths::with_operations(
             self.paths.clone(),
             gpui::ExternalPathDragOperations::COPY_MOVE_LINK,
@@ -947,6 +954,34 @@ impl ExplorerView {
             return;
         }
 
+        let resolved_destination = destination.resolve(&self.path);
+        if crate::explorer::portable_devices::is_portable_path(&resolved_destination)
+            || dragged
+                .paths
+                .iter()
+                .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        {
+            let operation = resolve_drop_operation_for_paths(
+                modifiers,
+                drop_destination_is_dir(&resolved_destination),
+                &dragged.paths,
+                &resolved_destination,
+            );
+            if operation == ResolvedDrop::Link {
+                self.set_error_notice("Portable devices do not support links.".to_owned());
+                return;
+            }
+            if matches!(operation, ResolvedDrop::Copy | ResolvedDrop::Move) {
+                self.start_portable_transfer(
+                    dragged.paths.clone(),
+                    resolved_destination,
+                    operation == ResolvedDrop::Move,
+                    cx,
+                );
+            }
+            return;
+        }
+
         let dragged = dragged.clone();
         let current_directory = self.path.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -1021,6 +1056,24 @@ impl ExplorerView {
             modifiers,
         );
         if !validity.valid {
+            return;
+        }
+
+        if crate::explorer::portable_devices::is_portable_path(&resolved_destination) {
+            let operation =
+                resolve_drop_operation_for_paths(modifiers, true, &paths, &resolved_destination);
+            if operation == ResolvedDrop::Link {
+                self.set_error_notice("Portable devices do not support links.".to_owned());
+                return;
+            }
+            if matches!(operation, ResolvedDrop::Copy | ResolvedDrop::Move) {
+                self.start_portable_transfer(
+                    paths,
+                    resolved_destination,
+                    operation == ResolvedDrop::Move,
+                    cx,
+                );
+            }
             return;
         }
 
@@ -1304,6 +1357,14 @@ fn internal_drop_target_validity(
     source_analysis: &ResolvedInternalDragSourceFacts,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
+    if crate::explorer::portable_devices::is_portable_path(resolved_destination)
+        && (modifiers.alt || (modifiers.secondary() && modifiers.shift))
+    {
+        return DropTargetValidity {
+            valid: false,
+            explicit_operation_required: false,
+        };
+    }
     let facts = internal_drop_target_facts(
         destination_item,
         resolved_destination,
@@ -1366,6 +1427,14 @@ fn provisional_internal_drop_target_validity(
     dragged: &DraggedEntries,
     modifiers: Modifiers,
 ) -> DropTargetValidity {
+    if crate::explorer::portable_devices::is_portable_path(resolved_destination)
+        && (modifiers.alt || (modifiers.secondary() && modifiers.shift))
+    {
+        return DropTargetValidity {
+            valid: false,
+            explicit_operation_required: false,
+        };
+    }
     if dragged
         .source_facts
         .selected_paths
@@ -1395,6 +1464,14 @@ fn external_drop_target_validity(
     paths: &[PathBuf],
     modifiers: Modifiers,
 ) -> DropTargetValidity {
+    if crate::explorer::portable_devices::is_portable_path(resolved_destination)
+        && (modifiers.alt || (modifiers.secondary() && modifiers.shift))
+    {
+        return DropTargetValidity {
+            valid: false,
+            explicit_operation_required: false,
+        };
+    }
     if !drop_destination_is_dir(resolved_destination)
         || paths.is_empty()
         || destination_is_dragged_directory_or_descendant(resolved_destination, paths)
@@ -1416,6 +1493,8 @@ fn external_drop_target_validity(
 
 fn drop_destination_is_dir(path: &Path) -> bool {
     ExplorerFs::new().is_dir(path).unwrap_or(false)
+        && (!crate::explorer::portable_devices::is_portable_path(path)
+            || crate::explorer::portable_devices::capabilities(path).can_upload)
 }
 
 fn drop_target_validity_for_same_source_destination(
@@ -2131,6 +2210,23 @@ mod tests {
         assert!(external_paths.operations().copy());
         assert!(external_paths.operations().move_());
         assert!(external_paths.operations().link());
+    }
+
+    #[test]
+    fn portable_drag_keeps_internal_entries_without_exporting_native_paths() {
+        let path = crate::explorer::portable_devices::virtual_root()
+            .join("device-1")
+            .join("storage-g1-1")
+            .join("object-1-photo.jpg");
+        let dragged = DraggedEntries::test_from_parts(
+            vec![path.clone()],
+            path.parent().unwrap().to_path_buf(),
+            "photo.jpg",
+            0,
+        );
+
+        assert_eq!(dragged.paths, vec![path]);
+        assert!(dragged.external_paths().paths().is_empty());
     }
 
     #[test]

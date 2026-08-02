@@ -34,6 +34,14 @@ pub(super) enum DirectoryOpenMode {
     NewTab,
 }
 
+fn navigation_parent(path: &Path) -> Option<PathBuf> {
+    if crate::explorer::portable_devices::is_portable_path(path) {
+        crate::explorer::portable_devices::parent(path)
+    } else {
+        path.parent().map(Path::to_path_buf)
+    }
+}
+
 impl ExplorerView {
     #[cfg(test)]
     pub(super) fn navigate_to_directory(&mut self, path: PathBuf, history_mode: HistoryMode) {
@@ -518,13 +526,13 @@ impl ExplorerView {
 
     #[cfg(test)]
     pub(super) fn navigate_up(&mut self) {
-        if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
+        if let Some(parent) = navigation_parent(&self.path) {
             self.navigate_to_directory(parent, HistoryMode::Record);
         }
     }
 
     pub(super) fn navigate_up_with_watcher(&mut self, cx: &mut Context<Self>) {
-        if let Some(parent) = self.path.parent().map(Path::to_path_buf) {
+        if let Some(parent) = navigation_parent(&self.path) {
             self.navigate_to_directory_with_watcher(parent, HistoryMode::Record, cx);
         }
     }
@@ -538,7 +546,7 @@ impl ExplorerView {
     }
 
     pub(super) fn can_go_up(&self) -> bool {
-        self.path.parent().is_some()
+        navigation_parent(&self.path).is_some()
     }
 
     pub(super) fn normalize_entry_click_count(

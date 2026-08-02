@@ -6,11 +6,13 @@ use std::{
 use crate::explorer::{
     entry::FileEntry,
     filesystem::{EntryVisibility, should_hide_entry},
+    portable_devices,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerLocation {
     Local(PathBuf),
+    Portable(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +20,7 @@ pub(super) enum ExplorerLocation {
 pub(super) enum ExplorerRefreshDriver {
     Notify,
     Poll,
+    Events,
 }
 
 #[allow(dead_code)]
@@ -29,12 +32,22 @@ impl ExplorerFs {
     }
 
     pub(super) fn classify(&self, path: &Path) -> ExplorerLocation {
-        ExplorerLocation::Local(path.to_path_buf())
+        if portable_devices::is_portable_path(path) {
+            ExplorerLocation::Portable(path.to_path_buf())
+        } else {
+            ExplorerLocation::Local(path.to_path_buf())
+        }
     }
 
     pub(super) fn can_mutate(&self, path: &Path) -> bool {
         match self.classify(path) {
             ExplorerLocation::Local(_) => true,
+            ExplorerLocation::Portable(_) => {
+                portable_devices::capabilities(path).can_mutate()
+                    || path
+                        .parent()
+                        .is_some_and(|parent| portable_devices::capabilities(parent).can_mutate())
+            }
         }
     }
 
@@ -45,12 +58,14 @@ impl ExplorerFs {
     pub(super) fn exists(&self, path: &Path) -> Result<bool, String> {
         match self.classify(path) {
             ExplorerLocation::Local(_) => Ok(path.exists()),
+            ExplorerLocation::Portable(_) => Ok(portable_devices::exists(path)),
         }
     }
 
     pub(super) fn is_dir(&self, path: &Path) -> Result<bool, String> {
         match self.classify(path) {
             ExplorerLocation::Local(_) => Ok(path.is_dir()),
+            ExplorerLocation::Portable(_) => Ok(portable_devices::is_dir(path)),
         }
     }
 
@@ -62,6 +77,7 @@ impl ExplorerFs {
     ) -> io::Result<Vec<FileEntry>> {
         match self.classify(path) {
             ExplorerLocation::Local(_) => list_local_dir(path, visibility),
+            ExplorerLocation::Portable(_) => portable_devices::list_dir(path),
         }
     }
 
@@ -72,6 +88,16 @@ impl ExplorerFs {
         match self.classify(path) {
             ExplorerLocation::Local(_) => {
                 fs::create_dir(path).map_err(|error| format!("Could not create folder: {error}"))
+            }
+            ExplorerLocation::Portable(_) => {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| "Portable-device parent was not found.".to_owned())?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| "Portable-device folder name is invalid.".to_owned())?;
+                portable_devices::create_folder(parent, name).map(|_| ())
             }
         }
     }
@@ -87,12 +113,29 @@ impl ExplorerFs {
         match self.classify(path) {
             ExplorerLocation::Local(_) => write_new_file(path, bytes)
                 .map_err(|error| format!("Could not create {}: {error}", display_name(path))),
+            ExplorerLocation::Portable(_) => {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| "Portable-device parent was not found.".to_owned())?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| "Portable-device file name is invalid.".to_owned())?;
+                portable_devices::write_file(parent, name, bytes).map(|_| ())
+            }
         }
     }
 
     pub(super) fn refresh_driver(&self, path: &Path) -> ExplorerRefreshDriver {
         match self.classify(path) {
             ExplorerLocation::Local(_) => ExplorerRefreshDriver::Notify,
+            ExplorerLocation::Portable(_) => {
+                if portable_devices::capabilities(path).supports_events {
+                    ExplorerRefreshDriver::Events
+                } else {
+                    ExplorerRefreshDriver::Poll
+                }
+            }
         }
     }
 }
@@ -153,5 +196,13 @@ mod tests {
             fs.refresh_driver(Path::new("/tmp/local")),
             ExplorerRefreshDriver::Notify
         );
+    }
+
+    #[test]
+    fn portable_paths_use_the_poll_refresh_driver() {
+        let fs = ExplorerFs::new();
+        let path = super::portable_devices::virtual_root().join("device-test");
+        assert!(matches!(fs.classify(&path), ExplorerLocation::Portable(_)));
+        assert_eq!(fs.refresh_driver(&path), ExplorerRefreshDriver::Poll);
     }
 }

@@ -874,6 +874,9 @@ impl ExplorerView {
 }
 
 pub(super) fn format_address_path(path: &Path, slash: AddressSlash) -> String {
+    if let Some(address) = crate::explorer::portable_devices::display_address(path) {
+        return address;
+    }
     let address = path.display().to_string();
 
     #[cfg(target_os = "windows")]
@@ -903,6 +906,10 @@ fn resolve_address_input_with_env(
     let cleaned = cleaned_address_input(input);
     if cleaned.is_empty() {
         return Err("The address is empty.".to_owned());
+    }
+
+    if let Some(path) = crate::explorer::portable_devices::path_for_display_address(&cleaned) {
+        return Ok(path);
     }
 
     let expanded = expand_address_environment_variables_with(&cleaned, env_var);
@@ -975,6 +982,9 @@ fn folder_suggestions_for_input_with_env(
     visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
     env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Vec<AddressBarSuggestion> {
+    if crate::explorer::portable_devices::is_portable_path(current_path) {
+        return Vec::new();
+    }
     let visibility = visibility.into();
     let cleaned = cleaned_address_input(input);
     let expanded = expand_address_environment_variables_with(&cleaned, env_var);

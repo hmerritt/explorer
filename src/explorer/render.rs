@@ -81,7 +81,7 @@ use crate::explorer::{
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
-        network_drive_icon, network_group_icon, pinned_group_icon,
+        network_drive_icon, network_group_icon, pinned_group_icon, portable_device_icon,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -3461,6 +3461,7 @@ fn sidebar_context_menu_target(
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
         SidebarItemKind::DriveNetwork(_) => Some(DirectoryKind::Drive),
+        SidebarItemKind::PortableDevice => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
     };
     let can_eject = match item.kind {
@@ -3527,6 +3528,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveNetwork(state) => network_drive_icon(state).into_any_element(),
+        SidebarItemKind::PortableDevice => portable_device_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
     }
 }

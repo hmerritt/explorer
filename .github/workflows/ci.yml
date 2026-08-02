@@ -51,3 +51,32 @@ jobs:
                   format: lcov
                   repo-token: ${{ secrets.COVERALLS_REPO_TOKEN }}
                   github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    portable_provider:
+        name: Portable provider (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt update
+                  sudo apt install -y pkg-config libwayland-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Cargo
+              uses: Swatinem/rust-cache@v2
+
+            - name: Check
+              run: cargo check --locked
+
+            - name: Test portable provider
+              run: cargo test --locked portable_devices -- --test-threads=1

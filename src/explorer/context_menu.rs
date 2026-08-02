@@ -1283,6 +1283,10 @@ fn entry_context_menu_items_with_custom_in_directory(
     working_directory: &Path,
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
+    let can_delete = targets.iter().all(|path| {
+        !crate::explorer::portable_devices::is_portable_path(path)
+            || crate::explorer::portable_devices::capabilities(path).can_delete
+    });
 
     if selected_count == 1 {
         let command = match single_directory_open_target {
@@ -1397,7 +1401,7 @@ fn entry_context_menu_items_with_custom_in_directory(
             icon: Some(ContextMenuIcon::Cut),
             label: "Cut".to_owned(),
             command: ContextMenuCommand::CutSelected,
-            enabled: true,
+            enabled: can_delete,
         },
         ContextMenuItem::Action {
             id: "context-menu-entry-copy".to_owned(),
@@ -1411,17 +1415,19 @@ fn entry_context_menu_items_with_custom_in_directory(
         && let Some(entry) = selected_entries.first()
     {
         let is_folder = directory_new_tab_target(entry).is_some();
-        items.push(copy_path_context_menu_item(
-            "context-menu-entry-copy-path",
-            &entry.path,
-            is_folder,
-        ));
-        if let Some(item) = copy_repo_relative_path_context_menu_item(
-            "context-menu-entry-copy-relative-repo-path",
-            &entry.path,
-            is_folder,
-        ) {
-            items.push(item);
+        if !crate::explorer::portable_devices::is_portable_path(&entry.path) {
+            items.push(copy_path_context_menu_item(
+                "context-menu-entry-copy-path",
+                &entry.path,
+                is_folder,
+            ));
+            if let Some(item) = copy_repo_relative_path_context_menu_item(
+                "context-menu-entry-copy-relative-repo-path",
+                &entry.path,
+                is_folder,
+            ) {
+                items.push(item);
+            }
         }
     }
     items.extend([
@@ -1431,7 +1437,7 @@ fn entry_context_menu_items_with_custom_in_directory(
             icon: Some(ContextMenuIcon::Delete),
             label: "Delete".to_owned(),
             command: ContextMenuCommand::DeleteSelected,
-            enabled: true,
+            enabled: can_delete,
         },
     ]);
     if selected_count == 1 {
@@ -1498,16 +1504,20 @@ fn path_is_windows_open_with_context_menu_excluded(path: &Path) -> bool {
 
 fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bool {
     !selected_entries.is_empty()
-        && selected_entries
-            .iter()
-            .all(|entry| entry.is_open_with_target() && archive_path_is_supported(&entry.path))
+        && selected_entries.iter().all(|entry| {
+            !crate::explorer::portable_devices::is_portable_path(&entry.path)
+                && entry.is_open_with_target()
+                && archive_path_is_supported(&entry.path)
+        })
 }
 
 fn selected_entries_are_supported_mountable_images(selected_entries: &[FileEntry]) -> bool {
     let [entry] = selected_entries else {
         return false;
     };
-    entry.is_open_with_target() && mountable_image_path_is_supported(&entry.path)
+    !crate::explorer::portable_devices::is_portable_path(&entry.path)
+        && entry.is_open_with_target()
+        && mountable_image_path_is_supported(&entry.path)
 }
 
 fn selected_entries_are_run_elevated_targets(selected_entries: &[FileEntry]) -> bool {
@@ -1515,7 +1525,9 @@ fn selected_entries_are_run_elevated_targets(selected_entries: &[FileEntry]) -> 
 }
 
 fn entry_is_run_elevated_target(entry: &FileEntry) -> bool {
-    entry.is_open_with_target() && path_is_run_elevated_target(&entry.path)
+    !crate::explorer::portable_devices::is_portable_path(&entry.path)
+        && entry.is_open_with_target()
+        && path_is_run_elevated_target(&entry.path)
 }
 
 fn path_is_run_elevated_target(path: &Path) -> bool {
@@ -1597,6 +1609,8 @@ fn folder_context_menu_items_from_times_with_format(
     date_format: &str,
 ) -> Vec<ContextMenuItem> {
     let path_is_transfer_path = false;
+    let portable_capabilities = crate::explorer::portable_devices::capabilities(path);
+    let is_portable = crate::explorer::portable_devices::is_portable_path(path);
 
     let mut items = vec![
         ContextMenuItem::Action {
@@ -1604,7 +1618,7 @@ fn folder_context_menu_items_from_times_with_format(
             icon: Some(ContextMenuIcon::Paste),
             label: "Paste".to_owned(),
             command: ContextMenuCommand::Paste,
-            enabled: can_paste,
+            enabled: can_paste && (!is_portable || portable_capabilities.can_upload),
         },
         ContextMenuItem::Submenu {
             id: "context-menu-new".to_owned(),
@@ -1616,14 +1630,14 @@ fn folder_context_menu_items_from_times_with_format(
                     icon: Some(ContextMenuIcon::File),
                     label: "File".to_owned(),
                     command: ContextMenuCommand::NewFile,
-                    enabled: true,
+                    enabled: !is_portable || portable_capabilities.can_upload,
                 },
                 ContextMenuItem::Action {
                     id: "context-menu-new-folder".to_owned(),
                     icon: Some(ContextMenuIcon::Folder),
                     label: "Folder".to_owned(),
                     command: ContextMenuCommand::NewFolder,
-                    enabled: true,
+                    enabled: !is_portable || portable_capabilities.can_create_folder,
                 },
             ],
         },

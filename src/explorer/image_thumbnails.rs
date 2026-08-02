@@ -920,9 +920,13 @@ fn load_or_create_thumbnail_cache_bytes(
         ImageThumbnailUsage::Standard => ThumbnailSpec::standard(request.size),
         ImageThumbnailUsage::HoverPreview => ThumbnailSpec::hover(request.size),
     };
-    let image = load_thumbnail_rgba_with_cancel_timed(&request.path, spec, cancel, false)
-        .result
-        .ok()?;
+    let image = if crate::explorer::portable_devices::is_portable_path(&request.path) {
+        load_portable_thumbnail_rgba(&request.path, request.size).ok()?
+    } else {
+        load_thumbnail_rgba_with_cancel_timed(&request.path, spec, cancel, false)
+            .result
+            .ok()?
+    };
     encode_rgba_qoi_bytes(image.as_raw(), image.width(), image.height())
 }
 
@@ -978,23 +982,36 @@ fn load_or_create_thumbnail_with_timings(
     }
 
     let extract_started = timings_enabled.then(Instant::now);
-    let (result, extraction_timings) = match request.kind {
-        ImageThumbnailKind::Image => {
-            let spec = match request.usage {
-                ImageThumbnailUsage::Standard => ThumbnailSpec::standard(request.size),
-                ImageThumbnailUsage::HoverPreview => ThumbnailSpec::hover(request.size),
-            };
-            let extracted =
-                load_thumbnail_rgba_with_cancel_timed(&request.path, spec, cancel, timings_enabled);
-            (extracted.result, extracted.timings)
-        }
-        ImageThumbnailKind::Video => {
-            let result = load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
-                .map(|extraction| extraction.value)
-                .map_err(|error| error.to_string());
-            (result, ImageThumbnailExtractionTimings::default())
-        }
-    };
+    let (result, extraction_timings) =
+        if crate::explorer::portable_devices::is_portable_path(&request.path) {
+            (
+                load_portable_thumbnail_rgba(&request.path, request.size),
+                ImageThumbnailExtractionTimings::default(),
+            )
+        } else {
+            match request.kind {
+                ImageThumbnailKind::Image => {
+                    let spec = match request.usage {
+                        ImageThumbnailUsage::Standard => ThumbnailSpec::standard(request.size),
+                        ImageThumbnailUsage::HoverPreview => ThumbnailSpec::hover(request.size),
+                    };
+                    let extracted = load_thumbnail_rgba_with_cancel_timed(
+                        &request.path,
+                        spec,
+                        cancel,
+                        timings_enabled,
+                    );
+                    (extracted.result, extracted.timings)
+                }
+                ImageThumbnailKind::Video => {
+                    let result =
+                        load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
+                            .map(|extraction| extraction.value)
+                            .map_err(|error| error.to_string());
+                    (result, ImageThumbnailExtractionTimings::default())
+                }
+            }
+        };
     let image = match result {
         Ok(image) => image,
         Err(_) if cancel.load(Ordering::Relaxed) => {
@@ -1028,6 +1045,13 @@ fn load_or_create_thumbnail_with_timings(
         extract_elapsed,
         extraction_timings,
     )
+}
+
+fn load_portable_thumbnail_rgba(path: &Path, size: u32) -> Result<image::RgbaImage, String> {
+    let bytes = crate::explorer::portable_devices::thumbnail(path)?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("Could not decode the device thumbnail: {error}"))?;
+    Ok(image.thumbnail(size, size).to_rgba8())
 }
 
 fn animated_source_for_request(request: &ImageThumbnailRequest) -> Option<AnimatedImageSource> {

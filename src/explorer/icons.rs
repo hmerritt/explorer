@@ -144,6 +144,7 @@ png_icon!(
 );
 png_icon!(DRIVES_GROUP_ICON, "devices", "monitor.png");
 png_icon!(DRIVE_ICON, "devices/drives", "drive.png");
+png_icon!(PORTABLE_DEVICE_ICON, "devices/drives", "unknown.png");
 png_icon!(DRIVE_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(MOUNT_DISC_ICON, "devices/discs", "disc.png");
 png_icon!(NETWORK_DRIVE_ICON, "devices/drives", "network.png");
@@ -442,6 +443,10 @@ pub(super) fn bin_sidebar_icon() -> AnyElement {
 
 pub(super) fn drive_icon() -> AnyElement {
     image_sidebar_icon(DRIVE_ICON.clone())
+}
+
+pub(super) fn portable_device_icon() -> AnyElement {
+    image_sidebar_icon(PORTABLE_DEVICE_ICON.clone())
 }
 
 pub(super) fn drive_disc_icon_for_path(path: &Path) -> AnyElement {

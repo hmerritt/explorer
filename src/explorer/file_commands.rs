@@ -172,6 +172,20 @@ impl ExplorerView {
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
+        if crate::explorer::portable_devices::is_portable_path(&self.path)
+            || clipboard
+                .paths
+                .iter()
+                .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        {
+            self.start_portable_transfer(
+                clipboard.paths,
+                self.path.clone(),
+                clipboard.operation == FileClipboardOperation::Cut,
+                cx,
+            );
+            return;
+        }
         match clipboard.operation {
             FileClipboardOperation::Copy => {
                 self.handle_prepared_file_command_result_and_open_dialog(
@@ -184,6 +198,52 @@ impl ExplorerView {
                 self.handle_prepared_file_command_result_and_open_dialog(result, cx);
             }
         }
+    }
+
+    pub(super) fn start_portable_transfer(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        move_sources: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_drop_task.is_some() || self.active_file_operation.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+        let sources_for_cleanup = sources.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::explorer::portable_devices::transfer_paths(
+                        &sources,
+                        &destination,
+                        move_sources,
+                    )
+                    .unwrap_or_else(|| Err("Portable transfer was not required.".to_owned()))
+                })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.pending_drop_task = None;
+                match result {
+                    Ok(_paths) => {
+                        explorer.clear_operation_notice();
+                        if move_sources {
+                            explorer.remove_cut_paths(&sources_for_cleanup);
+                        }
+                        explorer.reload_with_entry_metadata_resolution(cx);
+                        explorer.emit_filesystem_changed(cx);
+                    }
+                    Err(error) => {
+                        explorer.set_error_notice(error);
+                        explorer.reload_with_entry_metadata_resolution(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.pending_drop_task = Some(task);
     }
 
     fn paste_clipboard_image(
@@ -244,6 +304,15 @@ impl ExplorerView {
         if paths.is_empty() {
             return;
         }
+        if paths
+            .iter()
+            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        {
+            self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
+            self.clear_operation_notice();
+            self.open_pending_dialog_window(cx);
+            return;
+        }
 
         let selection_after_delete = self.selection_after_removing_paths(&paths);
         let trash_undo = TrashUndoCapture::before_delete(&paths);
@@ -268,6 +337,16 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if paths.is_empty() {
+            return;
+        }
+
+        if paths
+            .iter()
+            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        {
+            self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
+            self.clear_operation_notice();
+            self.open_pending_dialog_window(cx);
             return;
         }
 

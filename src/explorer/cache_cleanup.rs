@@ -78,6 +78,7 @@ fn run_scheduled_cache_cleanup(
     run_scheduled_cache_cleanup_with(state_path, interval_days, now, || {
         super::image_thumbnails::cleanup_stale_path_cache_entries();
         super::app_icons::cleanup_stale_path_cache_entries();
+        super::portable_devices::cleanup_open_cache();
     })
 }
 

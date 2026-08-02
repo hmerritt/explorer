@@ -38,6 +38,26 @@ pub(super) enum ShellShortcutTargetKind {
 }
 
 impl FileEntry {
+    pub(super) fn from_provider(
+        path: PathBuf,
+        name: String,
+        is_directory: bool,
+        size: Option<u64>,
+        modified: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            path,
+            name,
+            kind: if is_directory {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            modified,
+            size: (!is_directory).then_some(size).flatten(),
+        }
+    }
+
     pub(super) fn from_path(path: PathBuf) -> Option<Self> {
         let link_metadata = fs::symlink_metadata(&path).ok()?;
         Self::from_path_with_link_metadata(path, link_metadata)

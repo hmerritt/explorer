@@ -4675,6 +4675,9 @@ fn collect_property_item(
     date_format: &str,
     tree_mode: PropertyTreeMode<'_>,
 ) -> Result<PropertyItem, String> {
+    if crate::explorer::portable_devices::is_portable_path(path) {
+        return collect_portable_property_item(path);
+    }
     let link_metadata = fs::symlink_metadata(path).ok();
     let metadata = property_target_metadata(path, link_metadata.as_ref());
     let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
@@ -4793,8 +4796,53 @@ fn collect_property_item(
     })
 }
 
+fn collect_portable_property_item(path: &Path) -> Result<PropertyItem, String> {
+    let metadata = crate::explorer::portable_devices::metadata(path)
+        .ok_or_else(|| "This portable-device item is no longer available.".to_owned())?;
+    let entry = crate::explorer::FileEntry::from_provider(
+        path.to_path_buf(),
+        metadata.name,
+        metadata.is_directory,
+        metadata.size,
+        metadata.modified,
+    );
+    let size = metadata
+        .size
+        .map(|size| PropertyValue::ready(size))
+        .or_else(|| metadata.is_directory.then(|| PropertyValue::ready(0)));
+    Ok(PropertyItem {
+        path: path.to_path_buf(),
+        exists: true,
+        is_dir: metadata.is_directory,
+        type_label: Some(entry.type_label()),
+        location: crate::explorer::portable_devices::parent(path)
+            .and_then(|parent| crate::explorer::portable_devices::display_address(&parent)),
+        size: size.clone(),
+        size_on_disk: size,
+        contains: None,
+        selection_counts: None,
+        created: None,
+        modified: metadata.modified,
+        accessed: None,
+        readonly: None,
+        hidden: None,
+        owner: None,
+        group: None,
+        unix_mode: None,
+        permission_summary: None,
+        run_as_admin: None,
+        shortcut: None,
+        details: Vec::new(),
+    })
+}
+
 fn property_title(paths: &[PathBuf]) -> String {
     if paths.len() == 1 {
+        if let Some(label) = crate::explorer::portable_devices::labels(&paths[0])
+            .and_then(|labels| labels.last().cloned())
+        {
+            return label;
+        }
         paths[0]
             .file_name()
             .unwrap_or(paths[0].as_os_str())
@@ -4871,7 +4919,10 @@ fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp>
     let [item] = items else {
         return None;
     };
-    if !item.exists || item.is_dir {
+    if !item.exists
+        || item.is_dir
+        || crate::explorer::portable_devices::is_portable_path(&item.path)
+    {
         return None;
     }
 

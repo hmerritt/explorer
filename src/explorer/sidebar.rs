@@ -4,6 +4,7 @@ use crate::explorer::filesystem::{
     NetworkDrive, NetworkDriveState, network_drives, path_is_remote_drive,
     windows_local_os_drive_root,
 };
+use crate::explorer::portable_devices::{PortableDeviceRoot, portable_device_roots};
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
 };
@@ -24,6 +25,7 @@ pub(super) enum SidebarItemKind {
     Drive,
     DriveWindows,
     DriveNetwork(NetworkDriveState),
+    PortableDevice,
     DriveWsl,
 }
 
@@ -41,6 +43,7 @@ pub(super) fn sidebar_sections(
         network_roots,
         network_drives(),
         wsl_drive_roots(),
+        portable_device_roots(),
     )
 }
 
@@ -51,13 +54,18 @@ fn sidebar_sections_from_roots_internal(
     network_roots: Vec<PathBuf>,
     discovered_network_drives: Vec<NetworkDrive>,
     wsl_roots: Vec<PathBuf>,
+    portable_roots: Vec<PortableDeviceRoot>,
 ) -> SidebarSections {
     let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
     let mut network_drives = network_drive_items_from_roots(network_roots, filesystem_name);
     network_drives.extend(network_drive_items(discovered_network_drives));
     SidebarSections {
         user_directories: configured_sidebar_items(&settings.items, filesystem_name),
-        drives: drive_items_from_roots(drive_roots, filesystem_name),
+        drives: {
+            let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
+            drives.extend(portable_device_items(portable_roots));
+            drives
+        },
         network_drives,
         wsl_drives: if hide_wsl_drives {
             Vec::new()
@@ -81,6 +89,7 @@ fn sidebar_sections_from_roots(
         Vec::new(),
         Vec::new(),
         wsl_roots,
+        Vec::new(),
     )
 }
 
@@ -100,6 +109,7 @@ fn sidebar_sections_from_sources(
         network_roots,
         network_drives,
         wsl_roots,
+        Vec::new(),
     )
 }
 
@@ -199,9 +209,29 @@ fn sidebar_item_label_for_path(
             sidebar_drive_label(path, filesystem_name)
         }
         SidebarItemKind::DriveNetwork(_) => home_sidebar_label(path),
+        SidebarItemKind::PortableDevice => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
     }
+}
+
+fn portable_device_items(devices: Vec<PortableDeviceRoot>) -> Vec<SidebarItem> {
+    let mut items = devices
+        .into_iter()
+        .map(|device| SidebarItem {
+            label: device.label,
+            path: device.path,
+            kind: SidebarItemKind::PortableDevice,
+            configured_index: None,
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.label
+            .to_ascii_lowercase()
+            .cmp(&right.label.to_ascii_lowercase())
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    items
 }
 
 fn home_sidebar_label(path: &Path) -> String {
@@ -554,6 +584,40 @@ mod tests {
         assert_eq!(sections.wsl_drives.len(), 1);
         assert_eq!(sections.wsl_drives[0].label, "Ubuntu-24.04");
         assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
+    }
+
+    #[test]
+    fn portable_devices_follow_native_volumes_and_are_sorted_case_insensitively() {
+        let native = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+        let sections = sidebar_sections_from_roots_internal(
+            &SidebarSettings::default(),
+            "Filesystem",
+            vec![native.clone()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                PortableDeviceRoot {
+                    label: "zeta phone".to_owned(),
+                    path: PathBuf::from("portable-zeta"),
+                    unavailable_reason: None,
+                },
+                PortableDeviceRoot {
+                    label: "Alpha camera".to_owned(),
+                    path: PathBuf::from("portable-alpha"),
+                    unavailable_reason: Some("locked".to_owned()),
+                },
+            ],
+        );
+
+        assert_eq!(sections.drives[0].path, native);
+        assert_eq!(sections.drives[1].label, "Alpha camera");
+        assert_eq!(sections.drives[2].label, "zeta phone");
+        assert!(
+            sections.drives[1..]
+                .iter()
+                .all(|item| item.kind == SidebarItemKind::PortableDevice)
+        );
     }
 
     #[test]
