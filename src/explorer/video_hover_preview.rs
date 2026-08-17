@@ -19,7 +19,7 @@ use crate::explorer::{
     entry::FileEntry,
     image_thumbnails::{
         CachedThumbnailImage, ThumbnailSourcePolicy, dimensions_for_preview,
-        entry_may_have_hover_image_preview, entry_may_have_hover_video_preview,
+        entry_may_have_hover_video_preview,
     },
     video::{ffmpeg_executable_path, path_may_have_video_metadata},
     view::ExplorerView,
@@ -433,14 +433,6 @@ fn video_hover_preview_frame_from_raw(
         width: frame.width,
         height: frame.height,
     })
-}
-
-pub(super) fn entry_may_have_hover_media_preview(entry: &FileEntry) -> bool {
-    entry_may_have_hover_image_preview(entry) || entry_may_have_hover_video_preview(entry)
-}
-
-pub(super) fn hover_preview_is_video(entry: &FileEntry) -> bool {
-    entry_may_have_hover_video_preview(entry)
 }
 
 #[cfg(feature = "benchmarks")]

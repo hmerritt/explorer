@@ -13,8 +13,8 @@ use gpui::{
     ExternalPathsDragCallback, FocusHandle, Focusable, FontWeight, Image, IntoElement,
     ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, list, prelude::*, px,
-    rgb, transparent_black, uniform_list,
+    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, list,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -101,10 +101,13 @@ use crate::explorer::{
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
-    tooltip::explorer_tooltip,
-    video_hover_preview::{
-        VideoHoverPreviewLookup, entry_may_have_hover_media_preview, hover_preview_is_video,
+    text_hover_preview::{
+        HoverPreviewKind, TEXT_HOVER_PREVIEW_LINE_HEIGHT, TEXT_HOVER_PREVIEW_PADDING,
+        TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
+        hover_preview_kind, text_hover_preview_line_limit,
     },
+    tooltip::explorer_tooltip,
+    video_hover_preview::VideoHoverPreviewLookup,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
         ImageHoverPreview, OperationNotice, OperationNoticeKind, UtilityMenu,
@@ -977,57 +980,83 @@ impl ExplorerView {
             || self.active_drop_indicator.is_some()
         {
             self.cancel_video_hover_preview(cx);
+            self.cancel_text_hover_preview();
             return None;
         }
 
         let state = self.image_hover_preview.clone()?;
-        let (width, height, content) = if hover_preview_is_video(&state.entry) {
-            match self.hover_video_preview_for_entry(&state.entry, cx)? {
-                VideoHoverPreviewLookup::Loading {
-                    width,
-                    height,
-                    thumbnail,
-                } => (
-                    width,
-                    height,
-                    image_hover_preview_loading_content(thumbnail),
-                ),
-                VideoHoverPreviewLookup::Playing(preview) => (
-                    preview.width,
-                    preview.height,
-                    gpui::img(preview.image)
-                        .size_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
-                        .into_any_element(),
-                ),
-                VideoHoverPreviewLookup::Failed => return None,
-            }
-        } else {
-            self.cancel_video_hover_preview(cx);
-            match self.hover_image_preview_for_entry(&state.entry, cx)? {
-                HoverImagePreviewLookup::Loading {
-                    width,
-                    height,
-                    thumbnail,
-                } => (
-                    width,
-                    height,
-                    image_hover_preview_loading_content(thumbnail),
-                ),
-                HoverImagePreviewLookup::Ready(preview) => (
-                    preview.width,
-                    preview.height,
-                    self.image_hover_preview_ready_content(preview, cx),
-                ),
-                HoverImagePreviewLookup::Failed => return None,
-            }
-        };
         let viewport_size = window.viewport_size();
         let window_size = (
             f32::from(viewport_size.width),
             f32::from(viewport_size.height),
         );
+        let (width, height, content) = match hover_preview_kind(&state.entry)? {
+            HoverPreviewKind::Video => {
+                self.cancel_text_hover_preview();
+                match self.hover_video_preview_for_entry(&state.entry, cx)? {
+                    VideoHoverPreviewLookup::Loading {
+                        width,
+                        height,
+                        thumbnail,
+                    } => (
+                        width,
+                        height,
+                        image_hover_preview_loading_content(thumbnail),
+                    ),
+                    VideoHoverPreviewLookup::Playing(preview) => (
+                        preview.width,
+                        preview.height,
+                        gpui::img(preview.image)
+                            .size_full()
+                            .object_fit(ObjectFit::Contain)
+                            .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
+                            .into_any_element(),
+                    ),
+                    VideoHoverPreviewLookup::Failed => return None,
+                }
+            }
+            HoverPreviewKind::Image => {
+                self.cancel_video_hover_preview(cx);
+                self.cancel_text_hover_preview();
+                match self.hover_image_preview_for_entry(&state.entry, cx)? {
+                    HoverImagePreviewLookup::Loading {
+                        width,
+                        height,
+                        thumbnail,
+                    } => (
+                        width,
+                        height,
+                        image_hover_preview_loading_content(thumbnail),
+                    ),
+                    HoverImagePreviewLookup::Ready(preview) => (
+                        preview.width,
+                        preview.height,
+                        self.image_hover_preview_ready_content(preview, cx),
+                    ),
+                    HoverImagePreviewLookup::Failed => return None,
+                }
+            }
+            HoverPreviewKind::Text => {
+                self.cancel_video_hover_preview(cx);
+                let preview_size = image_hover_preview_render_size(
+                    self.media_preview_size,
+                    self.media_preview_size,
+                    window_size,
+                );
+                let line_limit = text_hover_preview_line_limit(preview_size.1);
+                let content =
+                    match self.hover_text_preview_for_entry(&state.entry, line_limit, cx)? {
+                        TextHoverPreviewLookup::Loading => {
+                            image_hover_preview_loading_content(None)
+                        }
+                        TextHoverPreviewLookup::Ready(content) => {
+                            text_hover_preview_content(content)
+                        }
+                        TextHoverPreviewLookup::Failed => return None,
+                    };
+                (self.media_preview_size, self.media_preview_size, content)
+            }
+        };
         let preview_size = image_hover_preview_render_size(width, height, window_size);
         let local_position = state.position - self.view_origin;
         let (left, top) = image_hover_preview_origin(local_position, preview_size, window_size);
@@ -1049,6 +1078,7 @@ impl ExplorerView {
                     if this.update_image_hover_preview_alt(event.modifiers.alt) {
                         if !event.modifiers.alt {
                             this.cancel_video_hover_preview(cx);
+                            this.cancel_text_hover_preview();
                         }
                         cx.notify();
                     }
@@ -1100,7 +1130,7 @@ impl ExplorerView {
         alt: bool,
     ) -> bool {
         let mut changed = self.update_image_hover_preview_alt(alt);
-        if !entry_may_have_hover_media_preview(entry) {
+        if hover_preview_kind(entry).is_none() {
             return self.clear_image_hover_preview() || changed;
         }
 
@@ -3149,6 +3179,7 @@ impl Render for ExplorerView {
                 let image_hover_changed = this.update_image_hover_preview_alt(event.modifiers.alt);
                 if !event.modifiers.alt {
                     this.cancel_video_hover_preview(cx);
+                    this.cancel_text_hover_preview();
                 }
                 if drop_indicator_changed || image_hover_changed {
                     cx.notify();
@@ -3697,6 +3728,45 @@ fn animated_gif_preview_content(
         .into_any_element()
 }
 
+fn text_hover_preview_content(content: TextHoverPreviewContent) -> AnyElement {
+    let mut body = div()
+        .debug_selector(|| "text-hover-preview-content".to_owned())
+        .flex()
+        .flex_col()
+        .size_full()
+        .p(px(TEXT_HOVER_PREVIEW_PADDING))
+        .overflow_hidden()
+        .font(text_hover_preview_font())
+        .text_size(px(TEXT_HOVER_PREVIEW_TEXT_SIZE))
+        .text_color(rgb(0x1f1f1f));
+
+    for (index, line) in content.lines.into_iter().enumerate() {
+        body = body.child(
+            div()
+                .debug_selector(move || format!("text-hover-preview-line-{index}"))
+                .w_full()
+                .h(px(TEXT_HOVER_PREVIEW_LINE_HEIGHT))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .line_height(px(TEXT_HOVER_PREVIEW_LINE_HEIGHT))
+                .child(SharedString::from(line.text)),
+        );
+    }
+
+    body.into_any_element()
+}
+
+fn text_hover_preview_font() -> gpui::Font {
+    if cfg!(target_os = "windows") {
+        font("Consolas")
+    } else if cfg!(target_os = "macos") {
+        font("SF Mono")
+    } else {
+        font("DejaVu Sans Mono")
+    }
+}
+
 fn image_hover_preview_loading_progress() -> impl IntoElement {
     linear_indeterminate(
         "image-hover-preview-loading-progress-bar",
@@ -4016,6 +4086,7 @@ fn add_entry_hover_preview(
         .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
             let changed = if event.pressed_button.is_some() {
                 this.cancel_video_hover_preview(cx);
+                this.cancel_text_hover_preview();
                 this.clear_image_hover_preview()
             } else {
                 this.update_image_hover_preview(&move_entry, event.position, event.modifiers.alt)
@@ -4027,6 +4098,7 @@ fn add_entry_hover_preview(
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if !*hovered && this.clear_image_hover_preview_for_entry(&entry) {
                 this.cancel_video_hover_preview(cx);
+                this.cancel_text_hover_preview();
                 cx.notify();
             }
         }))
@@ -7242,6 +7314,22 @@ mod tests {
         panic!("{selector} should be visible");
     }
 
+    fn run_until_text_hover_preview_ready(
+        view: &gpui::Entity<ExplorerView>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        for _ in 0..10 {
+            cx.run_until_parked();
+            if cx.read_entity(view, |view, _| {
+                view.text_hover_preview_content_for_test().is_some()
+            }) {
+                return;
+            }
+        }
+
+        panic!("text hover preview should be ready");
+    }
+
     fn alt_modifiers() -> Modifiers {
         Modifiers {
             alt: true,
@@ -9960,6 +10048,142 @@ mod tests {
     }
 
     #[gpui::test]
+    fn alt_hover_markdown_renders_raw_visible_lines_in_square_popup(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let lines = (0..25)
+            .map(|index| {
+                if index == 0 {
+                    "# raw heading".to_owned()
+                } else {
+                    format!("line {index}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(temp.path().join("notes.md"), lines).expect("write markdown");
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview(cx);
+        run_until_text_hover_preview_ready(&view, cx);
+        let first_line = run_until_debug_bounds(cx, "text-hover-preview-line-0");
+        let last_line = run_until_debug_bounds(cx, "text-hover-preview-line-19");
+
+        assert_eq!(preview.size, gpui::size(gpui::px(400.0), gpui::px(400.0)));
+        assert_eq!(first_line.size.height, gpui::px(18.0));
+        assert_eq!(last_line.size.height, gpui::px(18.0));
+        assert!(cx.debug_bounds("text-hover-preview-line-20").is_none());
+        cx.read_entity(&view, |view, _| {
+            let content = view
+                .text_hover_preview_content_for_test()
+                .expect("ready text content");
+            assert_eq!(content.lines.len(), 20);
+            assert_eq!(content.lines[0].text, "# raw heading");
+        });
+    }
+
+    #[gpui::test]
+    fn text_hover_preview_uses_viewport_clamped_height_for_line_limit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let text = (0..25)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(temp.path().join("notes.txt"), text).expect("write text");
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.simulate_resize(gpui::size(gpui::px(300.0), gpui::px(300.0)));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.image_hover_preview = Some(ImageHoverPreview {
+                    entry: view.entries[0].clone(),
+                    position: gpui::point(gpui::px(295.0), gpui::px(295.0)),
+                });
+                view.image_hover_preview_alt = true;
+                cx.notify();
+            });
+        });
+        let preview = run_until_image_hover_preview(cx);
+        run_until_text_hover_preview_ready(&view, cx);
+
+        assert_eq!(preview.size, gpui::size(gpui::px(300.0), gpui::px(300.0)));
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.text_hover_preview_content_for_test()
+                    .expect("ready text content")
+                    .lines
+                    .len(),
+                15
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn releasing_alt_cancels_ready_text_hover_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("notes.txt"), "plain text").expect("write text");
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        run_until_text_hover_preview_ready(&view, cx);
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.image_hover_preview_alt);
+            assert!(view.text_hover_preview_path_for_test().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn alt_hover_switches_between_text_config_and_source_entries(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        for (name, content) in [
+            ("code.rs", "fn main() {}"),
+            ("config.toml", "enabled = true"),
+            ("notes.txt", "plain text"),
+        ] {
+            fs::write(temp.path().join(name), content).expect("write preview text");
+        }
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        for (index, expected_name, expected_text) in [
+            (0, "code.rs", "fn main() {}"),
+            (1, "config.toml", "enabled = true"),
+            (2, "notes.txt", "plain text"),
+        ] {
+            let selector = match index {
+                0 => "explorer-entry-0",
+                1 => "explorer-entry-1",
+                _ => "explorer-entry-2",
+            };
+            hover_selector(cx, selector, alt_modifiers());
+            run_until_text_hover_preview_ready(&view, cx);
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(
+                    view.text_hover_preview_path_for_test()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str()),
+                    Some(expected_name)
+                );
+                assert_eq!(
+                    view.text_hover_preview_content_for_test()
+                        .and_then(|content| content.lines.first())
+                        .map(|line| line.text.as_str()),
+                    Some(expected_text)
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
     fn image_hover_preview_offsets_from_view_local_mouse_position(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         write_test_png(&temp.path().join("image.png"));
@@ -10015,9 +10239,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alt_hover_non_image_entry_does_not_show_preview(cx: &mut gpui::TestAppContext) {
+    fn alt_hover_unsupported_entry_does_not_show_preview(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
-        fs::write(temp.path().join("notes.txt"), b"notes").expect("write notes");
+        fs::write(temp.path().join("archive.bin"), b"not previewable").expect("write binary");
         let (_, cx) =
             add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
 

@@ -389,6 +389,7 @@ impl ExplorerTabs {
             let _ = tab.view.update(cx, |view, cx| {
                 view.cancel_image_thumbnail_extraction(cx);
                 view.cancel_video_hover_preview(cx);
+                view.cancel_text_hover_preview();
             });
         }
     }

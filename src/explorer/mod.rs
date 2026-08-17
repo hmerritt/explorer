@@ -42,6 +42,7 @@ mod sorting;
 mod tabs;
 #[cfg(test)]
 mod test_support;
+mod text_hover_preview;
 mod text_input;
 mod tooltip;
 mod video;

@@ -45,6 +45,7 @@ use crate::explorer::{
     search::{SearchState, filtered_entries},
     selection::{SelectionModifiers, SelectionState},
     sorting::sort_entries,
+    text_hover_preview::TextHoverPreviewSession,
     video_hover_preview::VideoHoverPreviewSession,
     watcher::DirectoryWatcher,
 };
@@ -111,6 +112,8 @@ pub struct ExplorerView {
     pub(super) animated_image_asset_evictions: BTreeSet<String>,
     pub(super) video_hover_preview: Option<VideoHoverPreviewSession>,
     pub(super) video_hover_preview_generation: u64,
+    pub(super) text_hover_preview: Option<TextHoverPreviewSession>,
+    pub(super) text_hover_preview_generation: u64,
     pub(super) file_columns: FileColumnSettings,
     pub(super) file_column_resize_drag: Option<FileColumnResizeDrag>,
     pub(super) file_sort: FileSortSettings,
@@ -501,6 +504,8 @@ impl ExplorerView {
             animated_image_asset_evictions: BTreeSet::new(),
             video_hover_preview: None,
             video_hover_preview_generation: 0,
+            text_hover_preview: None,
+            text_hover_preview_generation: 0,
             file_columns: settings.view.file_columns.clone(),
             file_column_resize_drag: None,
             file_sort: settings.view.sort,
@@ -610,6 +615,7 @@ impl ExplorerView {
         if media_preview_size_changed {
             self.cancel_hover_image_preview_extraction(cx);
             self.cancel_video_hover_preview(cx);
+            self.cancel_text_hover_preview();
         }
         if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
@@ -1997,6 +2003,7 @@ impl ExplorerView {
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
         self.cancel_image_thumbnail_extraction(cx);
         self.cancel_video_hover_preview(cx);
+        self.cancel_text_hover_preview();
         self.cancel_active_rename();
         self.cancel_address_bar_edit();
         self.finish_search_edit();
