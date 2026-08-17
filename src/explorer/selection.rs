@@ -42,6 +42,14 @@ pub(super) enum SelectionDirection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LargeIconSelectionDirection {
+    Previous,
+    Next,
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SelectionEdge {
     Home,
     End,
@@ -356,6 +364,41 @@ impl ExplorerView {
         self.select_single_index(target);
     }
 
+    pub(super) fn move_large_icon_selection(&mut self, direction: LargeIconSelectionDirection) {
+        if self.entries.is_empty() {
+            self.clear_selection();
+            return;
+        }
+
+        if self
+            .selection
+            .focused_index
+            .is_none_or(|ix| ix >= self.entries.len())
+        {
+            self.select_single_index(0);
+            return;
+        }
+
+        let columns = match direction {
+            LargeIconSelectionDirection::Previous | LargeIconSelectionDirection::Next => 1,
+            LargeIconSelectionDirection::Above | LargeIconSelectionDirection::Below => {
+                let Some(layout) = &self.large_icon_layout else {
+                    return;
+                };
+                layout.columns
+            }
+        };
+
+        if let Some(target) = large_icon_selection_target(
+            self.selection.focused_index,
+            self.entries.len(),
+            columns,
+            direction,
+        ) {
+            self.select_single_index(target);
+        }
+    }
+
     pub(super) fn extend_selection(&mut self, direction: SelectionDirection) {
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
@@ -403,6 +446,33 @@ impl ExplorerView {
     }
 }
 
+fn large_icon_selection_target(
+    focused_index: Option<usize>,
+    entry_count: usize,
+    columns: usize,
+    direction: LargeIconSelectionDirection,
+) -> Option<usize> {
+    if entry_count == 0 {
+        return None;
+    }
+
+    let Some(focused_index) = focused_index.filter(|ix| *ix < entry_count) else {
+        return Some(0);
+    };
+    let columns = columns.max(1);
+
+    match direction {
+        LargeIconSelectionDirection::Previous => focused_index.checked_sub(1),
+        LargeIconSelectionDirection::Next => {
+            (focused_index + 1 < entry_count).then_some(focused_index + 1)
+        }
+        LargeIconSelectionDirection::Above => focused_index.checked_sub(columns),
+        LargeIconSelectionDirection::Below => focused_index
+            .checked_add(columns)
+            .filter(|target| *target < entry_count),
+    }
+}
+
 fn indices_in_range(a: usize, b: usize) -> impl Iterator<Item = usize> {
     let range = SelectionRange::new(a, b);
     range.start..=range.end
@@ -414,6 +484,7 @@ mod tests {
     use super::*;
     use crate::explorer::{
         entry::FileEntry,
+        large_icons::LargeIconLayout,
         test_support::{TempDir, selected_names, test_view_with_entries},
         view::ExplorerView,
     };
@@ -504,6 +575,70 @@ mod tests {
         view.move_selection(SelectionDirection::Up);
         view.move_selection(SelectionDirection::Up);
         assert_eq!(selected_names(&view), vec!["a.txt"]);
+    }
+
+    #[test]
+    fn large_icon_selection_targets_follow_grid_rows_without_wrapping() {
+        use LargeIconSelectionDirection::{Above, Below, Next, Previous};
+
+        assert_eq!(large_icon_selection_target(None, 8, 3, Previous), Some(0));
+        assert_eq!(large_icon_selection_target(None, 8, 3, Next), Some(0));
+        assert_eq!(large_icon_selection_target(None, 8, 3, Above), Some(0));
+        assert_eq!(large_icon_selection_target(None, 8, 3, Below), Some(0));
+
+        assert_eq!(large_icon_selection_target(Some(0), 8, 3, Previous), None);
+        assert_eq!(large_icon_selection_target(Some(7), 8, 3, Next), None);
+        assert_eq!(large_icon_selection_target(Some(2), 8, 3, Above), None);
+        assert_eq!(large_icon_selection_target(Some(4), 8, 3, Above), Some(1));
+        assert_eq!(large_icon_selection_target(Some(1), 8, 3, Below), Some(4));
+        assert_eq!(large_icon_selection_target(Some(4), 8, 3, Below), Some(7));
+        assert_eq!(large_icon_selection_target(Some(5), 8, 3, Below), None);
+        assert_eq!(large_icon_selection_target(Some(7), 8, 3, Below), None);
+    }
+
+    #[test]
+    fn large_icon_arrow_selection_uses_rendered_columns_and_collapses_ranges() {
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            3,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+
+        for direction in [
+            LargeIconSelectionDirection::Previous,
+            LargeIconSelectionDirection::Next,
+            LargeIconSelectionDirection::Above,
+            LargeIconSelectionDirection::Below,
+        ] {
+            view.clear_selection();
+            view.move_large_icon_selection(direction);
+            assert_eq!(selected_names(&view), vec!["a.txt"]);
+        }
+
+        view.select_single_index(1);
+        view.extend_selection_to_index(4);
+        view.move_large_icon_selection(LargeIconSelectionDirection::Above);
+        assert_eq!(selected_names(&view), vec!["b.txt"]);
+
+        view.select_single_index(4);
+        view.move_large_icon_selection(LargeIconSelectionDirection::Below);
+        assert_eq!(selected_names(&view), vec!["h.txt"]);
+
+        view.select_single_index(5);
+        view.move_large_icon_selection(LargeIconSelectionDirection::Below);
+        assert_eq!(selected_names(&view), vec!["f.txt"]);
+
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            4,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+        view.select_single_index(6);
+        view.move_large_icon_selection(LargeIconSelectionDirection::Above);
+        assert_eq!(selected_names(&view), vec!["c.txt"]);
     }
 
     #[test]

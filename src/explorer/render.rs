@@ -3042,6 +3042,11 @@ fn search_bar_icon_button(
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        let key_context = if self.view_mode == FileViewMode::LargeIcons {
+            crate::explorer::EXPLORER_LARGE_ICONS_KEY_CONTEXT
+        } else {
+            "Explorer"
+        };
         let entity = cx.entity();
         let window_width = f32::from(window.bounds().size.width);
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
@@ -3056,9 +3061,13 @@ impl Render for ExplorerView {
         );
 
         div()
-            .key_context("Explorer")
+            .key_context(key_context)
             .track_focus(&focus_handle)
             .on_key_down(cx.listener(Self::handle_type_to_search))
+            .on_action(cx.listener(Self::handle_move_large_icon_left))
+            .on_action(cx.listener(Self::handle_move_large_icon_right))
+            .on_action(cx.listener(Self::handle_move_large_icon_up))
+            .on_action(cx.listener(Self::handle_move_large_icon_down))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
             .on_action(cx.listener(Self::handle_extend_up))

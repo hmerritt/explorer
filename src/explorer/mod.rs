@@ -53,6 +53,13 @@ mod watcher;
 #[cfg(target_os = "windows")]
 mod windows_shell;
 
+pub(crate) const EXPLORER_LARGE_ICONS_KEY_CONTEXT: &str = "Explorer view = large_icons";
+pub(crate) const EXPLORER_LARGE_ICONS_BINDING_CONTEXT: &str = "Explorer && view == large_icons";
+
+pub(crate) use actions::{
+    MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
+};
+
 pub use actions::{
     AddressAcceptSuggestion, AddressBackspace, AddressBackspaceWord, AddressCancel, AddressCommit,
     AddressCopy, AddressCut, AddressDelete, AddressEdit, AddressEnd, AddressHome, AddressLeft,

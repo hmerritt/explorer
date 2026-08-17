@@ -30,14 +30,15 @@ use crate::explorer::{
     AddressSelectLeft, AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight,
     AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag,
     CloseTab, CopySelected, CreateNewFolder, CutSelected, DialogCancel, DialogConfirm,
-    DialogFocusPrimary, DialogFocusSecondary, EnterSelected, EnterSelectedInNewTab, ExplorerTabs,
-    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
-    MoveHome, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected, OpenSelectedInNewTab,
-    OpenSettings, PasteClipboard, PermanentlyDeleteSelected, PropertiesOpenNext,
-    PropertiesOpenPrevious, RecursiveSearchEdit, Refresh, RenameBackspace, RenameBackspaceWord,
-    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
-    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
-    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
+    DialogFocusPrimary, DialogFocusSecondary, EXPLORER_LARGE_ICONS_BINDING_CONTEXT, EnterSelected,
+    EnterSelectedInNewTab, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack,
+    GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveLargeIconDown, MoveLargeIconLeft,
+    MoveLargeIconRight, MoveLargeIconUp, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected,
+    OpenSelectedInNewTab, OpenSettings, PasteClipboard, PermanentlyDeleteSelected,
+    PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit, Refresh, RenameBackspace,
+    RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
+    RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
+    RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
     RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
     SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
     SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
@@ -942,8 +943,19 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBindingProfile::Mac => push_mac_key_bindings(&mut bindings),
         KeyBindingProfile::WindowsLike => push_windows_like_key_bindings(&mut bindings),
     }
+    push_large_icon_key_bindings(&mut bindings);
 
     bindings
+}
+
+fn push_large_icon_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some(EXPLORER_LARGE_ICONS_BINDING_CONTEXT);
+    bindings.extend([
+        KeyBinding::new("left", MoveLargeIconLeft, context),
+        KeyBinding::new("right", MoveLargeIconRight, context),
+        KeyBinding::new("up", MoveLargeIconUp, context),
+        KeyBinding::new("down", MoveLargeIconDown, context),
+    ]);
 }
 
 fn push_mac_key_bindings(bindings: &mut Vec<KeyBinding>) {
@@ -1294,7 +1306,7 @@ mod tests {
     use super::*;
     use crate::settings::{ConfigPlatform, ExplorerSettings, config_dir_for};
     use crate::window_state::StoredWindowMode;
-    use gpui::{Keystroke, TestAppContext};
+    use gpui::{KeyContext, Keymap, Keystroke, TestAppContext};
     use std::{
         fs, thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1317,6 +1329,32 @@ mod tests {
                     == context
                 && matches!(binding.match_keystrokes(&[keystroke.clone()]), Some(false))
         })
+    }
+
+    fn resolves_to<A: gpui::Action>(
+        bindings: &[KeyBinding],
+        action: A,
+        keystroke: &str,
+        contexts: &[KeyContext],
+    ) -> bool {
+        let keystroke = Keystroke::parse(keystroke).expect("valid test keystroke");
+        let keymap = Keymap::new(bindings.to_vec());
+        let (resolved, pending) = keymap.bindings_for_input(&[keystroke], contexts);
+        !pending
+            && resolved
+                .first()
+                .is_some_and(|binding| binding.action().partial_eq(&action))
+    }
+
+    fn has_no_resolved_binding(
+        bindings: &[KeyBinding],
+        keystroke: &str,
+        contexts: &[KeyContext],
+    ) -> bool {
+        let keystroke = Keystroke::parse(keystroke).expect("valid test keystroke");
+        let keymap = Keymap::new(bindings.to_vec());
+        let (resolved, pending) = keymap.bindings_for_input(&[keystroke], contexts);
+        !pending && resolved.is_empty()
     }
 
     fn assert_text_clipboard_and_history_bindings(
@@ -1431,6 +1469,108 @@ mod tests {
 
         let windows_like_bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
         assert!(has_binding(&windows_like_bindings, GoUp, "left", None));
+    }
+
+    #[test]
+    fn large_icon_arrow_bindings_override_platform_navigation() {
+        let large_icons = [
+            KeyContext::parse(crate::explorer::EXPLORER_LARGE_ICONS_KEY_CONTEXT)
+                .expect("valid large icons key context"),
+        ];
+
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+            assert!(resolves_to(
+                &bindings,
+                MoveLargeIconLeft,
+                "left",
+                &large_icons
+            ));
+            assert!(resolves_to(
+                &bindings,
+                MoveLargeIconRight,
+                "right",
+                &large_icons
+            ));
+            assert!(resolves_to(&bindings, MoveLargeIconUp, "up", &large_icons));
+            assert!(resolves_to(
+                &bindings,
+                MoveLargeIconDown,
+                "down",
+                &large_icons
+            ));
+            assert!(resolves_to(&bindings, ExtendUp, "shift-up", &large_icons));
+            assert!(resolves_to(
+                &bindings,
+                ExtendDown,
+                "shift-down",
+                &large_icons
+            ));
+        }
+    }
+
+    #[test]
+    fn details_arrow_bindings_remain_platform_specific() {
+        let details = [KeyContext::parse("Explorer").expect("valid details key context")];
+
+        let mac = key_bindings_for_profile(KeyBindingProfile::Mac);
+        assert!(has_no_resolved_binding(&mac, "left", &details));
+        assert!(resolves_to(&mac, OpenSelected, "right", &details));
+        assert!(resolves_to(&mac, MoveUp, "up", &details));
+        assert!(resolves_to(&mac, MoveDown, "down", &details));
+
+        let windows_like = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
+        assert!(resolves_to(&windows_like, GoUp, "left", &details));
+        assert!(resolves_to(&windows_like, OpenSelected, "right", &details));
+        assert!(resolves_to(&windows_like, MoveUp, "up", &details));
+        assert!(resolves_to(&windows_like, MoveDown, "down", &details));
+    }
+
+    #[test]
+    fn nested_explorer_contexts_keep_arrow_precedence_in_large_icons() {
+        let large_icons = KeyContext::parse(crate::explorer::EXPLORER_LARGE_ICONS_KEY_CONTEXT)
+            .expect("valid large icons key context");
+
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+            let rename = [
+                large_icons.clone(),
+                KeyContext::parse("ExplorerRenameInput").expect("valid rename context"),
+            ];
+            assert!(resolves_to(&bindings, RenameLeft, "left", &rename));
+            assert!(resolves_to(&bindings, RenameNoop, "up", &rename));
+
+            let address = [
+                large_icons.clone(),
+                KeyContext::parse("ExplorerAddressInput").expect("valid address context"),
+            ];
+            assert!(resolves_to(&bindings, AddressRight, "right", &address));
+            assert!(resolves_to(
+                &bindings,
+                AddressSuggestionDown,
+                "down",
+                &address
+            ));
+
+            let search = [
+                large_icons.clone(),
+                KeyContext::parse("ExplorerSearchInput").expect("valid search context"),
+            ];
+            assert!(resolves_to(&bindings, SearchLeft, "left", &search));
+            assert!(resolves_to(&bindings, SearchRight, "right", &search));
+
+            let dialog = [
+                large_icons.clone(),
+                KeyContext::parse("ExplorerDialog").expect("valid dialog context"),
+            ];
+            assert!(resolves_to(&bindings, DialogFocusPrimary, "up", &dialog));
+            assert!(resolves_to(
+                &bindings,
+                DialogFocusSecondary,
+                "down",
+                &dialog
+            ));
+        }
     }
 
     #[test]

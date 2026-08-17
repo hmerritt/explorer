@@ -3,7 +3,7 @@ use std::path::Path;
 use gpui::{Context, Window, actions};
 
 use crate::explorer::{
-    selection::{SelectionDirection, SelectionEdge},
+    selection::{LargeIconSelectionDirection, SelectionDirection, SelectionEdge},
     view::ExplorerView,
 };
 
@@ -12,6 +12,10 @@ actions!(
     [
         MoveUp,
         MoveDown,
+        MoveLargeIconLeft,
+        MoveLargeIconRight,
+        MoveLargeIconUp,
+        MoveLargeIconDown,
         ExtendUp,
         ExtendDown,
         MoveHome,
@@ -128,6 +132,46 @@ pub struct SelectTabByIndex {
 }
 
 impl ExplorerView {
+    pub(super) fn handle_move_large_icon_left(
+        &mut self,
+        _: &MoveLargeIconLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_large_icon_selection(LargeIconSelectionDirection::Previous);
+        cx.notify();
+    }
+
+    pub(super) fn handle_move_large_icon_right(
+        &mut self,
+        _: &MoveLargeIconRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_large_icon_selection(LargeIconSelectionDirection::Next);
+        cx.notify();
+    }
+
+    pub(super) fn handle_move_large_icon_up(
+        &mut self,
+        _: &MoveLargeIconUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_large_icon_selection(LargeIconSelectionDirection::Above);
+        cx.notify();
+    }
+
+    pub(super) fn handle_move_large_icon_down(
+        &mut self,
+        _: &MoveLargeIconDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_large_icon_selection(LargeIconSelectionDirection::Below);
+        cx.notify();
+    }
+
     pub(super) fn handle_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(SelectionDirection::Up);
         cx.notify();
