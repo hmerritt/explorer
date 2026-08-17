@@ -1,9 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     mem,
     num::NonZeroIsize,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
@@ -35,7 +37,7 @@ use windows::{
 };
 
 use crate::*;
-use super::text_services::TsfCaretContext;
+use super::{WM_GPUI_START_EXTERNAL_PATHS_DRAG, text_services::TsfCaretContext};
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
@@ -133,6 +135,7 @@ pub(crate) struct WindowsWindowInner {
     pub(super) this: Weak<Self>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
+    pending_external_paths_drag: RefCell<PendingExternalPathsDrag>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) hide_title_bar: bool,
@@ -278,6 +281,33 @@ impl WindowsWindowState {
 }
 
 impl WindowsWindowInner {
+    pub(super) fn handle_start_external_paths_drag_msg(&self) -> Option<isize> {
+        let Some(paths) = self.pending_external_paths_drag.borrow_mut().take() else {
+            log::error!("received external paths drag message without a pending drag");
+            return Some(0);
+        };
+
+        // SHDoDragDrop runs a nested Windows message loop. The queued paths must
+        // be taken before entering it so no RefCell borrow survives re-entrancy.
+        let result = windows_external_drag_completion(start_windows_external_paths_drag(
+            self.hwnd, paths,
+        ));
+
+        let Some(mut callback) = self.state.borrow_mut().callbacks.input.take() else {
+            log::error!("unable to report external paths drag completion without an input callback");
+            return Some(0);
+        };
+        let callback_result = catch_unwind(AssertUnwindSafe(|| {
+            callback(PlatformInput::ExternalPathsDragFinished(result));
+        }));
+        self.state.borrow_mut().callbacks.input = Some(callback);
+        if let Err(payload) = callback_result {
+            resume_unwind(payload);
+        }
+
+        Some(0)
+    }
+
     pub(super) fn destroy_system_caret(&self) {
         if let Some(context) = self.tsf_caret_context.as_ref() {
             context.clear_caret();
@@ -311,6 +341,7 @@ impl WindowsWindowInner {
             this: this.clone(),
             drop_target_helper: context.drop_target_helper.clone(),
             state,
+            pending_external_paths_drag: RefCell::new(PendingExternalPathsDrag::default()),
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
             system_caret_bitmap,
@@ -965,7 +996,33 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
-        start_windows_external_paths_drag(self.0.hwnd, paths)
+        if paths.paths().is_empty() {
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        let Ok(mut pending_drag) = self.0.pending_external_paths_drag.try_borrow_mut() else {
+            log::error!("unable to queue external paths drag while the queue is borrowed");
+            return ExternalPathsDragStartResult::Failed;
+        };
+        if !pending_drag.queue(paths) {
+            log::error!("unable to queue external paths drag while another drag is pending");
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        if let Err(error) = unsafe {
+            PostMessageW(
+                Some(self.0.hwnd),
+                WM_GPUI_START_EXTERNAL_PATHS_DRAG,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        } {
+            pending_drag.cancel();
+            log::error!("unable to post external paths drag message: {error}");
+            return ExternalPathsDragStartResult::Failed;
+        }
+
+        ExternalPathsDragStartResult::Pending
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
@@ -1269,6 +1326,41 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
             logical_performed_effect.get(),
         )),
         None => ExternalPathsDragStartResult::Failed,
+    }
+}
+
+#[derive(Default)]
+struct PendingExternalPathsDrag {
+    paths: Option<ExternalPaths>,
+}
+
+impl PendingExternalPathsDrag {
+    fn queue(&mut self, paths: ExternalPaths) -> bool {
+        if self.paths.is_some() {
+            false
+        } else {
+            self.paths = Some(paths);
+            true
+        }
+    }
+
+    fn take(&mut self) -> Option<ExternalPaths> {
+        self.paths.take()
+    }
+
+    fn cancel(&mut self) {
+        self.paths = None;
+    }
+}
+
+fn windows_external_drag_completion(
+    result: ExternalPathsDragStartResult,
+) -> ExternalPathsDragResult {
+    match result {
+        ExternalPathsDragStartResult::Completed(result) => result,
+        ExternalPathsDragStartResult::Pending | ExternalPathsDragStartResult::Failed => {
+            ExternalPathsDragResult::Cancelled
+        }
     }
 }
 
@@ -1590,11 +1682,15 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 #[cfg(test)]
 mod external_paths_drag_tests {
     use super::{
-        build_hdrop_payload, windows_external_drag_result, DROPFILES, DROPEFFECT_COPY,
-        DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        PendingExternalPathsDrag, build_hdrop_payload, catch_windows_callback,
+        windows_external_drag_completion, windows_external_drag_result, DROPFILES,
+        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
     };
-    use crate::{ExternalPathDragOperation, ExternalPathsDragResult};
-    use std::{mem, path::PathBuf};
+    use crate::{
+        ExternalPathDragOperation, ExternalPaths, ExternalPathsDragResult,
+        ExternalPathsDragStartResult,
+    };
+    use std::{cell::Cell, mem, path::PathBuf};
 
     fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
         let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
@@ -1676,6 +1772,57 @@ mod external_paths_drag_tests {
                 cleanup_source: false,
             }
         );
+    }
+
+    #[test]
+    fn pending_drag_queue_rejects_duplicates_and_can_be_reused() {
+        let mut pending = PendingExternalPathsDrag::default();
+        assert!(pending.queue(ExternalPaths::new([PathBuf::from(
+            r"C:\Users\test\one.txt",
+        )])));
+        assert!(!pending.queue(ExternalPaths::new([PathBuf::from(
+            r"C:\Users\test\two.txt",
+        )])));
+
+        let paths = pending.take().unwrap();
+        assert_eq!(paths.paths(), [PathBuf::from(r"C:\Users\test\one.txt")]);
+        assert!(pending.queue(ExternalPaths::new([PathBuf::from(
+            r"C:\Users\test\three.txt",
+        )])));
+        pending.cancel();
+        assert!(pending.take().is_none());
+    }
+
+    #[test]
+    fn deferred_drag_completion_preserves_success_and_cancels_failures() {
+        let completed = ExternalPathsDragResult::copy();
+        assert_eq!(
+            windows_external_drag_completion(ExternalPathsDragStartResult::Completed(completed)),
+            completed
+        );
+        assert_eq!(
+            windows_external_drag_completion(ExternalPathsDragStartResult::Failed),
+            ExternalPathsDragResult::Cancelled
+        );
+        assert_eq!(
+            windows_external_drag_completion(ExternalPathsDragStartResult::Pending),
+            ExternalPathsDragResult::Cancelled
+        );
+    }
+
+    #[test]
+    fn windows_callback_panics_use_the_fallback() {
+        let fallback_called = Cell::new(false);
+        let result = catch_windows_callback(
+            || panic!("test callback panic"),
+            |_| {
+                fallback_called.set(true);
+                42
+            },
+        );
+
+        assert_eq!(result, 42);
+        assert!(fallback_called.get());
     }
 }
 
@@ -1838,6 +1985,22 @@ unsafe extern "system" fn window_procedure(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    catch_windows_callback(
+        || window_procedure_inner(hwnd, msg, wparam, lparam),
+        |payload| {
+            let message = panic_payload_message(payload);
+            log::error!("panic in Windows window procedure for message {msg:#x}: {message}");
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        },
+    )
+}
+
+fn window_procedure_inner(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     if msg == WM_NCCREATE {
         let window_params = lparam.0 as *const CREATESTRUCTW;
         let window_params = unsafe { &*window_params };
@@ -1874,6 +2037,24 @@ unsafe extern "system" fn window_procedure(
     }
 
     result
+}
+
+pub(super) fn catch_windows_callback<T>(
+    callback: impl FnOnce() -> T,
+    on_panic: impl FnOnce(&(dyn Any + Send)) -> T,
+) -> T {
+    match catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(result) => result,
+        Err(payload) => on_panic(payload.as_ref()),
+    }
+}
+
+pub(super) fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {

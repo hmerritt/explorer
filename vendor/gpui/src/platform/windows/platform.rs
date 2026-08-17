@@ -27,6 +27,7 @@ use windows::{
 };
 
 use crate::*;
+use super::window::{catch_windows_callback, panic_payload_message};
 
 pub(crate) struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
@@ -1105,6 +1106,22 @@ fn register_platform_window_class() {
 }
 
 unsafe extern "system" fn window_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    catch_windows_callback(
+        || window_procedure_inner(hwnd, msg, wparam, lparam),
+        |payload| {
+            let message = panic_payload_message(payload);
+            log::error!("panic in Windows platform procedure for message {msg:#x}: {message}");
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        },
+    )
+}
+
+fn window_procedure_inner(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,

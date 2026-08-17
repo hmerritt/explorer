@@ -527,8 +527,10 @@ mod tests {
         assert!(payload.len() > mem::size_of::<DROPFILES>());
 
         let header = unsafe { *(payload.as_ptr().cast::<DROPFILES>()) };
-        assert_eq!(header.pFiles, mem::size_of::<DROPFILES>() as u32);
-        assert_eq!(header.fWide, BOOL(1));
+        let pfiles = header.pFiles;
+        let fwide = header.fWide;
+        assert_eq!(pfiles, mem::size_of::<DROPFILES>() as u32);
+        assert_eq!(fwide, BOOL(1));
 
         let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
         assert_eq!(path_bytes.len() % mem::size_of::<u16>(), 0);
