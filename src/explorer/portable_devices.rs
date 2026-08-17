@@ -291,7 +291,7 @@ fn device_session(device_id: u64) -> Result<DeviceSession, String> {
         device_info.location_id,
     ) {
         #[cfg(not(target_os = "windows"))]
-        DeviceOpenTarget::Serial(serial) => block_on(MtpDevice::open_by_serial(serial)),
+        DeviceOpenTarget::Serial(serial) => block_on(MtpDevice::open_by_serial(&serial)),
         DeviceOpenTarget::Location(location_id) => {
             block_on(MtpDevice::open_by_location(location_id))
         }
