@@ -920,17 +920,52 @@ fn resolve_address_input_with_env(
         current_path.join(typed_path)
     };
 
-    if !candidate.exists() {
+    let candidate_exists = candidate.exists();
+    let Some(directory) = address_directory_target(&candidate) else {
+        if candidate_exists {
+            return Err(format!("{} is not a folder.", candidate.display()));
+        }
         return Err(format!("Could not find {}.", candidate.display()));
-    }
+    };
 
-    if !candidate.is_dir() {
-        return Err(format!("{} is not a folder.", candidate.display()));
-    }
-
-    Ok(fs::canonicalize(&candidate)
+    Ok(fs::canonicalize(&directory)
         .map(explorer_visible_address_path)
-        .unwrap_or(candidate))
+        .unwrap_or(directory))
+}
+
+fn address_directory_target(candidate: &Path) -> Option<PathBuf> {
+    if candidate.is_dir() {
+        return Some(candidate.to_path_buf());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let shortcut = address_shortcut_candidate(candidate)?;
+        let entry = crate::explorer::entry::FileEntry::from_path(shortcut)?;
+        let (_, target) = entry.pending_shell_shortcut_target()?;
+        target.is_dir().then_some(target)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn address_shortcut_candidate(candidate: &Path) -> Option<PathBuf> {
+    if candidate.exists()
+        || candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+    {
+        return Some(candidate.to_path_buf());
+    }
+
+    let mut shortcut_name = candidate.file_name()?.to_os_string();
+    shortcut_name.push(".lnk");
+    Some(candidate.with_file_name(shortcut_name))
 }
 
 #[cfg(windows)]
@@ -1644,6 +1679,96 @@ mod tests {
         assert!(resolve_address_input("missing", temp.path()).is_err());
         assert!(resolve_address_input("file.txt", temp.path()).is_err());
         assert!(resolve_address_input("", temp.path()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_follows_directory_shortcuts_with_hidden_or_explicit_extension() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target");
+        let shortcut = temp.path().join("test.lnk");
+        crate::explorer::windows_shell::create_shell_shortcut(&shortcut, &target)
+            .expect("create directory shortcut");
+        let expected = explorer_visible_address_path(fs::canonicalize(&target).unwrap());
+
+        assert_eq!(
+            resolve_address_input("test", temp.path()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_address_input("test.lnk", temp.path()).unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_appends_shortcut_extension_to_the_complete_display_name() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target");
+        let shortcut = temp.path().join("test.name.lnk");
+        crate::explorer::windows_shell::create_shell_shortcut(&shortcut, &target)
+            .expect("create directory shortcut");
+
+        assert_eq!(
+            resolve_address_input("test.name", temp.path()).unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&target).unwrap())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_ignores_file_broken_and_invalid_shortcuts() {
+        let temp = TempDir::new();
+        let target_file = temp.path().join("target.txt");
+        fs::write(&target_file, b"data").expect("create target file");
+        let file_shortcut = temp.path().join("file-target.lnk");
+        crate::explorer::windows_shell::create_shell_shortcut(&file_shortcut, &target_file)
+            .expect("create file shortcut");
+
+        let missing_target = temp.path().join("missing-target");
+        let broken_shortcut = temp.path().join("broken.lnk");
+        crate::explorer::windows_shell::create_shell_shortcut(&broken_shortcut, &missing_target)
+            .expect("create broken shortcut");
+
+        let invalid_shortcut = temp.path().join("invalid.lnk");
+        fs::write(&invalid_shortcut, b"not a shortcut").expect("create invalid shortcut");
+
+        for name in ["file-target", "broken", "invalid"] {
+            assert_eq!(
+                resolve_address_input(name, temp.path()).unwrap_err(),
+                format!("Could not find {}.", temp.path().join(name).display())
+            );
+        }
+
+        for name in ["file-target.lnk", "broken.lnk", "invalid.lnk"] {
+            assert_eq!(
+                resolve_address_input(name, temp.path()).unwrap_err(),
+                format!("{} is not a folder.", temp.path().join(name).display())
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_prefers_an_exact_directory_over_a_same_name_shortcut() {
+        let temp = TempDir::new();
+        let exact_directory = temp.path().join("test");
+        let shortcut_target = temp.path().join("shortcut-target");
+        fs::create_dir(&exact_directory).expect("create exact directory");
+        fs::create_dir(&shortcut_target).expect("create shortcut target");
+        crate::explorer::windows_shell::create_shell_shortcut(
+            &temp.path().join("test.lnk"),
+            &shortcut_target,
+        )
+        .expect("create directory shortcut");
+
+        assert_eq!(
+            resolve_address_input("test", temp.path()).unwrap(),
+            explorer_visible_address_path(fs::canonicalize(&exact_directory).unwrap())
+        );
     }
 
     #[cfg(windows)]
