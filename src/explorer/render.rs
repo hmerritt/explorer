@@ -2197,7 +2197,6 @@ impl ExplorerView {
                             paths.paths(),
                             destination.clone(),
                             window.modifiers(),
-                            window,
                             cx,
                         );
                         cx.stop_propagation();
@@ -4318,7 +4317,6 @@ fn add_drop_handlers(
                     paths.paths(),
                     destination.clone(),
                     window.modifiers(),
-                    window,
                     cx,
                 );
                 cx.stop_propagation();
@@ -5660,7 +5658,6 @@ fn directory_bar_label(
                     paths.paths(),
                     destination.clone(),
                     window.modifiers(),
-                    window,
                     cx,
                 );
                 cx.stop_propagation();

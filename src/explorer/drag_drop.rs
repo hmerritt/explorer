@@ -1040,7 +1040,6 @@ impl ExplorerView {
         paths: &[PathBuf],
         destination: DropDestination,
         modifiers: Modifiers,
-        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let paths = normalize_external_drop_paths(paths);
@@ -1060,10 +1059,9 @@ impl ExplorerView {
             return;
         }
 
-        let operation =
-            resolve_drop_operation_for_paths(modifiers, true, &paths, &resolved_destination);
-
         if crate::explorer::portable_devices::is_portable_path(&resolved_destination) {
+            let operation =
+                resolve_drop_operation_for_paths(modifiers, true, &paths, &resolved_destination);
             if operation == ResolvedDrop::Link {
                 self.set_error_notice("Portable devices do not support links.".to_owned());
                 return;
@@ -1075,79 +1073,6 @@ impl ExplorerView {
                     operation == ResolvedDrop::Move,
                     cx,
                 );
-            }
-            return;
-        }
-
-        #[cfg(target_os = "windows")]
-        if let Some(default_shell_operation) =
-            windows_shell_external_drop_operation(&paths, &resolved_destination, operation)
-        {
-            use crate::explorer::windows_shell::{
-                ShellFileOperationResult, WinScpDropBridgeResult,
-            };
-
-            if self.active_file_operation.is_some() {
-                self.set_error_notice("Another file operation is already running.".to_owned());
-                return;
-            }
-
-            self.clear_operation_notice();
-            let native_context = window.active_external_paths_drop_context();
-            let Some(shell_operation) =
-                crate::explorer::windows_shell::resolve_native_shell_file_operation(
-                    native_context,
-                    default_shell_operation,
-                )
-            else {
-                self.perform_file_drop_and_open_dialog(
-                    &paths,
-                    &resolved_destination,
-                    modifiers,
-                    cx,
-                );
-                return;
-            };
-            if crate::explorer::windows_shell::bridge_winscp_fake_directory_drop(
-                &paths,
-                &resolved_destination,
-            ) == WinScpDropBridgeResult::Committed
-            {
-                window.complete_external_paths_drop(0);
-                self.reload_with_entry_metadata_resolution(cx);
-                self.emit_filesystem_changed(cx);
-                return;
-            }
-
-            let result = crate::explorer::windows_shell::perform_shell_file_operation(
-                shell_operation,
-                &paths,
-                &resolved_destination,
-                crate::explorer::windows_shell::parent_hwnd(window),
-            );
-            match result {
-                ShellFileOperationResult::Completed => {
-                    window.complete_external_paths_drop(
-                        crate::explorer::windows_shell::shell_file_operation_effect(
-                            shell_operation,
-                        ),
-                    );
-                    self.reload_with_entry_metadata_resolution(cx);
-                    self.emit_filesystem_changed(cx);
-                }
-                ShellFileOperationResult::Aborted => {
-                    window.complete_external_paths_drop(0);
-                    self.reload_with_entry_metadata_resolution(cx);
-                    self.emit_filesystem_changed(cx);
-                }
-                ShellFileOperationResult::Failed(code) => {
-                    window.complete_external_paths_drop(0);
-                    self.reload_with_entry_metadata_resolution(cx);
-                    self.set_error_notice(format!(
-                        "Windows Shell file operation failed (0x{:08X}).",
-                        code as u32
-                    ));
-                }
             }
             return;
         }
@@ -1572,33 +1497,6 @@ fn drop_destination_is_dir(path: &Path) -> bool {
             || crate::explorer::portable_devices::capabilities(path).can_upload)
 }
 
-#[cfg(target_os = "windows")]
-fn windows_shell_external_drop_operation(
-    paths: &[PathBuf],
-    destination: &Path,
-    operation: ResolvedDrop,
-) -> Option<crate::explorer::windows_shell::ShellFileOperation> {
-    use crate::explorer::windows_shell::ShellFileOperation;
-
-    if crate::explorer::portable_devices::is_portable_path(destination)
-        || paths
-            .iter()
-            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
-        || !crate::explorer::windows_shell::shell_file_operation_paths_supported(paths, destination)
-        || !paths
-            .iter()
-            .any(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()))
-    {
-        return None;
-    }
-
-    match operation {
-        ResolvedDrop::Copy => Some(ShellFileOperation::Copy),
-        ResolvedDrop::Move => Some(ShellFileOperation::Move),
-        ResolvedDrop::Link | ResolvedDrop::Invalid => None,
-    }
-}
-
 fn drop_target_validity_for_same_source_destination(
     same_source_destination: bool,
     modifiers: Modifiers,
@@ -1773,125 +1671,6 @@ mod tests {
         assert_eq!(
             resolve_drop_operation(Modifiers::default(), false),
             ResolvedDrop::Invalid
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_shell_routes_directory_copy_and_move_drops() {
-        use crate::explorer::windows_shell::ShellFileOperation;
-
-        let temp = TempDir::new();
-        let source = temp.path().join("source");
-        let destination = temp.path().join("destination");
-        fs::create_dir(&source).expect("create source directory");
-        fs::create_dir(&destination).expect("create destination directory");
-
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source),
-                &destination,
-                ResolvedDrop::Copy,
-            ),
-            Some(ShellFileOperation::Copy)
-        );
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source),
-                &destination,
-                ResolvedDrop::Move,
-            ),
-            Some(ShellFileOperation::Move)
-        );
-
-        let normalized_source = normalize_external_drop_paths(std::slice::from_ref(&source));
-        let normalized_destination =
-            fs::canonicalize(&destination).expect("canonicalize destination directory");
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                &normalized_source,
-                &normalized_destination,
-                ResolvedDrop::Move,
-            ),
-            Some(ShellFileOperation::Move)
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_shell_routes_mixed_batches_but_not_file_only_or_link_drops() {
-        use crate::explorer::windows_shell::ShellFileOperation;
-
-        let temp = TempDir::new();
-        let source_directory = temp.path().join("source-directory");
-        let source_file = temp.path().join("source.txt");
-        let destination = temp.path().join("destination");
-        fs::create_dir(&source_directory).expect("create source directory");
-        fs::write(&source_file, b"data").expect("create source file");
-        fs::create_dir(&destination).expect("create destination directory");
-
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                &[source_file.clone(), source_directory.clone()],
-                &destination,
-                ResolvedDrop::Copy,
-            ),
-            Some(ShellFileOperation::Copy)
-        );
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source_file),
-                &destination,
-                ResolvedDrop::Copy,
-            ),
-            None
-        );
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source_directory),
-                &destination,
-                ResolvedDrop::Link,
-            ),
-            None
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_shell_rejects_portable_and_unsupported_paths() {
-        let temp = TempDir::new();
-        let source = temp.path().join("source");
-        let destination = temp.path().join("destination");
-        fs::create_dir(&source).expect("create source directory");
-        fs::create_dir(&destination).expect("create destination directory");
-
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source),
-                &crate::explorer::portable_devices::virtual_root(),
-                ResolvedDrop::Move,
-            ),
-            None
-        );
-
-        let portable_source = crate::explorer::portable_devices::virtual_root().join("source");
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                &[source.clone(), portable_source],
-                &destination,
-                ResolvedDrop::Move,
-            ),
-            None
-        );
-
-        let unsupported_destination = PathBuf::from(format!(r"C:\{}", "a".repeat(257)));
-        assert_eq!(
-            windows_shell_external_drop_operation(
-                std::slice::from_ref(&source),
-                &unsupported_destination,
-                ResolvedDrop::Move,
-            ),
-            None
         );
     }
 
