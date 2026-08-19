@@ -278,6 +278,7 @@ impl ExplorerTabs {
                     paths.paths(),
                     DropDestination::CurrentDirectory,
                     window.modifiers(),
+                    window,
                     cx,
                 );
                 cx.notify();

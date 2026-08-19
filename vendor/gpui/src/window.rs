@@ -1516,6 +1516,22 @@ impl Window {
         self.platform_window.window_bounds()
     }
 
+    /// Returns native metadata for the active Windows external-path drop.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn active_external_paths_drop_context(
+        &self,
+    ) -> Option<crate::WindowsExternalDropContext> {
+        self.platform_window.active_external_paths_drop_context()
+    }
+
+    /// Sets the effect returned to the source of the active Windows external-path drop.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn complete_external_paths_drop(&self, effect: u32) -> bool {
+        self.platform_window.complete_external_paths_drop(effect)
+    }
+
     /// Return the `WindowBounds` excluding insets (Wayland and X11)
     pub fn inner_window_bounds(&self) -> WindowBounds {
         self.platform_window.inner_window_bounds()

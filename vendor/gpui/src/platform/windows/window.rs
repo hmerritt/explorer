@@ -136,6 +136,8 @@ pub(crate) struct WindowsWindowInner {
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
     pending_external_paths_drag: RefCell<PendingExternalPathsDrag>,
+    incoming_external_paths_drag: RefCell<Option<IncomingWindowsExternalDrop>>,
+    active_external_paths_drops: RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) hide_title_bar: bool,
@@ -342,6 +344,8 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             pending_external_paths_drag: RefCell::new(PendingExternalPathsDrag::default()),
+            incoming_external_paths_drag: RefCell::new(None),
+            active_external_paths_drops: RefCell::new(Vec::new()),
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
             system_caret_bitmap,
@@ -995,6 +999,34 @@ impl PlatformWindow for WindowsWindow {
         self.0.hwnd
     }
 
+    fn active_external_paths_drop_context(&self) -> Option<WindowsExternalDropContext> {
+        let drop = self
+            .0
+            .active_external_paths_drops
+            .borrow()
+            .last()
+            .cloned()?;
+        Some(WindowsExternalDropContext {
+            allowed_effects: drop.allowed_effects.0,
+            preferred_effect: drop.preferred_effect.map(|effect| effect.0),
+            key_state: drop.key_state.0,
+        })
+    }
+
+    fn complete_external_paths_drop(&self, effect: u32) -> bool {
+        let Some(drop) = self
+            .0
+            .active_external_paths_drops
+            .borrow()
+            .last()
+            .cloned()
+        else {
+            return false;
+        };
+        drop.completed_effect.set(Some(DROPEFFECT(effect)));
+        true
+    }
+
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
         if paths.paths().is_empty() {
             return ExternalPathsDragStartResult::Failed;
@@ -1329,6 +1361,63 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
     }
 }
 
+#[derive(Clone, Copy)]
+struct IncomingWindowsExternalDrop {
+    allowed_effects: DROPEFFECT,
+    preferred_effect: Option<DROPEFFECT>,
+}
+
+struct IncomingWindowsExternalDropCleanup<'a> {
+    incoming_drop: &'a RefCell<Option<IncomingWindowsExternalDrop>>,
+    armed: bool,
+}
+
+impl IncomingWindowsExternalDropCleanup<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for IncomingWindowsExternalDropCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.incoming_drop.replace(None);
+        }
+    }
+}
+
+struct ActiveWindowsExternalDrop {
+    key_state: MODIFIERKEYS_FLAGS,
+    allowed_effects: DROPEFFECT,
+    preferred_effect: Option<DROPEFFECT>,
+    completed_effect: Cell<Option<DROPEFFECT>>,
+}
+
+struct ActiveWindowsExternalDropGuard<'a> {
+    active_drops: &'a RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+}
+
+impl Drop for ActiveWindowsExternalDropGuard<'_> {
+    fn drop(&mut self) {
+        self.active_drops.borrow_mut().pop();
+    }
+}
+
+fn push_active_windows_external_drop<'a>(
+    active_drops: &'a RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    drop: Rc<ActiveWindowsExternalDrop>,
+) -> ActiveWindowsExternalDropGuard<'a> {
+    active_drops.borrow_mut().push(drop);
+    ActiveWindowsExternalDropGuard { active_drops }
+}
+
+fn completed_external_drop_effect(
+    drop: &ActiveWindowsExternalDrop,
+    default: DROPEFFECT,
+) -> DROPEFFECT {
+    drop.completed_effect.get().unwrap_or(default)
+}
+
 #[derive(Default)]
 struct PendingExternalPathsDrag {
     paths: Option<ExternalPaths>,
@@ -1518,6 +1607,16 @@ fn read_dropeffect_from_medium(medium: *const STGMEDIUM) -> Option<DROPEFFECT> {
     Some(DROPEFFECT(effect))
 }
 
+fn preferred_dropeffect_from_data_object(data_object: &IDataObject) -> Option<DROPEFFECT> {
+    let format = dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT);
+    let mut medium = unsafe { data_object.GetData(&format) }.ok()?;
+    let effect = read_dropeffect_from_medium(&medium);
+    unsafe { ReleaseStgMedium(&mut medium) };
+    effect.filter(|effect| {
+        effect.0 & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK).0 != 0
+    })
+}
+
 fn allocate_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
     let payload = build_hdrop_payload(paths);
     unsafe {
@@ -1555,8 +1654,14 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        self.0.incoming_external_paths_drag.replace(None);
+        let mut cleanup = IncomingWindowsExternalDropCleanup {
+            incoming_drop: &self.0.incoming_external_paths_drag,
+            armed: true,
+        };
         unsafe {
             let idata_obj = pdataobj.ok()?;
+            let allowed_effects = *pdweffect;
             let config = FORMATETC {
                 cfFormat: CF_HDROP.0,
                 ptd: std::ptr::null_mut() as _,
@@ -1566,11 +1671,22 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             };
             let cursor_position = POINT { x: pt.x, y: pt.y };
             if idata_obj.QueryGetData(&config as _) == S_OK {
+                let preferred_effect = preferred_dropeffect_from_data_object(idata_obj);
+                self.0.incoming_external_paths_drag.replace(Some(
+                    IncomingWindowsExternalDrop {
+                        allowed_effects,
+                        preferred_effect,
+                    },
+                ));
                 *pdweffect = DROPEFFECT_COPY;
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
+                    self.0.incoming_external_paths_drag.replace(None);
+                    *pdweffect = DROPEFFECT_NONE;
                     return Ok(());
                 };
                 if idata.u.hGlobal.is_invalid() {
+                    self.0.incoming_external_paths_drag.replace(None);
+                    *pdweffect = DROPEFFECT_NONE;
                     return Ok(());
                 }
                 let hdrop = idata.u.hGlobal.0 as *mut HDROP;
@@ -1596,6 +1712,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 });
                 self.handle_drag_drop(input);
             } else {
+                self.0.incoming_external_paths_drag.replace(None);
                 *pdweffect = DROPEFFECT_NONE;
             }
             self.0
@@ -1603,6 +1720,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 .DragEnter(self.0.hwnd, idata_obj, &cursor_position, *pdweffect)
                 .log_err();
         }
+        cleanup.disarm();
         Ok(())
     }
 
@@ -1612,6 +1730,10 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        let mut cleanup = IncomingWindowsExternalDropCleanup {
+            incoming_drop: &self.0.incoming_external_paths_drag,
+            armed: true,
+        };
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
@@ -1633,10 +1755,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         });
         self.handle_drag_drop(input);
 
+        cleanup.disarm();
         Ok(())
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        self.0.incoming_external_paths_drag.replace(None);
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
@@ -1649,14 +1773,22 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     fn Drop(
         &self,
         pdataobj: windows::core::Ref<IDataObject>,
-        _grfkeystate: MODIFIERKEYS_FLAGS,
+        grfkeystate: MODIFIERKEYS_FLAGS,
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        let incoming_drop = self.0.incoming_external_paths_drag.take();
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
+        let allowed_effects = incoming_drop
+            .map(|drag| drag.allowed_effects)
+            .unwrap_or_else(|| unsafe { *pdweffect });
+        let preferred_effect = incoming_drop
+            .and_then(|drag| drag.preferred_effect)
+            .or_else(|| preferred_dropeffect_from_data_object(idata_obj));
+        let default_effect = DROPEFFECT_COPY;
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            *pdweffect = default_effect;
             self.0
                 .drop_target_helper
                 .Drop(idata_obj, &cursor_position, *pdweffect)
@@ -1665,6 +1797,16 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 .ok()
                 .log_err();
         }
+        let active_drop = Rc::new(ActiveWindowsExternalDrop {
+            key_state: grfkeystate,
+            allowed_effects,
+            preferred_effect,
+            completed_effect: Cell::new(None),
+        });
+        let _active_drop_guard = push_active_windows_external_drop(
+            &self.0.active_external_paths_drops,
+            active_drop.clone(),
+        );
         let scale_factor = self.0.state.borrow().scale_factor;
         let input = PlatformInput::FileDrop(FileDropEvent::Submit {
             position: logical_point(
@@ -1674,6 +1816,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             ),
         });
         self.handle_drag_drop(input);
+        unsafe {
+            *pdweffect = completed_external_drop_effect(&active_drop, default_effect);
+        }
 
         Ok(())
     }
@@ -1682,15 +1827,41 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 #[cfg(test)]
 mod external_paths_drag_tests {
     use super::{
-        PendingExternalPathsDrag, build_hdrop_payload, catch_windows_callback,
+        ActiveWindowsExternalDrop, IncomingWindowsExternalDrop,
+        IncomingWindowsExternalDropCleanup, PendingExternalPathsDrag, WindowsFileDataObject,
+        build_hdrop_payload, catch_windows_callback, completed_external_drop_effect,
+        preferred_dropeffect_from_data_object, push_active_windows_external_drop,
         windows_external_drag_completion, windows_external_drag_result, DROPFILES,
-        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDataObject,
+        MK_CONTROL,
     };
     use crate::{
         ExternalPathDragOperation, ExternalPaths, ExternalPathsDragResult,
         ExternalPathsDragStartResult,
     };
-    use std::{cell::Cell, mem, path::PathBuf};
+    use std::{
+        cell::{Cell, RefCell},
+        mem,
+        panic::{AssertUnwindSafe, catch_unwind},
+        path::PathBuf,
+        rc::Rc,
+    };
+
+    fn test_active_external_drop() -> Rc<ActiveWindowsExternalDrop> {
+        let data_object: IDataObject = WindowsFileDataObject {
+            paths: vec![PathBuf::from(r"C:\Users\test\source")],
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+        }
+        .into();
+        Rc::new(ActiveWindowsExternalDrop {
+            key_state: MK_CONTROL,
+            allowed_effects: DROPEFFECT_COPY | DROPEFFECT_MOVE,
+            preferred_effect: preferred_dropeffect_from_data_object(&data_object),
+            completed_effect: Cell::new(None),
+        })
+    }
 
     fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
         let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
@@ -1791,6 +1962,88 @@ mod external_paths_drag_tests {
         )])));
         pending.cancel();
         assert!(pending.take().is_none());
+    }
+
+    #[test]
+    fn active_native_drop_context_is_scoped_and_preserves_metadata() {
+        let active_drops = RefCell::new(Vec::new());
+        let active_drop = test_active_external_drop();
+
+        {
+            let _guard =
+                push_active_windows_external_drop(&active_drops, active_drop.clone());
+            let current = active_drops.borrow().last().cloned().unwrap();
+            assert!(Rc::ptr_eq(&current, &active_drop));
+            assert_eq!(current.key_state, MK_CONTROL);
+            assert_eq!(current.allowed_effects, DROPEFFECT_COPY | DROPEFFECT_MOVE);
+            assert_eq!(current.preferred_effect, Some(DROPEFFECT_COPY));
+        }
+
+        assert!(active_drops.borrow().is_empty());
+    }
+
+    #[test]
+    fn active_native_drop_context_is_cleared_while_unwinding() {
+        let active_drops = RefCell::new(Vec::new());
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard =
+                push_active_windows_external_drop(&active_drops, test_active_external_drop());
+            panic!("drop callback panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(active_drops.borrow().is_empty());
+    }
+
+    #[test]
+    fn incoming_native_drop_context_is_cleared_while_unwinding() {
+        let incoming_drop = RefCell::new(Some(IncomingWindowsExternalDrop {
+            allowed_effects: DROPEFFECT_COPY | DROPEFFECT_MOVE,
+            preferred_effect: Some(DROPEFFECT_MOVE),
+        }));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = IncomingWindowsExternalDropCleanup {
+                incoming_drop: &incoming_drop,
+                armed: true,
+            };
+            panic!("drag callback panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(incoming_drop.borrow().is_none());
+    }
+
+    #[test]
+    fn completed_native_effect_overrides_the_existing_copy_default() {
+        let active_drop = test_active_external_drop();
+        assert_eq!(
+            completed_external_drop_effect(&active_drop, DROPEFFECT_COPY),
+            DROPEFFECT_COPY
+        );
+
+        for effect in [DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE] {
+            active_drop.completed_effect.set(Some(effect));
+            assert_eq!(
+                completed_external_drop_effect(&active_drop, DROPEFFECT_COPY),
+                effect
+            );
+        }
+    }
+
+    #[test]
+    fn preferred_drop_effect_is_read_from_the_live_data_object() {
+        let data_object: IDataObject = WindowsFileDataObject {
+            paths: vec![PathBuf::from(r"C:\Users\test\source")],
+            preferred_effect: DROPEFFECT_MOVE,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+        }
+        .into();
+
+        assert_eq!(
+            preferred_dropeffect_from_data_object(&data_object),
+            Some(DROPEFFECT_MOVE)
+        );
     }
 
     #[test]

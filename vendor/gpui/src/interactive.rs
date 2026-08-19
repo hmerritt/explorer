@@ -579,6 +579,21 @@ pub enum ExternalPathsDragResult {
     },
 }
 
+/// Native metadata retained while a Windows external-path drop is being dispatched.
+///
+/// This is an internal platform bridge and is not intended as a stable GPUI API.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsExternalDropContext {
+    /// Operations the drag source allows, encoded as native `DROPEFFECT` flags.
+    pub allowed_effects: u32,
+    /// The source's `CFSTR_PREFERREDDROPEFFECT`, when supplied and valid.
+    pub preferred_effect: Option<u32>,
+    /// Native `MK_*` modifier flags at the time of the drop.
+    pub key_state: u32,
+}
+
 impl ExternalPathsDragResult {
     /// Construct a completed native copy result.
     pub fn copy() -> Self {
