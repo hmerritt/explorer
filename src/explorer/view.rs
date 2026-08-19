@@ -120,6 +120,8 @@ pub struct ExplorerView {
     pub(super) recursive_file_sort_override: Option<FileSortSettings>,
     pub(super) pending_permanent_delete: Option<PendingPermanentDelete>,
     pub(super) pending_trash: Option<PendingTrash>,
+    pub(super) pending_trash_task: Option<Task<()>>,
+    pub(super) pending_deleted_paths: Vec<PathBuf>,
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
     pub(super) pending_drop_task: Option<Task<()>>,
     pub(super) active_file_operation: Option<FileOperationState>,
@@ -512,6 +514,8 @@ impl ExplorerView {
             recursive_file_sort_override: None,
             pending_permanent_delete: None,
             pending_trash: None,
+            pending_trash_task: None,
+            pending_deleted_paths: Vec::new(),
             pending_file_conflict: None,
             pending_drop_task: None,
             active_file_operation: None,
@@ -843,6 +847,7 @@ impl ExplorerView {
         } else {
             self.all_entries = entries;
             self.entries = self.all_entries.clone();
+            self.filter_pending_deleted_entries();
             if mode.preserve_selection {
                 self.restore_selection_from_paths(&selected_paths);
             } else {
@@ -1277,6 +1282,26 @@ impl ExplorerView {
                 preserve_context_menu: false,
             },
             select_after_load.into_iter().collect(),
+            true,
+            false,
+            false,
+            cx,
+        );
+        self.clear_selection();
+    }
+
+    pub(super) fn reload_after_failed_delete(
+        &mut self,
+        select_after_load: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_async_with_options_preserving_live_selection(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: true,
+                preserve_context_menu: false,
+            },
+            select_after_load,
             true,
             false,
             false,
@@ -1741,7 +1766,9 @@ impl ExplorerView {
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
-        self.has_active_file_operation() || self.network_connection_is_working()
+        self.has_active_file_operation()
+            || self.pending_trash_task.is_some()
+            || self.network_connection_is_working()
     }
 
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
@@ -1850,6 +1877,22 @@ impl ExplorerView {
         } else {
             self.entries = self.all_entries.clone();
         }
+        self.filter_pending_deleted_entries();
+    }
+
+    pub(super) fn filter_pending_deleted_entries(&mut self) -> bool {
+        if self.pending_deleted_paths.is_empty() {
+            return false;
+        }
+
+        let previous_len = self.entries.len();
+        self.entries.retain(|entry| {
+            !self
+                .pending_deleted_paths
+                .iter()
+                .any(|path| path == &entry.path)
+        });
+        self.entries.len() != previous_len
     }
 
     fn active_visible_file_sort(&self) -> Option<FileSortSettings> {
@@ -2414,6 +2457,29 @@ mod tests {
         assert_eq!(
             names(&view.all_entries),
             vec!["small.txt", "medium.txt", "large.txt"]
+        );
+    }
+
+    #[test]
+    fn apply_loaded_entries_keeps_pending_deleted_paths_hidden() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        view.pending_deleted_paths = vec![PathBuf::from("pending.txt")];
+
+        view.apply_loaded_entries(
+            ReloadMode {
+                preserve_selection: false,
+                rebuild_sidebar: false,
+                preserve_context_menu: false,
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![test_file("pending.txt"), test_file("survivor.txt")],
+        );
+
+        assert_eq!(names(&view.entries), vec!["survivor.txt"]);
+        assert_eq!(
+            names(&view.all_entries),
+            vec!["pending.txt", "survivor.txt"]
         );
     }
 

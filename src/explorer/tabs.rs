@@ -2752,10 +2752,25 @@ mod tests {
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 view.restore_selection_from_paths(&paths);
+                view.mark_cut_paths(&paths);
                 view.pending_trash = Some(PendingTrash {
                     paths: paths.clone(),
                 });
                 view.confirm_pending_trash(cx);
+                assert!(view.pending_trash.is_none());
+                assert!(view.pending_trash_task.is_some());
+                assert_eq!(view.pending_deleted_paths, paths);
+                assert!(paths.iter().all(|path| path.exists()));
+                assert_eq!(selected_names(view), vec!["c.txt"]);
+                assert_eq!(
+                    view.entries
+                        .iter()
+                        .map(|entry| entry.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["c.txt"]
+                );
+                assert!(view.has_background_operation());
+                assert!(view.file_operation_undo_stack.is_empty());
             });
         });
         cx.run_until_parked();
@@ -2765,6 +2780,11 @@ mod tests {
         assert!(temp.path().join("c.txt").exists());
         cx.read_entity(&view, |view, _| {
             assert_eq!(selected_names(view), vec!["c.txt"]);
+            assert!(view.pending_trash_task.is_none());
+            assert!(view.pending_deleted_paths.is_empty());
+            assert!(!view.has_background_operation());
+            assert_eq!(view.file_operation_undo_stack.len(), 1);
+            assert!(paths.iter().all(|path| !view.entry_is_cut(path)));
         });
     }
 

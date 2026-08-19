@@ -300,6 +300,10 @@ impl ExplorerView {
     }
 
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
+        if self.pending_trash_task.is_some() {
+            return;
+        }
+
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
@@ -314,21 +318,7 @@ impl ExplorerView {
             return;
         }
 
-        let selection_after_delete = self.selection_after_removing_paths(&paths);
-        let trash_undo = TrashUndoCapture::before_delete(&paths);
-        match trash_paths(&paths) {
-            Ok(()) => {
-                self.push_file_operation_undo(trash_undo.after_delete());
-                self.remove_cut_paths(&paths);
-                self.reload_after_successful_delete(selection_after_delete, cx);
-                self.clear_operation_notice();
-                self.emit_filesystem_changed(cx);
-            }
-            Err(error) => {
-                self.set_error_notice(error);
-                self.reload_with_entry_metadata_resolution(cx);
-            }
-        }
+        self.start_trash_operation(paths, cx);
     }
 
     pub(super) fn request_trash_paths_with_confirmation(
@@ -336,7 +326,7 @@ impl ExplorerView {
         paths: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        if paths.is_empty() {
+        if paths.is_empty() || self.pending_trash_task.is_some() {
             return;
         }
 
@@ -359,26 +349,81 @@ impl ExplorerView {
         let Some(pending) = self.pending_trash.take() else {
             return;
         };
+        if self.pending_trash_task.is_some() {
+            return;
+        }
 
-        let selection_after_delete = self.selection_after_removing_paths(&pending.paths);
-        let trash_undo = TrashUndoCapture::before_delete(&pending.paths);
-        match trash_paths(&pending.paths) {
-            Ok(()) => {
-                self.push_file_operation_undo(trash_undo.after_delete());
-                self.remove_cut_paths(&pending.paths);
+        self.start_trash_operation(pending.paths, cx);
+    }
+
+    pub(super) fn cancel_pending_trash(&mut self) {
+        self.pending_trash = None;
+    }
+
+    fn start_trash_operation(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        debug_assert!(!paths.is_empty());
+        debug_assert!(self.pending_trash_task.is_none());
+
+        let selection_after_delete = self.selection_after_removing_paths(&paths);
+        let operation_path = self.path.clone();
+        self.pending_deleted_paths = paths.clone();
+        self.filter_pending_deleted_entries();
+        if let Some(path) = selection_after_delete.as_ref() {
+            self.restore_selection_from_paths(std::slice::from_ref(path));
+            self.scroll_focused_selection_to_view_bottom();
+        } else {
+            self.clear_selection();
+        }
+        self.clear_operation_notice();
+        cx.notify();
+
+        let paths_for_operation = paths.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result: Result<Option<FileOperationUndo>, String> = cx
+                .background_executor()
+                .spawn(async move { run_trash_operation(paths_for_operation) })
+                .await;
+
+            let _ = this.update(cx, move |explorer, cx| {
+                explorer.complete_trash_operation(
+                    operation_path,
+                    paths,
+                    selection_after_delete,
+                    result,
+                    cx,
+                );
+            });
+        });
+        self.pending_trash_task = Some(task);
+    }
+
+    fn complete_trash_operation(
+        &mut self,
+        operation_path: PathBuf,
+        paths: Vec<PathBuf>,
+        selection_after_delete: Option<PathBuf>,
+        result: Result<Option<FileOperationUndo>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_trash_task = None;
+        self.pending_deleted_paths.clear();
+
+        match result {
+            Ok(trash_undo) => {
+                self.push_file_operation_undo(trash_undo);
+                self.remove_cut_paths(&paths);
                 self.reload_after_successful_delete(selection_after_delete, cx);
                 self.clear_operation_notice();
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
+                if self.path == operation_path {
+                    self.reload_after_failed_delete(paths, cx);
+                }
                 self.set_error_notice(error);
-                self.reload_with_entry_metadata_resolution(cx);
             }
         }
-    }
-
-    pub(super) fn cancel_pending_trash(&mut self) {
-        self.pending_trash = None;
+        cx.notify();
     }
 
     pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
@@ -987,6 +1032,36 @@ fn preflight_move_undo(paths: &[FileOperationMove]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn run_trash_operation(paths: Vec<PathBuf>) -> Result<Option<FileOperationUndo>, String> {
+    run_trash_worker(move || {
+        let trash_undo = TrashUndoCapture::before_delete(&paths);
+        trash_paths(&paths)?;
+        Ok(trash_undo.after_delete())
+    })?
+}
+
+#[cfg(target_os = "windows")]
+fn run_trash_worker<T, F>(worker: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("explorer-trash".to_owned())
+        .spawn(worker)
+        .map_err(|error| format!("Could not start the Recycle Bin worker: {error}"))?
+        .join()
+        .map_err(|_| "The Recycle Bin worker stopped unexpectedly.".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_trash_worker<T, F>(worker: F) -> Result<T, String>
+where
+    F: FnOnce() -> T,
+{
+    Ok(worker())
 }
 
 fn undo_trash_paths(trash: TrashUndo) -> Result<Vec<PathBuf>, String> {
@@ -1837,6 +1912,157 @@ mod tests {
     }
 
     #[gpui::test]
+    fn duplicate_trash_request_is_ignored_while_delete_is_pending(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        fs::write(&first, b"first").expect("create first file");
+        fs::write(&second, b"second").expect("create second file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.restore_selection_from_paths(std::slice::from_ref(&first));
+                view.trash_selected_paths(cx);
+                assert!(view.pending_trash_task.is_some());
+
+                view.restore_selection_from_paths(std::slice::from_ref(&second));
+                view.trash_selected_paths(cx);
+                assert!(view.pending_trash_task.is_some());
+            });
+        });
+
+        cx.run_until_parked();
+
+        assert!(!first.exists());
+        assert!(second.exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.pending_trash_task.is_none());
+            assert_eq!(view.file_operation_undo_stack.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn failed_trash_operation_survives_tab_close_and_clears_pending_state(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let missing = temp.path().join("missing.txt");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.start_trash_operation(vec![missing.clone()], cx);
+                assert!(view.pending_trash_task.is_some());
+                assert_eq!(view.pending_deleted_paths, vec![missing.clone()]);
+                assert!(view.has_background_operation());
+
+                view.prepare_for_tab_close(cx);
+                assert!(view.pending_trash_task.is_some());
+                assert_eq!(view.pending_deleted_paths, vec![missing.clone()]);
+                assert!(view.has_background_operation());
+            });
+        });
+
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.pending_trash_task.is_none());
+            assert!(view.pending_deleted_paths.is_empty());
+            assert!(!view.has_background_operation());
+            assert!(view.file_operation_undo_stack.is_empty());
+            assert!(
+                view.operation_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.text.contains("Recycle Bin"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_trash_completion_restores_hidden_paths_and_selection(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        fs::write(&first, b"first").expect("create first file");
+        fs::write(&second, b"second").expect("create second file");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.pending_deleted_paths = vec![first.clone()];
+                view.filter_pending_deleted_entries();
+                view.select_single_path(&second);
+                assert_eq!(selected_names(view), vec!["second.txt"]);
+
+                view.complete_trash_operation(
+                    temp.path().to_path_buf(),
+                    vec![first.clone()],
+                    Some(second.clone()),
+                    Err("Could not move the selected item to the Recycle Bin.".to_owned()),
+                    cx,
+                );
+
+                assert!(view.pending_deleted_paths.is_empty());
+                assert!(view.entries.iter().all(|entry| entry.path != first));
+                assert!(
+                    view.operation_notice
+                        .as_ref()
+                        .is_some_and(|notice| notice.text.contains("Recycle Bin"))
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(first.exists());
+        assert!(second.exists());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.pending_deleted_paths.is_empty());
+            assert_eq!(selected_names(view), vec!["first.txt"]);
+            assert!(view.entries.iter().any(|entry| entry.path == first));
+            assert!(
+                view.operation_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.text.contains("Recycle Bin"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_trash_completion_does_not_change_selection_after_navigation(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let origin = temp.path().join("origin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&origin).expect("create origin directory");
+        fs::create_dir(&destination).expect("create destination directory");
+        let attempted = origin.join("attempted.txt");
+        let current = destination.join("current.txt");
+        fs::write(&attempted, b"attempted").expect("create attempted file");
+        fs::write(&current, b"current").expect("create current file");
+        let (view, cx) = test_view_entity_at_path(cx, destination);
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&current);
+                view.pending_deleted_paths = vec![attempted.clone()];
+
+                view.complete_trash_operation(
+                    origin,
+                    vec![attempted],
+                    None,
+                    Err("Could not move the selected item to the Recycle Bin.".to_owned()),
+                    cx,
+                );
+
+                assert!(view.pending_deleted_paths.is_empty());
+                assert_eq!(selected_names(view), vec!["current.txt"]);
+                assert!(view.directory_load_task.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn external_drag_unoptimized_move_cleans_up_existing_sources(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let file = temp.path().join("dragged.txt");
@@ -2297,6 +2523,33 @@ mod tests {
                 panic!("expected restorable trash undo, got {reason}");
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_trash_worker_uses_fresh_com_apartment_when_caller_is_mta() {
+        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+
+        let worker_result = std::thread::spawn(|| {
+            assert!(
+                unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok(),
+                "initialize MTA caller thread"
+            );
+
+            let result = run_trash_worker(|| {
+                trash::os_limited::is_empty()
+                    .map_err(|error| format!("Could not inspect the Recycle Bin: {error}"))
+            });
+
+            unsafe { CoUninitialize() };
+            result
+        })
+        .join()
+        .expect("MTA caller thread should not panic");
+
+        worker_result
+            .expect("start dedicated trash worker")
+            .expect("query Recycle Bin from dedicated trash worker");
     }
 
     #[cfg(target_os = "macos")]

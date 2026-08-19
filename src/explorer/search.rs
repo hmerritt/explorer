@@ -252,6 +252,7 @@ impl ExplorerView {
         self.recursive_file_sort_override = None;
         self.entries = filtered_entries(&self.all_entries, &self.search.content);
         sort_entries(&mut self.entries, self.file_sort);
+        self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(selected_paths);
     }
 
@@ -260,6 +261,7 @@ impl ExplorerView {
         self.recursive_file_sort_override = None;
         self.entries = self.all_entries.clone();
         sort_entries(&mut self.entries, self.file_sort);
+        self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(selected_paths);
     }
 
@@ -898,6 +900,7 @@ impl ExplorerView {
             paths: output.scanned_paths,
         });
         self.entries = output.entries;
+        self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(&selected_paths);
         self.scroll_to_top();
     }
@@ -1284,6 +1287,34 @@ mod tests {
         assert_eq!(names(&view.entries), vec!["a.txt", "b.png"]);
         assert_eq!(view.search.recursive_status, RecursiveSearchStatus::Idle);
         assert!(!view.recursive_search_results_active());
+    }
+
+    #[test]
+    fn search_rebuilds_keep_pending_deleted_paths_hidden() {
+        let mut view = test_view_with_entries(&["alpha.txt", "beta.txt"]);
+        view.pending_deleted_paths = vec![PathBuf::from("alpha.txt")];
+        view.search.content = "txt".to_owned();
+
+        view.apply_search_filter_preserving_selection(&[]);
+
+        assert_eq!(names(&view.entries), vec!["beta.txt"]);
+        assert_eq!(names(&view.all_entries), vec!["alpha.txt", "beta.txt"]);
+
+        view.search.recursive_enabled = true;
+        view.search.recursive_generation = 1;
+        view.apply_recursive_search_output(RecursiveSearchOutput {
+            generation: 1,
+            root: view.path.clone(),
+            query: "txt".to_owned(),
+            visibility: view.entry_visibility(),
+            scanned_paths: Arc::new(Vec::new()),
+            entries: vec![
+                FileEntry::test("alpha.txt", false, Some(1), None),
+                FileEntry::test("nested.txt", false, Some(1), None),
+            ],
+        });
+
+        assert_eq!(names(&view.entries), vec!["nested.txt"]);
     }
 
     #[test]
