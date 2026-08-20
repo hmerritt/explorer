@@ -1,9 +1,5 @@
 ## 1
 
-- Sidebar group view
-    - Previous path remains active leaving two sidebar items highlighted (should only ever highlight group)
-    - Address bar suggestions also show for previous path, should be nonthing while in the group view
-    - Network drives, when selected from the sidebar directly, will try to connect if they are disconnected, but from the group view, it navigates without connecting and shows an error.
 - "Open with" contextmenu error: "Could not open Screenshot 2026-08-18 214121 .png: The system cannot find the file specified, (Ox80070002)"
 - Improve linux install.sh script (see aura's install script)
 - Bug when an item (or multiple) is selected explorer sometimes freezes and enters a "not responding" state in Windows for a second or two before coming back

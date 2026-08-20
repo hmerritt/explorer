@@ -1990,7 +1990,8 @@ impl ExplorerView {
         content_indent: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_current = item.path == self.path;
+        let is_current =
+            sidebar_item_is_current(&item.path, &self.path, self.is_sidebar_group_view());
         let label = item.label.clone();
         let path = item.path.clone();
         let icon_item = item.clone();
@@ -3831,6 +3832,14 @@ fn sidebar_row_background_color(is_current: bool, context_menu_active: bool) -> 
     } else {
         SIDEBAR_ROW_BG
     }
+}
+
+fn sidebar_item_is_current(
+    item_path: &Path,
+    current_path: &Path,
+    sidebar_group_view: bool,
+) -> bool {
+    !sidebar_group_view && item_path == current_path
 }
 
 fn entry_row_hover_enabled(is_selected: bool, context_menu_active: bool) -> bool {
@@ -7438,8 +7447,9 @@ mod tests {
         open_current_folder_context_menu_from_event, operation_notice_style,
         recursive_result_path_tooltip, recursive_result_text_width, search_working_detail,
         selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_dragging, sidebar_pin_path_from_value,
-        sidebar_row_background_color, sort_indicator_direction, text_cell_width,
+        sidebar_context_menu_target, sidebar_item_is_current, sidebar_item_is_dragging,
+        sidebar_pin_path_from_value, sidebar_row_background_color, sort_indicator_direction,
+        text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
@@ -8859,6 +8869,19 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_item_current_state_is_suppressed_by_virtual_group_location() {
+        let path = Path::new("C:/Users/Ada/Downloads");
+
+        assert!(sidebar_item_is_current(path, path, false));
+        assert!(!sidebar_item_is_current(path, path, true));
+        assert!(!sidebar_item_is_current(
+            Path::new("C:/Users/Ada/Documents"),
+            path,
+            false,
+        ));
+    }
+
+    #[test]
     fn sidebar_auto_hide_helpers_use_strict_forty_percent_threshold() {
         assert!(!sidebar_auto_hide_is_active(320.0, 800.0));
         assert!(sidebar_auto_hide_is_active(320.0, 799.0));
@@ -9289,12 +9312,7 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             let address = view.active_address_bar.as_ref().expect("address edit");
             assert_eq!(address.content, "");
-            assert!(
-                address
-                    .suggestions
-                    .iter()
-                    .all(|suggestion| suggestion.path.starts_with(temp.path()))
-            );
+            assert!(address.suggestions.is_empty());
         });
     }
 

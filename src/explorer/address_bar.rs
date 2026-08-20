@@ -541,8 +541,12 @@ impl ExplorerView {
             self.address_text_for_path(&self.path)
         };
         let mut address = AddressBarState::new(initial_text, Some(focus_handle.clone()));
-        address.suggestions =
-            folder_suggestions_for_input(&address.content, &self.path, self.entry_visibility());
+        address.suggestions = active_location_address_suggestions(
+            &address.content,
+            &self.path,
+            self.entry_visibility(),
+            self.is_sidebar_group_view(),
+        );
 
         focus_handle.focus(window);
         let subscription = cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
@@ -844,9 +848,14 @@ impl ExplorerView {
     fn refresh_address_suggestions(&mut self) {
         let current_path = self.path.clone();
         let visibility = self.entry_visibility();
+        let sidebar_group_view = self.is_sidebar_group_view();
         if let Some(address) = self.active_address_bar.as_mut() {
-            address.suggestions =
-                folder_suggestions_for_input(&address.content, &current_path, visibility);
+            address.suggestions = active_location_address_suggestions(
+                &address.content,
+                &current_path,
+                visibility,
+                sidebar_group_view,
+            );
             if address
                 .highlighted_suggestion
                 .is_some_and(|index| index >= address.suggestions.len())
@@ -1011,6 +1020,19 @@ pub(super) fn folder_suggestions_for_input(
     visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
 ) -> Vec<AddressBarSuggestion> {
     folder_suggestions_for_input_with_env(input, current_path, visibility, |name| env::var_os(name))
+}
+
+fn active_location_address_suggestions(
+    input: &str,
+    current_path: &Path,
+    visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
+    sidebar_group_view: bool,
+) -> Vec<AddressBarSuggestion> {
+    if sidebar_group_view && input.trim().is_empty() {
+        Vec::new()
+    } else {
+        folder_suggestions_for_input(input, current_path, visibility)
+    }
 }
 
 fn folder_suggestions_for_input_with_env(
@@ -1807,6 +1829,68 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(labels, vec!["Alpha", "apricot"]);
+    }
+
+    #[test]
+    fn group_address_suggestions_stay_empty_until_a_path_prefix_is_entered() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child")).expect("create child");
+
+        assert!(active_location_address_suggestions("", temp.path(), true, true).is_empty());
+        assert!(active_location_address_suggestions("   ", temp.path(), true, true).is_empty());
+
+        let typed = active_location_address_suggestions("ch", temp.path(), true, true);
+        assert_eq!(
+            typed
+                .iter()
+                .map(|suggestion| suggestion.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+
+        assert!(active_location_address_suggestions("", temp.path(), true, true).is_empty());
+        assert_eq!(
+            active_location_address_suggestions("", temp.path(), true, false).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn clearing_group_address_input_removes_existing_suggestions() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child")).expect("create child");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.sidebar_group_view = Some(
+            crate::explorer::sidebar_group_view::SidebarGroupViewState::new(
+                crate::settings::SidebarGroupKind::Pinned,
+                &crate::explorer::sidebar::SidebarSections::default(),
+            ),
+        );
+        view.active_address_bar = Some(AddressBarState::new("ch".to_owned(), None));
+
+        view.refresh_address_suggestions();
+        assert_eq!(
+            view.active_address_bar
+                .as_ref()
+                .expect("address edit")
+                .suggestions
+                .len(),
+            1
+        );
+
+        view.active_address_bar
+            .as_mut()
+            .expect("address edit")
+            .content
+            .clear();
+        view.refresh_address_suggestions();
+        assert!(
+            view.active_address_bar
+                .as_ref()
+                .expect("address edit")
+                .suggestions
+                .is_empty()
+        );
     }
 
     #[test]

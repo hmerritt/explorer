@@ -895,7 +895,11 @@ impl ExplorerView {
     ) -> Option<EntryAction> {
         match directory_open_mode {
             DirectoryOpenMode::CurrentTab => {
-                self.navigate_to_directory_inner(path, HistoryMode::Record, cx);
+                if let Some(cx) = cx {
+                    self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+                } else {
+                    self.navigate_to_directory_inner(path, HistoryMode::Record, None);
+                }
                 None
             }
             DirectoryOpenMode::NewTab => Some(EntryAction::OpenDirectoryInNewTab(path)),
@@ -984,6 +988,14 @@ mod tests {
             std::io::ErrorKind::NotFound,
             "network path missing",
         ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn network_test_connector_success(
+        _: &crate::explorer::filesystem::NetworkConnectionTarget,
+        _: Option<windows::Win32::Foundation::HWND>,
+    ) -> std::io::Result<()> {
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
@@ -1890,6 +1902,166 @@ mod tests {
                 assert!(notice.text.contains("Could not connect to Team Share (S:)"));
                 assert!(notice.text.contains("network path missing"));
                 assert!(view.read_error.is_none());
+            });
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn activating_network_group_entry_connects_before_navigating(cx: &mut gpui::TestAppContext) {
+        let _guard = crate::explorer::filesystem::network_connection_test_guard();
+        let previous = TempDir::new();
+        let network_path = previous.path().join("team-share");
+        fs::create_dir(&network_path).expect("create network directory");
+        crate::explorer::filesystem::set_network_connection_targets_for_test(Some(vec![
+            crate::explorer::filesystem::NetworkConnectionTarget {
+                label: "Team Share".to_owned(),
+                remote_name: r"\\server\share".to_owned(),
+                local_name: Some(network_path.display().to_string()),
+            },
+        ]));
+        crate::explorer::filesystem::set_network_connector_for_test(Some(
+            network_test_connector_success,
+        ));
+        let initial_path = previous.path().to_path_buf();
+        let (view, cx) = cx.add_window_view({
+            let initial_path = initial_path.clone();
+            let network_path = network_path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+                    initial_path,
+                    Some(focus_handle),
+                    &crate::settings::ExplorerSettings::default(),
+                );
+                view.sidebar_sections = SidebarSections {
+                    network_drives: vec![SidebarItem {
+                        label: "Team Share".to_owned(),
+                        path: network_path,
+                        kind: SidebarItemKind::DriveNetwork(
+                            crate::explorer::filesystem::NetworkDriveState::Disconnected,
+                        ),
+                        configured_index: None,
+                    }],
+                    ..SidebarSections::default()
+                };
+                view.sidebar_group_view = Some(SidebarGroupViewState::new(
+                    SidebarGroupKind::Network,
+                    &view.sidebar_sections,
+                ));
+                view.rebuild_sidebar_group_entries(&[]);
+                view.select_single_index(0);
+                view
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert_eq!(view.activate_focused_entry_with_watcher(true, cx), None);
+                assert!(view.network_connect_task.is_some());
+                assert_eq!(view.path, initial_path);
+                assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Network));
+                assert!(view.back_stack.is_empty());
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.read_with(app, |view, _| {
+                assert_eq!(view.path, network_path);
+                assert_eq!(view.active_sidebar_group(), None);
+                assert_eq!(
+                    view.back_stack,
+                    vec![NavigationLocation::SidebarGroup(SidebarGroupKind::Network)]
+                );
+                assert!(view.forward_stack.is_empty());
+                assert!(view.network_connect_task.is_none());
+                assert!(view.operation_notice.is_none());
+            });
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn failed_network_group_entry_activation_keeps_group_and_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _guard = crate::explorer::filesystem::network_connection_test_guard();
+        crate::explorer::filesystem::set_network_connection_targets_for_test(Some(vec![
+            network_test_target(),
+        ]));
+        crate::explorer::filesystem::set_network_connector_for_test(Some(
+            network_test_connector_failure,
+        ));
+        let initial_path = PathBuf::from("root");
+        let network_path = PathBuf::from(r"S:\photos");
+        let (view, cx) = cx.add_window_view({
+            let initial_path = initial_path.clone();
+            let network_path = network_path.clone();
+            move |window, cx| {
+                let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+                let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+                    initial_path,
+                    Some(focus_handle),
+                    &crate::settings::ExplorerSettings::default(),
+                );
+                view.sidebar_sections = SidebarSections {
+                    network_drives: vec![SidebarItem {
+                        label: "Team Share (S:)".to_owned(),
+                        path: network_path,
+                        kind: SidebarItemKind::DriveNetwork(
+                            crate::explorer::filesystem::NetworkDriveState::Disconnected,
+                        ),
+                        configured_index: None,
+                    }],
+                    ..SidebarSections::default()
+                };
+                view.sidebar_group_view = Some(SidebarGroupViewState::new(
+                    SidebarGroupKind::Network,
+                    &view.sidebar_sections,
+                ));
+                view.rebuild_sidebar_group_entries(&[]);
+                view
+            }
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                assert_eq!(
+                    view.handle_entry_click_with_watcher_and_directory_mode(
+                        &entry,
+                        2,
+                        SelectionModifiers::default(),
+                        DirectoryOpenMode::CurrentTab,
+                        cx,
+                    ),
+                    None
+                );
+                assert!(view.network_connect_task.is_some());
+                assert_eq!(view.path, initial_path);
+                assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Network));
+                assert!(view.back_stack.is_empty());
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.read_with(app, |view, _| {
+                assert_eq!(view.path, initial_path);
+                assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Network));
+                assert!(view.back_stack.is_empty());
+                assert!(view.forward_stack.is_empty());
+                assert!(view.network_connect_task.is_none());
+                let notice = view.operation_notice.as_ref().expect("failure notice");
+                assert_eq!(
+                    notice.kind,
+                    crate::explorer::view::OperationNoticeKind::Error
+                );
+                assert!(notice.text.contains("Could not connect to Team Share (S:)"));
+                assert!(notice.text.contains("network path missing"));
             });
         });
     }
