@@ -28,6 +28,7 @@ use crate::{
             path_may_have_image_preview,
         },
         image_resize::dimensions_for_longest_side,
+        pdf_hover_preview::{load_pdf_first_page_rgba, path_may_have_pdf_preview},
         video::path_may_have_video_metadata,
         video_thumbnails::load_video_thumbnail_rgba,
         view::ExplorerView,
@@ -103,6 +104,7 @@ pub(super) enum ThumbnailSourcePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImageThumbnailKind {
     Image,
+    Pdf,
     Video,
 }
 
@@ -116,8 +118,10 @@ impl ImageThumbnailUsage {
     fn cache_namespace(self, kind: ImageThumbnailKind) -> &'static str {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image",
+            (Self::Standard, ImageThumbnailKind::Pdf) => "pdf",
             (Self::Standard, ImageThumbnailKind::Video) => "video",
             (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-v2",
+            (Self::HoverPreview, ImageThumbnailKind::Pdf) => "pdf-hover-preview-v1",
             (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview",
         }
     }
@@ -246,8 +250,9 @@ impl ImageThumbnailCacheInner {
     fn hover_preview_for_request(
         &mut self,
         request: ImageThumbnailRequest,
-        standard_request: ImageThumbnailRequest,
+        standard_request: impl Into<Option<ImageThumbnailRequest>>,
     ) -> (HoverImagePreviewLookup, Option<u64>) {
+        let standard_request = standard_request.into();
         let preview_size = request.size;
         if let Some(state) = self.states.get(&request.key) {
             if state.should_retry_for_request(&request) {
@@ -257,10 +262,11 @@ impl ImageThumbnailCacheInner {
             }
         }
 
-        let loading_thumbnail = self
-            .states
-            .get(&standard_request.key)
-            .and_then(ImageThumbnailState::thumbnail);
+        let loading_thumbnail = standard_request.as_ref().and_then(|request| {
+            self.states
+                .get(&request.key)
+                .and_then(ImageThumbnailState::thumbnail)
+        });
         let (width, height) = loading_thumbnail
             .as_ref()
             .and_then(|thumbnail| {
@@ -547,7 +553,7 @@ impl ExplorerView {
             self.media_preview_size,
         )?;
         let standard_request =
-            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy)?;
+            image_thumbnail_request_for_entry(entry, &self.path, self.thumbnail_source_policy);
         let (preview, loader_generation) = cx
             .try_global::<ImageThumbnailCache>()
             .map(|cache| {
@@ -1003,6 +1009,10 @@ fn load_or_create_thumbnail_with_timings(
                     );
                     (extracted.result, extracted.timings)
                 }
+                ImageThumbnailKind::Pdf => (
+                    load_pdf_first_page_rgba(&request.path, request.size, cancel),
+                    ImageThumbnailExtractionTimings::default(),
+                ),
                 ImageThumbnailKind::Video => {
                     let result =
                         load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
@@ -1441,6 +1451,10 @@ pub(super) fn entry_may_have_hover_image_preview(entry: &FileEntry) -> bool {
     !entry.is_directory_like() && path_may_have_image_preview(&entry.path)
 }
 
+pub(super) fn entry_may_have_hover_pdf_preview(entry: &FileEntry) -> bool {
+    !entry.is_directory_like() && path_may_have_pdf_preview(&entry.path)
+}
+
 pub(super) fn entry_may_have_hover_video_preview(entry: &FileEntry) -> bool {
     !entry.is_directory_like() && path_may_have_video_metadata(&entry.path)
 }
@@ -1451,12 +1465,16 @@ fn hover_image_preview_request_for_entry(
     source_policy: ThumbnailSourcePolicy,
     size: u32,
 ) -> Option<ImageThumbnailRequest> {
-    if !entry_may_have_hover_image_preview(entry) {
+    let kind = if entry_may_have_hover_image_preview(entry) {
+        ImageThumbnailKind::Image
+    } else if entry_may_have_hover_pdf_preview(entry) {
+        ImageThumbnailKind::Pdf
+    } else {
         return None;
-    }
+    };
 
     Some(ImageThumbnailRequest {
-        kind: ImageThumbnailKind::Image,
+        kind,
         usage: ImageThumbnailUsage::HoverPreview,
         size,
         source_policy,
@@ -1486,12 +1504,12 @@ fn image_thumbnail_key(entry: &FileEntry, kind: ImageThumbnailKind) -> String {
 }
 
 fn hover_image_preview_key(entry: &FileEntry, size: u32) -> String {
-    image_thumbnail_key_for_usage(
-        entry,
-        ImageThumbnailKind::Image,
-        ImageThumbnailUsage::HoverPreview,
-        size,
-    )
+    let kind = if entry_may_have_hover_pdf_preview(entry) {
+        ImageThumbnailKind::Pdf
+    } else {
+        ImageThumbnailKind::Image
+    };
+    image_thumbnail_key_for_usage(entry, kind, ImageThumbnailUsage::HoverPreview, size)
 }
 
 fn image_thumbnail_key_for_usage(
@@ -2034,7 +2052,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_requests_are_image_only() {
+    fn hover_preview_requests_include_images_and_pdfs_only() {
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("folder", true, None, Some(UNIX_EPOCH)),
@@ -2070,6 +2088,45 @@ mod tests {
                 HOVER_IMAGE_PREVIEW_SIZE,
             )
             .is_some()
+        );
+        let pdf = hover_image_preview_request_for_entry(
+            &FileEntry::test("document.PDF", false, Some(1), Some(UNIX_EPOCH)),
+            Path::new("folder"),
+            ThumbnailSourcePolicy::ReadSource,
+            HOVER_IMAGE_PREVIEW_SIZE,
+        )
+        .expect("expected PDF hover preview request");
+        assert_eq!(pdf.kind, ImageThumbnailKind::Pdf);
+        assert_eq!(pdf.usage, ImageThumbnailUsage::HoverPreview);
+        assert_eq!(pdf.usage.cache_namespace(pdf.kind), "pdf-hover-preview-v1");
+        assert!(
+            image_thumbnail_request_for_entry(
+                &FileEntry::test("document.pdf", false, Some(1), Some(UNIX_EPOCH)),
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
+            )
+            .is_none(),
+            "PDFs should not receive standard file-list thumbnails"
+        );
+    }
+
+    #[test]
+    fn pdf_hover_preview_key_changes_with_metadata_and_requested_size() {
+        let first = FileEntry::test("document.pdf", false, Some(1), Some(UNIX_EPOCH));
+        let changed = FileEntry::test(
+            "document.pdf",
+            false,
+            Some(2),
+            Some(UNIX_EPOCH + Duration::from_secs(1)),
+        );
+
+        assert_ne!(
+            hover_image_preview_key(&first, HOVER_IMAGE_PREVIEW_SIZE),
+            hover_image_preview_key(&changed, HOVER_IMAGE_PREVIEW_SIZE)
+        );
+        assert_ne!(
+            hover_image_preview_key(&first, HOVER_IMAGE_PREVIEW_SIZE),
+            hover_image_preview_key(&first, HOVER_IMAGE_PREVIEW_SIZE + 1)
         );
     }
 
@@ -2499,6 +2556,31 @@ mod tests {
             source_policy: ThumbnailSourcePolicy::CacheOnly,
             key: "0123456789abcdef".to_owned(),
             path: temp.path().join("movie.mp4"),
+            directory: temp.path().to_path_buf(),
+        };
+
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
+
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
+        assert!(result.image.is_none());
+        assert!(result.timings.get(ThumbnailStage::Extract).is_none());
+    }
+
+    #[test]
+    fn cache_only_pdf_hover_miss_does_not_open_or_render_source() {
+        let temp = TempDir::new();
+        let request = ImageThumbnailRequest {
+            kind: ImageThumbnailKind::Pdf,
+            usage: ImageThumbnailUsage::HoverPreview,
+            size: HOVER_IMAGE_PREVIEW_SIZE,
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            key: "0123456789abcdef".to_owned(),
+            path: temp.path().join("missing.pdf"),
             directory: temp.path().to_path_buf(),
         };
 

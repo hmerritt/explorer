@@ -1041,7 +1041,7 @@ impl ExplorerView {
                     VideoHoverPreviewLookup::Failed => return None,
                 }
             }
-            HoverPreviewKind::Image => {
+            HoverPreviewKind::Image | HoverPreviewKind::Pdf => {
                 self.cancel_video_hover_preview(cx);
                 self.cancel_text_hover_preview();
                 match self.hover_image_preview_for_entry(&state.entry, cx)? {
@@ -7415,6 +7415,7 @@ mod tests {
         KeyboardClickEvent, Modifiers, MouseButton, MouseClickEvent, MouseDownEvent, MouseUpEvent,
         Pixels, Point, SharedString,
     };
+    use pdf_oxide::{api::PdfBuilder, writer::PageSize};
 
     use crate::explorer::context_menu::{
         ContextMenuCommand, ContextMenuIconSlot, ContextMenuItem, ContextMenuSource,
@@ -7606,6 +7607,15 @@ mod tests {
         fs::write(path, bytes).expect("write test png");
     }
 
+    fn write_test_pdf_with_page_size(path: &Path, width: f32, height: f32) {
+        let mut pdf = PdfBuilder::new()
+            .page_size(PageSize::Custom(width, height))
+            .margin(20.0)
+            .from_text("PDF hover preview")
+            .expect("create test PDF");
+        pdf.save(path).expect("write test PDF");
+    }
+
     fn write_test_gif_with_dimensions(path: &Path, width: u32, height: u32) {
         let mut bytes = Vec::new();
         {
@@ -7652,6 +7662,23 @@ mod tests {
         }
 
         panic!("image hover preview should be visible");
+    }
+
+    fn run_until_image_hover_preview_size(
+        cx: &mut gpui::VisualTestContext,
+        expected: (f32, f32),
+    ) -> Bounds<Pixels> {
+        for _ in 0..20 {
+            cx.run_until_parked();
+            if let Some(bounds) = cx.debug_bounds("image-hover-preview")
+                && bounds.size.width == gpui::px(expected.0)
+                && bounds.size.height == gpui::px(expected.1)
+            {
+                return bounds;
+            }
+        }
+
+        panic!("image hover preview should reach size {expected:?}");
     }
 
     fn run_until_debug_bounds(
@@ -10556,6 +10583,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn alt_hover_pdf_entry_shows_first_page_in_details(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_pdf_with_page_size(&temp.path().join("document.pdf"), 400.0, 200.0);
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview_size(cx, (400.0, 200.0));
+
+        assert_eq!(preview.size.width, gpui::px(400.0));
+        assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn releasing_alt_clears_pdf_hover_preview_modifier_state(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_pdf_with_page_size(&temp.path().join("document.pdf"), 400.0, 200.0);
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        run_until_image_hover_preview_size(cx, (400.0, 200.0));
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.image_hover_preview_alt);
+        });
+        cx.update(|window, _| {
+            assert!(!window.modifiers().alt);
+        });
+    }
+
+    #[gpui::test]
     fn alt_hover_gif_entry_uses_animated_preview_in_details(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         write_test_gif_with_dimensions(&temp.path().join("loop.gif"), 8, 4);
@@ -10790,6 +10851,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn alt_hover_invalid_pdf_does_not_leave_a_preview(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("broken.pdf"), b"not a PDF").expect("write broken PDF");
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        for _ in 0..5 {
+            cx.run_until_parked();
+        }
+
+        assert!(cx.debug_bounds("image-hover-preview").is_none());
+    }
+
+    #[gpui::test]
     fn alt_hover_image_entry_shows_preview_in_large_icons(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         write_test_png(&temp.path().join("image.png"));
@@ -10801,6 +10877,20 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn alt_hover_pdf_entry_shows_first_page_in_large_icons(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_pdf_with_page_size(&temp.path().join("document.pdf"), 200.0, 400.0);
+        let (_, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::LargeIcons);
+
+        hover_selector(cx, "explorer-large-icon-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview_size(cx, (200.0, 400.0));
+
+        assert_eq!(preview.size.width, gpui::px(200.0));
+        assert_eq!(preview.size.height, gpui::px(400.0));
     }
 
     #[gpui::test]

@@ -65,7 +65,7 @@ scoop install hmerritt/explorer
     - [x] Android phones, cameras, and media players using MTP/PTP
     - [x] In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
 - [x] Key bindings for ~~everything~~ most things
-- [x] Fast image, video, and text previews on `Alt+hover`
+- [x] Fast image, video, text, and PDF first-page previews on `Alt+hover`
 - [x] Git support
     - [x] Branch
     - [x] Outgoing/Incoming commits

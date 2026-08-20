@@ -28,6 +28,7 @@ mod large_icons;
 mod mouse_selection;
 mod navigation;
 mod open_with;
+mod pdf_hover_preview;
 mod portable_devices;
 mod properties;
 mod recursive_search;

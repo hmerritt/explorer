@@ -31,6 +31,7 @@ futures = "0.3"
 jwalk = "0.8.1"
 libc = "0.2.177"
 open = { version = "5.3.5", features = ["shellexecute-on-windows"] }
+pdf_oxide = { version = "0.3.77", features = ["rendering"] }
 raw-window-handle = "0.6.2"
 rayon = "1.11.0"
 rustfft = "6.4.1"
