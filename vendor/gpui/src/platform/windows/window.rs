@@ -8,7 +8,6 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     rc::{Rc, Weak},
-    str::FromStr,
     sync::{Arc, LazyLock, Once},
     time::{Duration, Instant},
 };
@@ -136,6 +135,7 @@ pub(crate) struct WindowsWindowInner {
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
     pending_external_paths_drag: RefCell<PendingExternalPathsDrag>,
+    active_external_paths_drops: RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) hide_title_bar: bool,
@@ -342,6 +342,7 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             pending_external_paths_drag: RefCell::new(PendingExternalPathsDrag::default()),
+            active_external_paths_drops: RefCell::new(Vec::new()),
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
             system_caret_bitmap,
@@ -995,6 +996,10 @@ impl PlatformWindow for WindowsWindow {
         self.0.hwnd
     }
 
+    fn complete_external_paths_drop(&self, effect: u32) -> bool {
+        complete_active_windows_external_drop(&self.0.active_external_paths_drops, effect)
+    }
+
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
         if paths.paths().is_empty() {
             return ExternalPathsDragStartResult::Failed;
@@ -1081,6 +1086,9 @@ static PERFORMED_DROPEFFECT_FORMAT: LazyLock<u16> =
     LazyLock::new(|| register_shell_clipboard_format(CFSTR_PERFORMEDDROPEFFECT));
 static LOGICAL_PERFORMED_DROPEFFECT_FORMAT: LazyLock<u16> =
     LazyLock::new(|| register_shell_clipboard_format(CFSTR_LOGICALPERFORMEDDROPEFFECT));
+#[cfg(test)]
+static TEST_SHELL_ID_LIST_FORMAT: LazyLock<u16> =
+    LazyLock::new(|| register_shell_clipboard_format(CFSTR_SHELLIDLIST));
 
 fn register_shell_clipboard_format(format: PCWSTR) -> u16 {
     let format = unsafe { RegisterClipboardFormatW(format) };
@@ -1125,6 +1133,12 @@ struct WindowsFileDataObject {
     preferred_effect: DROPEFFECT,
     performed_effect: Rc<Cell<DROPEFFECT>>,
     logical_performed_effect: Rc<Cell<DROPEFFECT>>,
+    #[cfg(test)]
+    test_offer_hdrop: bool,
+    #[cfg(test)]
+    test_shell_id_list: Option<Vec<u8>>,
+    #[cfg(test)]
+    test_fail_shell_get_data: bool,
 }
 
 #[allow(non_snake_case)]
@@ -1142,6 +1156,22 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         } else if format == *PREFERRED_DROPEFFECT_FORMAT {
             allocate_dropeffect(self.preferred_effect)?
         } else {
+            #[cfg(test)]
+            {
+                if format == *TEST_SHELL_ID_LIST_FORMAT {
+                    if self.test_fail_shell_get_data {
+                        return Err(DV_E_FORMATETC.into());
+                    }
+                    allocate_global_payload(
+                        self.test_shell_id_list
+                            .as_deref()
+                            .ok_or(DV_E_FORMATETC)?,
+                    )?
+                } else {
+                    return Err(DV_E_FORMATETC.into());
+                }
+            }
+            #[cfg(not(test))]
             return Err(DV_E_FORMATETC.into());
         };
         Ok(STGMEDIUM {
@@ -1160,7 +1190,27 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
     }
 
     fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::HRESULT {
-        if is_hdrop_format(pformatetc) || is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT) {
+        let hdrop_supported = is_hdrop_format(pformatetc)
+            && {
+                #[cfg(test)]
+                {
+                    self.test_offer_hdrop
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            };
+        #[cfg(test)]
+        let shell_id_list_supported = self.test_shell_id_list.is_some()
+            && is_clipboard_hglobal_format(pformatetc, *TEST_SHELL_ID_LIST_FORMAT);
+        #[cfg(not(test))]
+        let shell_id_list_supported = false;
+
+        if hdrop_supported
+            || shell_id_list_supported
+            || is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT)
+        {
             S_OK
         } else {
             DV_E_FORMATETC
@@ -1313,6 +1363,12 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
             preferred_effect,
             performed_effect: performed_effect.clone(),
             logical_performed_effect: logical_performed_effect.clone(),
+            #[cfg(test)]
+            test_offer_hdrop: true,
+            #[cfg(test)]
+            test_shell_id_list: None,
+            #[cfg(test)]
+            test_fail_shell_get_data: false,
         }
         .into();
         let drop_source: IDropSource = WindowsFileDragSource.into();
@@ -1419,6 +1475,10 @@ fn is_hdrop_format(format: *const FORMATETC) -> bool {
 }
 
 fn is_dropeffect_format(format: *const FORMATETC, expected_format: u16) -> bool {
+    is_clipboard_hglobal_format(format, expected_format)
+}
+
+fn is_clipboard_hglobal_format(format: *const FORMATETC, expected_format: u16) -> bool {
     let Some(format) = (unsafe { format.as_ref() }) else {
         return false;
     };
@@ -1520,6 +1580,10 @@ fn read_dropeffect_from_medium(medium: *const STGMEDIUM) -> Option<DROPEFFECT> {
 
 fn allocate_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
     let payload = build_hdrop_payload(paths);
+    allocate_global_payload(&payload)
+}
+
+fn allocate_global_payload(payload: &[u8]) -> windows::core::Result<HGLOBAL> {
     unsafe {
         let global = GlobalAlloc(GMEM_MOVEABLE, payload.len())?;
         let handle = GlobalLock(global);
@@ -1530,6 +1594,125 @@ fn allocate_hdrop(paths: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
         let _ = GlobalUnlock(global);
         Ok(global)
     }
+}
+
+enum HdropPaths {
+    Unavailable,
+    Invalid,
+    Paths(SmallVec<[PathBuf; 2]>),
+}
+
+fn hdrop_paths_from_data_object(data_object: &IDataObject) -> HdropPaths {
+    let format = hdrop_format_etc();
+    if unsafe { data_object.QueryGetData(&format) } != S_OK {
+        return HdropPaths::Unavailable;
+    }
+
+    let Ok(mut medium) = (unsafe { data_object.GetData(&format) }) else {
+        return HdropPaths::Invalid;
+    };
+    let paths = if (medium.tymed & TYMED_HGLOBAL.0 as u32) == 0 {
+        None
+    } else {
+        unsafe {
+            let global = medium.u.hGlobal;
+            if global.is_invalid() {
+                None
+            } else {
+                let locked = GlobalLock(global);
+                if locked.is_null() {
+                    None
+                } else {
+                    let mut paths = SmallVec::<[PathBuf; 2]>::new();
+                    with_file_names(HDROP(locked), |file_name| {
+                        paths.push(PathBuf::from(file_name));
+                    });
+                    let _ = GlobalUnlock(global);
+                    (!paths.is_empty()).then_some(paths)
+                }
+            }
+        }
+    };
+    unsafe { ReleaseStgMedium(&mut medium) };
+    paths.map_or(HdropPaths::Invalid, HdropPaths::Paths)
+}
+
+fn shell_item_paths_from_data_object(
+    data_object: &IDataObject,
+) -> Option<SmallVec<[PathBuf; 2]>> {
+    let items: IShellItemArray =
+        unsafe { SHCreateShellItemArrayFromDataObject(data_object) }.ok()?;
+    let count = unsafe { items.GetCount() }.ok()?;
+    if count == 0 {
+        return None;
+    }
+
+    let mut paths = SmallVec::<[PathBuf; 2]>::with_capacity(count as usize);
+    for index in 0..count {
+        let item = unsafe { items.GetItemAt(index) }.ok()?;
+        let display_name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+        if display_name.0.is_null() {
+            return None;
+        }
+        let path = unsafe { display_name.to_string() };
+        unsafe { CoTaskMemFree(Some(display_name.0.cast())) };
+        let path = PathBuf::from(path.ok()?);
+        if path.as_os_str().is_empty() || !path.is_absolute() {
+            return None;
+        }
+        paths.push(path);
+    }
+    Some(paths)
+}
+
+fn external_paths_from_data_object(data_object: &IDataObject) -> Option<ExternalPaths> {
+    match hdrop_paths_from_data_object(data_object) {
+        HdropPaths::Paths(paths) => Some(ExternalPaths::new(paths)),
+        HdropPaths::Unavailable => {
+            shell_item_paths_from_data_object(data_object).map(ExternalPaths::new)
+        }
+        HdropPaths::Invalid => None,
+    }
+}
+
+struct ActiveWindowsExternalDrop {
+    completed_effect: Cell<Option<DROPEFFECT>>,
+}
+
+struct ActiveWindowsExternalDropGuard<'a> {
+    active_drops: &'a RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+}
+
+impl Drop for ActiveWindowsExternalDropGuard<'_> {
+    fn drop(&mut self) {
+        self.active_drops.borrow_mut().pop();
+    }
+}
+
+fn push_active_windows_external_drop<'a>(
+    active_drops: &'a RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    drop: Rc<ActiveWindowsExternalDrop>,
+) -> ActiveWindowsExternalDropGuard<'a> {
+    active_drops.borrow_mut().push(drop);
+    ActiveWindowsExternalDropGuard { active_drops }
+}
+
+fn completed_external_drop_effect(
+    drop: &ActiveWindowsExternalDrop,
+    default: DROPEFFECT,
+) -> DROPEFFECT {
+    drop.completed_effect.get().unwrap_or(default)
+}
+
+fn complete_active_windows_external_drop(
+    active_drops: &RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    effect: u32,
+) -> bool {
+    let Some(drop) = active_drops.borrow().last().cloned() else {
+        return false;
+    };
+    drop.completed_effect.set(Some(DROPEFFECT(effect)));
+    true
 }
 
 #[implement(IDropTarget)]
@@ -1557,30 +1740,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         unsafe {
             let idata_obj = pdataobj.ok()?;
-            let config = FORMATETC {
-                cfFormat: CF_HDROP.0,
-                ptd: std::ptr::null_mut() as _,
-                dwAspect: DVASPECT_CONTENT.0,
-                lindex: -1,
-                tymed: TYMED_HGLOBAL.0 as _,
-            };
             let cursor_position = POINT { x: pt.x, y: pt.y };
-            if idata_obj.QueryGetData(&config as _) == S_OK {
+            if let Some(paths) = external_paths_from_data_object(idata_obj) {
                 *pdweffect = DROPEFFECT_COPY;
-                let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
-                    return Ok(());
-                };
-                if idata.u.hGlobal.is_invalid() {
-                    return Ok(());
-                }
-                let hdrop = idata.u.hGlobal.0 as *mut HDROP;
-                let mut paths = SmallVec::<[PathBuf; 2]>::new();
-                with_file_names(*hdrop, |file_name| {
-                    if let Some(path) = PathBuf::from_str(&file_name).log_err() {
-                        paths.push(path);
-                    }
-                });
-                ReleaseStgMedium(&mut idata);
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
                     .ok()
@@ -1592,7 +1754,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                         cursor_position.y as f32,
                         scale_factor,
                     ),
-                    paths: ExternalPaths::new(paths),
+                    paths,
                 });
                 self.handle_drag_drop(input);
             } else {
@@ -1655,8 +1817,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
+        let default_effect = DROPEFFECT_COPY;
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            *pdweffect = default_effect;
             self.0
                 .drop_target_helper
                 .Drop(idata_obj, &cursor_position, *pdweffect)
@@ -1665,6 +1828,13 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 .ok()
                 .log_err();
         }
+        let active_drop = Rc::new(ActiveWindowsExternalDrop {
+            completed_effect: Cell::new(None),
+        });
+        let _active_drop_guard = push_active_windows_external_drop(
+            &self.0.active_external_paths_drops,
+            active_drop.clone(),
+        );
         let scale_factor = self.0.state.borrow().scale_factor;
         let input = PlatformInput::FileDrop(FileDropEvent::Submit {
             position: logical_point(
@@ -1674,6 +1844,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             ),
         });
         self.handle_drag_drop(input);
+        unsafe {
+            *pdweffect = completed_external_drop_effect(&active_drop, default_effect);
+        }
 
         Ok(())
     }
@@ -1682,15 +1855,135 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 #[cfg(test)]
 mod external_paths_drag_tests {
     use super::{
-        PendingExternalPathsDrag, build_hdrop_payload, catch_windows_callback,
-        windows_external_drag_completion, windows_external_drag_result, DROPFILES,
-        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        ActiveWindowsExternalDrop, COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree,
+        CoUninitialize, DROPFILES, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
+        DROPEFFECT_NONE, IDataObject, ILGetSize, PCWSTR, PendingExternalPathsDrag,
+        SHParseDisplayName, WindowsFileDataObject, build_hdrop_payload, catch_windows_callback,
+        complete_active_windows_external_drop, completed_external_drop_effect,
+        external_paths_from_data_object, push_active_windows_external_drop,
+        windows_external_drag_completion, windows_external_drag_result,
     };
     use crate::{
         ExternalPathDragOperation, ExternalPaths, ExternalPathsDragResult,
         ExternalPathsDragStartResult,
     };
-    use std::{cell::Cell, mem, path::PathBuf};
+    use std::{
+        cell::{Cell, RefCell},
+        ffi::OsStr,
+        mem,
+        path::{Path, PathBuf},
+        rc::Rc,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestComApartment(bool);
+
+    impl TestComApartment {
+        fn new() -> Self {
+            Self(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok())
+        }
+    }
+
+    impl Drop for TestComApartment {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    struct TestTempDir(PathBuf);
+
+    impl TestTempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "gpui-shell-drop-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn pidl_bytes(parsing_name: &OsStr) -> Vec<u8> {
+        use std::os::windows::ffi::OsStrExt;
+
+        let parsing_name = parsing_name
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut pidl = std::ptr::null_mut();
+        unsafe {
+            SHParseDisplayName(PCWSTR(parsing_name.as_ptr()), None, &mut pidl, 0, None).unwrap();
+            let size = ILGetSize(Some(pidl)) as usize;
+            let bytes = std::slice::from_raw_parts(pidl.cast::<u8>(), size).to_vec();
+            CoTaskMemFree(Some(pidl.cast()));
+            bytes
+        }
+    }
+
+    fn shell_id_list_payload(items: &[Vec<u8>]) -> Vec<u8> {
+        let header_size = size_of::<u32>() * (items.len() + 2);
+        let total_size = header_size + size_of::<u16>() + items.iter().map(Vec::len).sum::<usize>();
+        let mut payload = vec![0; total_size];
+        payload[..size_of::<u32>()].copy_from_slice(&(items.len() as u32).to_ne_bytes());
+
+        let mut offset = header_size;
+        payload[size_of::<u32>()..size_of::<u32>() * 2]
+            .copy_from_slice(&(offset as u32).to_ne_bytes());
+        offset += size_of::<u16>();
+        for (index, item) in items.iter().enumerate() {
+            let offset_start = size_of::<u32>() * (index + 2);
+            payload[offset_start..offset_start + size_of::<u32>()]
+                .copy_from_slice(&(offset as u32).to_ne_bytes());
+            payload[offset..offset + item.len()].copy_from_slice(item);
+            offset += item.len();
+        }
+        payload
+    }
+
+    fn test_data_object(
+        hdrop_paths: Option<Vec<PathBuf>>,
+        shell_id_list: Option<Vec<u8>>,
+    ) -> IDataObject {
+        let test_offer_hdrop = hdrop_paths.is_some();
+        WindowsFileDataObject {
+            paths: hdrop_paths.unwrap_or_default(),
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop,
+            test_shell_id_list: shell_id_list,
+            test_fail_shell_get_data: false,
+        }
+        .into()
+    }
+
+    fn malformed_test_data_object() -> IDataObject {
+        WindowsFileDataObject {
+            paths: Vec::new(),
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: false,
+            test_shell_id_list: Some(Vec::new()),
+            test_fail_shell_get_data: true,
+        }
+        .into()
+    }
 
     fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
         let path_bytes = &payload[mem::size_of::<DROPFILES>()..];
@@ -1728,6 +2021,71 @@ mod external_paths_drag_tests {
             [r"C:\Users\test\one.txt", r"C:\Users\test\two.txt"]
         );
         assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pidl_only_filesystem_data_object_becomes_external_paths() {
+        let _com = TestComApartment::new();
+        let temp = TestTempDir::new();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let payload = shell_id_list_payload(&[
+            pidl_bytes(first.as_os_str()),
+            pidl_bytes(second.as_os_str()),
+        ]);
+        let data_object = test_data_object(None, Some(payload));
+
+        let paths = external_paths_from_data_object(&data_object).unwrap();
+        assert_eq!(paths.paths(), [first, second]);
+    }
+
+    #[test]
+    fn hdrop_takes_precedence_when_shell_id_list_is_also_available() {
+        let _com = TestComApartment::new();
+        let temp = TestTempDir::new();
+        let shell_path = temp.path().join("shell.txt");
+        std::fs::write(&shell_path, b"shell").unwrap();
+        let hdrop_path = PathBuf::from(r"C:\preferred-hdrop.txt");
+        let data_object = test_data_object(
+            Some(vec![hdrop_path.clone()]),
+            Some(shell_id_list_payload(&[pidl_bytes(shell_path.as_os_str())])),
+        );
+
+        let paths = external_paths_from_data_object(&data_object).unwrap();
+        assert_eq!(paths.paths(), [hdrop_path]);
+    }
+
+    #[test]
+    fn empty_virtual_partial_and_malformed_shell_batches_are_rejected() {
+        let _com = TestComApartment::new();
+        let empty = test_data_object(None, Some(shell_id_list_payload(&[])));
+        assert!(external_paths_from_data_object(&empty).is_none());
+
+        let virtual_pidl = pidl_bytes(OsStr::new(
+            r"shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}",
+        ));
+        let virtual_only = test_data_object(
+            None,
+            Some(shell_id_list_payload(std::slice::from_ref(&virtual_pidl))),
+        );
+        assert!(external_paths_from_data_object(&virtual_only).is_none());
+
+        let temp = TestTempDir::new();
+        let file = temp.path().join("real.txt");
+        std::fs::write(&file, b"real").unwrap();
+        let partial = test_data_object(
+            None,
+            Some(shell_id_list_payload(&[
+                pidl_bytes(file.as_os_str()),
+                virtual_pidl,
+            ])),
+        );
+        assert!(external_paths_from_data_object(&partial).is_none());
+
+        let malformed = malformed_test_data_object();
+        assert!(external_paths_from_data_object(&malformed).is_none());
     }
 
     #[test]
@@ -1823,6 +2181,49 @@ mod external_paths_drag_tests {
 
         assert_eq!(result, 42);
         assert!(fallback_called.get());
+    }
+
+    #[test]
+    fn external_drop_completion_is_scoped_reentrant_and_defaults_to_copy() {
+        let active = RefCell::new(Vec::new());
+        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+
+        let outer = Rc::new(ActiveWindowsExternalDrop {
+            completed_effect: Cell::new(None),
+        });
+        let outer_guard = push_active_windows_external_drop(&active, outer.clone());
+        assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_COPY);
+
+        let inner = Rc::new(ActiveWindowsExternalDrop {
+            completed_effect: Cell::new(None),
+        });
+        {
+            let _inner_guard = push_active_windows_external_drop(&active, inner.clone());
+            assert!(complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+            assert_eq!(completed_external_drop_effect(&inner, DROPEFFECT_COPY), DROPEFFECT_NONE);
+            assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_COPY);
+        }
+
+        assert!(complete_active_windows_external_drop(&active, DROPEFFECT_MOVE.0));
+        assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_MOVE);
+        drop(outer_guard);
+        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+    }
+
+    #[test]
+    fn external_drop_completion_scope_is_cleared_during_unwinding() {
+        let active = RefCell::new(Vec::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let drop = Rc::new(ActiveWindowsExternalDrop {
+                completed_effect: Cell::new(None),
+            });
+            let _guard = push_active_windows_external_drop(&active, drop);
+            panic!("exercise drop-scope cleanup");
+        }));
+
+        assert!(result.is_err());
+        assert!(active.borrow().is_empty());
+        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
     }
 }
 

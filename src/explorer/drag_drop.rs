@@ -1057,6 +1057,7 @@ impl ExplorerView {
         paths: &[PathBuf],
         destination: DropDestination,
         modifiers: Modifiers,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         if self.is_sidebar_group_view() {
@@ -1076,6 +1077,16 @@ impl ExplorerView {
             modifiers,
         );
         if !validity.valid {
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        if crate::explorer::windows_shell::bridge_winscp_fake_directory_drop(
+            &paths,
+            &resolved_destination,
+        ) == crate::explorer::windows_shell::WinScpDropBridgeResult::Committed
+        {
+            window.complete_external_paths_drop(0);
             return;
         }
 

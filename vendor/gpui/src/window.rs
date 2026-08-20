@@ -1521,6 +1521,16 @@ impl Window {
         self.platform_window.inner_window_bounds()
     }
 
+    /// Override the native effect returned for the Windows external-paths drop currently being
+    /// dispatched.
+    ///
+    /// This is an internal platform bridge and is available only from a synchronous drop handler.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn complete_external_paths_drop(&self, effect: u32) -> bool {
+        self.platform_window.complete_external_paths_drop(effect)
+    }
+
     /// Dispatch the given action on the currently focused element.
     pub fn dispatch_action(&mut self, action: Box<dyn Action>, cx: &mut App) {
         let focus_id = self.focused(cx).map(|handle| handle.id);
