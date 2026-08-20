@@ -2983,7 +2983,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn apply_settings_recomputes_sidebar_sections_when_hide_changes(cx: &mut gpui::TestAppContext) {
+    fn apply_settings_updates_hidden_sidebar_groups(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
@@ -3007,7 +3007,7 @@ mod tests {
                 view.apply_settings(
                     &ExplorerSettings {
                         sidebar: crate::settings::SidebarSettings {
-                            hide: vec![crate::settings::DriveHideKind::Wsl],
+                            hide_groups: vec![crate::settings::SidebarGroupKind::Wsl],
                             ..crate::settings::SidebarSettings::default()
                         },
                         ..ExplorerSettings::default()
@@ -3018,7 +3018,10 @@ mod tests {
         });
 
         cx.read_entity(&view, |view, _| {
-            assert!(view.sidebar_sections.wsl_drives.is_empty());
+            assert_eq!(
+                view.sidebar_settings.hide_groups,
+                vec![crate::settings::SidebarGroupKind::Wsl]
+            );
         });
     }
 

@@ -1533,7 +1533,9 @@ impl ExplorerView {
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
         let mut previous_group_expanded = None;
 
-        if !sections.user_directories.is_empty() {
+        if !sections.user_directories.is_empty()
+            && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Pinned)
+        {
             let expanded =
                 sidebar_group_is_expanded(&self.sidebar_settings, SidebarGroupKind::Pinned);
             children.push(self.render_sidebar_group_header(
@@ -1579,7 +1581,9 @@ impl ExplorerView {
             previous_group_expanded = Some(expanded);
         }
 
-        if !sections.drives.is_empty() {
+        if !sections.drives.is_empty()
+            && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Drives)
+        {
             if let Some(previous_group_expanded) = previous_group_expanded {
                 children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
@@ -1610,7 +1614,9 @@ impl ExplorerView {
             previous_group_expanded = Some(expanded);
         }
 
-        if !sections.network_drives.is_empty() {
+        if !sections.network_drives.is_empty()
+            && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Network)
+        {
             if let Some(previous_group_expanded) = previous_group_expanded {
                 children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
@@ -1645,7 +1651,9 @@ impl ExplorerView {
         }
 
         #[cfg(target_os = "windows")]
-        if !sections.wsl_drives.is_empty() {
+        if !sections.wsl_drives.is_empty()
+            && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Wsl)
+        {
             if let Some(previous_group_expanded) = previous_group_expanded {
                 children.push(sidebar_group_gap(previous_group_expanded).into_any_element());
             }
@@ -3746,6 +3754,13 @@ fn sidebar_group_is_expanded(
     kind: SidebarGroupKind,
 ) -> bool {
     settings.expanded_groups.contains(&kind)
+}
+
+fn sidebar_group_is_hidden(
+    settings: &crate::settings::SidebarSettings,
+    kind: SidebarGroupKind,
+) -> bool {
+    settings.hide_groups.contains(&kind)
 }
 
 fn set_local_sidebar_group_expanded(
@@ -9009,6 +9024,62 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sidebar_hide_groups_omit_headers_and_rows_without_affecting_other_groups(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let pinned_path = temp.path().join("pinned");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = vec![pinned_path.clone()];
+        settings.sidebar.expanded_groups = vec![
+            SidebarGroupKind::Pinned,
+            SidebarGroupKind::Drives,
+            SidebarGroupKind::Network,
+        ];
+        settings.sidebar.hide_groups = vec![SidebarGroupKind::Pinned, SidebarGroupKind::Network];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                user_directories: vec![SidebarItem {
+                    label: "Pinned".to_owned(),
+                    path: pinned_path,
+                    kind: SidebarItemKind::CustomDirectory,
+                    configured_index: Some(0),
+                }],
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: PathBuf::from(r"C:\"),
+                    kind: SidebarItemKind::DriveWindows,
+                    configured_index: None,
+                }],
+                network_drives: vec![SidebarItem {
+                    label: "Team Share (S:)".to_owned(),
+                    path: PathBuf::from(r"S:\"),
+                    kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Connected),
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-0").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-group-drives").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-group-network").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_none());
+    }
+
+    #[gpui::test]
     fn sidebar_group_gap_after_expanded_group_is_14px(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
@@ -9350,6 +9421,40 @@ mod tests {
 
         assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn sidebar_hidden_wsl_group_is_omitted_on_windows(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
+        settings.sidebar.hide_groups = vec![SidebarGroupKind::Wsl];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                wsl_drives: vec![SidebarItem {
+                    label: "Ubuntu".to_owned(),
+                    path: PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
+                    kind: SidebarItemKind::DriveWsl,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_none());
     }
 
     #[cfg(not(target_os = "windows"))]

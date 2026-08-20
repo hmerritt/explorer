@@ -8,7 +8,7 @@ use crate::explorer::portable_devices::{PortableDeviceRoot, portable_device_root
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
 };
-use crate::settings::{DriveHideKind, SidebarSettings, expand_configured_path};
+use crate::settings::{SidebarSettings, expand_configured_path};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -56,7 +56,6 @@ fn sidebar_sections_from_roots_internal(
     wsl_roots: Vec<PathBuf>,
     portable_roots: Vec<PortableDeviceRoot>,
 ) -> SidebarSections {
-    let hide_wsl_drives = settings.hide.contains(&DriveHideKind::Wsl);
     let mut network_drives = network_drive_items_from_roots(network_roots, filesystem_name);
     network_drives.extend(network_drive_items(discovered_network_drives));
     SidebarSections {
@@ -67,11 +66,7 @@ fn sidebar_sections_from_roots_internal(
             drives
         },
         network_drives,
-        wsl_drives: if hide_wsl_drives {
-            Vec::new()
-        } else {
-            wsl_drive_items_from_roots(wsl_roots)
-        },
+        wsl_drives: wsl_drive_items_from_roots(wsl_roots),
     }
 }
 
@@ -338,7 +333,7 @@ fn sidebar_wsl_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use crate::settings::{DriveHideKind, SidebarSettings};
+    use crate::settings::{SidebarGroupKind, SidebarSettings};
     use std::fs;
 
     #[test]
@@ -665,10 +660,10 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_sections_hide_wsl_drives_when_configured() {
+    fn hidden_wsl_group_keeps_underlying_sidebar_items() {
         let sections = sidebar_sections_from_roots(
             &SidebarSettings {
-                hide: vec![DriveHideKind::Wsl],
+                hide_groups: vec![SidebarGroupKind::Wsl],
                 items: Vec::new(),
                 ..SidebarSettings::default()
             },
@@ -678,6 +673,6 @@ mod tests {
         );
 
         assert_eq!(sections.drives.len(), 1);
-        assert!(sections.wsl_drives.is_empty());
+        assert_eq!(sections.wsl_drives.len(), 1);
     }
 }

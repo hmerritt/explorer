@@ -136,6 +136,7 @@ Example with sidebar and contextmenu items:
         "show_folder_sizes": false
     },
     "sidebar": {
+        "hide_groups": ["network", "wsl"],
         "items": ["~", "~/Downloads", "~/Documents", "~/Pictures"],
         "width": 225
     },
@@ -150,6 +151,9 @@ Example with sidebar and contextmenu items:
     ]
 }
 ```
+
+`sidebar.hide_groups` removes matching groups from the sidebar. It accepts
+`"pinned"`, `"drives"`, `"network"`, and `"wsl"`; the default is an empty array.
 
 Context-menu entries can launch an external executable or invoke a built-in action. The native
 no-dialog ZIP action is configured as:

@@ -65,12 +65,6 @@ enum SidebarItemSetting {
     Legacy(LegacySidebarLocation),
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DriveHideKind {
-    Wsl,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarGroupKind {
@@ -228,7 +222,7 @@ impl Serialize for SerializableSidebarSettings<'_> {
     {
         let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry("expanded_groups", &self.settings.expanded_groups)?;
-        map.serialize_entry("hide", &self.settings.hide)?;
+        map.serialize_entry("hide_groups", &self.settings.hide_groups)?;
         map.serialize_entry(
             "items",
             &SerializableSidebarItems {
@@ -626,8 +620,8 @@ pub struct SidebarSettings {
         deserialize_with = "deserialize_sidebar_expanded_groups"
     )]
     pub expanded_groups: Vec<SidebarGroupKind>,
-    #[serde(default, deserialize_with = "deserialize_drive_hide_kinds")]
-    pub hide: Vec<DriveHideKind>,
+    #[serde(default, deserialize_with = "deserialize_sidebar_hide_groups")]
+    pub hide_groups: Vec<SidebarGroupKind>,
     #[serde(
         default = "default_sidebar_items",
         deserialize_with = "deserialize_sidebar_items"
@@ -781,7 +775,7 @@ impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
             expanded_groups: default_sidebar_expanded_groups(),
-            hide: Vec::new(),
+            hide_groups: Vec::new(),
             items: default_sidebar_items(),
             width: SIDEBAR_DEFAULT_WIDTH,
         }
@@ -2148,13 +2142,6 @@ pub(crate) fn default_file_column_width(kind: FileColumnKind) -> u32 {
     }
 }
 
-fn drive_hide_kind_from_str(value: &str) -> Option<DriveHideKind> {
-    match value {
-        "wsl" => Some(DriveHideKind::Wsl),
-        _ => None,
-    }
-}
-
 fn sidebar_group_kind_from_str(value: &str) -> Option<SidebarGroupKind> {
     match value {
         "pinned" => Some(SidebarGroupKind::Pinned),
@@ -2179,12 +2166,14 @@ where
         .collect())
 }
 
-fn deserialize_drive_hide_kinds<'de, D>(deserializer: D) -> Result<Vec<DriveHideKind>, D::Error>
+fn deserialize_sidebar_hide_groups<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SidebarGroupKind>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
-    Ok(drive_hide_kinds_from_value(value))
+    Ok(sidebar_group_kinds_from_value(value, Vec::new()))
 }
 
 fn deserialize_sidebar_expanded_groups<'de, D>(
@@ -2194,30 +2183,18 @@ where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
-    Ok(sidebar_group_kinds_from_value(value))
+    Ok(sidebar_group_kinds_from_value(
+        value,
+        default_sidebar_expanded_groups(),
+    ))
 }
 
-fn drive_hide_kinds_from_value(value: Value) -> Vec<DriveHideKind> {
+fn sidebar_group_kinds_from_value(
+    value: Value,
+    default: Vec<SidebarGroupKind>,
+) -> Vec<SidebarGroupKind> {
     let Some(values) = value.as_array() else {
-        return Vec::new();
-    };
-
-    let mut kinds = Vec::new();
-    for kind in values
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(drive_hide_kind_from_str)
-    {
-        if !kinds.contains(&kind) {
-            kinds.push(kind);
-        }
-    }
-    kinds
-}
-
-fn sidebar_group_kinds_from_value(value: Value) -> Vec<SidebarGroupKind> {
-    let Some(values) = value.as_array() else {
-        return default_sidebar_expanded_groups();
+        return default;
     };
 
     let mut kinds = Vec::new();
@@ -2516,7 +2493,7 @@ mod tests {
             settings.app.cache_cleanup_interval_days,
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
         );
-        assert!(settings.sidebar.hide.is_empty());
+        assert!(settings.sidebar.hide_groups.is_empty());
         assert_eq!(
             settings.sidebar.expanded_groups,
             vec![SidebarGroupKind::Pinned]
@@ -2868,7 +2845,7 @@ mod tests {
         assert_eq!(settings.app.start, default_app_start_path());
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
         assert_eq!(settings.contextmenu.items, default_context_menu_items());
-        assert!(settings.sidebar.hide.is_empty());
+        assert!(settings.sidebar.hide_groups.is_empty());
         assert_eq!(
             settings.sidebar.expanded_groups,
             vec![SidebarGroupKind::Pinned]
@@ -3029,12 +3006,48 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_hide_deserializes_wsl_and_ignores_unknown_values() {
-        let settings: ExplorerSettings =
-            serde_json::from_str(r#"{"sidebar":{"hide":["wsl","future_drive",42,"wsl"]}}"#)
-                .expect("deserialize sidebar hide settings");
+    fn sidebar_hide_groups_deserialize_and_ignore_unknown_values() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"sidebar":{"hide_groups":["pinned","drives","future_group",42,"network","wsl","drives"]}}"#,
+        )
+        .expect("deserialize sidebar hidden groups");
 
-        assert_eq!(settings.sidebar.hide, vec![DriveHideKind::Wsl]);
+        assert_eq!(
+            settings.sidebar.hide_groups,
+            vec![
+                SidebarGroupKind::Pinned,
+                SidebarGroupKind::Drives,
+                SidebarGroupKind::Network,
+                SidebarGroupKind::Wsl,
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_hide_groups_default_to_empty_for_malformed_values() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"sidebar":{"hide_groups":"wsl"}}"#)
+                .expect("deserialize malformed sidebar hidden groups");
+
+        assert!(settings.sidebar.hide_groups.is_empty());
+    }
+
+    #[test]
+    fn legacy_sidebar_hide_is_ignored_and_removed_during_normalization() {
+        let path = unique_temp_dir("legacy-sidebar-hide").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"sidebar":{"hide":["wsl"]}}"#).unwrap();
+
+        let loaded = load_settings_document_from_path_for(&path, ConfigPlatform::Linux).unwrap();
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert!(loaded.value.sidebar.hide_groups.is_empty());
+        assert!(normalized["sidebar"].get("hide").is_none());
+        assert_eq!(
+            normalized["sidebar"]["hide_groups"],
+            Value::Array(Vec::new())
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -3427,7 +3440,8 @@ mod tests {
             Value::Array(vec![Value::String("pinned".to_owned())])
         );
         assert!(json.contains("\n    \"expanded_groups\": [\"pinned\"],"));
-        assert!(json.contains("\n    \"hide\": [],"));
+        assert!(json.contains("\n    \"hide_groups\": [],"));
+        assert!(document["sidebar"].get("hide").is_none());
         let expected_sidebar_items = settings
             .sidebar
             .items
