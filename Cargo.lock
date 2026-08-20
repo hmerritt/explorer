@@ -2255,6 +2255,7 @@ dependencies = [
  "open",
  "paste",
  "pdf_oxide",
+ "percent-encoding",
  "plist",
  "qoi",
  "raw-window-handle",

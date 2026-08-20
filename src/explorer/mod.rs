@@ -12,6 +12,7 @@ pub(crate) mod constants;
 mod context_menu;
 mod dialog;
 mod directory_kind;
+mod download;
 mod drag_drop;
 mod entry;
 mod explorer_fs;

@@ -1,6 +1,6 @@
-use std::{any::type_name, sync::Arc, time::Duration};
+use std::{any::type_name, io, sync::Arc, time::Duration};
 
-use futures::{AsyncReadExt, FutureExt};
+use futures::{AsyncReadExt, FutureExt, TryStreamExt};
 use gpui::{
     App,
     http_client::{
@@ -87,10 +87,13 @@ impl HttpClient for ExplorerHttpClient {
                     let status = response.status();
                     let version = response.version();
                     let headers = std::mem::take(response.headers_mut());
-                    let bytes = response.bytes().await?;
+                    let body = response
+                        .bytes_stream()
+                        .map_err(io::Error::other)
+                        .into_async_read();
                     let mut builder = Response::builder().status(status).version(version);
                     *builder.headers_mut().expect("response builder headers") = headers;
-                    Ok(builder.body(AsyncBody::from(bytes.to_vec()))?)
+                    Ok(builder.body(AsyncBody::from_reader(body))?)
                 })
                 .await?
         }
@@ -122,7 +125,9 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::mpsc,
         thread,
+        time::Duration,
     };
 
     use super::*;
@@ -192,6 +197,55 @@ mod tests {
         assert_eq!(response.status(), http::StatusCode::OK);
         assert_eq!(response.headers()[http::header::CONTENT_TYPE], "image/png");
         assert_eq!(body, b"icon");
+    }
+
+    #[test]
+    fn client_get_returns_after_headers_before_streaming_body_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming test server");
+        let address = listener
+            .local_addr()
+            .expect("streaming test server address");
+        let (headers_tx, headers_rx) = mpsc::channel();
+        let (body_tx, body_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept streaming test request");
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .expect("write streaming headers");
+            stream.flush().expect("flush streaming headers");
+            headers_tx.send(()).unwrap();
+            body_rx.recv().unwrap();
+            stream.write_all(b"body").expect("write streaming body");
+        });
+
+        let (response_tx, response_rx) = mpsc::channel();
+        let client = Arc::new(
+            ExplorerHttpClient::new_without_system_proxy_for_test().expect("Explorer HTTP client"),
+        );
+        let request_client = client.clone();
+        thread::spawn(move || {
+            let response = futures::executor::block_on(request_client.get(
+                &format!("http://{address}/stream"),
+                ().into(),
+                true,
+            ));
+            response_tx.send(response).unwrap();
+        });
+
+        headers_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server sent headers");
+        let mut response = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("client returned after headers")
+            .expect("successful GET");
+        body_tx.send(()).unwrap();
+        let mut body = Vec::new();
+        futures::executor::block_on(response.body_mut().read_to_end(&mut body))
+            .expect("read streamed body");
+        assert_eq!(body, b"body");
     }
 
     #[test]

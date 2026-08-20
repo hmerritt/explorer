@@ -14,7 +14,7 @@ use gpui::{
     ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, list,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    prelude::*, px, relative, rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -62,6 +62,7 @@ use crate::explorer::{
         context_menu_item_is_visually_active, context_menu_item_top, context_menu_path_is_active,
         context_menu_pointer_tip_origin, context_submenu_left,
     },
+    download::{DownloadNoticeRow, DownloadNoticeStatus},
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
         drop_indicator_origin, row_drop_destination_for_entry,
@@ -3586,6 +3587,9 @@ impl Render for ExplorerView {
                             .when_some(self.operation_notice.as_ref(), |this, notice| {
                                 this.child(render_operation_notice(notice))
                             })
+                            .when(!self.download_notice_rows.is_empty(), |this| {
+                                this.child(render_download_notices(&self.download_notice_rows))
+                            })
                             .when(self.recursive_search_is_working(), |this| {
                                 this.child(linear_indeterminate(
                                     "recursive-search-linear-progress",
@@ -3960,6 +3964,148 @@ fn render_operation_notice(notice: &OperationNotice) -> AnyElement {
         .text_color(rgb(text))
         .child(SharedString::from(notice.text.clone()))
         .into_any_element()
+}
+
+fn render_download_notices(rows: &[DownloadNoticeRow]) -> AnyElement {
+    div()
+        .id("download-notices")
+        .debug_selector(|| "download-notices".to_owned())
+        .w_full()
+        .flex()
+        .flex_col()
+        .children(rows.iter().map(render_download_notice_row))
+        .into_any_element()
+}
+
+fn render_download_notice_row(row: &DownloadNoticeRow) -> AnyElement {
+    let (kind, text) = match &row.status {
+        DownloadNoticeStatus::Connecting => (
+            OperationNoticeKind::Info,
+            format!("Downloading \"{}\"...", row.file_name),
+        ),
+        DownloadNoticeStatus::Downloading {
+            downloaded_bytes,
+            total_bytes: Some(total_bytes),
+        } => {
+            let percent = if *total_bytes == 0 {
+                100
+            } else {
+                downloaded_bytes.saturating_mul(100) / total_bytes
+            };
+            (
+                OperationNoticeKind::Info,
+                format!(
+                    "Downloading \"{}\" — {} of {} ({}%)",
+                    row.file_name,
+                    format_size(Some(*downloaded_bytes)),
+                    format_size(Some(*total_bytes)),
+                    percent.min(100)
+                ),
+            )
+        }
+        DownloadNoticeStatus::Downloading {
+            downloaded_bytes,
+            total_bytes: None,
+        } => (
+            OperationNoticeKind::Info,
+            format!(
+                "Downloading \"{}\" — {}",
+                row.file_name,
+                format_size(Some(*downloaded_bytes))
+            ),
+        ),
+        DownloadNoticeStatus::Completed => (
+            OperationNoticeKind::Info,
+            format!("Downloaded \"{}\".", row.file_name),
+        ),
+        DownloadNoticeStatus::Failed(error) => (OperationNoticeKind::Error, error.clone()),
+    };
+    let (bg, border, text_color, _) = operation_notice_style(kind);
+    let id = row.id;
+
+    div()
+        .id(SharedString::from(format!("download-notice-{id}")))
+        .debug_selector(move || format!("download-notice-{id}"))
+        .w_full()
+        .flex()
+        .flex_col()
+        .bg(rgb(bg))
+        .border_b_1()
+        .border_color(rgb(border))
+        .child(
+            div()
+                .py(px(OPEN_ERROR_VERTICAL_PADDING))
+                .px(px(OPEN_ERROR_HORIZONTAL_PADDING))
+                .text_size(px(12.0))
+                .text_color(rgb(text_color))
+                .child(SharedString::from(text)),
+        )
+        .when_some(download_progress_element(row), |this, progress| {
+            this.child(progress)
+        })
+        .into_any_element()
+}
+
+fn download_progress_element(row: &DownloadNoticeRow) -> Option<AnyElement> {
+    const HEIGHT: f32 = 4.0;
+    const COLOR: u32 = 0x36a646;
+    const TRACK: u32 = 0xe1f3e4;
+
+    match row.status {
+        DownloadNoticeStatus::Connecting
+        | DownloadNoticeStatus::Downloading {
+            total_bytes: None, ..
+        } => {
+            let id = row.id;
+            Some(
+                div()
+                    .debug_selector(move || format!("download-progress-{id}"))
+                    .relative()
+                    .w_full()
+                    .h(px(HEIGHT))
+                    .overflow_hidden()
+                    .bg(rgb(TRACK))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .bg(rgb(COLOR))
+                            .with_animation(
+                                ("download-indeterminate", id),
+                                Animation::new(Duration::from_millis(1_500)).repeat(),
+                                |bar, delta| {
+                                    let width = 0.35;
+                                    let left = -width + (1.0 + width) * delta;
+                                    bar.left(relative(left)).w(relative(width))
+                                },
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        }
+        DownloadNoticeStatus::Downloading {
+            downloaded_bytes,
+            total_bytes: Some(total_bytes),
+        } => {
+            let fraction = if total_bytes == 0 {
+                1.0
+            } else {
+                (downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0)
+            };
+            let id = row.id;
+            Some(
+                div()
+                    .debug_selector(move || format!("download-progress-{id}"))
+                    .w_full()
+                    .h(px(HEIGHT))
+                    .bg(rgb(TRACK))
+                    .child(div().h_full().w(relative(fraction)).bg(rgb(COLOR)))
+                    .into_any_element(),
+            )
+        }
+        DownloadNoticeStatus::Completed | DownloadNoticeStatus::Failed(_) => None,
+    }
 }
 
 fn operation_notice_style(kind: OperationNoticeKind) -> (u32, u32, u32, &'static str) {
@@ -7433,6 +7579,7 @@ mod tests {
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
             NAV_BUTTON_ACTIVE_OPACITY,
         },
+        download::{DownloadNoticeRow, DownloadNoticeStatus},
         entry::FileEntry,
         filesystem::NetworkDriveState,
         git_status::{GitDivergence, GitRepositoryStatus},
@@ -8547,7 +8694,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_button_availability_accepts_file_and_image_clipboard_payloads() {
+    fn paste_button_availability_accepts_files_images_and_download_urls() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
             vec![PathBuf::from("a.txt")],
@@ -8555,10 +8702,12 @@ mod tests {
         .expect("clipboard item");
         let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
         let image_item = ClipboardItem::new_image(&image);
+        let download_item = ClipboardItem::new_string("https://example.com/archive.zip".to_owned());
         let plain_item = ClipboardItem::new_string("a.txt".to_owned());
 
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
         assert!(clipboard_item_can_paste(Some(&image_item)));
+        assert!(clipboard_item_can_paste(Some(&download_item)));
         assert!(!clipboard_item_can_paste(Some(&plain_item)));
         assert!(!clipboard_item_can_paste(None));
     }
@@ -11355,6 +11504,51 @@ mod tests {
             operation_notice_style(OperationNoticeKind::Success),
             (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success")
         );
+    }
+
+    #[gpui::test]
+    fn concurrent_download_notices_render_as_stacked_progress_rows(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.download_notice_rows = vec![
+                DownloadNoticeRow {
+                    id: 10,
+                    file_name: "known.zip".to_owned(),
+                    status: DownloadNoticeStatus::Downloading {
+                        downloaded_bytes: 25,
+                        total_bytes: Some(100),
+                    },
+                },
+                DownloadNoticeRow {
+                    id: 11,
+                    file_name: "unknown.zip".to_owned(),
+                    status: DownloadNoticeStatus::Downloading {
+                        downloaded_bytes: 25,
+                        total_bytes: None,
+                    },
+                },
+            ];
+            view
+        });
+
+        cx.run_until_parked();
+
+        let first = cx
+            .debug_bounds("download-notice-10")
+            .expect("first download row");
+        let second = cx
+            .debug_bounds("download-notice-11")
+            .expect("second download row");
+        assert!(first.origin.y < second.origin.y);
+        assert!(cx.debug_bounds("download-progress-10").is_some());
+        assert!(cx.debug_bounds("download-progress-11").is_some());
     }
 
     #[test]

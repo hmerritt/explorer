@@ -17,8 +17,8 @@ use gpui::{
 
 use crate::explorer::{
     clipboard::{
-        FileClipboard, FileClipboardOperation, clipboard_item_for_files, file_clipboard_from_item,
-        image_clipboard_from_item,
+        FileClipboard, FileClipboardOperation, clipboard_item_for_files,
+        download_from_clipboard_item, file_clipboard_from_item, image_clipboard_from_item,
     },
     explorer_fs::ExplorerFs,
     filesystem::{
@@ -177,6 +177,11 @@ impl ExplorerView {
 
         if let Some(image) = image_clipboard_from_item(&item) {
             self.paste_clipboard_image(image, window, cx);
+            return;
+        }
+
+        if let Some(download) = download_from_clipboard_item(&item) {
+            self.start_clipboard_download(download, cx);
         }
     }
 

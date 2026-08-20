@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use gpui::{ClipboardEntry, ClipboardFileOperation, ClipboardItem, Image};
+use gpui::{ClipboardEntry, ClipboardFileOperation, ClipboardItem, Image, http_client::Url};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
@@ -17,6 +18,12 @@ pub(super) enum FileClipboardOperation {
 pub(super) struct FileClipboard {
     pub(super) operation: FileClipboardOperation,
     pub(super) paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardDownload {
+    pub(super) url: Url,
+    pub(super) file_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,9 +102,77 @@ pub(super) fn image_clipboard_from_item(item: &ClipboardItem) -> Option<&Image> 
     })
 }
 
+pub(super) fn download_from_clipboard_item(item: &ClipboardItem) -> Option<ClipboardDownload> {
+    let text = item.text()?;
+    download_from_text(text.trim())
+}
+
+fn download_from_text(text: &str) -> Option<ClipboardDownload> {
+    if text.is_empty() || text.lines().count() != 1 {
+        return None;
+    }
+
+    let url = Url::parse(text).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+
+    let encoded_name = url.path_segments()?.next_back()?;
+    if encoded_name.is_empty() {
+        return None;
+    }
+    let file_name = percent_decode_str(encoded_name)
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    if !download_file_name_is_valid(&file_name) {
+        return None;
+    }
+
+    Some(ClipboardDownload { url, file_name })
+}
+
+fn download_file_name_is_valid(file_name: &str) -> bool {
+    if file_name.is_empty()
+        || matches!(file_name, "." | "..")
+        || file_name.ends_with(['.', ' '])
+        || file_name.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+
+    let extension_is_present = Path::new(file_name)
+        .extension()
+        .is_some_and(|extension| !extension.is_empty());
+    if !extension_is_present {
+        return false;
+    }
+
+    let windows_stem = file_name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(['.', ' '])
+        .to_ascii_uppercase();
+    !matches!(
+        windows_stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$"
+    ) && !matches!(
+        windows_stem.strip_prefix("COM"),
+        Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+    ) && !matches!(
+        windows_stem.strip_prefix("LPT"),
+        Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+    )
+}
+
 pub(super) fn clipboard_item_can_paste(item: Option<&ClipboardItem>) -> bool {
     item.is_some_and(|item| {
-        file_clipboard_from_item(item).is_some() || image_clipboard_from_item(item).is_some()
+        file_clipboard_from_item(item).is_some()
+            || image_clipboard_from_item(item).is_some()
+            || download_from_clipboard_item(item).is_some()
     })
 }
 
@@ -230,6 +305,41 @@ mod tests {
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
         assert!(!clipboard_item_can_paste(Some(&plain_item)));
         assert!(!clipboard_item_can_paste(None));
+    }
+
+    #[test]
+    fn download_clipboard_accepts_http_files_and_decodes_the_file_name() {
+        let item = ClipboardItem::new_string(
+            "  https://example.com/releases/My%20File.tar.gz?download=1#asset  ".to_owned(),
+        );
+
+        let download = download_from_clipboard_item(&item).expect("download URL");
+        assert_eq!(
+            download.url.as_str(),
+            "https://example.com/releases/My%20File.tar.gz?download=1#asset"
+        );
+        assert_eq!(download.file_name, "My File.tar.gz");
+        assert!(clipboard_item_can_paste(Some(&item)));
+    }
+
+    #[test]
+    fn download_clipboard_rejects_non_files_and_unsafe_names() {
+        for text in [
+            "plain text",
+            "example.com/file.zip",
+            "ftp://example.com/file.zip",
+            "https://example.com/folder/",
+            "https://example.com/README",
+            "https://example.com/a%2Fb.zip",
+            "https://example.com/CON.txt",
+            "https://example.com/file.zip\nhttps://example.com/other.zip",
+        ] {
+            let item = ClipboardItem::new_string(text.to_owned());
+            assert!(
+                download_from_clipboard_item(&item).is_none(),
+                "unexpectedly accepted {text:?}"
+            );
+        }
     }
 
     #[test]

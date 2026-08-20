@@ -1,12 +1,9 @@
 ## 1
 
-- PDF Alt+hover shows the first page
-- Pasting a URL to a file (with a proto + file extention) downloads it into the current directory. Use the error/info bottom banner to indicate the download + progress
 - Fix Chrome file drop not registering
 - Improve linux install.sh script (see aura's install script)
 - Bug when an item (or multiple) is selected explorer sometimes freezes and enters a "not responding" state in Windows for a second or two before coming back
 - Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).
--
 
 ## 2
 
