@@ -2246,7 +2246,7 @@ impl ExplorerView {
                     move |this, paths: &ExternalPaths, window, cx| {
                         this.clear_drop_indicator();
                         this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
+                            paths,
                             destination.clone(),
                             window.modifiers(),
                             window,
@@ -4651,7 +4651,7 @@ fn add_drop_handlers(
             move |this, paths: &ExternalPaths, window, cx| {
                 this.clear_drop_indicator();
                 this.drop_external_paths_and_open_dialog(
-                    paths.paths(),
+                    paths,
                     destination.clone(),
                     window.modifiers(),
                     window,
@@ -5998,7 +5998,7 @@ fn directory_bar_label(
             move |this, paths: &ExternalPaths, window, cx| {
                 this.clear_drop_indicator();
                 this.drop_external_paths_and_open_dialog(
-                    paths.paths(),
+                    paths,
                     destination.clone(),
                     window.modifiers(),
                     window,

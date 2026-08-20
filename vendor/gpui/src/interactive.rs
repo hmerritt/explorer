@@ -621,6 +621,7 @@ pub enum ExternalPathsDragStartResult {
 pub struct ExternalPaths {
     paths: SmallVec<[PathBuf; 2]>,
     operations: ExternalPathDragOperations,
+    pending_windows_drop: bool,
 }
 
 impl ExternalPaths {
@@ -632,6 +633,7 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations: ExternalPathDragOperations::default(),
+            pending_windows_drop: false,
         }
     }
 
@@ -646,7 +648,24 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations,
+            pending_windows_drop: false,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn pending_windows_drop() -> Self {
+        Self {
+            paths: SmallVec::new(),
+            operations: ExternalPathDragOperations::COPY,
+            pending_windows_drop: true,
+        }
+    }
+
+    /// Construct a pending Windows external-path payload for platform integration tests.
+    #[cfg(all(target_os = "windows", any(test, feature = "test-support")))]
+    #[doc(hidden)]
+    pub fn pending_windows_drop_for_test() -> Self {
+        Self::pending_windows_drop()
     }
 
     /// Convert this collection of paths into a slice.
@@ -659,9 +678,17 @@ impl ExternalPaths {
         self.operations
     }
 
-    /// Returns true when no paths are present.
+    /// Returns whether Windows will materialize the offered files after the drop is accepted.
+    ///
+    /// Pending offers have no concrete paths during drag feedback. The live Windows data object
+    /// is retained by the platform and completed after the destination accepts the drop.
+    pub fn is_pending_windows_drop(&self) -> bool {
+        self.pending_windows_drop
+    }
+
+    /// Returns true when neither concrete paths nor a pending Windows file offer are present.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+        self.paths.is_empty() && !self.pending_windows_drop
     }
 
     /// Encode the paths as a freedesktop-compatible `text/uri-list` payload.
