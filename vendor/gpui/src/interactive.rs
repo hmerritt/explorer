@@ -621,7 +621,6 @@ pub enum ExternalPathsDragStartResult {
 pub struct ExternalPaths {
     paths: SmallVec<[PathBuf; 2]>,
     operations: ExternalPathDragOperations,
-    deferred: bool,
 }
 
 impl ExternalPaths {
@@ -633,7 +632,6 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations: ExternalPathDragOperations::default(),
-            deferred: false,
         }
     }
 
@@ -648,24 +646,7 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations,
-            deferred: false,
         }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn deferred() -> Self {
-        Self {
-            paths: SmallVec::new(),
-            operations: ExternalPathDragOperations::COPY,
-            deferred: true,
-        }
-    }
-
-    /// Construct a deferred external-path payload for platform integration tests.
-    #[cfg(all(target_os = "windows", any(test, feature = "test-support")))]
-    #[doc(hidden)]
-    pub fn deferred_for_test() -> Self {
-        Self::deferred()
     }
 
     /// Convert this collection of paths into a slice.
@@ -676,14 +657,6 @@ impl ExternalPaths {
     /// Returns the native drag operations advertised for these paths.
     pub fn operations(&self) -> ExternalPathDragOperations {
         self.operations
-    }
-
-    /// Returns whether the native source will materialize the paths after the drop is accepted.
-    ///
-    /// Deferred paths are used by Windows data objects that implement asynchronous Shell data
-    /// extraction. Their concrete paths are intentionally unavailable during drag feedback.
-    pub fn is_deferred(&self) -> bool {
-        self.deferred
     }
 
     /// Returns true when no paths are present.

@@ -1054,7 +1054,7 @@ impl ExplorerView {
 
     pub(super) fn drop_external_paths_and_open_dialog(
         &mut self,
-        paths: &gpui::ExternalPaths,
+        paths: &[PathBuf],
         destination: DropDestination,
         modifiers: Modifiers,
         window: &Window,
@@ -1063,17 +1063,7 @@ impl ExplorerView {
         if self.is_sidebar_group_view() {
             return;
         }
-
-        if paths.is_deferred() {
-            let resolved_destination = destination.resolve(&self.path);
-            #[cfg(target_os = "windows")]
-            if deferred_external_drop_target_is_valid(&resolved_destination) {
-                window.complete_deferred_external_paths_drop(&resolved_destination);
-            }
-            return;
-        }
-
-        let paths = normalize_external_drop_paths(paths.paths());
+        let paths = normalize_external_drop_paths(paths);
         if paths.is_empty() {
             return;
         }
@@ -1348,16 +1338,6 @@ fn resolve_dragged_value_drop(
     }
 
     if let Some(paths) = dragged_value.downcast_ref::<gpui::ExternalPaths>() {
-        if paths.is_deferred() {
-            return DraggedValueDropResolution {
-                resolved: if deferred_external_drop_target_is_valid(destination) {
-                    ResolvedDrop::Copy
-                } else {
-                    ResolvedDrop::Invalid
-                },
-                explicit_operation_required: false,
-            };
-        }
         let paths = normalize_external_drop_paths(paths.paths());
         let validity = external_drop_target_validity(
             destination_kind,
@@ -1380,20 +1360,6 @@ fn resolve_dragged_value_drop(
     DraggedValueDropResolution {
         resolved: resolve_drop_operation_for_paths(modifiers, false, &[], destination),
         explicit_operation_required: false,
-    }
-}
-
-fn deferred_external_drop_target_is_valid(destination: &Path) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        !crate::explorer::portable_devices::is_portable_path(destination)
-            && destination.is_absolute()
-            && destination.is_dir()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = destination;
-        false
     }
 }
 
@@ -1794,52 +1760,6 @@ mod tests {
         let external_paths = gpui::ExternalPaths::new(paths.clone());
 
         assert_eq!(external_paths.paths(), paths.as_slice());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn deferred_external_paths_accept_only_filesystem_directories() {
-        let temp = TempDir::new();
-        let file = temp.path().join("file.txt");
-        fs::write(&file, b"file").unwrap();
-        let deferred = gpui::ExternalPaths::deferred_for_test();
-
-        let accepted = resolve_dragged_value_drop(
-            &deferred,
-            &DropDestination::CurrentDirectory,
-            temp.path(),
-            temp.path(),
-            Modifiers::default(),
-        );
-        assert_eq!(accepted.resolved, ResolvedDrop::Copy);
-        assert!(!accepted.explicit_operation_required);
-
-        let rejected_file = resolve_dragged_value_drop(
-            &deferred,
-            &DropDestination::CurrentDirectory,
-            temp.path(),
-            &file,
-            Modifiers::default(),
-        );
-        assert_eq!(rejected_file.resolved, ResolvedDrop::Invalid);
-
-        let rejected_relative = resolve_dragged_value_drop(
-            &deferred,
-            &DropDestination::CurrentDirectory,
-            temp.path(),
-            Path::new("relative"),
-            Modifiers::default(),
-        );
-        assert_eq!(rejected_relative.resolved, ResolvedDrop::Invalid);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn deferred_external_paths_do_not_enable_trash_drop() {
-        let temp = TempDir::new();
-        let view = ExplorerView::new(temp.path().to_path_buf());
-
-        assert!(!view.can_trash_drop_value(&gpui::ExternalPaths::deferred_for_test()));
     }
 
     #[test]

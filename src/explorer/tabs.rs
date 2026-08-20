@@ -277,7 +277,7 @@ impl ExplorerTabs {
             let _ = view.update(cx, |view, cx| {
                 view.clear_drop_indicator();
                 view.drop_external_paths_and_open_dialog(
-                    paths,
+                    paths.paths(),
                     DropDestination::CurrentDirectory,
                     window.modifiers(),
                     window,

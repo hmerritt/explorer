@@ -533,11 +533,6 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
 
-    #[cfg(target_os = "windows")]
-    fn complete_deferred_external_paths_drop(&self, _destination: &Path) -> bool {
-        false
-    }
-
     // Linux specific methods
     fn inner_window_bounds(&self) -> WindowBounds {
         self.window_bounds()
