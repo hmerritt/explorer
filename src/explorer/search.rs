@@ -638,7 +638,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = self.search.selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(text),
+                cx,
+            );
         }
         cx.stop_propagation();
         cx.notify();
@@ -651,7 +654,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = self.search.selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(text),
+                cx,
+            );
             self.replace_search_text(None, "", EditableTextEditKind::Cut, cx);
         }
         cx.stop_propagation();

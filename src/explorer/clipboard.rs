@@ -1,8 +1,25 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use gpui::{ClipboardEntry, ClipboardFileOperation, ClipboardItem, Image, http_client::Url};
+use gpui::{
+    App, BorrowAppContext, ClipboardEntry, ClipboardFileOperation, ClipboardItem, Global, Image,
+    ImageFormat, http_client::Url,
+};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use thousands::Separable;
+use xxhash_rust::xxh3::xxh3_64;
+
+use crate::explorer::{
+    folder_size::{FolderSizeError, calculate_folder_size},
+    formatting::format_size,
+};
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
 const CLIPBOARD_VERSION: u8 = 1;
@@ -38,6 +55,58 @@ pub(super) enum ClipboardTextPayload {
     Materialization(ClipboardMaterialization),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardSummary {
+    pub(super) label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ClipboardFingerprint {
+    Files {
+        operation: FileClipboardOperation,
+        paths: Vec<PathBuf>,
+    },
+    Image {
+        format: ImageFormat,
+        byte_len: usize,
+        digest: u64,
+    },
+    Text {
+        byte_len: usize,
+        digest: u64,
+    },
+}
+
+#[derive(Default)]
+pub(super) struct ClipboardSummaryState {
+    fingerprint: Option<ClipboardFingerprint>,
+    generation: u64,
+    summary: Option<ClipboardSummary>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Global for ClipboardSummaryState {}
+
+struct ClipboardInspection {
+    fingerprint: ClipboardFingerprint,
+    summary: ClipboardSummary,
+    file_paths: Option<Vec<PathBuf>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClipboardFilesystemMetadata {
+    folder_paths: Vec<PathBuf>,
+    folder_count: usize,
+    file_count: usize,
+    file_size: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipboardSummaryScanError {
+    Cancelled,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct FileClipboardMetadata {
     kind: String,
@@ -50,6 +119,298 @@ impl FileClipboard {
     pub(super) fn new(operation: FileClipboardOperation, paths: Vec<PathBuf>) -> Self {
         Self { operation, paths }
     }
+}
+
+pub(crate) fn initialize_clipboard_summary(cx: &mut App) {
+    cx.set_global(ClipboardSummaryState::default());
+}
+
+pub(super) fn clipboard_summary(cx: &App) -> Option<&ClipboardSummary> {
+    cx.try_global::<ClipboardSummaryState>()?.summary.as_ref()
+}
+
+pub(super) fn write_to_clipboard_and_refresh(item: ClipboardItem, cx: &mut App) {
+    cx.write_to_clipboard(item);
+    refresh_clipboard_summary(cx);
+}
+
+pub(super) fn refresh_clipboard_summary(cx: &mut App) {
+    if cx.try_global::<ClipboardSummaryState>().is_none() {
+        cx.set_global(ClipboardSummaryState::default());
+    }
+
+    let inspection = cx
+        .read_from_clipboard()
+        .as_ref()
+        .and_then(clipboard_summary_inspection);
+    let next_fingerprint = inspection
+        .as_ref()
+        .map(|inspection| inspection.fingerprint.clone());
+    let fingerprint_is_unchanged =
+        cx.global::<ClipboardSummaryState>().fingerprint.as_ref() == next_fingerprint.as_ref();
+    let filesystem_payload = inspection
+        .as_ref()
+        .is_some_and(|inspection| inspection.file_paths.is_some());
+    if fingerprint_is_unchanged && !filesystem_payload {
+        return;
+    }
+
+    let (generation, cancel) = cx.update_global::<ClipboardSummaryState, _>(|state, _| {
+        if let Some(cancel) = state.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        state.generation = state.generation.wrapping_add(1);
+        state.fingerprint = next_fingerprint.clone();
+        state.summary = inspection
+            .as_ref()
+            .map(|inspection| inspection.summary.clone());
+        state.cancel = inspection
+            .as_ref()
+            .and_then(|inspection| inspection.file_paths.as_ref())
+            .map(|_| Arc::new(AtomicBool::new(false)));
+        (state.generation, state.cancel.clone())
+    });
+
+    let Some(inspection) = inspection else {
+        return;
+    };
+    let Some(paths) = inspection.file_paths else {
+        return;
+    };
+    let Some(cancel) = cancel else {
+        return;
+    };
+    let fingerprint = inspection.fingerprint;
+
+    cx.spawn(async move |cx| {
+        let metadata_cancel = cancel.clone();
+        let metadata_task = cx
+            .background_executor()
+            .spawn(async move { scan_clipboard_filesystem_metadata(&paths, &metadata_cancel) });
+        let Ok(metadata) = metadata_task.await else {
+            return;
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let summary = ClipboardSummary {
+            label: clipboard_filesystem_summary_label(
+                metadata.folder_count,
+                metadata.file_count,
+                metadata
+                    .folder_paths
+                    .is_empty()
+                    .then_some(metadata.file_size),
+            ),
+        };
+        if cx
+            .update(|cx| update_clipboard_summary_if_current(cx, generation, &fingerprint, summary))
+            .ok()
+            != Some(true)
+            || metadata.folder_paths.is_empty()
+        {
+            return;
+        }
+
+        let folder_paths = metadata.folder_paths;
+        let file_size = metadata.file_size;
+        let folder_cancel = cancel.clone();
+        let folder_size_task = cx.background_executor().spawn(async move {
+            scan_clipboard_folder_sizes(&folder_paths, file_size, &folder_cancel)
+        });
+        let Ok(total_size) = folder_size_task.await else {
+            return;
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let final_summary = ClipboardSummary {
+            label: clipboard_filesystem_summary_label(
+                metadata.folder_count,
+                metadata.file_count,
+                Some(total_size),
+            ),
+        };
+        let _ = cx.update(|cx| {
+            update_clipboard_summary_if_current(cx, generation, &fingerprint, final_summary)
+        });
+    })
+    .detach();
+}
+
+fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspection> {
+    if let Some(clipboard) = file_clipboard_from_item(item)
+        && !clipboard.paths.is_empty()
+    {
+        let summary = ClipboardSummary {
+            label: clipboard_count_label(clipboard.paths.len(), "item", "items"),
+        };
+        return Some(ClipboardInspection {
+            fingerprint: ClipboardFingerprint::Files {
+                operation: clipboard.operation,
+                paths: clipboard.paths.clone(),
+            },
+            summary,
+            file_paths: Some(clipboard.paths),
+        });
+    }
+
+    if let Some(image) = image_clipboard_from_item(item) {
+        let label = if image.format() == ImageFormat::Svg {
+            "SVG vector file"
+        } else {
+            "Image file"
+        };
+        return Some(ClipboardInspection {
+            fingerprint: ClipboardFingerprint::Image {
+                format: image.format(),
+                byte_len: image.bytes().len(),
+                digest: xxh3_64(image.bytes()),
+            },
+            summary: ClipboardSummary {
+                label: clipboard_typed_summary_label(label, image.bytes().len() as u64),
+            },
+            file_paths: None,
+        });
+    }
+
+    let payload = clipboard_text_payload_from_item(item)?;
+    let text = item.text().unwrap_or_default();
+    let markdown = item.markdown().unwrap_or_default();
+    let mut fingerprint_bytes = Vec::with_capacity(text.len() + markdown.len() + 1);
+    fingerprint_bytes.extend_from_slice(text.as_bytes());
+    fingerprint_bytes.push(0);
+    fingerprint_bytes.extend_from_slice(markdown.as_bytes());
+
+    let label = match payload {
+        ClipboardTextPayload::Downloads(downloads) => {
+            clipboard_count_label(downloads.len(), "URL download", "URL downloads")
+        }
+        ClipboardTextPayload::Materialization(materialization) => clipboard_typed_summary_label(
+            clipboard_materialization_type_label(materialization.file_name),
+            materialization.contents.len() as u64,
+        ),
+    };
+
+    Some(ClipboardInspection {
+        fingerprint: ClipboardFingerprint::Text {
+            byte_len: fingerprint_bytes.len(),
+            digest: xxh3_64(&fingerprint_bytes),
+        },
+        summary: ClipboardSummary { label },
+        file_paths: None,
+    })
+}
+
+fn clipboard_materialization_type_label(file_name: &str) -> &'static str {
+    match file_name {
+        "data.json" => "JSON file",
+        "table.csv" => "CSV file",
+        "vector.svg" => "SVG vector file",
+        "document.md" => "MD file",
+        _ => "Text file",
+    }
+}
+
+fn clipboard_typed_summary_label(kind: &str, size: u64) -> String {
+    format!("{kind} · {}", format_size(Some(size)))
+}
+
+fn clipboard_filesystem_summary_label(
+    folder_count: usize,
+    file_count: usize,
+    size: Option<u64>,
+) -> String {
+    let counts = match (folder_count, file_count) {
+        (0, files) => clipboard_count_label(files, "file", "files"),
+        (folders, 0) => clipboard_count_label(folders, "folder", "folders"),
+        (folders, files) => format!(
+            "{}, {}",
+            clipboard_count_label(folders, "folder", "folders"),
+            clipboard_count_label(files, "file", "files")
+        ),
+    };
+    match size {
+        Some(size) => format!("{counts} · {}", format_size(Some(size))),
+        None => counts,
+    }
+}
+
+fn clipboard_count_label(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{} {noun}", count.separate_with_commas())
+}
+
+fn scan_clipboard_filesystem_metadata(
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+) -> Result<ClipboardFilesystemMetadata, ClipboardSummaryScanError> {
+    let mut folder_paths = Vec::new();
+    let mut file_count = 0usize;
+    let mut file_size = 0u64;
+
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ClipboardSummaryScanError::Cancelled);
+        }
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| ClipboardSummaryScanError::Unavailable)?;
+        if metadata.is_dir() {
+            folder_paths.push(path.clone());
+        } else {
+            file_count += 1;
+            file_size = file_size.saturating_add(metadata.len());
+        }
+    }
+
+    Ok(ClipboardFilesystemMetadata {
+        folder_count: folder_paths.len(),
+        folder_paths,
+        file_count,
+        file_size,
+    })
+}
+
+fn scan_clipboard_folder_sizes(
+    folder_paths: &[PathBuf],
+    initial_size: u64,
+    cancel: &Arc<AtomicBool>,
+) -> Result<u64, ClipboardSummaryScanError> {
+    let mut size = initial_size;
+    for path in folder_paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ClipboardSummaryScanError::Cancelled);
+        }
+        let folder_size =
+            calculate_folder_size(path, cancel.clone()).map_err(|error| match error {
+                FolderSizeError::Cancelled => ClipboardSummaryScanError::Cancelled,
+                FolderSizeError::Unavailable => ClipboardSummaryScanError::Unavailable,
+            })?;
+        size = size.saturating_add(folder_size);
+    }
+    Ok(size)
+}
+
+fn update_clipboard_summary_if_current(
+    cx: &mut App,
+    generation: u64,
+    fingerprint: &ClipboardFingerprint,
+    summary: ClipboardSummary,
+) -> bool {
+    if cx
+        .try_global::<ClipboardSummaryState>()
+        .is_none_or(|state| {
+            state.generation != generation || state.fingerprint.as_ref() != Some(fingerprint)
+        })
+    {
+        return false;
+    }
+    cx.update_global::<ClipboardSummaryState, _>(|state, _| {
+        state.summary = Some(summary);
+    });
+    true
 }
 
 pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<ClipboardItem, String> {
@@ -491,6 +852,10 @@ fn explorer_clipboard_operation(operation: ClipboardFileOperation) -> FileClipbo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::{
+        constants::{KB_BYTES, MB_BYTES},
+        test_support::TempDir,
+    };
     use gpui::{Image, ImageFormat};
 
     #[test]
@@ -808,5 +1173,186 @@ mod tests {
 
         assert!(item.files().is_none());
         assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
+    }
+
+    #[test]
+    fn clipboard_summary_classifies_materialized_text_payloads() {
+        for (item, expected) in [
+            (
+                ClipboardItem::new_string("{\"ok\":true}".to_owned()),
+                "JSON file · 11 bytes",
+            ),
+            (
+                ClipboardItem::new_string("a\tb\n1\t2".to_owned()),
+                "CSV file · 8 bytes",
+            ),
+            (
+                ClipboardItem::new_string_with_markdown(
+                    "Heading".to_owned(),
+                    "# Heading".to_owned(),
+                ),
+                "MD file · 9 bytes",
+            ),
+            (
+                ClipboardItem::new_string("<svg/>".to_owned()),
+                "SVG vector file · 6 bytes",
+            ),
+            (
+                ClipboardItem::new_string("ordinary prose".to_owned()),
+                "Text file · 14 bytes",
+            ),
+        ] {
+            assert_eq!(
+                clipboard_summary_inspection(&item)
+                    .expect("clipboard summary")
+                    .summary
+                    .label,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_summary_classifies_images_and_url_batches() {
+        let image = Image::from_bytes(ImageFormat::Png, vec![0; 200 * KB_BYTES as usize]);
+        assert_eq!(
+            clipboard_summary_inspection(&ClipboardItem::new_image(&image))
+                .expect("image summary")
+                .summary
+                .label,
+            "Image file · 200.0 KB"
+        );
+
+        let svg = Image::from_bytes(ImageFormat::Svg, b"<svg/>".to_vec());
+        assert_eq!(
+            clipboard_summary_inspection(&ClipboardItem::new_image(&svg))
+                .expect("SVG image summary")
+                .summary
+                .label,
+            "SVG vector file · 6 bytes"
+        );
+
+        let urls = ClipboardItem::new_string(
+            "https://example.com/one.zip\nhttps://example.com/two.zip".to_owned(),
+        );
+        assert_eq!(
+            clipboard_summary_inspection(&urls)
+                .expect("URL summary")
+                .summary
+                .label,
+            "2 URL downloads"
+        );
+    }
+
+    #[test]
+    fn clipboard_summary_uses_existing_size_precision() {
+        assert_eq!(
+            clipboard_typed_summary_label("Image file", 200 * KB_BYTES),
+            "Image file · 200.0 KB"
+        );
+        assert_eq!(
+            clipboard_typed_summary_label("Image file", 2 * MB_BYTES),
+            "Image file · 2.00 MB"
+        );
+    }
+
+    #[test]
+    fn clipboard_filesystem_summary_counts_top_level_items_and_recurses_for_size() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create folder");
+        fs::write(folder.join("nested.bin"), vec![0; 5]).expect("write nested file");
+        let file = temp.path().join("top.bin");
+        fs::write(&file, vec![0; 7]).expect("write top-level file");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let metadata = scan_clipboard_filesystem_metadata(&[folder.clone(), file], cancel.as_ref())
+            .expect("clipboard metadata");
+        assert_eq!(metadata.folder_count, 1);
+        assert_eq!(metadata.file_count, 1);
+        assert_eq!(metadata.file_size, 7);
+        assert_eq!(
+            clipboard_filesystem_summary_label(1, 1, None),
+            "1 folder, 1 file"
+        );
+
+        let total =
+            scan_clipboard_folder_sizes(&metadata.folder_paths, metadata.file_size, &cancel)
+                .expect("recursive clipboard size");
+        assert_eq!(total, 12);
+        assert_eq!(
+            clipboard_filesystem_summary_label(1, 1, Some(total)),
+            "1 folder, 1 file · 12 bytes"
+        );
+    }
+
+    #[test]
+    fn clipboard_filesystem_summary_reports_unavailable_and_cancelled_scans() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            scan_clipboard_filesystem_metadata(
+                &[PathBuf::from("missing-clipboard-summary-item")],
+                cancel.as_ref(),
+            ),
+            Err(ClipboardSummaryScanError::Unavailable)
+        );
+
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(
+            scan_clipboard_filesystem_metadata(&[PathBuf::from("ignored")], cancel.as_ref()),
+            Err(ClipboardSummaryScanError::Cancelled)
+        );
+        assert_eq!(
+            scan_clipboard_folder_sizes(&[PathBuf::from("ignored")], 0, &cancel),
+            Err(ClipboardSummaryScanError::Cancelled)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_filesystem_summary_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        fs::create_dir(&folder).expect("create folder");
+        fs::write(folder.join("large.bin"), vec![0; 1024]).expect("write target file");
+        let link = temp.path().join("folder-link");
+        symlink(&folder, &link).expect("create directory symlink");
+        let cancel = AtomicBool::new(false);
+
+        let metadata = scan_clipboard_filesystem_metadata(&[link], &cancel)
+            .expect("symlink clipboard metadata");
+        assert_eq!(metadata.folder_count, 0);
+        assert_eq!(metadata.file_count, 1);
+        assert!(metadata.file_size < 1024);
+    }
+
+    #[gpui::test]
+    fn stale_clipboard_summary_updates_are_rejected(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            let current = ClipboardFingerprint::Text {
+                byte_len: 1,
+                digest: 1,
+            };
+            app.update_global::<ClipboardSummaryState, _>(|state, _| {
+                state.generation = 2;
+                state.fingerprint = Some(current);
+            });
+
+            assert!(!update_clipboard_summary_if_current(
+                app,
+                1,
+                &ClipboardFingerprint::Text {
+                    byte_len: 1,
+                    digest: 1,
+                },
+                ClipboardSummary {
+                    label: "stale".to_owned(),
+                },
+            ));
+            assert!(app.global::<ClipboardSummaryState>().summary.is_none());
+        });
     }
 }

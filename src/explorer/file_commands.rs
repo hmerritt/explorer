@@ -137,7 +137,7 @@ impl ExplorerView {
 
         match clipboard_item_for_files(&clipboard) {
             Ok(item) => {
-                cx.write_to_clipboard(item);
+                crate::explorer::clipboard::write_to_clipboard_and_refresh(item, cx);
                 self.cut_paths.clear();
                 self.clear_operation_notice();
             }
@@ -155,7 +155,7 @@ impl ExplorerView {
 
         match clipboard_item_for_files(&clipboard) {
             Ok(item) => {
-                cx.write_to_clipboard(item);
+                crate::explorer::clipboard::write_to_clipboard_and_refresh(item, cx);
                 self.mark_cut_paths(&clipboard.paths);
                 self.clear_operation_notice();
             }

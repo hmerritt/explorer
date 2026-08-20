@@ -89,7 +89,7 @@ impl ExplorerTabs {
     pub fn new(
         initial_path: PathBuf,
         focus_handle: FocusHandle,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let first_id = TabId(1);
@@ -103,6 +103,8 @@ impl ExplorerTabs {
         });
         observe_tab_view(&view, window, cx);
         observe_settings(cx);
+        observe_clipboard_summary(window, cx);
+        crate::explorer::clipboard::refresh_clipboard_summary(cx);
 
         Self {
             tabs: vec![ExplorerTab { id: first_id, view }],
@@ -964,6 +966,15 @@ fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Conte
 fn observe_settings(cx: &mut Context<ExplorerTabs>) {
     cx.observe_global::<SettingsState>(|this, cx| this.apply_settings_to_all_tabs(cx))
         .detach();
+}
+
+fn observe_clipboard_summary(window: &mut Window, cx: &mut Context<ExplorerTabs>) {
+    cx.observe_window_activation(window, |_, window, cx| {
+        if window.is_window_active() {
+            crate::explorer::clipboard::refresh_clipboard_summary(cx);
+        }
+    })
+    .detach();
 }
 
 fn close_tab_button(tab_id: TabId, cx: &mut Context<ExplorerTabs>) -> AnyElement {

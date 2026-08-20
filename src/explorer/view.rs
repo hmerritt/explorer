@@ -409,6 +409,7 @@ impl ExplorerView {
                 view.start_device_catalog_tasks(cx);
                 view.observe_icon_caches(cx);
                 view.observe_image_thumbnail_cache(cx);
+                view.observe_clipboard_summary(cx);
                 return view;
             }
         }
@@ -420,7 +421,15 @@ impl ExplorerView {
         view.start_device_catalog_tasks(cx);
         view.observe_icon_caches(cx);
         view.observe_image_thumbnail_cache(cx);
+        view.observe_clipboard_summary(cx);
         view
+    }
+
+    fn observe_clipboard_summary(&mut self, cx: &mut Context<Self>) {
+        cx.observe_global::<crate::explorer::clipboard::ClipboardSummaryState>(|_, cx| {
+            cx.notify();
+        })
+        .detach();
     }
 
     fn start_initial_directory_load(&mut self, cx: &mut Context<Self>) {

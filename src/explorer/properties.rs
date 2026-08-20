@@ -2115,7 +2115,10 @@ impl PropertiesDialog {
         cx: &mut Context<Self>,
     ) {
         match clipboard_image_from_property_image_payload(&payload) {
-            Ok(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+            Ok(image) => crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                ClipboardItem::new_image(&image),
+                cx,
+            ),
             Err(error) => crate::debug_options::log_property_marker(format_args!(
                 "image copy failed width={} height={} error={}",
                 payload.width, payload.height, error
@@ -10369,7 +10372,10 @@ fn property_copy_text(label: &str, value: &str) -> String {
 }
 
 fn copy_property_to_clipboard(label: &str, value: &str, cx: &mut Context<PropertiesDialog>) {
-    cx.write_to_clipboard(ClipboardItem::new_string(property_copy_text(label, value)));
+    crate::explorer::clipboard::write_to_clipboard_and_refresh(
+        ClipboardItem::new_string(property_copy_text(label, value)),
+        cx,
+    );
 }
 
 #[derive(Clone, Copy)]

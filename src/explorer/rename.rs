@@ -372,7 +372,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = self.selected_rename_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(text),
+                cx,
+            );
         }
         cx.stop_propagation();
         cx.notify();
@@ -385,7 +388,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = self.selected_rename_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(text),
+                cx,
+            );
             if let Some(rename) = self.active_rename.as_mut() {
                 replace_rename_text(rename, None, "", EditableTextEditKind::Cut);
             }

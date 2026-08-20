@@ -31,7 +31,7 @@ use crate::explorer::{
         BreadcrumbSegment, VisibleBreadcrumb, directory_bar_available_width,
         visible_breadcrumb_for_path,
     },
-    clipboard::clipboard_item_can_paste,
+    clipboard::{ClipboardSummary, clipboard_item_can_paste, clipboard_summary},
     codebase_summary::{CodebaseSummary, language_segment_widths},
     columns::file_column_label,
     constants::{
@@ -168,6 +168,7 @@ const CODEBASE_MAKEUP_SEPARATOR_WIDTH: f32 = 2.0;
 const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
+const STATUS_BAR_CLIPBOARD_MAX_WIDTH: f32 = 320.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
 const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
@@ -2943,13 +2944,17 @@ impl ExplorerView {
         .into_any_element()
     }
 
-    fn render_status_bar(&self) -> AnyElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let summary = folder_status_summary(&self.entries, &self.selection.selected_indices);
         let codebase_summary = self
             .codebase_summary
             .as_ref()
             .filter(|summary| summary.total_code > 0 && !summary.languages.is_empty());
         let git_status = self.git_status.as_ref();
+        let clipboard_summary = (!self.is_sidebar_group_view())
+            .then(|| clipboard_summary(cx).cloned())
+            .flatten();
+        let has_other_right_status = codebase_summary.is_some() || git_status.is_some();
 
         div()
             .id("explorer-status-bar")
@@ -2986,6 +2991,12 @@ impl ExplorerView {
                     this.child(status_bar_separator())
                 })
                 .child(render_git_repository_status(git_status))
+            })
+            .when_some(clipboard_summary, |this, clipboard_summary| {
+                this.when(has_other_right_status, |this| {
+                    this.child(clipboard_status_bar_separator())
+                })
+                .child(render_clipboard_status(clipboard_summary, cx))
             })
             .into_any_element()
     }
@@ -3596,7 +3607,7 @@ impl Render for ExplorerView {
                                     LinearProgressStyle::explorer_copy_green(),
                                 ))
                             })
-                            .child(self.render_status_bar()),
+                            .child(self.render_status_bar(cx)),
                     ),
             )
             .when_some(
@@ -5935,9 +5946,10 @@ fn directory_copy_address_button(
             this.close_context_menu();
             this.open_utility_menu = None;
             if this.commit_active_rename_before_interaction(window, cx) {
-                cx.write_to_clipboard(ClipboardItem::new_string(
-                    this.address_text_for_path(&this.path),
-                ));
+                crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                    ClipboardItem::new_string(this.address_text_for_path(&this.path)),
+                    cx,
+                );
             }
             cx.stop_propagation();
             cx.notify();
@@ -7416,6 +7428,54 @@ fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
         .into_any_element()
 }
 
+fn render_clipboard_status(
+    summary: ClipboardSummary,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    div()
+        .id("clipboard-status")
+        .debug_selector(|| "clipboard-status".to_owned())
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(20.0))
+        .max_w(px(STATUS_BAR_CLIPBOARD_MAX_WIDTH))
+        .min_w(px(0.0))
+        .px(px(4.0))
+        .gap(px(STATUS_BAR_GIT_ITEM_GAP))
+        .rounded(px(4.0))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_context_menu();
+            this.open_utility_menu = None;
+            if this.commit_active_rename_before_interaction(window, cx) {
+                this.paste_clipboard(window, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .tooltip(explorer_tooltip(
+            "Paste clipboard contents into this folder.",
+        ))
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(image_icon(PASTE_ICON.clone(), 14.0, 14.0)),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .truncate()
+                .child(SharedString::from(summary.label)),
+        )
+        .into_any_element()
+}
+
 fn status_bar_icon_label(
     icon: Arc<Image>,
     label: String,
@@ -7485,6 +7545,13 @@ fn status_bar_separator() -> Div {
         .mx(px(12.0))
         .flex_shrink_0()
         .bg(rgb(STATUS_BAR_SEPARATOR_COLOR))
+}
+
+fn clipboard_status_bar_separator() -> AnyElement {
+    status_bar_separator()
+        .id("clipboard-status-divider")
+        .debug_selector(|| "clipboard-status-divider".to_owned())
+        .into_any_element()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7571,7 +7638,7 @@ mod tests {
         DirectoryKind,
         clipboard::{
             FileClipboard, FileClipboardOperation, clipboard_item_can_paste,
-            clipboard_item_for_files,
+            clipboard_item_for_files, initialize_clipboard_summary, write_to_clipboard_and_refresh,
         },
         codebase_summary::{CodebaseLanguageSummary, CodebaseSummary},
         constants::{
@@ -11304,6 +11371,105 @@ mod tests {
     #[gpui::test]
     fn git_branch_status_shows_tooltip(cx: &mut gpui::TestAppContext) {
         assert_status_bar_tooltip(cx, "git-branch-status");
+    }
+
+    #[gpui::test]
+    fn clipboard_status_is_rightmost_and_divided_from_git(cx: &mut gpui::TestAppContext) {
+        cx.set_global(crate::settings::SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+        });
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path.clone(), focus_handle);
+            view.git_status = Some(GitRepositoryStatus {
+                repo_root: path,
+                branch: "main".to_owned(),
+                divergence: None,
+            });
+            view
+        });
+
+        cx.run_until_parked();
+        let git = cx
+            .debug_bounds("git-branch-status")
+            .expect("Git status bounds");
+        let divider = cx
+            .debug_bounds("clipboard-status-divider")
+            .expect("clipboard divider bounds");
+        let clipboard = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds");
+        assert!(git.origin.x < divider.origin.x);
+        assert!(divider.origin.x < clipboard.origin.x);
+    }
+
+    #[gpui::test]
+    fn clipboard_status_without_other_right_items_has_no_divider(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+        });
+        let temp = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_some());
+        assert!(cx.debug_bounds("clipboard-status-divider").is_none());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_shows_tooltip_and_pastes_into_current_folder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+        });
+        let temp = TempDir::new();
+        let destination = temp.path().to_path_buf();
+        let (_, cx) = test_view_entity_at_path(cx, destination.clone());
+
+        cx.run_until_parked();
+        hover_selector_until_tooltip(cx, "clipboard-status");
+        let position = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds")
+            .center();
+        cx.simulate_click(position, Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(fs::read(destination.join("text.txt")).unwrap(), b"paste me");
+    }
+
+    #[gpui::test]
+    fn clipboard_status_hides_unsupported_and_sidebar_group_payloads(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string(String::new()), app);
+        });
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_none());
+
+        cx.update(|_, app| {
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+            view.update(app, |view, cx| {
+                view.navigate_to_sidebar_group(SidebarGroupKind::Pinned, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_none());
     }
 
     #[gpui::test]

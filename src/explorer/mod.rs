@@ -88,6 +88,7 @@ pub use actions::{
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;
 pub(crate) use cache_directory::initialize as initialize_cache_directory;
+pub(crate) use clipboard::initialize_clipboard_summary;
 pub use dialog::{DialogCancel, DialogConfirm, DialogFocusPrimary, DialogFocusSecondary};
 pub(crate) use directory_kind::{DirectoryKind, resolve_directory_kind};
 #[allow(unused_imports)]

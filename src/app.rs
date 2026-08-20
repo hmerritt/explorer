@@ -1283,6 +1283,7 @@ pub fn run() {
         crate::debug_options::initialize(cx, env::args_os());
         crate::settings::initialize(cx);
         crate::explorer::initialize_cache_directory();
+        crate::explorer::initialize_clipboard_summary(cx);
         crate::explorer::initialize_native_icon_cache(cx);
         crate::explorer::initialize_image_thumbnail_cache(cx);
         crate::explorer::initialize_folder_size_cache(cx);
@@ -2691,6 +2692,7 @@ mod tests {
         cx.update(|app| {
             register_embedded_fonts(app);
             app.set_global(SettingsState::for_test(ExplorerSettings::default()));
+            crate::explorer::initialize_clipboard_summary(app);
             crate::explorer::initialize_native_icon_cache(app);
             crate::explorer::initialize_image_thumbnail_cache(app);
             crate::explorer::initialize_folder_size_cache(app);

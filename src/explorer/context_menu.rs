@@ -447,12 +447,18 @@ impl ExplorerView {
             ContextMenuCommand::CutSelected => self.cut_selected_to_clipboard(cx),
             ContextMenuCommand::CopySelected => self.copy_selected_to_clipboard(cx),
             ContextMenuCommand::CopyPath { path } => {
-                cx.write_to_clipboard(ClipboardItem::new_string(self.address_text_for_path(&path)));
+                crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                    ClipboardItem::new_string(self.address_text_for_path(&path)),
+                    cx,
+                );
                 self.cut_paths.clear();
                 self.clear_operation_notice();
             }
             ContextMenuCommand::CopyRepoRelativePath { relative_path } => {
-                cx.write_to_clipboard(ClipboardItem::new_string(relative_path));
+                crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                    ClipboardItem::new_string(relative_path),
+                    cx,
+                );
                 self.cut_paths.clear();
                 self.clear_operation_notice();
             }
