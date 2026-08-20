@@ -3,10 +3,11 @@
 use std::{
     any::Any,
     cell::{Cell, RefCell},
+    collections::VecDeque,
     mem,
     num::NonZeroIsize,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{Arc, LazyLock, Once},
     time::{Duration, Instant},
@@ -23,7 +24,7 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         System::{
-            Com::*,
+            Com::{Marshal::*, StructuredStorage::CoGetInterfaceAndReleaseStream, *},
             DataExchange::RegisterClipboardFormatW,
             LibraryLoader::*,
             Memory::*,
@@ -36,7 +37,10 @@ use windows::{
 };
 
 use crate::*;
-use super::{WM_GPUI_START_EXTERNAL_PATHS_DRAG, text_services::TsfCaretContext};
+use super::{
+    WM_GPUI_START_DEFERRED_EXTERNAL_PATHS_DROP, WM_GPUI_START_EXTERNAL_PATHS_DRAG,
+    text_services::TsfCaretContext,
+};
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
@@ -135,7 +139,10 @@ pub(crate) struct WindowsWindowInner {
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
     pending_external_paths_drag: RefCell<PendingExternalPathsDrag>,
+    pending_deferred_external_paths_drops:
+        RefCell<VecDeque<PendingDeferredWindowsExternalDrop>>,
     active_external_paths_drops: RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    external_paths_drop_is_deferred: Cell<bool>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) hide_title_bar: bool,
@@ -308,6 +315,30 @@ impl WindowsWindowInner {
         Some(0)
     }
 
+    pub(super) fn handle_start_deferred_external_paths_drop_msg(&self) -> Option<isize> {
+        let Some(pending) = self
+            .pending_deferred_external_paths_drops
+            .borrow_mut()
+            .pop_front()
+        else {
+            log::error!("received deferred external drop message without a pending operation");
+            return Some(0);
+        };
+        start_pending_deferred_windows_external_drop(pending);
+        Some(0)
+    }
+
+    pub(super) fn cancel_pending_deferred_external_paths_drops(&self) {
+        let pending = self
+            .pending_deferred_external_paths_drops
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>();
+        for pending in pending {
+            pending.cancel(E_ABORT);
+        }
+    }
+
     pub(super) fn destroy_system_caret(&self) {
         if let Some(context) = self.tsf_caret_context.as_ref() {
             context.clear_caret();
@@ -342,7 +373,9 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             pending_external_paths_drag: RefCell::new(PendingExternalPathsDrag::default()),
+            pending_deferred_external_paths_drops: RefCell::new(VecDeque::new()),
             active_external_paths_drops: RefCell::new(Vec::new()),
+            external_paths_drop_is_deferred: Cell::new(false),
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
             system_caret_bitmap,
@@ -1000,6 +1033,15 @@ impl PlatformWindow for WindowsWindow {
         complete_active_windows_external_drop(&self.0.active_external_paths_drops, effect)
     }
 
+    fn complete_deferred_external_paths_drop(&self, destination: &Path) -> bool {
+        complete_active_deferred_windows_external_drop(
+            &self.0.active_external_paths_drops,
+            &self.0.pending_deferred_external_paths_drops,
+            destination,
+            self.0.hwnd,
+        )
+    }
+
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
         if paths.paths().is_empty() {
             return ExternalPathsDragStartResult::Failed;
@@ -1127,7 +1169,8 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
     }
 }
 
-#[implement(IDataObject)]
+#[cfg_attr(test, implement(IDataObject, IDataObjectAsyncCapability))]
+#[cfg_attr(not(test), implement(IDataObject))]
 struct WindowsFileDataObject {
     paths: Vec<PathBuf>,
     preferred_effect: DROPEFFECT,
@@ -1136,9 +1179,23 @@ struct WindowsFileDataObject {
     #[cfg(test)]
     test_offer_hdrop: bool,
     #[cfg(test)]
+    test_query_hdrop: bool,
+    #[cfg(test)]
     test_shell_id_list: Option<Vec<u8>>,
     #[cfg(test)]
     test_fail_shell_get_data: bool,
+    #[cfg(test)]
+    test_fail_hdrop_get_data: bool,
+    #[cfg(test)]
+    test_hdrop_failures_remaining: Option<Rc<Cell<usize>>>,
+    #[cfg(test)]
+    test_async_mode: bool,
+    #[cfg(test)]
+    test_call_order: Option<Rc<RefCell<Vec<&'static str>>>>,
+    #[cfg(test)]
+    test_start_count: Option<Rc<Cell<usize>>>,
+    #[cfg(test)]
+    test_end_events: Option<Rc<RefCell<Vec<(HRESULT, u32)>>>>,
 }
 
 #[allow(non_snake_case)]
@@ -1151,6 +1208,21 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         let format = unsafe { pformatetcin.as_ref() }
             .map(|format| format.cfFormat)
             .ok_or_else(|| windows::core::Error::from(DV_E_FORMATETC))?;
+        #[cfg(test)]
+        if format == CF_HDROP.0 {
+            if let Some(failures_remaining) = &self.test_hdrop_failures_remaining
+                && failures_remaining.get() > 0
+            {
+                failures_remaining.set(failures_remaining.get() - 1);
+                return Err(DV_E_FORMATETC.into());
+            }
+            if self.test_fail_hdrop_get_data {
+                if let Some(call_order) = &self.test_call_order {
+                    call_order.as_ref().borrow_mut().push("get_data");
+                }
+                return Err(DV_E_FORMATETC.into());
+            }
+        }
         let hglobal = if format == CF_HDROP.0 {
             allocate_hdrop(self.paths.as_slice())?
         } else if format == *PREFERRED_DROPEFFECT_FORMAT {
@@ -1194,7 +1266,7 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
             && {
                 #[cfg(test)]
                 {
-                    self.test_offer_hdrop
+                    self.test_query_hdrop
                 }
                 #[cfg(not(test))]
                 {
@@ -1251,7 +1323,15 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
         if dwdirection == DATADIR_GET.0 as u32 {
-            Ok(WindowsFormatEtcEnumerator::new().into())
+            let mut formats = Vec::new();
+            #[cfg(test)]
+            if self.test_offer_hdrop {
+                formats.push(hdrop_format_etc());
+            }
+            #[cfg(not(test))]
+            formats.push(hdrop_format_etc());
+            formats.push(dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT));
+            Ok(WindowsFormatEtcEnumerator::new(formats).into())
         } else {
             Err(E_NOTIMPL.into())
         }
@@ -1275,15 +1355,58 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
     }
 }
 
+#[allow(non_snake_case)]
+#[cfg(test)]
+impl IDataObjectAsyncCapability_Impl for WindowsFileDataObject_Impl {
+    fn SetAsyncMode(&self, _async_mode: BOOL) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn GetAsyncMode(&self) -> windows::core::Result<BOOL> {
+        if let Some(call_order) = &self.test_call_order {
+            call_order.as_ref().borrow_mut().push("get_async_mode");
+        }
+        Ok(self.test_async_mode.into())
+    }
+
+    fn StartOperation(
+        &self,
+        _reserved: windows::core::Ref<'_, IBindCtx>,
+    ) -> windows::core::Result<()> {
+        if let Some(start_count) = &self.test_start_count {
+            start_count.set(start_count.get() + 1);
+        }
+        Ok(())
+    }
+
+    fn InOperation(&self) -> windows::core::Result<BOOL> {
+        Ok(false.into())
+    }
+
+    fn EndOperation(
+        &self,
+        result: windows::core::HRESULT,
+        _reserved: windows::core::Ref<'_, IBindCtx>,
+        effects: u32,
+    ) -> windows::core::Result<()> {
+        if let Some(end_events) = &self.test_end_events {
+            end_events.as_ref().borrow_mut().push((result, effects));
+        }
+        Ok(())
+    }
+}
+
 #[implement(IEnumFORMATETC)]
 struct WindowsFormatEtcEnumerator {
     next_index: Cell<usize>,
+    formats: Vec<FORMATETC>,
 }
 
 impl WindowsFormatEtcEnumerator {
-    fn new() -> Self {
+    fn new(formats: Vec<FORMATETC>) -> Self {
         Self {
             next_index: Cell::new(0),
+            formats,
         }
     }
 }
@@ -1296,12 +1419,8 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
         }
 
         let mut fetched = 0;
-        while fetched < celt && self.next_index.get() < 2 {
-            let format = match self.next_index.get() {
-                0 => hdrop_format_etc(),
-                1 => dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT),
-                _ => unreachable!(),
-            };
+        while fetched < celt && self.next_index.get() < self.formats.len() {
+            let format = self.formats[self.next_index.get()];
             unsafe { rgelt.add(fetched as usize).write(format) };
             self.next_index.set(self.next_index.get() + 1);
             fetched += 1;
@@ -1317,9 +1436,9 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     }
 
     fn Skip(&self, celt: u32) -> windows::core::Result<()> {
-        let remaining = 2usize.saturating_sub(self.next_index.get());
+        let remaining = self.formats.len().saturating_sub(self.next_index.get());
         self.next_index
-            .set((self.next_index.get() + celt as usize).min(2));
+            .set((self.next_index.get() + celt as usize).min(self.formats.len()));
         if celt as usize <= remaining {
             Ok(())
         } else {
@@ -1335,6 +1454,7 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
         Ok(WindowsFormatEtcEnumerator {
             next_index: Cell::new(self.next_index.get()),
+            formats: self.formats.clone(),
         }
         .into())
     }
@@ -1366,9 +1486,23 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
             #[cfg(test)]
             test_offer_hdrop: true,
             #[cfg(test)]
+            test_query_hdrop: true,
+            #[cfg(test)]
             test_shell_id_list: None,
             #[cfg(test)]
             test_fail_shell_get_data: false,
+            #[cfg(test)]
+            test_fail_hdrop_get_data: false,
+            #[cfg(test)]
+            test_hdrop_failures_remaining: None,
+            #[cfg(test)]
+            test_async_mode: false,
+            #[cfg(test)]
+            test_call_order: None,
+            #[cfg(test)]
+            test_start_count: None,
+            #[cfg(test)]
+            test_end_events: None,
         }
         .into();
         let drop_source: IDropSource = WindowsFileDragSource.into();
@@ -1599,40 +1733,126 @@ fn allocate_global_payload(payload: &[u8]) -> windows::core::Result<HGLOBAL> {
 enum HdropPaths {
     Unavailable,
     Invalid,
+    Deferred,
     Paths(SmallVec<[PathBuf; 2]>),
 }
 
-fn hdrop_paths_from_data_object(data_object: &IDataObject) -> HdropPaths {
+fn enabled_async_capability(data_object: &IDataObject) -> Option<IDataObjectAsyncCapability> {
+    let capability = match data_object.cast::<IDataObjectAsyncCapability>() {
+        Ok(capability) => capability,
+        Err(error) => {
+            log::trace!("external drop has no async capability: {error}");
+            return None;
+        }
+    };
+    match unsafe { capability.GetAsyncMode() } {
+        Ok(enabled) if enabled.as_bool() => Some(capability),
+        Ok(_) => {
+            log::trace!("external drop async capability is disabled");
+            None
+        }
+        Err(error) => {
+            log::trace!("external drop async mode query failed: {error}");
+            None
+        }
+    }
+}
+
+fn data_object_advertises_hdrop(data_object: &IDataObject) -> bool {
     let format = hdrop_format_etc();
-    if unsafe { data_object.QueryGetData(&format) } != S_OK {
+    let query_result = unsafe { data_object.QueryGetData(&format) };
+    let mut enumerated_hdrop = false;
+    let mut enumerated_formats = Vec::new();
+
+    match unsafe { data_object.EnumFormatEtc(DATADIR_GET.0 as u32) } {
+        Ok(enumerator) => loop {
+            let mut format = FORMATETC::default();
+            let mut fetched = 0;
+            let result = unsafe {
+                enumerator.Next(std::slice::from_mut(&mut format), Some(&mut fetched))
+            };
+            if fetched == 0 {
+                break;
+            }
+            enumerated_formats.push((format.cfFormat, format.dwAspect, format.tymed));
+            enumerated_hdrop |= format.cfFormat == CF_HDROP.0
+                && format.dwAspect == DVASPECT_CONTENT.0
+                && (format.tymed & TYMED_HGLOBAL.0 as u32) != 0;
+            if !format.ptd.is_null() {
+                unsafe { CoTaskMemFree(Some(format.ptd.cast())) };
+            }
+            if result != S_OK {
+                break;
+            }
+        },
+        Err(error) => log::trace!("external drop format enumeration failed: {error}"),
+    }
+
+    log::trace!(
+        "external drop CF_HDROP discovery: query={query_result:?}, enumerated={enumerated_formats:?}"
+    );
+    enumerated_hdrop || query_result == S_OK
+}
+
+fn paths_from_hdrop_medium(medium: &STGMEDIUM) -> Option<SmallVec<[PathBuf; 2]>> {
+    if (medium.tymed & TYMED_HGLOBAL.0 as u32) == 0 {
+        return None;
+    }
+
+    unsafe {
+        let global = medium.u.hGlobal;
+        if global.is_invalid() {
+            return None;
+        }
+        let locked = GlobalLock(global);
+        if locked.is_null() {
+            return None;
+        }
+
+        let hdrop = HDROP(locked);
+        let count = DragQueryFileW(hdrop, u32::MAX, None);
+        let mut paths = SmallVec::<[PathBuf; 2]>::with_capacity(count as usize);
+        let result = (count > 0).then(|| {
+            for index in 0..count {
+                let length = DragQueryFileW(hdrop, index, None) as usize;
+                if length == 0 {
+                    return None;
+                }
+                let mut buffer = vec![0_u16; length + 1];
+                if DragQueryFileW(hdrop, index, Some(buffer.as_mut_slice())) as usize != length {
+                    return None;
+                }
+                let path = PathBuf::from(String::from_utf16(&buffer[..length]).ok()?);
+                if path.as_os_str().is_empty() {
+                    return None;
+                }
+                paths.push(path);
+            }
+            Some(paths)
+        });
+        let _ = GlobalUnlock(global);
+        result.flatten()
+    }
+}
+
+fn hdrop_paths_from_data_object(data_object: &IDataObject) -> HdropPaths {
+    let async_capability = enabled_async_capability(data_object);
+    if !data_object_advertises_hdrop(data_object) {
         return HdropPaths::Unavailable;
     }
 
-    let Ok(mut medium) = (unsafe { data_object.GetData(&format) }) else {
-        return HdropPaths::Invalid;
-    };
-    let paths = if (medium.tymed & TYMED_HGLOBAL.0 as u32) == 0 {
-        None
-    } else {
-        unsafe {
-            let global = medium.u.hGlobal;
-            if global.is_invalid() {
-                None
+    let mut medium = match unsafe { data_object.GetData(&hdrop_format_etc()) } {
+        Ok(medium) => medium,
+        Err(error) => {
+            log::trace!("external drop CF_HDROP materialization failed: {error}");
+            return if async_capability.is_some() {
+                HdropPaths::Deferred
             } else {
-                let locked = GlobalLock(global);
-                if locked.is_null() {
-                    None
-                } else {
-                    let mut paths = SmallVec::<[PathBuf; 2]>::new();
-                    with_file_names(HDROP(locked), |file_name| {
-                        paths.push(PathBuf::from(file_name));
-                    });
-                    let _ = GlobalUnlock(global);
-                    (!paths.is_empty()).then_some(paths)
-                }
-            }
+                HdropPaths::Invalid
+            };
         }
     };
+    let paths = paths_from_hdrop_medium(&medium);
     unsafe { ReleaseStgMedium(&mut medium) };
     paths.map_or(HdropPaths::Invalid, HdropPaths::Paths)
 }
@@ -1671,12 +1891,67 @@ fn external_paths_from_data_object(data_object: &IDataObject) -> Option<External
         HdropPaths::Unavailable => {
             shell_item_paths_from_data_object(data_object).map(ExternalPaths::new)
         }
+        HdropPaths::Deferred => Some(ExternalPaths::deferred()),
         HdropPaths::Invalid => None,
+    }
+}
+
+#[derive(Clone)]
+struct DeferredWindowsExternalDrop {
+    data_object: IDataObject,
+    allowed_effects: DROPEFFECT,
+}
+
+struct MarshaledWindowsInterface(Option<IStream>);
+
+// CoMarshalInterThreadInterfaceInStream explicitly creates a stream that may be handed to
+// another apartment. The windows crate cannot express that conditional COM guarantee.
+unsafe impl Send for MarshaledWindowsInterface {}
+
+impl MarshaledWindowsInterface {
+    fn new<T: Interface>(interface: &T) -> windows::core::Result<Self> {
+        let unknown = interface.cast::<IUnknown>()?;
+        let stream =
+            unsafe { CoMarshalInterThreadInterfaceInStream(&T::IID, &unknown) }?;
+        Ok(Self(Some(stream)))
+    }
+
+    fn unmarshal<T: Interface>(mut self) -> windows::core::Result<T> {
+        let stream = self.0.take().ok_or(E_UNEXPECTED)?;
+        let stream = mem::ManuallyDrop::new(stream);
+        unsafe { CoGetInterfaceAndReleaseStream::<_, T>(&*stream) }
+    }
+}
+
+impl Drop for MarshaledWindowsInterface {
+    fn drop(&mut self) {
+        if let Some(stream) = self.0.take() {
+            unsafe { CoReleaseMarshalData(&stream).log_err() };
+        }
+    }
+}
+
+struct PendingDeferredWindowsExternalDrop {
+    marshaled_data_object: MarshaledWindowsInterface,
+    marshaled_async_capability: MarshaledWindowsInterface,
+    async_capability: IDataObjectAsyncCapability,
+    destination: PathBuf,
+    owner: isize,
+}
+
+impl PendingDeferredWindowsExternalDrop {
+    fn cancel(self, result: HRESULT) {
+        unsafe {
+            self.async_capability
+                .EndOperation(result, None, DROPEFFECT_NONE.0 as u32)
+                .log_err();
+        }
     }
 }
 
 struct ActiveWindowsExternalDrop {
     completed_effect: Cell<Option<DROPEFFECT>>,
+    deferred: Option<DeferredWindowsExternalDrop>,
 }
 
 struct ActiveWindowsExternalDropGuard<'a> {
@@ -1704,6 +1979,14 @@ fn completed_external_drop_effect(
     drop.completed_effect.get().unwrap_or(default)
 }
 
+fn default_external_drop_effect(deferred: bool) -> DROPEFFECT {
+    if deferred {
+        DROPEFFECT_NONE
+    } else {
+        DROPEFFECT_COPY
+    }
+}
+
 fn complete_active_windows_external_drop(
     active_drops: &RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
     effect: u32,
@@ -1712,6 +1995,278 @@ fn complete_active_windows_external_drop(
         return false;
     };
     drop.completed_effect.set(Some(DROPEFFECT(effect)));
+    true
+}
+
+fn shell_item_for_path(destination: &Path) -> windows::core::Result<IShellItem> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe { SHCreateItemFromParsingName(PCWSTR(destination.as_ptr()), None) }
+}
+
+fn materialize_deferred_hdrop_paths(
+    data_object: &IDataObject,
+) -> windows::core::Result<SmallVec<[PathBuf; 2]>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let attempt_started = Instant::now();
+        match unsafe { data_object.GetData(&hdrop_format_etc()) } {
+            Ok(mut medium) => {
+                let paths = paths_from_hdrop_medium(&medium);
+                unsafe { ReleaseStgMedium(&mut medium) };
+                let paths = paths.ok_or(E_INVALIDARG)?;
+                if paths
+                    .iter()
+                    .all(|path| path.is_absolute() && path.exists())
+                {
+                    return Ok(paths);
+                }
+                return Err(E_INVALIDARG.into());
+            }
+            Err(error)
+                if error.code() == DV_E_FORMATETC
+                    && attempt_started.elapsed() < Duration::from_millis(100)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn copy_deferred_hdrop_paths_with_shell(
+    paths: &[PathBuf],
+    destination: &Path,
+    owner: HWND,
+) -> windows::core::Result<()> {
+    let destination = shell_item_for_path(destination)?;
+    let sources = paths
+        .iter()
+        .map(|path| shell_item_for_path(path))
+        .collect::<windows::core::Result<Vec<_>>>()?;
+    let operation: IFileOperation = unsafe {
+        CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)
+    }?;
+    if unsafe { IsWindow(Some(owner)).as_bool() } {
+        unsafe { operation.SetOwnerWindow(owner)? };
+    }
+    for source in &sources {
+        unsafe {
+            operation.CopyItem(
+                source,
+                &destination,
+                PCWSTR::null(),
+                None::<&IFileOperationProgressSink>,
+            )?;
+        }
+    }
+    unsafe { operation.PerformOperations()? };
+    if unsafe { operation.GetAnyOperationsAborted()? }.as_bool() {
+        Err(E_ABORT.into())
+    } else {
+        Ok(())
+    }
+}
+
+struct DeferredWindowsOperationCompletion {
+    capability: IDataObjectAsyncCapability,
+    completed: bool,
+}
+
+impl DeferredWindowsOperationCompletion {
+    fn finish(mut self, result: HRESULT, effect: DROPEFFECT) {
+        unsafe {
+            self.capability
+                .EndOperation(result, None, effect.0 as u32)
+                .log_err();
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for DeferredWindowsOperationCompletion {
+    fn drop(&mut self) {
+        if !self.completed {
+            unsafe {
+                self.capability
+                    .EndOperation(E_FAIL, None, DROPEFFECT_NONE.0 as u32)
+                    .log_err();
+            }
+        }
+    }
+}
+
+fn run_deferred_windows_external_drop_worker(
+    marshaled_data_object: MarshaledWindowsInterface,
+    marshaled_async_capability: MarshaledWindowsInterface,
+    destination: PathBuf,
+    owner: HWND,
+) -> windows::core::Result<()> {
+    let capability =
+        marshaled_async_capability.unmarshal::<IDataObjectAsyncCapability>()?;
+    let completion = DeferredWindowsOperationCompletion {
+        capability,
+        completed: false,
+    };
+    let data_object = match marshaled_data_object.unmarshal::<IDataObject>() {
+        Ok(data_object) => data_object,
+        Err(error) => {
+            completion.finish(error.code(), DROPEFFECT_NONE);
+            return Err(error);
+        }
+    };
+    match materialize_deferred_hdrop_paths(&data_object).and_then(|paths| {
+        copy_deferred_hdrop_paths_with_shell(&paths, &destination, owner)
+    }) {
+        Ok(()) => {
+            completion.finish(S_OK, DROPEFFECT_COPY);
+            Ok(())
+        }
+        Err(error) => {
+            let result = error.code();
+            completion.finish(result, DROPEFFECT_NONE);
+            Err(error)
+        }
+    }
+}
+
+fn start_pending_deferred_windows_external_drop(pending: PendingDeferredWindowsExternalDrop) {
+    let PendingDeferredWindowsExternalDrop {
+        marshaled_data_object,
+        marshaled_async_capability,
+        async_capability,
+        destination,
+        owner,
+    } = pending;
+    let result = std::thread::Builder::new()
+        .name("gpui-deferred-file-drop".to_owned())
+        .spawn(move || {
+            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if let Err(error) = initialized.ok() {
+                log::error!("failed to initialize deferred drop COM apartment: {error}");
+                return;
+            }
+            let owner = HWND(owner as *mut _);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                run_deferred_windows_external_drop_worker(
+                    marshaled_data_object,
+                    marshaled_async_capability,
+                    destination,
+                    owner,
+                )
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::error!("deferred external drop failed: {error}"),
+                Err(_) => log::error!("deferred external drop worker panicked"),
+            }
+            unsafe { CoUninitialize() };
+        });
+    match result {
+        Ok(_) => drop(async_capability),
+        Err(error) => {
+            log::error!("failed to start deferred external drop worker: {error}");
+            unsafe {
+                async_capability
+                    .EndOperation(E_FAIL, None, DROPEFFECT_NONE.0 as u32)
+                    .log_err();
+            }
+        }
+    }
+}
+
+fn complete_active_deferred_windows_external_drop(
+    active_drops: &RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    pending_drops: &RefCell<VecDeque<PendingDeferredWindowsExternalDrop>>,
+    destination: &Path,
+    hwnd: HWND,
+) -> bool {
+    complete_active_deferred_windows_external_drop_with_post(
+        active_drops,
+        pending_drops,
+        destination,
+        hwnd,
+        |hwnd| unsafe {
+            PostMessageW(
+                Some(hwnd),
+                WM_GPUI_START_DEFERRED_EXTERNAL_PATHS_DROP,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        },
+    )
+}
+
+fn complete_active_deferred_windows_external_drop_with_post(
+    active_drops: &RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
+    pending_drops: &RefCell<VecDeque<PendingDeferredWindowsExternalDrop>>,
+    destination: &Path,
+    hwnd: HWND,
+    post: impl FnOnce(HWND) -> windows::core::Result<()>,
+) -> bool {
+    let Some(active_drop) = active_drops.borrow().last().cloned() else {
+        return false;
+    };
+    let Some(deferred) = active_drop.deferred.as_ref() else {
+        return false;
+    };
+    if !destination.is_absolute()
+        || !destination.is_dir()
+        || !deferred.allowed_effects.contains(DROPEFFECT_COPY)
+    {
+        return false;
+    }
+    let Some(capability) = enabled_async_capability(&deferred.data_object) else {
+        return false;
+    };
+    if let Err(error) = unsafe { capability.StartOperation(None) } {
+        log::trace!("external drop StartOperation failed: {error}");
+        return false;
+    }
+    let marshaled_data_object = match MarshaledWindowsInterface::new(&deferred.data_object) {
+        Ok(marshaled_data_object) => marshaled_data_object,
+        Err(error) => {
+            unsafe {
+                capability
+                    .EndOperation(error.code(), None, DROPEFFECT_NONE.0 as u32)
+                    .log_err();
+            }
+            return false;
+        }
+    };
+    let marshaled_async_capability = match MarshaledWindowsInterface::new(&capability) {
+        Ok(marshaled_async_capability) => marshaled_async_capability,
+        Err(error) => {
+            unsafe {
+                capability
+                    .EndOperation(error.code(), None, DROPEFFECT_NONE.0 as u32)
+                    .log_err();
+            }
+            return false;
+        }
+    };
+    pending_drops
+        .borrow_mut()
+        .push_back(PendingDeferredWindowsExternalDrop {
+            marshaled_data_object,
+            marshaled_async_capability,
+            async_capability: capability,
+            destination: destination.to_path_buf(),
+            owner: hwnd.0 as isize,
+        });
+    if let Err(error) = post(hwnd) {
+        if let Some(pending) = pending_drops.borrow_mut().pop_back() {
+            pending.cancel(error.code());
+        }
+        return false;
+    }
+    active_drop.completed_effect.set(Some(DROPEFFECT_COPY));
     true
 }
 
@@ -1742,6 +2297,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             let idata_obj = pdataobj.ok()?;
             let cursor_position = POINT { x: pt.x, y: pt.y };
             if let Some(paths) = external_paths_from_data_object(idata_obj) {
+                self.0
+                    .external_paths_drop_is_deferred
+                    .set(paths.is_deferred());
                 *pdweffect = DROPEFFECT_COPY;
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
@@ -1758,6 +2316,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 });
                 self.handle_drag_drop(input);
             } else {
+                self.0.external_paths_drop_is_deferred.set(false);
                 *pdweffect = DROPEFFECT_NONE;
             }
             self.0
@@ -1799,6 +2358,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        self.0.external_paths_drop_is_deferred.set(false);
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
@@ -1817,7 +2377,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
-        let default_effect = DROPEFFECT_COPY;
+        let deferred = self.0.external_paths_drop_is_deferred.replace(false);
+        let allowed_effects = unsafe { *pdweffect };
+        let default_effect = default_external_drop_effect(deferred);
         unsafe {
             *pdweffect = default_effect;
             self.0
@@ -1830,6 +2392,10 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         }
         let active_drop = Rc::new(ActiveWindowsExternalDrop {
             completed_effect: Cell::new(None),
+            deferred: deferred.then(|| DeferredWindowsExternalDrop {
+                data_object: idata_obj.clone(),
+                allowed_effects,
+            }),
         });
         let _active_drop_guard = push_active_windows_external_drop(
             &self.0.active_external_paths_drops,
@@ -1857,10 +2423,15 @@ mod external_paths_drag_tests {
     use super::{
         ActiveWindowsExternalDrop, COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree,
         CoUninitialize, DROPFILES, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
-        DROPEFFECT_NONE, IDataObject, ILGetSize, PCWSTR, PendingExternalPathsDrag,
-        SHParseDisplayName, WindowsFileDataObject, build_hdrop_payload, catch_windows_callback,
-        complete_active_windows_external_drop, completed_external_drop_effect,
-        external_paths_from_data_object, push_active_windows_external_drop,
+        DROPEFFECT_NONE, DeferredWindowsExternalDrop, E_ABORT, E_FAIL, HWND, IDataObject,
+        ILGetSize, PCWSTR, PendingExternalPathsDrag, SHParseDisplayName,
+        WindowsFileDataObject, build_hdrop_payload,
+        catch_windows_callback, complete_active_windows_external_drop,
+        complete_active_deferred_windows_external_drop_with_post,
+        copy_deferred_hdrop_paths_with_shell,
+        completed_external_drop_effect, default_external_drop_effect,
+        external_paths_from_data_object, materialize_deferred_hdrop_paths,
+        push_active_windows_external_drop,
         windows_external_drag_completion, windows_external_drag_result,
     };
     use crate::{
@@ -1869,6 +2440,7 @@ mod external_paths_drag_tests {
     };
     use std::{
         cell::{Cell, RefCell},
+        collections::VecDeque,
         ffi::OsStr,
         mem,
         path::{Path, PathBuf},
@@ -1966,8 +2538,43 @@ mod external_paths_drag_tests {
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             test_offer_hdrop,
+            test_query_hdrop: test_offer_hdrop,
             test_shell_id_list: shell_id_list,
             test_fail_shell_get_data: false,
+            test_fail_hdrop_get_data: false,
+            test_hdrop_failures_remaining: None,
+            test_async_mode: false,
+            test_call_order: None,
+            test_start_count: None,
+            test_end_events: None,
+        }
+        .into()
+    }
+
+    fn delayed_hdrop_test_data_object(async_mode: bool) -> IDataObject {
+        delayed_hdrop_test_data_object_with(async_mode, true, None)
+    }
+
+    fn delayed_hdrop_test_data_object_with(
+        async_mode: bool,
+        query_hdrop: bool,
+        call_order: Option<Rc<RefCell<Vec<&'static str>>>>,
+    ) -> IDataObject {
+        WindowsFileDataObject {
+            paths: Vec::new(),
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: true,
+            test_query_hdrop: query_hdrop,
+            test_shell_id_list: None,
+            test_fail_shell_get_data: false,
+            test_fail_hdrop_get_data: true,
+            test_hdrop_failures_remaining: None,
+            test_async_mode: async_mode,
+            test_call_order: call_order,
+            test_start_count: None,
+            test_end_events: None,
         }
         .into()
     }
@@ -1979,8 +2586,61 @@ mod external_paths_drag_tests {
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             test_offer_hdrop: false,
+            test_query_hdrop: false,
             test_shell_id_list: Some(Vec::new()),
             test_fail_shell_get_data: true,
+            test_fail_hdrop_get_data: false,
+            test_hdrop_failures_remaining: None,
+            test_async_mode: false,
+            test_call_order: None,
+            test_start_count: None,
+            test_end_events: None,
+        }
+        .into()
+    }
+
+    fn lifecycle_delayed_hdrop_test_data_object(
+        start_count: Rc<Cell<usize>>,
+        end_events: Rc<RefCell<Vec<(windows::core::HRESULT, u32)>>>,
+    ) -> IDataObject {
+        WindowsFileDataObject {
+            paths: Vec::new(),
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: true,
+            test_query_hdrop: true,
+            test_shell_id_list: None,
+            test_fail_shell_get_data: false,
+            test_fail_hdrop_get_data: true,
+            test_hdrop_failures_remaining: None,
+            test_async_mode: true,
+            test_call_order: None,
+            test_start_count: Some(start_count),
+            test_end_events: Some(end_events),
+        }
+        .into()
+    }
+
+    fn transient_hdrop_test_data_object(
+        paths: Vec<PathBuf>,
+        failures_remaining: Rc<Cell<usize>>,
+    ) -> IDataObject {
+        WindowsFileDataObject {
+            paths,
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: true,
+            test_query_hdrop: true,
+            test_shell_id_list: None,
+            test_fail_shell_get_data: false,
+            test_fail_hdrop_get_data: false,
+            test_hdrop_failures_remaining: Some(failures_remaining),
+            test_async_mode: true,
+            test_call_order: None,
+            test_start_count: None,
+            test_end_events: None,
         }
         .into()
     }
@@ -2055,6 +2715,183 @@ mod external_paths_drag_tests {
 
         let paths = external_paths_from_data_object(&data_object).unwrap();
         assert_eq!(paths.paths(), [hdrop_path]);
+    }
+
+    #[test]
+    fn failed_hdrop_materialization_requires_enabled_async_capability() {
+        let _com = TestComApartment::new();
+
+        let deferred = external_paths_from_data_object(&delayed_hdrop_test_data_object(true))
+            .expect("async delayed CF_HDROP should be accepted");
+        assert!(deferred.is_deferred());
+        assert!(deferred.paths().is_empty());
+        assert!(deferred.is_empty());
+
+        assert!(
+            external_paths_from_data_object(&delayed_hdrop_test_data_object(false)).is_none(),
+            "failed synchronous CF_HDROP must remain invalid"
+        );
+    }
+
+    #[test]
+    fn enumerated_hdrop_can_be_deferred_when_query_get_data_disagrees() {
+        let _com = TestComApartment::new();
+        let deferred = external_paths_from_data_object(&delayed_hdrop_test_data_object_with(
+            true, false, None,
+        ))
+        .expect("enumerated delayed CF_HDROP should be accepted");
+
+        assert!(deferred.is_deferred());
+    }
+
+    #[test]
+    fn async_capability_is_captured_before_materialization_probe() {
+        let _com = TestComApartment::new();
+        let call_order = Rc::new(RefCell::new(Vec::new()));
+        let deferred = external_paths_from_data_object(&delayed_hdrop_test_data_object_with(
+            true,
+            true,
+            Some(call_order.clone()),
+        ))
+        .expect("async delayed CF_HDROP should be accepted");
+
+        assert!(deferred.is_deferred());
+        assert_eq!(call_order.borrow().as_slice(), ["get_async_mode", "get_data"]);
+    }
+
+    #[test]
+    fn successful_empty_hdrop_is_not_treated_as_deferred() {
+        let _com = TestComApartment::new();
+        let empty_hdrop = test_data_object(Some(Vec::new()), None);
+
+        assert!(external_paths_from_data_object(&empty_hdrop).is_none());
+    }
+
+    #[test]
+    fn deferred_completion_starts_and_queues_before_publishing_copy() {
+        let _com = TestComApartment::new();
+        let temp = TestTempDir::new();
+        let start_count = Rc::new(Cell::new(0));
+        let end_events = Rc::new(RefCell::new(Vec::new()));
+        let active = RefCell::new(Vec::new());
+        let pending = RefCell::new(VecDeque::new());
+        let drop = Rc::new(ActiveWindowsExternalDrop {
+            completed_effect: Cell::new(None),
+            deferred: Some(DeferredWindowsExternalDrop {
+                data_object: lifecycle_delayed_hdrop_test_data_object(
+                    start_count.clone(),
+                    end_events.clone(),
+                ),
+                allowed_effects: DROPEFFECT_COPY,
+            }),
+        });
+        let _guard = push_active_windows_external_drop(&active, drop.clone());
+
+        assert!(complete_active_deferred_windows_external_drop_with_post(
+            &active,
+            &pending,
+            temp.path(),
+            HWND::default(),
+            |_| Ok(()),
+        ));
+        assert_eq!(start_count.get(), 1);
+        assert_eq!(
+            completed_external_drop_effect(&drop, DROPEFFECT_NONE),
+            DROPEFFECT_COPY
+        );
+        assert_eq!(pending.borrow().len(), 1);
+        assert!(end_events.borrow().is_empty());
+
+        pending.borrow_mut().pop_front().unwrap().cancel(E_ABORT);
+        assert_eq!(
+            end_events.borrow().as_slice(),
+            [(E_ABORT, DROPEFFECT_NONE.0 as u32)]
+        );
+    }
+
+    #[test]
+    fn deferred_completion_cancels_when_posting_fails() {
+        let _com = TestComApartment::new();
+        let temp = TestTempDir::new();
+        let start_count = Rc::new(Cell::new(0));
+        let end_events = Rc::new(RefCell::new(Vec::new()));
+        let active = RefCell::new(Vec::new());
+        let pending = RefCell::new(VecDeque::new());
+        let drop = Rc::new(ActiveWindowsExternalDrop {
+            completed_effect: Cell::new(None),
+            deferred: Some(DeferredWindowsExternalDrop {
+                data_object: lifecycle_delayed_hdrop_test_data_object(
+                    start_count.clone(),
+                    end_events.clone(),
+                ),
+                allowed_effects: DROPEFFECT_COPY,
+            }),
+        });
+        let _guard = push_active_windows_external_drop(&active, drop.clone());
+
+        assert!(!complete_active_deferred_windows_external_drop_with_post(
+            &active,
+            &pending,
+            temp.path(),
+            HWND::default(),
+            |_| Err(E_FAIL.into()),
+        ));
+        assert_eq!(start_count.get(), 1);
+        assert_eq!(
+            completed_external_drop_effect(&drop, DROPEFFECT_NONE),
+            DROPEFFECT_NONE
+        );
+        assert!(pending.borrow().is_empty());
+        assert_eq!(
+            end_events.borrow().as_slice(),
+            [(E_FAIL, DROPEFFECT_NONE.0 as u32)]
+        );
+    }
+
+    #[test]
+    fn deferred_materialization_retries_transient_format_errors() {
+        let _com = TestComApartment::new();
+        let temp = TestTempDir::new();
+        let source = temp.path().join("source.png");
+        std::fs::write(&source, b"image").unwrap();
+        let failures_remaining = Rc::new(Cell::new(2));
+        let data_object = transient_hdrop_test_data_object(
+            vec![source.clone()],
+            failures_remaining.clone(),
+        );
+
+        let paths = materialize_deferred_hdrop_paths(&data_object).unwrap();
+        assert_eq!(paths.as_slice(), [source]);
+        assert_eq!(failures_remaining.get(), 0);
+    }
+
+    #[test]
+    fn deferred_materialization_rejects_missing_paths() {
+        let _com = TestComApartment::new();
+        let data_object = test_data_object(Some(vec![PathBuf::from(r"C:\missing.png")]), None);
+
+        assert!(materialize_deferred_hdrop_paths(&data_object).is_err());
+    }
+
+    #[test]
+    fn deferred_shell_copy_copies_materialized_files() {
+        let _com = TestComApartment::new();
+        let source_dir = TestTempDir::new();
+        let destination = TestTempDir::new();
+        let source = source_dir.path().join("source.txt");
+        std::fs::write(&source, b"shell-copy").unwrap();
+
+        copy_deferred_hdrop_paths_with_shell(
+            std::slice::from_ref(&source),
+            destination.path(),
+            HWND::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(destination.path().join("source.txt")).unwrap(),
+            b"shell-copy"
+        );
     }
 
     #[test]
@@ -2187,15 +3024,19 @@ mod external_paths_drag_tests {
     fn external_drop_completion_is_scoped_reentrant_and_defaults_to_copy() {
         let active = RefCell::new(Vec::new());
         assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+        assert_eq!(default_external_drop_effect(false), DROPEFFECT_COPY);
+        assert_eq!(default_external_drop_effect(true), DROPEFFECT_NONE);
 
         let outer = Rc::new(ActiveWindowsExternalDrop {
             completed_effect: Cell::new(None),
+            deferred: None,
         });
         let outer_guard = push_active_windows_external_drop(&active, outer.clone());
         assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_COPY);
 
         let inner = Rc::new(ActiveWindowsExternalDrop {
             completed_effect: Cell::new(None),
+            deferred: None,
         });
         {
             let _inner_guard = push_active_windows_external_drop(&active, inner.clone());
@@ -2216,6 +3057,7 @@ mod external_paths_drag_tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let drop = Rc::new(ActiveWindowsExternalDrop {
                 completed_effect: Cell::new(None),
+                deferred: None,
             });
             let _guard = push_active_windows_external_drop(&active, drop);
             panic!("exercise drop-scope cleanup");

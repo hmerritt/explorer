@@ -1531,6 +1531,17 @@ impl Window {
         self.platform_window.complete_external_paths_drop(effect)
     }
 
+    /// Complete a deferred Windows external-paths drop through the destination's native Shell
+    /// drop target.
+    ///
+    /// This is an internal platform bridge and is available only from a synchronous drop handler.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn complete_deferred_external_paths_drop(&self, destination: &std::path::Path) -> bool {
+        self.platform_window
+            .complete_deferred_external_paths_drop(destination)
+    }
+
     /// Dispatch the given action on the currently focused element.
     pub fn dispatch_action(&mut self, action: Box<dyn Action>, cx: &mut App) {
         let focus_id = self.focused(cx).map(|handle| handle.id);
