@@ -351,7 +351,11 @@ impl ExplorerView {
     }
 
     pub(super) fn handle_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_with_entry_metadata_and_search_resolution(cx);
+        if self.is_sidebar_group_view() {
+            self.refresh_sidebar_group_view(cx);
+        } else {
+            self.refresh_with_entry_metadata_and_search_resolution(cx);
+        }
         cx.notify();
     }
 
@@ -413,7 +417,7 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.has_active_text_input() {
+        if self.has_active_text_input() || self.is_sidebar_group_view() {
             cx.stop_propagation();
             return;
         }

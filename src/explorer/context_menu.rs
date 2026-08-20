@@ -287,6 +287,18 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
+        if self.is_sidebar_group_view() {
+            self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
+                origin,
+                sidebar_group_entry_context_menu_items(
+                    selected_context.single_directory_open_target,
+                    selected_context.selected_count,
+                    self.selected_paths(),
+                ),
+                selected_context.native_icon_entry,
+            ));
+            return true;
+        }
         let custom_items = cx
             .try_global::<crate::settings::SettingsState>()
             .map(|settings| settings.value.contextmenu.items.clone())
@@ -333,6 +345,18 @@ impl ExplorerView {
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
         let selected_context = self.selected_entry_context();
+        if self.is_sidebar_group_view() {
+            self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
+                origin,
+                sidebar_group_entry_context_menu_items(
+                    selected_context.single_directory_open_target,
+                    selected_context.selected_count,
+                    self.selected_paths(),
+                ),
+                selected_context.native_icon_entry,
+            ));
+            return true;
+        }
         let custom_items = cx
             .try_global::<crate::settings::SettingsState>()
             .map(|settings| settings.value.contextmenu.items.clone())
@@ -692,6 +716,64 @@ impl ExplorerView {
             self.handle_open_file_result(&path, result);
         }
     }
+}
+
+fn sidebar_group_entry_context_menu_items(
+    single_directory_open_target: Option<PathBuf>,
+    selected_count: usize,
+    selected_paths: Vec<PathBuf>,
+) -> Vec<ContextMenuItem> {
+    let mut items = Vec::new();
+    if let Some(path) = single_directory_open_target {
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-entry-open".to_owned(),
+            icon: Some(ContextMenuIcon::FolderKind(None)),
+            label: "Open".to_owned(),
+            command: ContextMenuCommand::OpenDirectory { path },
+            enabled: true,
+        });
+    }
+    if selected_count > 0 {
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-entry-open-new-tab".to_owned(),
+            icon: Some(ContextMenuIcon::NewTab),
+            label: if selected_count > 1 {
+                format!("Open new tabs ({selected_count})")
+            } else {
+                "Open in new tab".to_owned()
+            },
+            command: ContextMenuCommand::OpenSelectedDirectoriesInNewTabs,
+            enabled: true,
+        });
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-entry-copy".to_owned(),
+            icon: Some(ContextMenuIcon::Copy),
+            label: "Copy".to_owned(),
+            command: ContextMenuCommand::CopySelected,
+            enabled: true,
+        });
+        if selected_paths.len() == 1 {
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-entry-copy-path".to_owned(),
+                icon: Some(ContextMenuIcon::CopyAsPath),
+                label: "Copy as path".to_owned(),
+                command: ContextMenuCommand::CopyPath {
+                    path: selected_paths[0].clone(),
+                },
+                enabled: true,
+            });
+        }
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-entry-properties".to_owned(),
+            icon: Some(ContextMenuIcon::Properties),
+            label: "Properties".to_owned(),
+            command: ContextMenuCommand::PropertiesSelected,
+            enabled: true,
+        });
+    }
+    items
 }
 
 fn run_custom_command(
@@ -2094,6 +2176,54 @@ mod tests {
                 )
             })
             .expect("context menu action")
+    }
+
+    #[test]
+    fn sidebar_group_context_menu_contains_only_read_only_collection_actions() {
+        let path = PathBuf::from("C:/example");
+        let items = sidebar_group_entry_context_menu_items(Some(path.clone()), 1, vec![path]);
+        let commands = items
+            .iter()
+            .filter_map(|item| match item {
+                ContextMenuItem::Action { command, .. } => Some(command),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, ContextMenuCommand::OpenDirectory { .. }))
+        );
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            ContextMenuCommand::OpenSelectedDirectoriesInNewTabs
+        )));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, ContextMenuCommand::CopySelected))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, ContextMenuCommand::CopyPath { .. }))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, ContextMenuCommand::PropertiesSelected))
+        );
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            ContextMenuCommand::CutSelected
+                | ContextMenuCommand::Paste
+                | ContextMenuCommand::DeleteSelected
+                | ContextMenuCommand::RenameSelected
+                | ContextMenuCommand::NewFile
+                | ContextMenuCommand::NewFolder
+                | ContextMenuCommand::Compress { .. }
+        )));
     }
 
     fn menu_has_label(items: &[ContextMenuItem], expected: &str) -> bool {

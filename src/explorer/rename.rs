@@ -105,6 +105,9 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         self.cancel_pending_click_rename();
         self.start_rename_selected(window, cx);
         cx.notify();
@@ -530,6 +533,9 @@ impl ExplorerView {
     }
 
     pub(super) fn can_start_selected_rename(&self) -> bool {
+        if self.is_sidebar_group_view() {
+            return false;
+        }
         if self.selection.selected_indices.len() != 1 {
             return false;
         }

@@ -100,6 +100,9 @@ impl ExplorerView {
     }
 
     fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         match create_new_item_in_directory(&self.path, kind) {
             Ok(path) => {
                 self.clear_operation_notice();
@@ -142,6 +145,9 @@ impl ExplorerView {
     }
 
     pub(super) fn cut_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         let Some(clipboard) = self.selected_file_clipboard(FileClipboardOperation::Cut) else {
             return;
         };
@@ -157,6 +163,9 @@ impl ExplorerView {
     }
 
     pub(super) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
@@ -300,6 +309,9 @@ impl ExplorerView {
     }
 
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         if self.pending_trash_task.is_some() {
             return;
         }
@@ -427,6 +439,9 @@ impl ExplorerView {
     }
 
     pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;

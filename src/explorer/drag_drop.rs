@@ -719,13 +719,15 @@ impl ExplorerView {
     }
 
     pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
-        self.mouse_selection_drag.is_none()
+        !self.is_sidebar_group_view()
+            && self.mouse_selection_drag.is_none()
             && self.entries.get(ix).is_some()
             && self.entry_is_selected(ix)
     }
 
     pub(super) fn can_start_individual_item_drag_for_index(&self, ix: usize) -> bool {
-        self.mouse_selection_drag.is_none()
+        !self.is_sidebar_group_view()
+            && self.mouse_selection_drag.is_none()
             && self.entries.get(ix).is_some()
             && !self.entry_is_selected(ix)
     }
@@ -757,6 +759,9 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> bool {
+        if self.is_sidebar_group_view() {
+            return false;
+        }
         self.drop_resolution_for_value(dragged_value, destination, modifiers)
             .resolved
             .operation()
@@ -772,6 +777,9 @@ impl ExplorerView {
         #[cfg(test)]
         self.drop_predicate_evaluation_count
             .set(self.drop_predicate_evaluation_count.get() + 1);
+        if self.is_sidebar_group_view() {
+            return false;
+        }
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
             return dragged
                 .provisional_drop_resolution(destination, &self.path, modifiers)
@@ -812,6 +820,9 @@ impl ExplorerView {
         modifiers: Modifiers,
         mouse_position: Point<Pixels>,
     ) -> (CursorStyle, Option<DropIndicator>) {
+        if self.is_sidebar_group_view() {
+            return (CursorStyle::OperationNotAllowed, None);
+        }
         let resolution = self.drop_resolution_for_value(dragged_value, destination, modifiers);
         let cursor = resolution.resolved.cursor_style();
         let indicator =
@@ -827,6 +838,9 @@ impl ExplorerView {
         mouse_position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> (CursorStyle, Option<DropIndicator>) {
+        if self.is_sidebar_group_view() {
+            return (CursorStyle::OperationNotAllowed, None);
+        }
         let current_directory = self.path.clone();
         let provisional =
             dragged.provisional_drop_resolution(destination, &current_directory, modifiers);
@@ -949,6 +963,9 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         if self.pending_drop_task.is_some() || self.active_file_operation.is_some() {
             self.set_error_notice("Another file operation is already running.".to_owned());
             return;
@@ -1042,6 +1059,9 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         let paths = normalize_external_drop_paths(paths);
         if paths.is_empty() {
             return;

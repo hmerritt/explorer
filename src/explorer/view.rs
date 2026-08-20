@@ -44,6 +44,10 @@ use crate::explorer::{
     scrollbar::{HorizontalScrollbarDrag, ScrollbarDrag},
     search::{SearchState, filtered_entries},
     selection::{SelectionModifiers, SelectionState},
+    sidebar_group_view::{
+        SidebarGroupViewState, query_drive_capacities, sidebar_group_entries, sidebar_group_items,
+        sidebar_group_label,
+    },
     sorting::sort_entries,
     text_hover_preview::TextHoverPreviewSession,
     video_hover_preview::VideoHoverPreviewSession,
@@ -51,7 +55,7 @@ use crate::explorer::{
 };
 use crate::settings::{
     ExplorerSettings, FileColumnKind, FileColumnSettings, FileSortColumn, FileSortSettings,
-    FileViewMode, SearchMode, SidebarSettings, SortDirection,
+    FileViewMode, SearchMode, SidebarGroupKind, SidebarSettings, SortDirection,
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
@@ -61,6 +65,24 @@ pub(super) enum ViewModeSelection {
     Pending,
     Automatic,
     Manual,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum NavigationLocation {
+    Directory(PathBuf),
+    SidebarGroup(SidebarGroupKind),
+}
+
+impl From<PathBuf> for NavigationLocation {
+    fn from(path: PathBuf) -> Self {
+        Self::Directory(path)
+    }
+}
+
+impl PartialEq<PathBuf> for NavigationLocation {
+    fn eq(&self, other: &PathBuf) -> bool {
+        matches!(self, Self::Directory(path) if path == other)
+    }
 }
 
 pub struct ExplorerView {
@@ -80,8 +102,8 @@ pub struct ExplorerView {
     pub(super) image_mount_task: Option<Task<()>>,
     #[cfg(target_os = "windows")]
     pub(super) network_connect_task: Option<Task<()>>,
-    pub(super) back_stack: Vec<PathBuf>,
-    pub(super) forward_stack: Vec<PathBuf>,
+    pub(super) back_stack: Vec<NavigationLocation>,
+    pub(super) forward_stack: Vec<NavigationLocation>,
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) large_icon_list_state: gpui::ListState,
     pub(super) large_icon_layout: Option<LargeIconLayout>,
@@ -163,6 +185,7 @@ pub struct ExplorerView {
     pub(super) portable_hotplug_task: Option<Task<()>>,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
+    pub(super) sidebar_group_view: Option<SidebarGroupViewState>,
     pub(super) shell_shortcut_resolution_generation: u64,
     pub(super) shell_shortcut_resolution_task: Option<Task<()>>,
     pub(super) folder_size_generation: u64,
@@ -555,6 +578,7 @@ impl ExplorerView {
             portable_hotplug_task: None,
             sidebar_settings: settings.sidebar.clone(),
             sidebar_sections: sidebar_sections(&settings.sidebar, &filesystem_name),
+            sidebar_group_view: None,
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
             folder_size_generation: 0,
@@ -659,7 +683,12 @@ impl ExplorerView {
             self.file_columns = settings.view.file_columns.clone();
         }
 
-        if visibility_changed {
+        if self.is_sidebar_group_view() {
+            self.invalidate_recursive_search_cache();
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+            self.rebuild_active_sidebar_group_items(true);
+            self.schedule_sidebar_group_capacities(cx);
+        } else if visibility_changed {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
@@ -1180,6 +1209,94 @@ impl ExplorerView {
 
     fn rebuild_fast_sidebar_sections(&mut self) {
         self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+        self.rebuild_active_sidebar_group_items(true);
+    }
+
+    pub(super) fn active_sidebar_group(&self) -> Option<SidebarGroupKind> {
+        self.sidebar_group_view.as_ref().map(|view| view.kind)
+    }
+
+    pub(super) fn is_sidebar_group_view(&self) -> bool {
+        self.sidebar_group_view.is_some()
+    }
+
+    pub(super) fn current_navigation_location(&self) -> NavigationLocation {
+        self.active_sidebar_group()
+            .map(NavigationLocation::SidebarGroup)
+            .unwrap_or_else(|| NavigationLocation::Directory(self.path.clone()))
+    }
+
+    pub(super) fn rebuild_active_sidebar_group_items(&mut self, preserve_selection: bool) {
+        let Some(kind) = self.active_sidebar_group() else {
+            return;
+        };
+        let selected_paths = preserve_selection
+            .then(|| self.selected_paths())
+            .unwrap_or_default();
+        let items = sidebar_group_items(kind, &self.sidebar_sections);
+        if let Some(group) = self.sidebar_group_view.as_mut() {
+            group.items = items;
+            group
+                .capacities
+                .retain(|path, _| group.items.iter().any(|item| item.path == *path));
+        }
+        self.rebuild_sidebar_group_entries(&selected_paths);
+    }
+
+    pub(super) fn rebuild_sidebar_group_entries(&mut self, selected_paths: &[PathBuf]) {
+        let Some(group) = self.sidebar_group_view.as_ref() else {
+            return;
+        };
+        self.all_entries = sidebar_group_entries(&group.items, "");
+        self.entries = sidebar_group_entries(&group.items, self.search_query());
+        self.restore_selection_from_paths(selected_paths);
+        self.large_icon_layout = None;
+        self.large_icon_layout_key = None;
+        self.large_icon_list_state.reset(0);
+    }
+
+    pub(super) fn schedule_sidebar_group_capacities(&mut self, cx: &mut Context<Self>) {
+        let Some(group) = self.sidebar_group_view.as_mut() else {
+            return;
+        };
+        group.capacity_generation = group.capacity_generation.wrapping_add(1);
+        let generation = group.capacity_generation;
+        let kind = group.kind;
+        let paths = group.capacity_paths();
+        group.capacity_task = None;
+        if paths.is_empty() {
+            return;
+        }
+
+        let task = cx.spawn(async move |this, cx| {
+            let capacities = cx
+                .background_executor()
+                .spawn(async move { query_drive_capacities(paths) })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                let Some(group) = explorer.sidebar_group_view.as_mut() else {
+                    return;
+                };
+                if group.kind != kind || group.capacity_generation != generation {
+                    return;
+                }
+                group.capacity_task = None;
+                group.capacities = capacities;
+                cx.notify();
+            });
+        });
+        if let Some(group) = self.sidebar_group_view.as_mut() {
+            group.capacity_task = Some(task);
+        }
+    }
+
+    pub(super) fn refresh_sidebar_group_view(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_group_view.is_none() {
+            return;
+        }
+        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+        self.rebuild_active_sidebar_group_items(true);
+        self.schedule_sidebar_group_capacities(cx);
     }
 
     fn apply_directory_load_result(
@@ -1741,7 +1858,15 @@ impl ExplorerView {
         let sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
         if sections != self.sidebar_sections {
             self.sidebar_sections = sections;
+            if self.is_sidebar_group_view() {
+                self.rebuild_active_sidebar_group_items(true);
+                self.schedule_sidebar_group_capacities(cx);
+            }
             cx.notify();
+        }
+
+        if self.is_sidebar_group_view() {
+            return;
         }
 
         let Some(root) = crate::explorer::portable_devices::device_root_for_path(&self.path) else {
@@ -1758,7 +1883,10 @@ impl ExplorerView {
     }
 
     pub(super) fn tab_label(&self) -> String {
-        tab_label_for_path(&self.path)
+        self.active_sidebar_group()
+            .map(sidebar_group_label)
+            .map(str::to_owned)
+            .unwrap_or_else(|| tab_label_for_path(&self.path))
     }
 
     pub(super) fn has_active_file_operation(&self) -> bool {

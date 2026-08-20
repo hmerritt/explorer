@@ -38,6 +38,7 @@ mod scrollbar;
 mod search;
 mod selection;
 mod sidebar;
+mod sidebar_group_view;
 mod sorting;
 mod tabs;
 #[cfg(test)]

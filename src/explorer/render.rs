@@ -81,7 +81,8 @@ use crate::explorer::{
         drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, image_icon, large_file_icon_for_path_sized, nav_icon_font,
-        network_drive_icon, network_group_icon, pinned_group_icon, portable_device_icon,
+        network_drive_icon, network_drive_icon_sized, network_group_icon, pinned_group_icon,
+        portable_device_icon, portable_device_icon_sized,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -101,6 +102,7 @@ use crate::explorer::{
     search::search_text_element,
     selection::SelectionModifiers,
     sidebar::{SidebarItem, SidebarItemKind},
+    sidebar_group_view::{drive_capacity_text, used_capacity_fraction},
     text_hover_preview::{
         HoverPreviewKind, TEXT_HOVER_PREVIEW_LINE_HEIGHT, TEXT_HOVER_PREVIEW_PADDING,
         TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
@@ -142,6 +144,16 @@ const SIDEBAR_ROW_BG: u32 = 0xffffff;
 const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
 const SIDEBAR_ROW_HOVER_BG: u32 = 0xe5f3ff;
 const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 6.0;
+const SIDEBAR_GROUP_VIEW_PADDING: f32 = 20.0;
+const SIDEBAR_GROUP_VIEW_GAP: f32 = 12.0;
+const SIDEBAR_GROUP_DRIVE_TILE_WIDTH: f32 = 280.0;
+const SIDEBAR_GROUP_DRIVE_TILE_HEIGHT: f32 = 76.0;
+const SIDEBAR_GROUP_DRIVE_ICON_SIZE: f32 = 48.0;
+const SIDEBAR_GROUP_DRIVE_DETAILS_GAP: f32 = 10.0;
+const SIDEBAR_GROUP_CAPACITY_BAR_WIDTH: f32 = 196.0;
+const SIDEBAR_GROUP_CAPACITY_BAR_HEIGHT: f32 = 10.0;
+const SIDEBAR_GROUP_CAPACITY_BLUE: u32 = 0x0078d7;
+const SIDEBAR_GROUP_CAPACITY_GREY: u32 = 0xe5e5e5;
 const FILE_COLUMN_RESIZE_HIT_WIDTH: f32 = 6.0;
 const FILE_COLUMN_HEADER_HOVER_BG: u32 = 0xd9ebf9;
 const FILE_SORT_CHEVRON_ICON_SIZE: f32 = 11.0;
@@ -354,13 +366,15 @@ impl ExplorerView {
     }
 
     fn render_navbar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let breadcrumb = visible_breadcrumb_for_path(
-            &self.path,
-            &self.filesystem_name,
-            directory_bar_available_width(f32::from(window.bounds().size.width)),
-            &self.font,
-            window,
-        );
+        let breadcrumb = (!self.is_sidebar_group_view()).then(|| {
+            visible_breadcrumb_for_path(
+                &self.path,
+                &self.filesystem_name,
+                directory_bar_available_width(f32::from(window.bounds().size.width)),
+                &self.font,
+                window,
+            )
+        });
 
         div()
             .flex()
@@ -411,19 +425,26 @@ impl ExplorerView {
                 true,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
-                    this.refresh_with_entry_metadata_and_search_resolution(cx);
+                    if this.is_sidebar_group_view() {
+                        this.refresh_sidebar_group_view(cx);
+                    } else {
+                        this.refresh_with_entry_metadata_and_search_resolution(cx);
+                    }
                     cx.notify();
                 }),
             ))
             .child(if self.address_bar_is_editing() {
                 editable_directory_bar(self.active_address_focus_handle(), cx)
             } else {
-                directory_bar(
-                    breadcrumb,
-                    self.directory_bar_hovered,
-                    self.directory_bar_hover_generation,
-                    cx,
-                )
+                match breadcrumb {
+                    Some(breadcrumb) => directory_bar(
+                        breadcrumb,
+                        self.directory_bar_hovered,
+                        self.directory_bar_hover_generation,
+                        cx,
+                    ),
+                    None => sidebar_group_directory_bar(cx),
+                }
             })
             .child(self.render_search_bar(cx))
     }
@@ -522,17 +543,19 @@ impl ExplorerView {
                         this.truncate().child(SharedString::from(text))
                     }),
             )
-            .child(search_bar_icon_button(
-                "recursive-search-toggle",
-                RECURSIVE_SEARCH_ICON,
-                "Search subfolders",
-                self.recursive_search_is_enabled(),
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.toggle_recursive_search(cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            ))
+            .when(!self.is_sidebar_group_view(), |this| {
+                this.child(search_bar_icon_button(
+                    "recursive-search-toggle",
+                    RECURSIVE_SEARCH_ICON,
+                    "Search subfolders",
+                    self.recursive_search_is_enabled(),
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_recursive_search(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
+            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -554,8 +577,9 @@ impl ExplorerView {
         let can_rename = self.can_start_selected_rename();
         let can_extract = self.selected_archive_paths().is_some();
         let can_mount = self.selected_mountable_image_path().is_some();
+        let read_only_group = self.is_sidebar_group_view();
         let clipboard = cx.read_from_clipboard();
-        let can_paste = clipboard_item_can_paste(clipboard.as_ref());
+        let can_paste = !read_only_group && clipboard_item_can_paste(clipboard.as_ref());
 
         div()
             .flex()
@@ -596,6 +620,7 @@ impl ExplorerView {
                 Some(utility_new_icon().into_any_element()),
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
+                !read_only_group,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
                     this.cancel_pending_click_rename();
@@ -613,7 +638,7 @@ impl ExplorerView {
                 "utility-cut",
                 CUT_ICON.clone(),
                 "Cut",
-                has_selection,
+                has_selection && !read_only_group,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
                     this.open_utility_menu = None;
@@ -673,7 +698,7 @@ impl ExplorerView {
                 "utility-delete",
                 DELETE_ICON.clone(),
                 "Delete",
-                has_selection,
+                has_selection && !read_only_group,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
                     this.open_utility_menu = None;
@@ -690,6 +715,7 @@ impl ExplorerView {
                 Some(utility_view_icon().into_any_element()),
                 "View",
                 self.open_utility_menu == Some(UtilityMenu::View),
+                !read_only_group,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
                     this.cancel_pending_click_rename();
@@ -1841,6 +1867,7 @@ impl ExplorerView {
         expanded: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let is_current = self.active_sidebar_group() == Some(kind);
         let chevron = if expanded {
             SIDEBAR_GROUP_CHEVRON_DOWN
         } else {
@@ -1858,20 +1885,36 @@ impl ExplorerView {
             .px(px(4.0))
             .rounded(px(4.0))
             .cursor_default()
-            .hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
+            .bg(rgb(if is_current {
+                SIDEBAR_ROW_CURRENT_BG
+            } else {
+                SIDEBAR_ROW_BG
+            }))
+            .when(!is_current, |this| {
+                this.hover(|style| style.bg(rgb(SIDEBAR_ROW_HOVER_BG)))
+            })
             .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let expanded = !expanded;
-                if crate::settings::set_sidebar_group_expanded(kind, expanded, cx) {
-                    set_local_sidebar_group_expanded(
-                        &mut this.sidebar_settings.expanded_groups,
-                        kind,
-                        expanded,
-                    );
-                }
+                this.close_context_menu();
+                this.navigate_to_sidebar_group(kind, cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                    let expanded = !expanded;
+                    if crate::settings::set_sidebar_group_expanded(kind, expanded, cx) {
+                        set_local_sidebar_group_expanded(
+                            &mut this.sidebar_settings.expanded_groups,
+                            kind,
+                            expanded,
+                        );
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -2581,6 +2624,229 @@ impl ExplorerView {
         )
     }
 
+    fn render_sidebar_group_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(group) = self.sidebar_group_view.as_ref() else {
+            return div().into_any_element();
+        };
+        let kind = group.kind;
+        let items = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                group.item_for_path(&entry.path).cloned().map(|item| {
+                    let capacity = group.capacities.get(&entry.path).copied();
+                    (entry.clone(), item, capacity)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let tile_width = if kind == SidebarGroupKind::Pinned {
+            LARGE_ICON_TILE_WIDTH
+        } else {
+            SIDEBAR_GROUP_DRIVE_TILE_WIDTH
+        };
+        let viewport_width =
+            (self.list_viewport_width(window) - SIDEBAR_GROUP_VIEW_PADDING * 2.0).max(tile_width);
+        let columns = ((viewport_width + SIDEBAR_GROUP_VIEW_GAP)
+            / (tile_width + SIDEBAR_GROUP_VIEW_GAP))
+            .floor()
+            .max(1.0) as usize;
+        self.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            columns,
+            SIDEBAR_GROUP_VIEW_GAP,
+            vec![
+                if kind == SidebarGroupKind::Pinned {
+                    LARGE_ICON_TILE_HEIGHT
+                } else {
+                    SIDEBAR_GROUP_DRIVE_TILE_HEIGHT
+                };
+                items.len()
+            ],
+        ));
+
+        if items.is_empty() {
+            let message = if self.search_is_active() {
+                SEARCH_NO_MATCHES_MESSAGE
+            } else {
+                "This group is empty."
+            };
+            return div()
+                .size_full()
+                .child(self.render_empty_folder(message, cx))
+                .into_any_element();
+        }
+
+        let children = items
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (entry, item, capacity))| {
+                if kind == SidebarGroupKind::Pinned {
+                    self.render_sidebar_group_large_icon(ix, entry, item, cx)
+                } else {
+                    self.render_sidebar_group_drive_tile(ix, entry, item, capacity, cx)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .id("explorer-sidebar-group-view")
+            .debug_selector(|| "explorer-sidebar-group-view".to_owned())
+            .size_full()
+            .overflow_y_scroll()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
+                this.clear_selection();
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_start()
+                    .content_start()
+                    .gap(px(SIDEBAR_GROUP_VIEW_GAP))
+                    .p(px(SIDEBAR_GROUP_VIEW_PADDING))
+                    .children(children),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar_group_large_icon(
+        &mut self,
+        ix: usize,
+        entry: FileEntry,
+        item: SidebarItem,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.entry_is_selected(ix);
+        let mut tile = div()
+            .id(("explorer-sidebar-group-entry", ix))
+            .debug_selector(move || format!("explorer-sidebar-group-entry-{ix}"))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_start()
+            .w(px(LARGE_ICON_TILE_WIDTH))
+            .h(px(LARGE_ICON_TILE_HEIGHT))
+            .pt(px(4.0))
+            .border_1()
+            .border_color(rgb(if selected { 0x000000 } else { 0xffffff }))
+            .bg(rgb(if selected {
+                FILE_ENTRY_SELECTED_BG
+            } else {
+                FILE_ENTRY_BG
+            }))
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(rgb(FILE_ENTRY_HOVER_BG)))
+            })
+            .cursor_default()
+            .child(sidebar_group_item_icon_sized(&item, LARGE_ICON_SIZE))
+            .child(
+                div()
+                    .mt(px(LARGE_ICON_TEXT_TOP_GAP))
+                    .w_full()
+                    .px(px(4.0))
+                    .overflow_hidden()
+                    .text_center()
+                    .text_size(px(LARGE_ICON_TEXT_SIZE))
+                    .line_height(px(LARGE_ICON_TEXT_LINE_HEIGHT))
+                    .child(SharedString::from(item.label)),
+            );
+        tile = add_entry_primary_click(tile, entry.clone(), EntryClickTarget::Row, cx);
+        tile = add_entry_context_menu(tile, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
+        tile = add_entry_middle_click(tile, entry, cx);
+        tile.into_any_element()
+    }
+
+    fn render_sidebar_group_drive_tile(
+        &mut self,
+        ix: usize,
+        entry: FileEntry,
+        item: SidebarItem,
+        capacity: Option<crate::explorer::sidebar_group_view::DriveCapacity>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.entry_is_selected(ix);
+        let mut tile = div()
+            .id(("explorer-sidebar-group-drive", ix))
+            .debug_selector(move || format!("explorer-sidebar-group-drive-{ix}"))
+            .flex()
+            .flex_row()
+            .items_center()
+            .w(px(SIDEBAR_GROUP_DRIVE_TILE_WIDTH))
+            .h(px(SIDEBAR_GROUP_DRIVE_TILE_HEIGHT))
+            .px(px(8.0))
+            .border_1()
+            .border_color(rgb(if selected { 0x000000 } else { 0xffffff }))
+            .bg(rgb(if selected {
+                FILE_ENTRY_SELECTED_BG
+            } else {
+                FILE_ENTRY_BG
+            }))
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(rgb(FILE_ENTRY_HOVER_BG)))
+            })
+            .cursor_default()
+            .child(sidebar_group_item_icon_sized(
+                &item,
+                SIDEBAR_GROUP_DRIVE_ICON_SIZE,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .min_w(px(0.0))
+                    .ml(px(SIDEBAR_GROUP_DRIVE_DETAILS_GAP))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x1f1f1f))
+                            .child(SharedString::from(item.label)),
+                    )
+                    .when_some(capacity, |this, capacity| {
+                        let used_width =
+                            SIDEBAR_GROUP_CAPACITY_BAR_WIDTH * used_capacity_fraction(capacity);
+                        this.child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("explorer-sidebar-group-capacity-{ix}")
+                                })
+                                .relative()
+                                .w(px(SIDEBAR_GROUP_CAPACITY_BAR_WIDTH))
+                                .h(px(SIDEBAR_GROUP_CAPACITY_BAR_HEIGHT))
+                                .mt(px(6.0))
+                                .bg(rgb(SIDEBAR_GROUP_CAPACITY_GREY))
+                                .border_1()
+                                .border_color(rgb(0xb8b8b8))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .bottom(px(0.0))
+                                        .w(px(used_width))
+                                        .bg(rgb(SIDEBAR_GROUP_CAPACITY_BLUE)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(3.0))
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0x595959))
+                                .child(SharedString::from(drive_capacity_text(capacity))),
+                        )
+                    }),
+            );
+        tile = add_entry_primary_click(tile, entry.clone(), EntryClickTarget::Row, cx);
+        tile = add_entry_context_menu(tile, entry.clone(), EntryContextMenuTarget::WholeEntry, cx);
+        tile = add_entry_middle_click(tile, entry, cx);
+        tile.into_any_element()
+    }
+
     fn render_list(&mut self, cx: &mut Context<Self>) -> Div {
         let has_horizontal_scrollbar = self.horizontal_scrollbar_metrics().is_some();
 
@@ -3003,6 +3269,27 @@ impl ExplorerView {
     }
 }
 
+fn sidebar_group_directory_bar(cx: &mut Context<ExplorerView>) -> AnyElement {
+    div()
+        .id("directory-bar")
+        .debug_selector(|| "directory-bar".to_owned())
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(DIRECTORY_BAR_HEIGHT))
+        .flex_1()
+        .overflow_hidden()
+        .rounded(px(DIRECTORY_BAR_RADIUS))
+        .bg(rgb(0xfdfdfd))
+        .px(px(DIRECTORY_BAR_HORIZONTAL_PADDING))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.start_address_bar_edit(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
 fn search_bar_icon_button(
     id: &'static str,
     icon: &'static str,
@@ -3042,11 +3329,12 @@ fn search_bar_icon_button(
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
-        let key_context = if self.view_mode == FileViewMode::LargeIcons {
-            crate::explorer::EXPLORER_LARGE_ICONS_KEY_CONTEXT
-        } else {
-            "Explorer"
-        };
+        let key_context =
+            if self.is_sidebar_group_view() || self.view_mode == FileViewMode::LargeIcons {
+                crate::explorer::EXPLORER_LARGE_ICONS_KEY_CONTEXT
+            } else {
+                "Explorer"
+            };
         let entity = cx.entity();
         let window_width = f32::from(window.bounds().size.width);
         let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
@@ -3236,40 +3524,47 @@ impl Render for ExplorerView {
                             .min_w(px(0.0))
                             .h_full()
                             .overflow_hidden()
-                            .when(self.view_mode == FileViewMode::Details, |this| {
-                                this.child(self.render_header(window, cx))
-                            })
+                            .when(
+                                !self.is_sidebar_group_view()
+                                    && self.view_mode == FileViewMode::Details,
+                                |this| this.child(self.render_header(window, cx)),
+                            )
                             .child(
-                                match self.content_branch() {
-                                    ExplorerContentBranch::Error => div().child(
-                                        div()
-                                            .p_4()
-                                            .text_size(px(14.0))
-                                            .text_color(rgb(0x6f1d1d))
-                                            .child(self.read_error.clone().unwrap_or_default()),
-                                    ),
-                                    ExplorerContentBranch::Loading => div().child(
-                                        self.render_empty_folder(FOLDER_LOADING_MESSAGE, cx),
-                                    ),
-                                    ExplorerContentBranch::Empty => div()
-                                        .child(self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx)),
-                                    ExplorerContentBranch::SearchWorking => {
-                                        div().child(self.render_empty_folder_with_detail(
-                                            None,
-                                            Some(search_working_detail(
-                                                self.recursive_search_progress(),
-                                            )),
-                                            cx,
-                                        ))
-                                    }
-                                    ExplorerContentBranch::NoSearchMatches => div().child(
-                                        self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
-                                    ),
-                                    ExplorerContentBranch::List => {
-                                        if self.view_mode == FileViewMode::LargeIcons {
-                                            div().child(self.render_large_icons(window, cx))
-                                        } else {
-                                            div().child(self.render_list(cx))
+                                if self.is_sidebar_group_view() {
+                                    div().child(self.render_sidebar_group_view(window, cx))
+                                } else {
+                                    match self.content_branch() {
+                                        ExplorerContentBranch::Error => div().child(
+                                            div()
+                                                .p_4()
+                                                .text_size(px(14.0))
+                                                .text_color(rgb(0x6f1d1d))
+                                                .child(self.read_error.clone().unwrap_or_default()),
+                                        ),
+                                        ExplorerContentBranch::Loading => div().child(
+                                            self.render_empty_folder(FOLDER_LOADING_MESSAGE, cx),
+                                        ),
+                                        ExplorerContentBranch::Empty => div().child(
+                                            self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx),
+                                        ),
+                                        ExplorerContentBranch::SearchWorking => {
+                                            div().child(self.render_empty_folder_with_detail(
+                                                None,
+                                                Some(search_working_detail(
+                                                    self.recursive_search_progress(),
+                                                )),
+                                                cx,
+                                            ))
+                                        }
+                                        ExplorerContentBranch::NoSearchMatches => div().child(
+                                            self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
+                                        ),
+                                        ExplorerContentBranch::List => {
+                                            if self.view_mode == FileViewMode::LargeIcons {
+                                                div().child(self.render_large_icons(window, cx))
+                                            } else {
+                                                div().child(self.render_list(cx))
+                                            }
                                         }
                                     }
                                 }
@@ -3558,6 +3853,23 @@ fn file_entry_background_color(
 
 fn sidebar_item_icon(item: &SidebarItem) -> AnyElement {
     sidebar_item_kind_icon_for_path(item.kind, &item.path)
+}
+
+fn sidebar_group_item_icon_sized(item: &SidebarItem, size: f32) -> AnyElement {
+    match item.kind {
+        SidebarItemKind::Directory(kind) => directory_kind_icon_sized(kind, size),
+        SidebarItemKind::CustomDirectory => folder_icon_sized(size).into_any_element(),
+        SidebarItemKind::Drive if drive_root_is_ejectable(&item.path) => {
+            drive_disc_icon_sized_for_path(&item.path, size)
+        }
+        SidebarItemKind::Drive => directory_kind_icon_sized(DirectoryKind::Drive, size),
+        SidebarItemKind::DriveWindows => {
+            directory_kind_icon_sized(DirectoryKind::DriveWindows, size)
+        }
+        SidebarItemKind::DriveNetwork(state) => network_drive_icon_sized(state, size),
+        SidebarItemKind::PortableDevice => portable_device_icon_sized(size).into_any_element(),
+        SidebarItemKind::DriveWsl => drive_wsl_icon_sized_for_path(&item.path, size),
+    }
 }
 
 fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyElement {
@@ -4388,9 +4700,10 @@ fn utility_text_button(
     left_icon: Option<AnyElement>,
     label: &'static str,
     is_open: bool,
+    enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    utility_text_button_base(id, left_icon, label, is_open, true, on_click)
+    utility_text_button_base(id, left_icon, label, is_open, true, enabled, on_click)
 }
 
 fn utility_action_button(
@@ -4399,7 +4712,7 @@ fn utility_action_button(
     label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    utility_text_button_base(id, left_icon, label, false, false, on_click)
+    utility_text_button_base(id, left_icon, label, false, false, true, on_click)
 }
 
 fn utility_text_button_base(
@@ -4408,6 +4721,7 @@ fn utility_text_button_base(
     label: &'static str,
     is_open: bool,
     show_chevron: bool,
+    enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
@@ -4427,9 +4741,12 @@ fn utility_text_button_base(
         } else {
             rgb(0xf8f8f8)
         })
-        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
-        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-        .on_click(on_click)
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+                .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+                .on_click(on_click)
+        })
+        .when(!enabled, |this| this.opacity(0.4))
         .when_some(left_icon, |this, icon| this.child(icon))
         .child(
             div()
@@ -8858,7 +9175,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_sidebar_group_header_persists_and_repaints(cx: &mut gpui::TestAppContext) {
+    fn right_clicking_sidebar_group_header_persists_and_repaints(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
@@ -8889,8 +9206,8 @@ mod tests {
             .debug_bounds("explorer-sidebar-group-drives")
             .expect("drive group bounds")
             .center();
-        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_some());
@@ -8908,6 +9225,77 @@ mod tests {
                 .expanded_groups
                 .contains(&SidebarGroupKind::Drives)
         }));
+    }
+
+    #[gpui::test]
+    fn left_clicking_sidebar_group_header_opens_group_without_expanding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let drive_path = temp.path().join("drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.items = Vec::new();
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![SidebarItem {
+                    label: "Drive".to_owned(),
+                    path: drive_path,
+                    kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drive group bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("explorer-sidebar-group-view").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-group-drive-0").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Drives));
+            assert_eq!(view.tab_label(), "Drives");
+            assert!(!view.can_go_up());
+            assert!(
+                !view
+                    .sidebar_settings
+                    .expanded_groups
+                    .contains(&SidebarGroupKind::Drives)
+            );
+        });
+
+        let address_position = cx
+            .debug_bounds("directory-bar")
+            .expect("blank directory bar bounds")
+            .center();
+        cx.simulate_mouse_down(address_position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(address_position, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let address = view.active_address_bar.as_ref().expect("address edit");
+            assert_eq!(address.content, "");
+            assert!(
+                address
+                    .suggestions
+                    .iter()
+                    .all(|suggestion| suggestion.path.starts_with(temp.path()))
+            );
+        });
     }
 
     #[cfg(target_os = "windows")]

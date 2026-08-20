@@ -1,6 +1,10 @@
 ## 1
 
-- Implement a new view for sidebar groups. Change click to toggle sidebar group expanded/closed visibility to right-click. Clicking a sidebar group should open a temporary view in the main panel to show the items in the group. Drives + Network groups should mirror Windows Explorer's This PC tiled view, with drive capacity and usage shown as a grey/blue bar, with the text usage below "800 GB free of 2.1 TB". For Pinned, which is directories not drives, render Large Icons view. In the address bar show nothing. No breadcrumb, or address. A user can still click into it and type/paste an address if they want to. Address bar dropdown suggestions can render what is in the group as possible paths.
+- Sidebar group view
+    - Previous path remains active leaving two sidebar items highlighted (should only ever highlight group)
+    - Address bar suggestions also show for previous path, should be nonthing while in the group view
+    - Network drives, when selected from the sidebar directly, will try to connect if they are disconnected, but from the group view, it navigates without connecting and shows an error.
+- "Open with" contextmenu error: "Could not open Screenshot 2026-08-18 214121 .png: The system cannot find the file specified, (Ox80070002)"
 - Improve linux install.sh script (see aura's install script)
 - Bug when an item (or multiple) is selected explorer sometimes freezes and enters a "not responding" state in Windows for a second or two before coming back
 - Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).

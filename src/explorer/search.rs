@@ -209,6 +209,12 @@ impl ExplorerView {
     }
 
     pub(super) fn search_placeholder(&self) -> String {
+        if let Some(kind) = self.active_sidebar_group() {
+            return format!(
+                "Search {}",
+                crate::explorer::sidebar_group_view::sidebar_group_label(kind)
+            );
+        }
         let folder = self
             .path
             .file_name()
@@ -248,6 +254,12 @@ impl ExplorerView {
         &mut self,
         selected_paths: &[std::path::PathBuf],
     ) {
+        if self.is_sidebar_group_view() {
+            self.search.recursive_results_active = false;
+            self.recursive_file_sort_override = None;
+            self.rebuild_sidebar_group_entries(selected_paths);
+            return;
+        }
         self.search.recursive_results_active = false;
         self.recursive_file_sort_override = None;
         self.entries = filtered_entries(&self.all_entries, &self.search.content);
@@ -276,6 +288,11 @@ impl ExplorerView {
     }
 
     pub(super) fn toggle_recursive_search(&mut self, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            self.search.recursive_enabled = false;
+            self.refresh_search_filter(cx);
+            return;
+        }
         let selected_paths = self.selected_paths();
         self.search.recursive_enabled = !self.search.recursive_enabled;
         self.search.recursive_generation = self.search.recursive_generation.wrapping_add(1);
@@ -284,6 +301,11 @@ impl ExplorerView {
     }
 
     fn set_recursive_search_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            self.search.recursive_enabled = false;
+            self.refresh_search_filter(cx);
+            return;
+        }
         if self.search.recursive_enabled == enabled {
             return;
         }
@@ -767,6 +789,11 @@ impl ExplorerView {
         selected_paths: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
+        if self.is_sidebar_group_view() {
+            self.cancel_recursive_search();
+            self.rebuild_sidebar_group_entries(selected_paths);
+            return;
+        }
         if self.search.recursive_enabled {
             if !recursive_search_query_is_ready(&self.search.content) {
                 self.reset_recursive_search_below_minimum(selected_paths);

@@ -449,6 +449,10 @@ pub(super) fn portable_device_icon() -> AnyElement {
     image_sidebar_icon(PORTABLE_DEVICE_ICON.clone())
 }
 
+pub(super) fn portable_device_icon_sized(size: f32) -> AnyElement {
+    image_icon(PORTABLE_DEVICE_ICON.clone(), size, size)
+}
+
 pub(super) fn drive_disc_icon_for_path(path: &Path) -> AnyElement {
     image_sidebar_icon(drive_disc_image_for_path(path))
 }
@@ -490,6 +494,10 @@ pub(super) fn drive_wsl_icon_sized_for_path(path: &Path, size: f32) -> AnyElemen
 
 pub(super) fn network_drive_icon(state: NetworkDriveState) -> AnyElement {
     image_sidebar_icon(network_drive_image_for_state(state))
+}
+
+pub(super) fn network_drive_icon_sized(state: NetworkDriveState, size: f32) -> AnyElement {
+    image_icon(network_drive_image_for_state(state), size, size)
 }
 
 fn network_drive_image_for_state(state: NetworkDriveState) -> Arc<Image> {

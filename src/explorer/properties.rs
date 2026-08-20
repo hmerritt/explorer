@@ -762,6 +762,9 @@ impl ExplorerView {
         }
 
         let paths = self.selected_or_current_property_paths();
+        if paths.is_empty() {
+            return;
+        }
         self.open_properties_for_paths(paths, window, cx);
         cx.notify();
     }
@@ -769,7 +772,11 @@ impl ExplorerView {
     fn selected_or_current_property_paths(&self) -> Vec<PathBuf> {
         let paths = self.selected_paths();
         if paths.is_empty() {
-            vec![self.path.clone()]
+            if self.is_sidebar_group_view() {
+                Vec::new()
+            } else {
+                vec![self.path.clone()]
+            }
         } else {
             paths
         }

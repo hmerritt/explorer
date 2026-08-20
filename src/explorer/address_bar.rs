@@ -535,10 +535,12 @@ impl ExplorerView {
         }
 
         let focus_handle = cx.focus_handle();
-        let mut address = AddressBarState::new(
-            self.address_text_for_path(&self.path),
-            Some(focus_handle.clone()),
-        );
+        let initial_text = if self.is_sidebar_group_view() {
+            String::new()
+        } else {
+            self.address_text_for_path(&self.path)
+        };
+        let mut address = AddressBarState::new(initial_text, Some(focus_handle.clone()));
         address.suggestions =
             folder_suggestions_for_input(&address.content, &self.path, self.entry_visibility());
 

@@ -10,11 +10,13 @@ use crate::explorer::{
     CloseTab, NewTab, NewWindow, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
-    icons::folder_icon,
+    icons::{
+        drive_wsl_icon, drives_group_icon, folder_icon, network_group_icon, pinned_group_icon,
+    },
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
 };
-use crate::settings::SettingsState;
+use crate::settings::{SettingsState, SidebarGroupKind};
 use crate::window_chrome::{
     MAC_TRAFFIC_LIGHT_PADDING, TITLEBAR_HEIGHT, WindowDragState, render_platform_window_frame,
     render_titlebar_drag_region, render_window_controls,
@@ -575,6 +577,7 @@ impl ExplorerTabs {
         let view = tab.view.read(cx);
         let label = SharedString::from(view.tab_label());
         let path = view.path().to_path_buf();
+        let sidebar_group = view.active_sidebar_group();
         let tab_id = tab.id;
         let is_dragging = self.dragging_tab == Some(tab_id);
         let entity = cx.entity();
@@ -638,6 +641,7 @@ impl ExplorerTabs {
             .child(tab_inner_contents(
                 label.clone(),
                 Some(&path),
+                sidebar_group,
                 can_close.then(|| close_tab_button(tab_id, cx)),
             ))
             .can_drop({
@@ -849,6 +853,7 @@ fn tab_preview_visual(
         .child(tab_inner_contents(
             label,
             Some(path),
+            None,
             Some(close_tab_glyph_visual().into_any_element()),
         ))
 }
@@ -856,6 +861,7 @@ fn tab_preview_visual(
 fn tab_inner_contents(
     label: SharedString,
     path: Option<&Path>,
+    sidebar_group: Option<SidebarGroupKind>,
     close_glyph: Option<AnyElement>,
 ) -> AnyElement {
     div()
@@ -866,7 +872,7 @@ fn tab_inner_contents(
         .min_w(px(0.0))
         .gap(px(TAB_ICON_GAP))
         .overflow_hidden()
-        .child(tab_icon(path))
+        .child(tab_icon(path, sidebar_group))
         .child(
             div()
                 .flex_1()
@@ -880,7 +886,16 @@ fn tab_inner_contents(
         .into_any_element()
 }
 
-fn tab_icon(path: Option<&Path>) -> AnyElement {
+fn tab_icon(path: Option<&Path>, sidebar_group: Option<SidebarGroupKind>) -> AnyElement {
+    if let Some(group) = sidebar_group {
+        return match group {
+            SidebarGroupKind::Pinned => pinned_group_icon(),
+            SidebarGroupKind::Drives => drives_group_icon(),
+            SidebarGroupKind::Network => network_group_icon(),
+            SidebarGroupKind::Wsl => drive_wsl_icon(),
+        };
+    }
+
     let Some(path) = path else {
         return folder_icon().into_any_element();
     };
@@ -1524,8 +1539,9 @@ mod tests {
                     ExplorerView::new_with_focus_handle_for_test(view_one_path, focus_one)
                 });
                 view_one.update(cx, |view, _| {
-                    view.back_stack = vec![ejected_history.clone(), history_one.clone()];
-                    view.forward_stack = vec![ejected_root.join("forward-one")];
+                    view.back_stack =
+                        vec![ejected_history.clone().into(), history_one.clone().into()];
+                    view.forward_stack = vec![ejected_root.join("forward-one").into()];
                 });
 
                 let focus_two = cx.focus_handle();
@@ -1534,8 +1550,8 @@ mod tests {
                     ExplorerView::new_with_focus_handle_for_test(view_two_path, focus_two)
                 });
                 view_two.update(cx, |view, _| {
-                    view.back_stack = vec![history_two.clone()];
-                    view.forward_stack = vec![ejected_root.join("forward-two")];
+                    view.back_stack = vec![history_two.clone().into()];
+                    view.forward_stack = vec![ejected_root.join("forward-two").into()];
                 });
 
                 tabs.tabs.push(ExplorerTab {
@@ -1566,20 +1582,22 @@ mod tests {
         cx.read_entity(&affected_views[0], |view, _| {
             assert_eq!(view.path, history_one);
             assert!(view.back_stack.is_empty());
-            assert!(
-                view.forward_stack
-                    .iter()
-                    .all(|path| !path.starts_with(&ejected_root))
-            );
+            assert!(view.forward_stack.iter().all(|location| match location {
+                crate::explorer::view::NavigationLocation::Directory(path) => {
+                    !path.starts_with(&ejected_root)
+                }
+                crate::explorer::view::NavigationLocation::SidebarGroup(_) => true,
+            }));
         });
         cx.read_entity(&affected_views[1], |view, _| {
             assert_eq!(view.path, history_two);
             assert!(view.back_stack.is_empty());
-            assert!(
-                view.forward_stack
-                    .iter()
-                    .all(|path| !path.starts_with(&ejected_root))
-            );
+            assert!(view.forward_stack.iter().all(|location| match location {
+                crate::explorer::view::NavigationLocation::Directory(path) => {
+                    !path.starts_with(&ejected_root)
+                }
+                crate::explorer::view::NavigationLocation::SidebarGroup(_) => true,
+            }));
         });
     }
 

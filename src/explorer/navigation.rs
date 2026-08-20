@@ -11,10 +11,13 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{default_start_path, local_drive_roots, path_is_same_or_descendant},
     selection::SelectionModifiers,
+    sidebar_group_view::SidebarGroupViewState,
     view::{
-        EntryClickSequence, ExplorerView, ExplorerViewEvent, MouseDownEntrySelection, ReloadMode,
+        EntryClickSequence, ExplorerView, ExplorerViewEvent, MouseDownEntrySelection,
+        NavigationLocation, ReloadMode,
     },
 };
+use crate::settings::SidebarGroupKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HistoryMode {
@@ -176,6 +179,7 @@ impl ExplorerView {
         let _timing_batch = crate::debug_options::NavTimingBatch::start();
         let total_started = Instant::now();
         let original_path = self.path.clone();
+        let original_location = self.current_navigation_location();
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!(
@@ -184,7 +188,7 @@ impl ExplorerView {
             ),
         );
 
-        if path == self.path {
+        if path == self.path && !self.is_sidebar_group_view() {
             let reload_started = Instant::now();
             if select_after_load.is_empty() {
                 if let Some(cx) = cx.as_deref_mut() {
@@ -252,7 +256,7 @@ impl ExplorerView {
 
         let pre_reload_started = Instant::now();
         if matches!(history_mode, HistoryMode::Record) {
-            self.back_stack.push(self.path.clone());
+            self.back_stack.push(original_location);
             self.forward_stack.clear();
         }
 
@@ -261,6 +265,7 @@ impl ExplorerView {
             self.cancel_video_hover_preview(cx);
             self.cancel_text_hover_preview();
         }
+        self.sidebar_group_view = None;
         self.path = path;
         self.reset_view_mode_for_navigation();
         self.reset_search_for_navigation();
@@ -337,6 +342,40 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
+    }
+
+    pub(super) fn navigate_to_sidebar_group(
+        &mut self,
+        kind: SidebarGroupKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_sidebar_group() == Some(kind) {
+            self.refresh_sidebar_group_view(cx);
+            return;
+        }
+
+        self.back_stack.push(self.current_navigation_location());
+        self.forward_stack.clear();
+        self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
+        self.directory_load_task = None;
+        self.loading_path = None;
+        self.hide_live_entries_during_load = false;
+        self.directory_watcher = None;
+        self.cancel_image_thumbnail_extraction(cx);
+        self.cancel_video_hover_preview(cx);
+        self.cancel_text_hover_preview();
+        self.cancel_active_rename();
+        self.cancel_address_bar_edit();
+        self.reset_search_for_navigation();
+        self.clear_selection();
+        self.read_error = None;
+        self.clear_operation_notice();
+        self.codebase_summary = None;
+        self.git_status = None;
+        self.scroll_to_top();
+        self.sidebar_group_view = Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+        self.rebuild_sidebar_group_entries(&[]);
+        self.schedule_sidebar_group_capacities(cx);
     }
 
     #[cfg(target_os = "windows")]
@@ -472,16 +511,20 @@ impl ExplorerView {
     ) -> Option<PathBuf> {
         let mut target = None;
         while let Some(candidate) = self.back_stack.pop() {
-            if mounted_volume_redirect_candidate_is_valid(&candidate, ejected_root) {
-                target = Some(candidate);
-                break;
+            if let NavigationLocation::Directory(path) = candidate {
+                if mounted_volume_redirect_candidate_is_valid(&path, ejected_root) {
+                    target = Some(path);
+                    break;
+                }
             }
         }
 
-        self.back_stack
-            .retain(|path| !path_is_same_or_descendant(path, ejected_root));
-        self.forward_stack
-            .retain(|path| !path_is_same_or_descendant(path, ejected_root));
+        let retain_location = |location: &NavigationLocation| match location {
+            NavigationLocation::Directory(path) => !path_is_same_or_descendant(path, ejected_root),
+            NavigationLocation::SidebarGroup(_) => true,
+        };
+        self.back_stack.retain(retain_location);
+        self.forward_stack.retain(retain_location);
 
         target
             .or_else(|| {
@@ -497,42 +540,94 @@ impl ExplorerView {
 
     #[cfg(test)]
     pub(super) fn navigate_back(&mut self) {
-        if let Some(path) = self.back_stack.pop() {
-            self.forward_stack.push(self.path.clone());
-            self.navigate_to_directory(path, HistoryMode::Preserve);
+        if let Some(location) = self.back_stack.pop() {
+            self.forward_stack.push(self.current_navigation_location());
+            match location {
+                NavigationLocation::Directory(path) => {
+                    self.navigate_to_directory(path, HistoryMode::Preserve)
+                }
+                NavigationLocation::SidebarGroup(kind) => {
+                    self.sidebar_group_view =
+                        Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+                    self.reset_search_for_navigation();
+                    self.rebuild_sidebar_group_entries(&[]);
+                }
+            }
         }
     }
 
     pub(super) fn navigate_back_with_watcher(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.back_stack.pop() {
-            self.forward_stack.push(self.path.clone());
-            self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx);
+        if let Some(location) = self.back_stack.pop() {
+            self.forward_stack.push(self.current_navigation_location());
+            self.navigate_to_location_with_watcher(location, cx);
         }
     }
 
     #[cfg(test)]
     pub(super) fn navigate_forward(&mut self) {
-        if let Some(path) = self.forward_stack.pop() {
-            self.back_stack.push(self.path.clone());
-            self.navigate_to_directory(path, HistoryMode::Preserve);
+        if let Some(location) = self.forward_stack.pop() {
+            self.back_stack.push(self.current_navigation_location());
+            match location {
+                NavigationLocation::Directory(path) => {
+                    self.navigate_to_directory(path, HistoryMode::Preserve)
+                }
+                NavigationLocation::SidebarGroup(kind) => {
+                    self.sidebar_group_view =
+                        Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+                    self.reset_search_for_navigation();
+                    self.rebuild_sidebar_group_entries(&[]);
+                }
+            }
         }
     }
 
     pub(super) fn navigate_forward_with_watcher(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.forward_stack.pop() {
-            self.back_stack.push(self.path.clone());
-            self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx);
+        if let Some(location) = self.forward_stack.pop() {
+            self.back_stack.push(self.current_navigation_location());
+            self.navigate_to_location_with_watcher(location, cx);
+        }
+    }
+
+    fn navigate_to_location_with_watcher(
+        &mut self,
+        location: NavigationLocation,
+        cx: &mut Context<Self>,
+    ) {
+        match location {
+            NavigationLocation::Directory(path) => {
+                self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx)
+            }
+            NavigationLocation::SidebarGroup(kind) => {
+                self.directory_load_generation = self.directory_load_generation.wrapping_add(1);
+                self.directory_load_task = None;
+                self.loading_path = None;
+                self.directory_watcher = None;
+                self.reset_search_for_navigation();
+                self.clear_selection();
+                self.read_error = None;
+                self.clear_operation_notice();
+                self.sidebar_group_view =
+                    Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+                self.rebuild_sidebar_group_entries(&[]);
+                self.schedule_sidebar_group_capacities(cx);
+            }
         }
     }
 
     #[cfg(test)]
     pub(super) fn navigate_up(&mut self) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         if let Some(parent) = navigation_parent(&self.path) {
             self.navigate_to_directory(parent, HistoryMode::Record);
         }
     }
 
     pub(super) fn navigate_up_with_watcher(&mut self, cx: &mut Context<Self>) {
+        if self.is_sidebar_group_view() {
+            return;
+        }
         if let Some(parent) = navigation_parent(&self.path) {
             self.navigate_to_directory_with_watcher(parent, HistoryMode::Record, cx);
         }
@@ -547,7 +642,7 @@ impl ExplorerView {
     }
 
     pub(super) fn can_go_up(&self) -> bool {
-        navigation_parent(&self.path).is_some()
+        !self.is_sidebar_group_view() && navigation_parent(&self.path).is_some()
     }
 
     pub(super) fn normalize_entry_click_count(
@@ -864,6 +959,7 @@ mod tests {
     use crate::explorer::{
         context_menu::ContextMenuState,
         entry::{DirectoryLinkKind, EntryKind, FileEntry, ShellShortcutTargetKind},
+        sidebar::{SidebarItem, SidebarItemKind, SidebarSections},
         test_support::TempDir,
         view::{ExplorerView, ViewModeSelection},
     };
@@ -920,6 +1016,45 @@ mod tests {
         assert!(view.forward_stack.is_empty());
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].name, "inside.txt");
+    }
+
+    #[test]
+    fn sidebar_group_locations_participate_in_back_and_forward_history() {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child directory");
+        let drive = SidebarItem {
+            label: "Test drive".to_owned(),
+            path: temp.path().to_path_buf(),
+            kind: SidebarItemKind::Drive,
+            configured_index: None,
+        };
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.sidebar_sections = SidebarSections {
+            drives: vec![drive],
+            ..SidebarSections::default()
+        };
+        view.sidebar_group_view = Some(SidebarGroupViewState::new(
+            SidebarGroupKind::Drives,
+            &view.sidebar_sections,
+        ));
+        view.rebuild_sidebar_group_entries(&[]);
+
+        view.navigate_to_directory(child.clone(), HistoryMode::Record);
+
+        assert_eq!(
+            view.back_stack,
+            vec![NavigationLocation::SidebarGroup(SidebarGroupKind::Drives)]
+        );
+        assert!(!view.is_sidebar_group_view());
+
+        view.navigate_back();
+        assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Drives));
+        assert_eq!(view.forward_stack, vec![child.clone()]);
+
+        view.navigate_forward();
+        assert!(!view.is_sidebar_group_view());
+        assert_eq!(view.path, child);
     }
 
     #[test]
@@ -994,7 +1129,7 @@ mod tests {
         fs::create_dir_all(&newest_valid).expect("create newest history");
 
         let mut view = ExplorerView::new(current);
-        view.back_stack = vec![older.clone(), newest_valid.clone()];
+        view.back_stack = vec![older.clone().into(), newest_valid.clone().into()];
 
         let target = view
             .mounted_volume_eject_redirect_target_from(&ejected_root, Vec::new(), None)
@@ -1019,8 +1154,12 @@ mod tests {
         fs::create_dir_all(&retained_forward).expect("create retained forward history");
 
         let mut view = ExplorerView::new(current);
-        view.back_stack = vec![valid.clone(), ejected_history.clone(), missing];
-        view.forward_stack = vec![ejected_history, retained_forward.clone()];
+        view.back_stack = vec![
+            valid.clone().into(),
+            ejected_history.clone().into(),
+            missing.into(),
+        ];
+        view.forward_stack = vec![ejected_history.into(), retained_forward.clone().into()];
 
         let target = view
             .mounted_volume_eject_redirect_target_from(&ejected_root, Vec::new(), None)
@@ -1622,7 +1761,7 @@ mod tests {
         fs::create_dir_all(&child).expect("create child directory");
 
         let mut view = ExplorerView::new(temp.path().to_path_buf());
-        view.forward_stack.push(temp.path().join("forward"));
+        view.forward_stack.push(temp.path().join("forward").into());
 
         view.navigate_to_directory(child.clone(), HistoryMode::Record);
 
@@ -1865,8 +2004,8 @@ mod tests {
         let forward = temp.path().join("forward");
 
         let mut view = ExplorerView::new(child.clone());
-        view.back_stack.push(back.clone());
-        view.forward_stack.push(forward.clone());
+        view.back_stack.push(back.clone().into());
+        view.forward_stack.push(forward.clone().into());
 
         view.reload();
 
