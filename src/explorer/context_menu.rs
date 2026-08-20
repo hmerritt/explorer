@@ -825,6 +825,7 @@ fn windows_run_elevated_path(
         OsStr::new("runas"),
         None,
         false,
+        false,
         parent,
     );
     crate::explorer::windows_shell::execute_shell_request(&mut request)

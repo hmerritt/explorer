@@ -5,7 +5,10 @@ use windows::{
     Win32::{
         Foundation::HWND,
         UI::{
-            Shell::{SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, ShellExecuteExW},
+            Shell::{
+                SEE_MASK_CLASSKEY, SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
+                SHELLEXECUTEINFOW, ShellExecuteExW,
+            },
             WindowsAndMessaging::SW_SHOWNORMAL,
         },
     },
@@ -27,6 +30,22 @@ pub(super) fn null_terminated_wide(value: &OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
     value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn null_terminated_shell_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 pub(super) fn shell_execute_result(result: windows::core::Result<()>) -> io::Result<bool> {
@@ -64,13 +83,14 @@ pub(super) fn shell_execute_file_request(
     verb: &OsStr,
     class: Option<&OsStr>,
     no_ui: bool,
+    no_async: bool,
     parent: Option<HWND>,
 ) -> ShellExecuteRequest {
     use std::mem::size_of;
 
     let verb = null_terminated_wide(verb);
     let class = class.map(null_terminated_wide);
-    let file = null_terminated_wide(path.as_os_str());
+    let file = null_terminated_shell_path(path);
     let mut execute_info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         hwnd: parent.unwrap_or_default(),
@@ -86,6 +106,9 @@ pub(super) fn shell_execute_file_request(
     if no_ui {
         execute_info.fMask |= SEE_MASK_FLAG_NO_UI;
     }
+    if no_async {
+        execute_info.fMask |= SEE_MASK_NOASYNC;
+    }
 
     ShellExecuteRequest {
         _verb: verb,
@@ -95,8 +118,44 @@ pub(super) fn shell_execute_file_request(
     }
 }
 
+pub(super) fn shell_execute_file_with_class_key_request(
+    path: &Path,
+    verb: &OsStr,
+    class_key: windows::Win32::System::Registry::HKEY,
+    no_ui: bool,
+    no_async: bool,
+    parent: Option<HWND>,
+) -> ShellExecuteRequest {
+    let mut request = shell_execute_file_request(path, verb, None, no_ui, no_async, parent);
+    request.execute_info.fMask |= SEE_MASK_CLASSKEY;
+    request.execute_info.hkeyClass = class_key;
+    request
+}
+
 pub(super) fn execute_shell_request(request: &mut ShellExecuteRequest) -> io::Result<bool> {
     shell_execute_result(unsafe { ShellExecuteExW(request.execute_info_mut()) })
+}
+
+pub(super) fn execute_shell_request_with_com(
+    request: &mut ShellExecuteRequest,
+) -> io::Result<bool> {
+    use windows::Win32::{
+        Foundation::RPC_E_CHANGED_MODE,
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+    };
+
+    let initialization = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if initialization.is_err() && initialization != RPC_E_CHANGED_MODE {
+        return Err(io::Error::other(windows::core::Error::from_hresult(
+            initialization,
+        )));
+    }
+
+    let result = execute_shell_request(request);
+    if initialization.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 pub(super) fn create_shell_shortcut(shortcut: &Path, target: &Path) -> io::Result<()> {
@@ -122,5 +181,37 @@ pub(super) fn create_shell_shortcut(shortcut: &Path, target: &Path) -> io::Resul
             CoUninitialize();
         }
         result.map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_path_normalization_preserves_non_separator_utf16_units() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
+
+        let path = PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'/' as u16,
+            0xd800,
+            b'/' as u16,
+            b'x' as u16,
+        ]));
+
+        assert_eq!(
+            null_terminated_shell_path(&path),
+            vec![
+                b'C' as u16,
+                b':' as u16,
+                b'\\' as u16,
+                0xd800,
+                b'\\' as u16,
+                b'x' as u16,
+                0,
+            ]
+        );
     }
 }

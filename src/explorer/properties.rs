@@ -2201,15 +2201,49 @@ impl PropertiesDialog {
         };
 
         let before = snapshot.default_app.clone();
-        let parent = crate::explorer::windows_shell::parent_hwnd(window);
+        let target = self.target.clone();
+        let date_format = self.date_format.clone();
+        let parent =
+            crate::explorer::windows_shell::parent_hwnd(window).map(|parent| parent.0 as usize);
         let task = cx.spawn(async move |this, cx| {
-            let result =
-                crate::explorer::open_with::windows_change_default_application_for_file_with_parent(
-                    &path, parent,
-                );
+            let picker_result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move {
+                        crate::explorer::open_with::windows_run_default_application_picker(
+                            &path,
+                            parent.map(|parent| windows::Win32::Foundation::HWND(parent as *mut _)),
+                        )
+                    }
+                })
+                .await;
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    collect_property_snapshot_fast_with_date_format(target, &date_format)
+                })
+                .await;
+            let result = windows_default_app_change_outcome_after_picker(
+                &before,
+                picker_result,
+                snapshot
+                    .as_ref()
+                    .map(|snapshot| &snapshot.default_app)
+                    .map_err(String::as_str),
+            );
 
             let _ = this.update(cx, |dialog, cx| {
-                dialog.refresh_after_default_app_change(path, before, result, cx);
+                dialog.default_app_task = None;
+                if default_app_change_refreshes_file_type_icons(&result) {
+                    super::app_icons::invalidate_native_file_type_icons_for_path(&path, cx);
+                }
+                dialog.default_app_error =
+                    default_app_change_error(&path, &before, &result, snapshot.as_ref().ok());
+                if let Ok(snapshot) = snapshot {
+                    dialog.set_ready_snapshot(snapshot, cx);
+                }
+                cx.notify();
             });
         });
         self.default_app_task = Some(task);
@@ -2294,6 +2328,7 @@ impl PropertiesDialog {
         cx.notify();
     }
 
+    #[cfg(target_os = "macos")]
     fn refresh_after_default_app_change(
         &mut self,
         path: PathBuf,
@@ -9467,6 +9502,23 @@ fn windows_utf16_bytes(value: &str) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_default_app_change_outcome_after_picker<T: PartialEq>(
+    before: &Option<T>,
+    picker_result: std::io::Result<bool>,
+    refreshed_default_app: Result<&Option<T>, &str>,
+) -> std::io::Result<DefaultAppChangeOutcome> {
+    picker_result?;
+    let refreshed_default_app =
+        refreshed_default_app.map_err(|error| std::io::Error::other(error.to_owned()))?;
+
+    if refreshed_default_app == before {
+        Ok(DefaultAppChangeOutcome::Cancelled)
+    } else {
+        Ok(DefaultAppChangeOutcome::Changed)
+    }
+}
+
 fn default_app_change_error(
     path: &Path,
     before: &Option<PropertyDefaultApp>,
@@ -14408,6 +14460,49 @@ mod tests {
         assert!(!default_app_change_refreshes_file_type_icons(&Err(
             std::io::Error::other("denied")
         )));
+    }
+
+    #[test]
+    fn windows_default_app_picker_classifies_changed_and_cancelled_associations() {
+        let before = Some("Old Editor".to_owned());
+        let changed = Some("New Editor".to_owned());
+
+        assert_eq!(
+            windows_default_app_change_outcome_after_picker(&before, Ok(true), Ok(&changed))
+                .unwrap(),
+            DefaultAppChangeOutcome::Changed
+        );
+        assert_eq!(
+            windows_default_app_change_outcome_after_picker(&before, Ok(true), Ok(&before))
+                .unwrap(),
+            DefaultAppChangeOutcome::Cancelled
+        );
+        assert_eq!(
+            windows_default_app_change_outcome_after_picker(&before, Ok(false), Ok(&before))
+                .unwrap(),
+            DefaultAppChangeOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn windows_default_app_picker_propagates_launch_and_refresh_failures() {
+        let before = Some("Old Editor".to_owned());
+
+        let launch_error = windows_default_app_change_outcome_after_picker(
+            &before,
+            Err(std::io::Error::other("picker failed")),
+            Ok(&before),
+        )
+        .unwrap_err();
+        assert_eq!(launch_error.to_string(), "picker failed");
+
+        let refresh_error = windows_default_app_change_outcome_after_picker(
+            &before,
+            Ok(true),
+            Err("association refresh failed"),
+        )
+        .unwrap_err();
+        assert_eq!(refresh_error.to_string(), "association refresh failed");
     }
 
     #[test]

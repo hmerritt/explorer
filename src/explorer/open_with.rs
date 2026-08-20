@@ -292,7 +292,8 @@ impl ExplorerView {
 
         #[cfg(target_os = "windows")]
         {
-            let parent = crate::explorer::windows_shell::parent_hwnd(window);
+            let parent =
+                crate::explorer::windows_shell::parent_hwnd(window).map(|parent| parent.0 as usize);
             match intent {
                 OpenFileIntent::Default => {
                     let task = cx.spawn(async move |this, cx| {
@@ -314,7 +315,16 @@ impl ExplorerView {
                                     remaining,
                                 } => {
                                     results.extend(completed);
-                                    let result = windows_choose_application(&path, parent);
+                                    let picker_path = path.clone();
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            windows_choose_application(
+                                                &picker_path,
+                                                windows_parent_hwnd(parent),
+                                            )
+                                        })
+                                        .await;
                                     let completed =
                                         result.as_ref().is_ok_and(|outcome| outcome.is_opened());
                                     results.push((path, result));
@@ -341,15 +351,29 @@ impl ExplorerView {
                     self.open_with_task = Some(task);
                 }
                 OpenFileIntent::ChooseApplication => {
-                    let results = open_paths_until_not_opened(paths, |path| {
-                        windows_choose_application(path, parent)
+                    let task = cx.spawn(async move |this, cx| {
+                        let results = cx
+                            .background_executor()
+                            .spawn(async move {
+                                open_paths_until_not_opened(paths, |path| {
+                                    windows_choose_application(path, windows_parent_hwnd(parent))
+                                })
+                            })
+                            .await;
+
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.open_with_task = None;
+                            for (path, result) in results {
+                                if explorer.handle_open_with_result(&path, result) {
+                                    refresh_file_type_icons_after_default_app_may_have_changed(
+                                        &path, cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
                     });
-                    for (path, result) in results {
-                        if self.handle_open_with_result(&path, result) {
-                            refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
-                        }
-                    }
-                    cx.notify();
+                    self.open_with_task = Some(task);
                 }
             }
         }
@@ -521,56 +545,97 @@ fn windows_error_is_no_association(error: &io::Error) -> bool {
     error.raw_os_error() == Some(1155)
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn windows_open_with_outcome_from_shell_result(
-    result: io::Result<bool>,
-) -> io::Result<OpenWithOutcome> {
-    if result? {
-        Ok(OpenWithOutcome::opened(true))
-    } else {
-        Ok(OpenWithOutcome::Cancelled)
-    }
-}
+#[cfg(target_os = "windows")]
+const WINDOWS_OPEN_WITH_VERB: &str = "openas";
+#[cfg(target_os = "windows")]
+const WINDOWS_SET_DEFAULT_VERB: &str = "OpenWithSetDefaultOn";
 
-#[cfg(any(target_os = "windows", test))]
-fn windows_default_app_change_outcome_from_shell_result(
-    result: io::Result<bool>,
-) -> io::Result<DefaultAppChangeOutcome> {
-    if result? {
-        Ok(DefaultAppChangeOutcome::Changed)
-    } else {
-        Ok(DefaultAppChangeOutcome::Cancelled)
-    }
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+enum WindowsPickerVerb {
+    OpenWith,
+    SetDefault,
 }
 
 #[cfg(target_os = "windows")]
-const WINDOWS_OPEN_WITH_CLASS: &str = "Unknown";
-#[cfg(target_os = "windows")]
-const WINDOWS_OPEN_WITH_VERB: &str = "OpenWithSetDefaultOn";
+impl WindowsPickerVerb {
+    fn as_os_str(self) -> &'static std::ffi::OsStr {
+        match self {
+            Self::OpenWith => std::ffi::OsStr::new(WINDOWS_OPEN_WITH_VERB),
+            Self::SetDefault => std::ffi::OsStr::new(WINDOWS_SET_DEFAULT_VERB),
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
-fn windows_open_with_execute_request(
+fn windows_parent_hwnd(value: Option<usize>) -> Option<windows::Win32::Foundation::HWND> {
+    value.map(|value| windows::Win32::Foundation::HWND(value as *mut _))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_unknown_class_execute_request(
     path: &Path,
+    verb: WindowsPickerVerb,
+    class_key: windows::Win32::System::Registry::HKEY,
     parent: Option<windows::Win32::Foundation::HWND>,
 ) -> crate::explorer::windows_shell::ShellExecuteRequest {
-    use std::ffi::OsStr;
-
-    crate::explorer::windows_shell::shell_execute_file_request(
+    crate::explorer::windows_shell::shell_execute_file_with_class_key_request(
         path,
-        OsStr::new(WINDOWS_OPEN_WITH_VERB),
-        Some(OsStr::new(WINDOWS_OPEN_WITH_CLASS)),
+        verb.as_os_str(),
+        class_key,
+        false,
         true,
         parent,
     )
 }
 
 #[cfg(target_os = "windows")]
-fn windows_show_open_with_picker(
+fn windows_run_unknown_class_picker(
     path: &Path,
+    verb: WindowsPickerVerb,
     parent: Option<windows::Win32::Foundation::HWND>,
 ) -> io::Result<bool> {
-    let mut request = windows_open_with_execute_request(path, parent);
-    crate::explorer::windows_shell::execute_shell_request(&mut request)
+    use windows::{
+        Win32::System::Registry::{HKEY, HKEY_CLASSES_ROOT, KEY_READ, RegCloseKey, RegOpenKeyExW},
+        core::w,
+    };
+
+    let mut class_key = HKEY::default();
+    windows_registry_status(unsafe {
+        RegOpenKeyExW(
+            HKEY_CLASSES_ROOT,
+            w!("Unknown"),
+            None,
+            KEY_READ,
+            &mut class_key,
+        )
+    })?;
+
+    let mut request = windows_unknown_class_execute_request(path, verb, class_key, parent);
+    let picker_result =
+        crate::explorer::windows_shell::execute_shell_request_with_com(&mut request);
+    let close_result = windows_registry_status(unsafe { RegCloseKey(class_key) });
+
+    match picker_result {
+        Err(error) => Err(error),
+        Ok(completed) => {
+            close_result?;
+            Ok(completed)
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_open_with_outcome_after_picker<T: PartialEq>(
+    before: &Option<T>,
+    picker_result: io::Result<bool>,
+    after: &Option<T>,
+) -> io::Result<OpenWithOutcome> {
+    if !picker_result? {
+        return Ok(OpenWithOutcome::Cancelled);
+    }
+
+    Ok(OpenWithOutcome::opened(before != after))
 }
 
 #[cfg(target_os = "windows")]
@@ -587,17 +652,29 @@ fn windows_choose_application(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
 ) -> io::Result<OpenWithOutcome> {
-    windows_open_with_outcome_from_shell_result(windows_show_open_with_picker(path, parent))
+    let before = windows_default_application_for_file(path);
+    let picker_result = windows_run_unknown_class_picker(path, WindowsPickerVerb::OpenWith, parent);
+    let after = windows_default_application_for_file(path);
+    windows_open_with_outcome_after_picker(&before, picker_result, &after)
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn windows_change_default_application_for_file_with_parent(
+pub(super) fn windows_run_default_application_picker(
     path: &Path,
     parent: Option<windows::Win32::Foundation::HWND>,
-) -> io::Result<DefaultAppChangeOutcome> {
-    windows_default_app_change_outcome_from_shell_result(windows_show_open_with_picker(
-        path, parent,
-    ))
+) -> io::Result<bool> {
+    windows_run_unknown_class_picker(path, WindowsPickerVerb::SetDefault, parent)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_status(status: windows::Win32::Foundation::WIN32_ERROR) -> io::Result<()> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status.0 as i32))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1940,52 +2017,36 @@ mod tests {
         assert_eq!(windows_file_association_query(Path::new("Makefile")), None);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn windows_open_with_shell_result_true_maps_to_opened() {
+    fn windows_open_with_picker_reports_association_changes() {
+        let before = Some("Old Editor".to_owned());
+        let after = Some("New Editor".to_owned());
+
         assert_eq!(
-            windows_open_with_outcome_from_shell_result(Ok(true)).unwrap(),
+            windows_open_with_outcome_after_picker(&before, Ok(true), &after).unwrap(),
             OpenWithOutcome::opened(true)
         );
-    }
-
-    #[test]
-    fn windows_open_with_shell_result_false_maps_to_cancelled() {
         assert_eq!(
-            windows_open_with_outcome_from_shell_result(Ok(false)).unwrap(),
-            OpenWithOutcome::Cancelled
+            windows_open_with_outcome_after_picker(&before, Ok(true), &before).unwrap(),
+            OpenWithOutcome::opened(false)
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn windows_open_with_shell_result_error_propagates() {
-        let error =
-            windows_open_with_outcome_from_shell_result(Err(io::Error::other("shell failed")))
-                .unwrap_err();
+    fn windows_open_with_picker_maps_cancelled_and_error_results() {
+        let association = Some("Editor".to_owned());
+        let result =
+            windows_open_with_outcome_after_picker(&association, Ok(false), &association).unwrap();
 
-        assert_eq!(error.to_string(), "shell failed");
-    }
+        assert_eq!(result, OpenWithOutcome::Cancelled);
 
-    #[test]
-    fn windows_default_app_change_shell_result_true_maps_to_changed() {
-        assert_eq!(
-            windows_default_app_change_outcome_from_shell_result(Ok(true)).unwrap(),
-            DefaultAppChangeOutcome::Changed
-        );
-    }
-
-    #[test]
-    fn windows_default_app_change_shell_result_false_maps_to_cancelled() {
-        assert_eq!(
-            windows_default_app_change_outcome_from_shell_result(Ok(false)).unwrap(),
-            DefaultAppChangeOutcome::Cancelled
-        );
-    }
-
-    #[test]
-    fn windows_default_app_change_shell_result_error_propagates() {
-        let error = windows_default_app_change_outcome_from_shell_result(Err(io::Error::other(
-            "shell failed",
-        )))
+        let error = windows_open_with_outcome_after_picker(
+            &association,
+            Err(io::Error::other("shell failed")),
+            &association,
+        )
         .unwrap_err();
 
         assert_eq!(error.to_string(), "shell failed");
@@ -1993,8 +2054,121 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_shell_execute_success_maps_to_true() {
-        assert!(crate::explorer::windows_shell::shell_execute_result(Ok(())).unwrap());
+    fn windows_open_with_execute_request_uses_unknown_class_and_normalized_path() {
+        use windows::Win32::{
+            Foundation::HWND,
+            System::Registry::HKEY,
+            UI::Shell::{SEE_MASK_CLASSKEY, SEE_MASK_NOASYNC},
+        };
+
+        let parent = HWND(0x1234usize as *mut _);
+        let class_key = HKEY(0x5678usize as *mut _);
+        let request = windows_unknown_class_execute_request(
+            Path::new(r"C:/Users/hrmer/Downloads\archives/résumé plan.md"),
+            WindowsPickerVerb::OpenWith,
+            class_key,
+            Some(parent),
+        );
+        let info = request.execute_info();
+
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(info.lpVerb) },
+            WINDOWS_OPEN_WITH_VERB
+        );
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(info.lpFile) },
+            r"C:\Users\hrmer\Downloads\archives\résumé plan.md"
+        );
+        assert_eq!(info.hwnd, parent);
+        assert!(info.lpClass.is_null());
+        assert_eq!(info.hkeyClass, class_key);
+        assert_eq!(info.fMask & SEE_MASK_CLASSKEY, SEE_MASK_CLASSKEY);
+        assert_ne!(info.fMask & SEE_MASK_NOASYNC, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_default_app_request_uses_unknown_class_key_and_programmatic_verb() {
+        use windows::Win32::{
+            Foundation::HWND,
+            System::Registry::HKEY,
+            UI::Shell::{SEE_MASK_CLASSKEY, SEE_MASK_NOASYNC},
+        };
+
+        let parent = HWND(0x1234usize as *mut _);
+        let class_key = HKEY(0x5678usize as *mut _);
+        let request = windows_unknown_class_execute_request(
+            Path::new(r"C:/Users/hrmer/Downloads\archives/mpv.conf"),
+            WindowsPickerVerb::SetDefault,
+            class_key,
+            Some(parent),
+        );
+        let info = request.execute_info();
+
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(info.lpVerb) },
+            WINDOWS_SET_DEFAULT_VERB
+        );
+        assert_eq!(
+            unsafe { windows_pcwstr_to_string(info.lpFile) },
+            r"C:\Users\hrmer\Downloads\archives\mpv.conf"
+        );
+        assert_eq!(info.hwnd, parent);
+        assert!(info.lpClass.is_null());
+        assert_eq!(info.hkeyClass, class_key);
+        assert_eq!(info.fMask & SEE_MASK_CLASSKEY, SEE_MASK_CLASSKEY);
+        assert_ne!(info.fMask & SEE_MASK_NOASYNC, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_requests_normalize_disk_unc_and_verbatim_path_separators() {
+        use std::ffi::OsStr;
+
+        let cases = [
+            (
+                r"C:/Users/hrmer/Downloads\archives/résumé plan.md",
+                r"C:\Users\hrmer\Downloads\archives\résumé plan.md",
+            ),
+            (
+                r"//server/share\folder/archive.conf",
+                r"\\server\share\folder\archive.conf",
+            ),
+            (
+                r"\\?\C:\very\long/path/file.conf",
+                r"\\?\C:\very\long\path\file.conf",
+            ),
+            (
+                r"C:\Users\hrmer\Downloads\already-normal.conf",
+                r"C:\Users\hrmer\Downloads\already-normal.conf",
+            ),
+        ];
+
+        for (path, expected) in cases {
+            let request = crate::explorer::windows_shell::shell_execute_file_request(
+                Path::new(path),
+                OsStr::new(WINDOWS_OPEN_WITH_VERB),
+                None,
+                false,
+                true,
+                None,
+            );
+
+            assert_eq!(
+                unsafe { windows_pcwstr_to_string(request.execute_info().lpFile) },
+                expected
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_registry_status_maps_open_failure() {
+        use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+
+        let error = windows_registry_status(ERROR_FILE_NOT_FOUND).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[cfg(target_os = "windows")]
@@ -2008,66 +2182,6 @@ mod tests {
         .unwrap();
 
         assert!(!result);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_shell_execute_error_propagates() {
-        let error = crate::explorer::windows_shell::shell_execute_result(Err(
-            windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(2)),
-        ))
-        .unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_open_with_execute_request_targets_registered_picker_verb() {
-        use windows::Win32::{
-            Foundation::HWND,
-            UI::Shell::{SEE_MASK_CLASSNAME, SEE_MASK_FLAG_NO_UI},
-        };
-
-        let parent = HWND(0x1234usize as *mut _);
-        let request = windows_open_with_execute_request(
-            Path::new(r"C:\Users\hrmer\Downloads\PLAN.md"),
-            Some(parent),
-        );
-        let execute_info = request.execute_info();
-
-        assert_eq!(
-            unsafe { windows_pcwstr_to_string(execute_info.lpVerb) },
-            WINDOWS_OPEN_WITH_VERB
-        );
-        assert_eq!(
-            unsafe { windows_pcwstr_to_string(execute_info.lpClass) },
-            WINDOWS_OPEN_WITH_CLASS
-        );
-        assert_eq!(
-            unsafe { windows_pcwstr_to_string(execute_info.lpFile) },
-            r"C:\Users\hrmer\Downloads\PLAN.md"
-        );
-        assert_eq!(execute_info.hwnd, parent);
-        assert_ne!(execute_info.fMask & SEE_MASK_CLASSNAME, 0);
-        assert_ne!(execute_info.fMask & SEE_MASK_FLAG_NO_UI, 0);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_null_terminated_wide_appends_single_nul() {
-        let wide = crate::explorer::windows_shell::null_terminated_wide(std::ffi::OsStr::new(
-            WINDOWS_OPEN_WITH_VERB,
-        ));
-
-        assert_eq!(
-            wide,
-            vec![
-                'O' as u16, 'p' as u16, 'e' as u16, 'n' as u16, 'W' as u16, 'i' as u16, 't' as u16,
-                'h' as u16, 'S' as u16, 'e' as u16, 't' as u16, 'D' as u16, 'e' as u16, 'f' as u16,
-                'a' as u16, 'u' as u16, 'l' as u16, 't' as u16, 'O' as u16, 'n' as u16, 0
-            ]
-        );
     }
 
     #[cfg(target_os = "windows")]
