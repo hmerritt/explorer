@@ -1061,7 +1061,7 @@ impl Platform for MacPlatform {
                         .init_attributed_string(NSString::alloc(nil).init_str(""));
 
                     for entry in item.entries {
-                        if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry
+                        if let ClipboardEntry::String(ClipboardString { text, .. }) = entry
                         {
                             let to_append = NSAttributedString::alloc(nil)
                                 .init_attributed_string(NSString::alloc(nil).init_str(&text));
@@ -1126,6 +1126,11 @@ impl Platform for MacPlatform {
                 return Some(item);
             }
 
+            let markdown = self
+                .read_utf8_pasteboard_type(pasteboard, types, "net.daringfireball.markdown")
+                .or_else(|| self.read_utf8_pasteboard_type(pasteboard, types, "public.markdown"))
+                .or_else(|| self.read_utf8_pasteboard_type(pasteboard, types, "text/markdown"));
+
             let mut entries = Vec::new();
             for format in ImageFormat::iter() {
                 if let Some(item) = try_clipboard_image(pasteboard, format) {
@@ -1138,8 +1143,16 @@ impl Platform for MacPlatform {
                 entries.extend(item.into_entries());
             }
 
-            if !entries.is_empty() {
-                return Some(ClipboardItem { entries });
+            if !entries.is_empty() || markdown.is_some() {
+                let mut item = if entries.is_empty() {
+                    ClipboardItem::new_string(String::new())
+                } else {
+                    ClipboardItem { entries }
+                };
+                if let Some(markdown) = markdown {
+                    item.attach_markdown(markdown);
+                }
+                return Some(item);
             }
         }
 
@@ -1283,6 +1296,22 @@ impl MacPlatform {
         }
     }
 
+    unsafe fn read_utf8_pasteboard_type(
+        &self,
+        pasteboard: id,
+        types: id,
+        type_name: &str,
+    ) -> Option<String> {
+        unsafe {
+            let pasteboard_type = ns_string(type_name);
+            if !msg_send![types, containsObject: pasteboard_type] {
+                return None;
+            }
+            let bytes = self.read_from_pasteboard(pasteboard, pasteboard_type)?;
+            String::from_utf8(bytes.to_vec()).ok()
+        }
+    }
+
     unsafe fn read_string_from_clipboard(
         &self,
         state: &MacPlatformState,
@@ -1306,7 +1335,11 @@ impl MacPlatform {
                 });
 
             ClipboardItem {
-                entries: vec![ClipboardEntry::String(ClipboardString { text, metadata })],
+                entries: vec![ClipboardEntry::String(ClipboardString {
+                    text,
+                    metadata,
+                    markdown: None,
+                })],
             }
         }
     }
@@ -1324,6 +1357,18 @@ impl MacPlatform {
             state
                 .pasteboard
                 .setData_forType(text_bytes, NSPasteboardTypeString);
+
+            if let Some(markdown) = string.markdown.as_deref() {
+                let bytes = NSData::dataWithBytes_length_(
+                        nil,
+                        markdown.as_ptr() as *const c_void,
+                        markdown.len() as u64,
+                    );
+                state.pasteboard.setData_forType(
+                    bytes,
+                    ns_string("net.daringfireball.markdown"),
+                );
+            }
 
             if let Some(metadata) = string.metadata.as_ref() {
                 let hash_bytes = ClipboardString::text_hash(&string.text).to_be_bytes();

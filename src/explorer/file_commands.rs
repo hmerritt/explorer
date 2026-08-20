@@ -17,8 +17,9 @@ use gpui::{
 
 use crate::explorer::{
     clipboard::{
-        FileClipboard, FileClipboardOperation, clipboard_item_for_files,
-        download_from_clipboard_item, file_clipboard_from_item, image_clipboard_from_item,
+        ClipboardMaterialization, ClipboardTextPayload, FileClipboard, FileClipboardOperation,
+        clipboard_item_for_files, clipboard_text_payload_from_item, file_clipboard_from_item,
+        image_clipboard_from_item,
     },
     explorer_fs::ExplorerFs,
     filesystem::{
@@ -180,8 +181,17 @@ impl ExplorerView {
             return;
         }
 
-        if let Some(download) = download_from_clipboard_item(&item) {
-            self.start_clipboard_download(download, cx);
+        if let Some(payload) = clipboard_text_payload_from_item(&item) {
+            match payload {
+                ClipboardTextPayload::Downloads(downloads) => {
+                    for download in downloads {
+                        self.start_clipboard_download(download, cx);
+                    }
+                }
+                ClipboardTextPayload::Materialization(materialization) => {
+                    self.paste_clipboard_materialization(materialization, window, cx);
+                }
+            }
         }
     }
 
@@ -267,6 +277,38 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         match create_clipboard_image_file_in_directory(&self.path, image) {
+            Ok(path) => {
+                self.clear_operation_notice();
+                self.reload_async_with_options_and_focused_rename(
+                    crate::explorer::view::ReloadMode {
+                        preserve_selection: true,
+                        rebuild_sidebar: true,
+                        preserve_context_menu: false,
+                    },
+                    vec![path.clone()],
+                    path,
+                    true,
+                    false,
+                    false,
+                    window,
+                    cx,
+                );
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.reload_with_entry_metadata_resolution(cx);
+                self.set_error_notice(error);
+            }
+        }
+    }
+
+    fn paste_clipboard_materialization(
+        &mut self,
+        materialization: ClipboardMaterialization,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match create_clipboard_materialization_in_directory(&self.path, &materialization) {
             Ok(path) => {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
@@ -1289,6 +1331,40 @@ fn create_clipboard_image_file_in_directory(
     create_clipboard_image_file_payload_in_directory(parent, extension, bytes.as_ref())
 }
 
+fn create_clipboard_materialization_in_directory(
+    parent: &Path,
+    materialization: &ClipboardMaterialization,
+) -> Result<PathBuf, String> {
+    let explorer_fs = ExplorerFs::new();
+    let cancel = AtomicBool::new(false);
+    let mut index = 1usize;
+    loop {
+        let name = clipboard_materialization_file_name(materialization.file_name, index);
+        let path = parent.join(&name);
+        if explorer_fs.exists(&path)? {
+            index = next_new_item_index(index, &name)?;
+            continue;
+        }
+        match write_file_path_with_cancel(&path, &materialization.contents, &cancel, &explorer_fs) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.to_ascii_lowercase().contains("already exist") => {
+                index = next_new_item_index(index, &name)?;
+            }
+            Err(error) => return Err(format!("Could not create \"{name}\": {error}")),
+        }
+    }
+}
+
+fn clipboard_materialization_file_name(file_name: &str, index: usize) -> String {
+    if index == 1 {
+        return file_name.to_owned();
+    }
+    let (stem, extension) = file_name
+        .rsplit_once('.')
+        .expect("clipboard materialization names always have an extension");
+    format!("{stem} ({index}).{extension}")
+}
+
 fn create_clipboard_image_file_payload_in_directory(
     parent: &Path,
     extension: &'static str,
@@ -1611,6 +1687,26 @@ mod tests {
     fn clipboard_image_file_name_uses_windows_style_suffixes() {
         assert_eq!(clipboard_image_file_name("png", 1), "image.png");
         assert_eq!(clipboard_image_file_name("png", 2), "image (2).png");
+    }
+
+    #[test]
+    fn clipboard_materialization_uses_windows_style_suffixes_without_overwrite() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("document.md"), b"existing").unwrap();
+        let materialization = ClipboardMaterialization {
+            file_name: "document.md",
+            contents: b"# New".to_vec(),
+        };
+
+        let path = create_clipboard_materialization_in_directory(temp.path(), &materialization)
+            .expect("materialized file");
+
+        assert_eq!(path.file_name().unwrap(), "document (2).md");
+        assert_eq!(
+            fs::read(temp.path().join("document.md")).unwrap(),
+            b"existing"
+        );
+        assert_eq!(fs::read(path).unwrap(), b"# New");
     }
 
     #[test]

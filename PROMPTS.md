@@ -1,5 +1,18 @@
 ## 1
 
+- Bug: When a file/folder is selected, and I navigate onto a different program/window, when I come back it is still highlighted (which is good) but I can't press F2 to rename without clicking on it again, or paste into the current directory.
+- URL download X button (right-aligned) to cancel+delete immediately
+- Clipboard summary in the bottom-right of the status bar
+    - <clipboard-icon> 2 folders, 1 file · 2.0 MB
+    - <clipboard-icon> 1 folder, 50 files · 40.3 GB
+    - (show paste data classification when available, such as JSON, CSV, MD, text, etc... Or a URL which will be downloaded)
+    - <clipboard-icon> URL download
+    - <clipboard-icon> SVG vector file · 200.0 KB
+    - <clipboard-icon> MD file · 200.0 KB
+    - <clipboard-icon> Image file · 200.0 KB
+    - Summary section is a button (with hover bg + tooltip), clicking triggers paste to current directory
+- Paste a YouTube URL (either youtube.com or the shortened URL youtu.be) downloads via yt-dlp if it exists in the path (show error if not in the path)
+- Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
 - Fix Chrome file drop not registering
 - Improve linux install.sh script (see aura's install script)
 - Bug when an item (or multiple) is selected explorer sometimes freezes and enters a "not responding" state in Windows for a second or two before coming back

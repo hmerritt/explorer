@@ -19,6 +19,7 @@ use crate::{
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+pub(crate) const MARKDOWN_MIME_TYPE: &str = "text/markdown";
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 pub(crate) const GNOME_COPIED_FILES_MIME_TYPE: &str = "x-special/gnome-copied-files";
 pub(crate) const KDE_FILE_LIST_MIME_TYPE: &str = "application/x-kde4-urilist";
@@ -108,25 +109,31 @@ impl<T: ReceiveData> DataOffer<T> {
     }
 
     fn read_text(&self, connection: &Connection) -> Option<ClipboardItem> {
-        let mime_type = self.mime_types.iter().find(|&mime_type| {
+        let plain_text = self.mime_types.iter().find(|&mime_type| {
             ALLOWED_TEXT_MIME_TYPES
                 .iter()
                 .any(|&allowed| allowed == mime_type)
-        })?;
-        let bytes = self.read_bytes(connection, mime_type)?;
-        let text_content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(e) => {
-                log::error!("Failed to convert clipboard content to UTF-8: {}", e);
-                return None;
-            }
-        };
+        }).and_then(|mime_type| self.read_bytes(connection, mime_type))
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        let markdown = self
+            .has_mime_type(MARKDOWN_MIME_TYPE)
+            .then(|| self.read_bytes(connection, MARKDOWN_MIME_TYPE))
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        if plain_text.is_none() && markdown.is_none() {
+            return None;
+        }
 
         // Normalize the text to unix line endings, otherwise
         // copying from eg: firefox inserts a lot of blank
         // lines, and that is super annoying.
-        let result = text_content.replace("\r\n", "\n");
-        Some(ClipboardItem::new_string(result))
+        let mut item = ClipboardItem::new_string(
+            plain_text.unwrap_or_default().replace("\r\n", "\n"),
+        );
+        if let Some(markdown) = markdown {
+            item.attach_markdown(markdown);
+        }
+        Some(item)
     }
 
     fn read_files(&self, connection: &Connection) -> Option<ClipboardItem> {
@@ -331,6 +338,8 @@ fn clipboard_bytes_for_mime(item: &ClipboardItem, mime_type: &str) -> Option<Vec
 
     if TEXT_MIME_TYPES.iter().any(|text_mime| text_mime == &mime_type) {
         item.text().map(|text| text.into_bytes())
+    } else if mime_type == MARKDOWN_MIME_TYPE {
+        item.markdown().map(|markdown| markdown.into_bytes())
     } else {
         None
     }

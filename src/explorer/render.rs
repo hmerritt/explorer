@@ -8694,7 +8694,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_button_availability_accepts_files_images_and_download_urls() {
+    fn paste_button_availability_accepts_files_images_urls_and_plain_text() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
             vec![PathBuf::from("a.txt")],
@@ -8708,7 +8708,7 @@ mod tests {
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
         assert!(clipboard_item_can_paste(Some(&image_item)));
         assert!(clipboard_item_can_paste(Some(&download_item)));
-        assert!(!clipboard_item_can_paste(Some(&plain_item)));
+        assert!(clipboard_item_can_paste(Some(&plain_item)));
         assert!(!clipboard_item_can_paste(None));
     }
 

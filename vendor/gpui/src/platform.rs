@@ -1626,7 +1626,17 @@ impl ClipboardItem {
             entries: vec![ClipboardEntry::String(ClipboardString {
                 text,
                 metadata: Some(metadata),
+                markdown: None,
             })],
+        }
+    }
+
+    /// Create a plain-text clipboard item with an alternate Markdown representation.
+    pub fn new_string_with_markdown(text: String, markdown: String) -> Self {
+        Self {
+            entries: vec![ClipboardEntry::String(
+                ClipboardString::new(text).with_markdown(markdown),
+            )],
         }
     }
 
@@ -1666,6 +1676,7 @@ impl ClipboardItem {
                 ClipboardEntry::String(ClipboardString {
                     text,
                     metadata: Some(metadata),
+                    markdown: None,
                 }),
             ],
         }
@@ -1678,13 +1689,38 @@ impl ClipboardItem {
         let mut any_entries = false;
 
         for entry in self.entries.iter() {
-            if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry {
+            if let ClipboardEntry::String(ClipboardString { text, .. }) = entry {
                 answer.push_str(text);
                 any_entries = true;
             }
         }
 
         if any_entries { Some(answer) } else { None }
+    }
+
+    /// Concatenates all alternate Markdown representations in the item.
+    pub fn markdown(&self) -> Option<String> {
+        concatenate_clipboard_strings(&self.entries, |string| string.markdown.as_deref())
+    }
+
+    pub(crate) fn attach_markdown(&mut self, markdown: String) {
+        self.markdown_string_mut().markdown = Some(markdown);
+    }
+
+    fn markdown_string_mut(&mut self) -> &mut ClipboardString {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, ClipboardEntry::String(_)))
+            .unwrap_or_else(|| {
+                self.entries
+                    .push(ClipboardEntry::String(ClipboardString::new(String::new())));
+                self.entries.len() - 1
+            });
+        match &mut self.entries[index] {
+            ClipboardEntry::String(string) => string,
+            _ => unreachable!(),
+        }
     }
 
     /// If this item has exactly one metadata-bearing string entry, returns its metadata.
@@ -2064,6 +2100,7 @@ impl Image {
 pub struct ClipboardString {
     pub(crate) text: String,
     pub(crate) metadata: Option<String>,
+    pub(crate) markdown: Option<String>,
 }
 
 impl ClipboardString {
@@ -2072,7 +2109,13 @@ impl ClipboardString {
         Self {
             text,
             metadata: None,
+            markdown: None,
         }
+    }
+
+    pub(crate) fn with_markdown(mut self, markdown: String) -> Self {
+        self.markdown = Some(markdown);
+        self
     }
 
     /// Return a new clipboard item with the metadata replaced by the given metadata,
@@ -2115,6 +2158,24 @@ impl From<String> for ClipboardString {
         Self {
             text: value,
             metadata: None,
+            markdown: None,
         }
     }
+}
+
+fn concatenate_clipboard_strings(
+    entries: &[ClipboardEntry],
+    representation: impl Fn(&ClipboardString) -> Option<&str>,
+) -> Option<String> {
+    let mut answer = String::new();
+    let mut any_entries = false;
+    for entry in entries {
+        if let ClipboardEntry::String(string) = entry {
+            if let Some(value) = representation(string) {
+                answer.push_str(value);
+                any_entries = true;
+            }
+        }
+    }
+    any_entries.then_some(answer)
 }

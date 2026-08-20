@@ -499,20 +499,17 @@ mod tests {
                     .body(AsyncBody::from(body))?)
             }
         });
-        cx.update(|app| app.set_http_client(client));
+        cx.update(|app| {
+            app.set_http_client(client);
+            app.write_to_clipboard(ClipboardItem::new_string(
+                "https://example.com/one.zip\n\nhttps://example.com/two.zip".to_owned(),
+            ));
+        });
         let (view, cx) = test_view_entity_at_path(cx, destination.clone());
 
-        cx.update(|_, app| {
+        cx.update(|window, app| {
             view.update(app, |view, cx| {
-                for file_name in ["one.zip", "two.zip"] {
-                    view.start_clipboard_download(
-                        ClipboardDownload {
-                            url: Url::parse(&format!("https://example.com/{file_name}")).unwrap(),
-                            file_name: file_name.to_owned(),
-                        },
-                        cx,
-                    );
-                }
+                view.paste_clipboard(window, cx);
                 assert_eq!(view.download_notice_rows.len(), 2);
                 assert_eq!(view.download_tasks.len(), 2);
             });

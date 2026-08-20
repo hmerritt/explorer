@@ -1190,7 +1190,8 @@ mod tests {
     use crate::explorer::{
         actions::{
             CreateNewFile, CreateNewFolder, EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab,
-            PasteClipboard, RecursiveSearchEdit, RenameCommit, SearchCommit, SearchEdit,
+            PasteClipboard, RecursiveSearchEdit, RenameCancel, RenameCommit, SearchCommit,
+            SearchEdit,
         },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
@@ -2657,6 +2658,63 @@ mod tests {
             assert_eq!(selected_names(view), vec!["image (2).png"]);
             assert!(view.rename_is_active_for_path(&path));
         });
+    }
+
+    #[gpui::test]
+    fn paste_materializes_supported_text_formats_and_starts_rename(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = observe_active_test_view(&tabs, cx);
+        let cases = [
+            (
+                ClipboardItem::new_string("{\"ok\":true}".to_owned()),
+                "data.json",
+                "{\"ok\":true}",
+            ),
+            (
+                ClipboardItem::new_string("a\tb\n1\t2".to_owned()),
+                "table.csv",
+                "a,b\r\n1,2",
+            ),
+            (
+                ClipboardItem::new_string_with_markdown(
+                    "Heading".to_owned(),
+                    "# Heading".to_owned(),
+                ),
+                "document.md",
+                "# Heading",
+            ),
+            (
+                ClipboardItem::new_string("<svg viewBox=\"0 0 1 1\"></svg>".to_owned()),
+                "vector.svg",
+                "<svg viewBox=\"0 0 1 1\"></svg>",
+            ),
+            (
+                ClipboardItem::new_string("<p>plain fallback</p>".to_owned()),
+                "text.txt",
+                "<p>plain fallback</p>",
+            ),
+        ];
+
+        for (item, file_name, expected) in cases {
+            cx.update(|_, app| app.write_to_clipboard(item));
+            cx.dispatch_action(PasteClipboard);
+            cx.run_until_parked();
+
+            let path = temp.path().join(file_name);
+            assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+            cx.update(|window, app| {
+                view.update(app, |view, _| {
+                    assert!(view.rename_is_active_for_path(&path));
+                    assert!(
+                        view.active_rename_focus_handle()
+                            .expect("materialized rename focus")
+                            .is_focused(window)
+                    );
+                });
+            });
+            cx.dispatch_action(RenameCancel);
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]

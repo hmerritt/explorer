@@ -78,7 +78,7 @@ x11rb::atom_manager! {
         TEXT,
         TEXT_MIME_UNKNOWN: b"text/plain",
 
-        // HTML: b"text/html",
+        MARKDOWN_MIME: b"text/markdown",
         URI_LIST: b"text/uri-list",
         GNOME_COPIED_FILES: b"x-special/gnome-copied-files",
         KDE4_URI_LIST: b"application/x-kde4-urilist",
@@ -1036,6 +1036,12 @@ impl Clipboard {
                 format: self.inner.atoms.UTF8_STRING,
             });
         }
+        if let Some(markdown) = item.markdown() {
+            data.push(ClipboardData {
+                bytes: markdown.into_bytes(),
+                format: self.inner.atoms.MARKDOWN_MIME,
+            });
+        }
 
         if data.is_empty() {
             data.push(ClipboardData {
@@ -1108,9 +1114,14 @@ impl Clipboard {
             self.inner.atoms.TEXT_MIME_UNKNOWN,
         ];
 
+        const RICH_TEXT_FORMAT_COUNT: usize = 1;
+        let rich_text_format_atoms: [Atom; RICH_TEXT_FORMAT_COUNT] =
+            [self.inner.atoms.MARKDOWN_MIME];
+
         let atom_none: Atom = AtomEnum::NONE.into();
 
-        const FORMAT_ATOM_COUNT: usize = FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT + TEXT_FORMAT_COUNT;
+        const FORMAT_ATOM_COUNT: usize =
+            FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT + RICH_TEXT_FORMAT_COUNT + TEXT_FORMAT_COUNT;
 
         let mut format_atoms: [Atom; FORMAT_ATOM_COUNT] = [atom_none; FORMAT_ATOM_COUNT];
 
@@ -1120,7 +1131,10 @@ impl Clipboard {
         // format that the contents can be converted to
         format_atoms[FILE_FORMAT_COUNT..FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT]
             .copy_from_slice(&image_format_atoms);
-        format_atoms[FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT..].copy_from_slice(&text_format_atoms);
+        let rich_start = FILE_FORMAT_COUNT + IMAGE_FORMAT_COUNT;
+        format_atoms[rich_start..rich_start + RICH_TEXT_FORMAT_COUNT]
+            .copy_from_slice(&rich_text_format_atoms);
+        format_atoms[rich_start + RICH_TEXT_FORMAT_COUNT..].copy_from_slice(&text_format_atoms);
         debug_assert!(!format_atoms.contains(&atom_none));
 
         let result = self.inner.read(&format_atoms, selection)?;
@@ -1156,6 +1170,20 @@ impl Clipboard {
                     bytes,
                 }));
             }
+        }
+
+        if result.format == self.inner.atoms.MARKDOWN_MIME {
+            let representation =
+                String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?;
+            let plain_text = self
+                .inner
+                .read(&text_format_atoms, selection)
+                .ok()
+                .and_then(|plain| String::from_utf8(plain.bytes).ok())
+                .unwrap_or_default();
+            let mut item = ClipboardItem::new_string(plain_text);
+            item.attach_markdown(representation);
+            return Ok(item);
         }
 
         let text = if result.format == self.inner.atoms.STRING {

@@ -35,6 +35,8 @@ static CLIPBOARD_HASH_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal text hash")));
 static CLIPBOARD_METADATA_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal metadata")));
+static CLIPBOARD_MARKDOWN_FORMAT: LazyLock<u32> =
+    LazyLock::new(|| register_clipboard_format(windows::core::w!("text/markdown")));
 static CLIPBOARD_SVG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("image/svg+xml")));
 static CLIPBOARD_GIF_FORMAT: LazyLock<u32> =
@@ -97,11 +99,21 @@ pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
             }
         }
 
-        with_best_match_format(|item_format| match format_to_type(item_format) {
+        let mut item = with_best_match_format(|item_format| match format_to_type(item_format) {
             ClipboardFormatType::Text => read_string_from_clipboard(),
             ClipboardFormatType::Image => read_image_from_clipboard(item_format),
             ClipboardFormatType::Files => read_files_from_clipboard(),
-        })
+        });
+        let markdown = read_utf8_clipboard_format(*CLIPBOARD_MARKDOWN_FORMAT);
+        if item.is_none() && markdown.is_some() {
+            item = Some(ClipboardItem::new_string(String::new()));
+        }
+        if let Some(item) = item.as_mut() {
+            if let Some(markdown) = markdown {
+                item.attach_markdown(markdown);
+            }
+        }
+        item
     })
     .flatten()
 }
@@ -195,6 +207,10 @@ fn write_to_clipboard_inner(item: ClipboardItem) -> Result<()> {
 
 fn write_string_to_clipboard(item: &ClipboardString) -> Result<()> {
     set_unicode_text_to_clipboard(&item.text)?;
+
+    if let Some(markdown) = item.markdown.as_deref() {
+        set_data_to_clipboard(markdown.as_bytes(), *CLIPBOARD_MARKDOWN_FORMAT)?;
+    }
 
     if let Some(metadata) = item.metadata.as_ref() {
         let hash_result = {
@@ -309,6 +325,9 @@ where
         clipboard_format = 0;
         for _ in 0..count {
             clipboard_format = unsafe { EnumClipboardFormats(clipboard_format) };
+            if clipboard_format == *CLIPBOARD_MARKDOWN_FORMAT {
+                continue;
+            }
             let mut buffer = [0u16; 64];
             unsafe { GetClipboardFormatNameW(clipboard_format, &mut buffer) };
             let format_name = String::from_utf16_lossy(&buffer);
@@ -337,10 +356,22 @@ fn read_string_from_clipboard() -> Option<ClipboardEntry> {
         Some(ClipboardEntry::String(ClipboardString {
             text,
             metadata: Some(metadata),
+            markdown: None,
         }))
     } else {
         Some(ClipboardEntry::String(ClipboardString::new(text)))
     }
+}
+
+fn read_utf8_clipboard_format(format: u32) -> Option<String> {
+    if unsafe { IsClipboardFormatAvailable(format).is_err() } {
+        return None;
+    }
+    with_clipboard_data(format, |data_ptr, size| {
+        let bytes = unsafe { std::slice::from_raw_parts(data_ptr.cast::<u8>(), size) };
+        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+        String::from_utf8(bytes[..end].to_vec()).ok()
+    })?
 }
 
 fn read_hash_from_clipboard() -> Option<u64> {
@@ -545,4 +576,5 @@ mod tests {
         assert!(text.contains(r"C:\Users\test\file one.txt"));
         assert!(text.contains(r"D:\folder"));
     }
+
 }
