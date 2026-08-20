@@ -533,18 +533,6 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
 
-    #[cfg(target_os = "windows")]
-    fn complete_pending_windows_drop(
-        &self,
-        _destination: &Path,
-    ) -> oneshot::Receiver<std::result::Result<(), String>> {
-        let (completion, receiver) = oneshot::channel();
-        let _ = completion.send(Err(
-            "Pending Windows file drops are unavailable on this platform window.".to_owned(),
-        ));
-        receiver
-    }
-
     // Linux specific methods
     fn inner_window_bounds(&self) -> WindowBounds {
         self.window_bounds()

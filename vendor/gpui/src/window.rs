@@ -1531,18 +1531,6 @@ impl Window {
         self.platform_window.complete_external_paths_drop(effect)
     }
 
-    /// Complete a pending Windows file offer into the given local filesystem directory.
-    ///
-    /// This is an internal platform bridge and is available only from a synchronous drop handler.
-    #[cfg(target_os = "windows")]
-    #[doc(hidden)]
-    pub fn complete_pending_windows_drop(
-        &self,
-        destination: &std::path::Path,
-    ) -> oneshot::Receiver<std::result::Result<(), String>> {
-        self.platform_window.complete_pending_windows_drop(destination)
-    }
-
     /// Dispatch the given action on the currently focused element.
     pub fn dispatch_action(&mut self, action: Box<dyn Action>, cx: &mut App) {
         let focus_id = self.focused(cx).map(|handle| handle.id);
