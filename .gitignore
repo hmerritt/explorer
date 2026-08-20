@@ -4,6 +4,7 @@
 # Editor and OS files
 .vscode/
 .idea/
+.firecrawl/
 *.swp
 *.swo
 .DS_Store
