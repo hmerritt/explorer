@@ -54,33 +54,39 @@ scoop install hmerritt/explorer
 
 - [x] Cross-platform macOS, Linux (Wayland/X11), and Windows
 - [x] GPU-accelerated Explorer UI ([GPUI](https://gpui.rs/))
-- [x] Search
-    - [x] Type-to-search current directory
-    - [x] Recursive search (much faster than Windows)
 - [x] Tabs
 - [x] Arrow keys navigation
 - [x] Sidebar custom pins (drag-to-pin)
-- [x] Removable and portable storage
-    - [x] Native mounted volumes, USB mass storage, and optical media
-    - [x] Android phones, cameras, and media players using MTP/PTP
-    - [x] In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
 - [x] Key bindings for ~~everything~~ most things
-- [x] Fast image, video, text, and PDF first-page previews on `Alt+hover`
-- [x] Git support
+- [x] File URLs can be downloaded directly when pasted
+- [x] Native ZIP creation with Finder-style `Compress` naming and progress
+- [x] A simple, functional, built-in image viewer (you can set `explorer` as the default image viewer)
+- [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
+- [x] Search
+    - [x] Type-to-search current directory
+    - [x] Recursive search (no pre-indexing like Windows, but still pretty quick)
+- [x] Git repo support
     - [x] Branch
     - [x] Outgoing/Incoming commits
     - [x] Lines of code
     - [x] Primary language used
     - [x] Github-style language makup bar
+- [x] `Alt+hover` special keybinding to instantly preview files
+    - [x] Images
+    - [x] Videos
+    - [x] PDF first-page preview
+    - [x] Text (plain text, logs, markdown, code files, etc...)
 - [x] File properties
     - [x] Generic file/folder information
-    - [x] In-depth image/video/audio metadata
-    - [x] Image EXIF tags (grouped and organised for ease-of-use)
     - [x] Image preview in properties
     - [x] Video frames preview in properties
-- [x] A simple, functional, built-in image viewer (you can set `explorer` to the default image viewer)
-- [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
-- [x] Native ZIP creation with Finder-style `Compress` naming and progress
+    - [x] In-depth image/video/audio metadata
+    - [x] Audio spectrum analyser (inspired by [Spek](https://www.spek.cc/))
+    - [x] Image EXIF tags (grouped and organised for ease-of-use)
+- [x] Removable and portable storage
+    - [x] Native mounted volumes, USB mass storage, and optical media
+    - [x] Android phones, cameras, and media players using MTP/PTP
+    - [x] In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
 
 ## 🔃 'Anti-Features' that will NOT be implemented
 
@@ -90,6 +96,14 @@ scoop install hmerritt/explorer
 - [x] Search _that takes as long as a cross-country flight_
 - [x] Context menu delays _that take longer than my wife does when deciding where to eat_
 - [x] _Claiming it's built in 'pure rust' when really it's just a WebView wrapper with basic app logic in rust_.
+
+---
+
+https://github.com/user-attachments/assets/cf7ca1d4-1609-4270-88e4-0798fad9b38a
+
+> Downloading a file URL directly into the current directory.
+
+---
 
 ## Configuration
 
