@@ -4010,10 +4010,11 @@ fn render_download_notice_row(
     let (kind, text) = match &row.status {
         DownloadNoticeStatus::Connecting => (
             OperationNoticeKind::Info,
-            if row.kind == DownloadNoticeKind::YoutubeVideo {
-                "Downloading YouTube video...".to_owned()
-            } else {
-                format!("Downloading \"{}\"...", row.file_name)
+            match &row.kind {
+                DownloadNoticeKind::Video { site_domain } => {
+                    format!("Downloading video from {site_domain}...")
+                }
+                DownloadNoticeKind::File => format!("Downloading \"{}\"...", row.file_name),
             },
         ),
         DownloadNoticeStatus::WaitingForCredentials => (
@@ -4060,10 +4061,11 @@ fn render_download_notice_row(
         ),
         DownloadNoticeStatus::Completed => (
             OperationNoticeKind::Info,
-            if row.kind == DownloadNoticeKind::YoutubeVideo {
-                "Downloaded YouTube video.".to_owned()
-            } else {
-                format!("Downloaded \"{}\".", row.file_name)
+            match &row.kind {
+                DownloadNoticeKind::Video { site_domain } => {
+                    format!("Downloaded video from {site_domain}.")
+                }
+                DownloadNoticeKind::File => format!("Downloaded \"{}\".", row.file_name),
             },
         ),
         DownloadNoticeStatus::Failed(error) => (OperationNoticeKind::Error, error.clone()),
@@ -11820,8 +11822,10 @@ mod tests {
                 },
                 DownloadNoticeRow {
                     id: 14,
-                    kind: DownloadNoticeKind::YoutubeVideo,
-                    file_name: "YouTube video".to_owned(),
+                    kind: DownloadNoticeKind::Video {
+                        site_domain: "youtube.com".to_owned(),
+                    },
+                    file_name: "Video from youtube.com".to_owned(),
                     status: DownloadNoticeStatus::Connecting,
                 },
             ];

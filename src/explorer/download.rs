@@ -22,7 +22,7 @@ use gpui::{Context, http_client::HttpClient};
 use tempfile::NamedTempFile;
 
 use crate::explorer::{
-    clipboard::{ClipboardDownload, ClipboardYoutubeDownload},
+    clipboard::{ClipboardDownload, ClipboardVideoDownload},
     portable_devices,
     remote_dialog::{open_remote_credentials_dialog, open_remote_host_key_dialog},
     remote_download::{
@@ -38,15 +38,15 @@ const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DownloadNoticeKind {
     File,
-    YoutubeVideo,
+    Video { site_domain: String },
 }
 
 impl DownloadNoticeKind {
-    pub(super) fn can_cancel(self) -> bool {
-        self == Self::File
+    pub(super) fn can_cancel(&self) -> bool {
+        self == &Self::File
     }
 }
 
@@ -104,7 +104,7 @@ pub(super) struct ActiveRemoteDownload {
 #[derive(Debug)]
 enum DownloadResult {
     File(PathBuf),
-    YoutubeVideo,
+    Video,
 }
 
 impl PendingDownload {
@@ -425,9 +425,9 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn start_youtube_downloads(
+    pub(super) fn start_video_downloads(
         &mut self,
-        downloads: Vec<ClipboardYoutubeDownload>,
+        downloads: Vec<ClipboardVideoDownload>,
         cx: &mut Context<Self>,
     ) {
         if portable_devices::is_portable_path(&self.path) || !self.path.is_dir() {
@@ -436,9 +436,7 @@ impl ExplorerView {
         }
 
         let Some(executable) = ytdlp_executable_from_path() else {
-            self.set_error_notice(
-                "Could not download YouTube video: yt-dlp was not found in PATH.",
-            );
+            self.set_error_notice("Could not download video: yt-dlp was not found in PATH.");
             return;
         };
         let options = cx
@@ -447,34 +445,32 @@ impl ExplorerView {
             .unwrap_or_default();
 
         for download in downloads {
-            self.start_youtube_download(download, executable.clone(), options.clone(), cx);
+            self.start_video_download(download, executable.clone(), options.clone(), cx);
         }
     }
 
-    fn start_youtube_download(
+    fn start_video_download(
         &mut self,
-        download: ClipboardYoutubeDownload,
+        download: ClipboardVideoDownload,
         executable: PathBuf,
         options: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         self.begin_download_batch_if_needed();
 
+        let ClipboardVideoDownload { url, site_domain } = download;
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
         self.download_notice_rows.push(DownloadNoticeRow {
             id,
-            kind: DownloadNoticeKind::YoutubeVideo,
-            file_name: "YouTube video".to_owned(),
+            kind: DownloadNoticeKind::Video {
+                site_domain: site_domain.clone(),
+            },
+            file_name: format!("Video from {site_domain}"),
             status: DownloadNoticeStatus::Connecting,
         });
 
-        let command = ytdlp_command_spec(
-            executable,
-            options,
-            download.url.as_str(),
-            self.path.clone(),
-        );
+        let command = ytdlp_command_spec(executable, options, url.as_str(), self.path.clone());
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -580,7 +576,7 @@ impl ExplorerView {
                 }
                 self.emit_filesystem_changed(cx);
             }
-            Ok(DownloadResult::YoutubeVideo) => {
+            Ok(DownloadResult::Video) => {
                 self.download_batch_succeeded += 1;
                 self.download_notice_rows[row_index].status = DownloadNoticeStatus::Completed;
                 self.reload_with_entry_metadata_resolution(cx);
@@ -616,20 +612,37 @@ impl ExplorerView {
             .last()
             .map(|row| row.file_name.clone())
             .unwrap_or_default();
-        let youtube_batch = self
+        let video_sites = self
             .download_notice_rows
-            .last()
-            .is_some_and(|row| row.kind == DownloadNoticeKind::YoutubeVideo);
+            .iter()
+            .filter_map(|row| match &row.kind {
+                DownloadNoticeKind::Video { site_domain } => Some(site_domain.clone()),
+                DownloadNoticeKind::File => None,
+            })
+            .collect::<Vec<_>>();
+        let video_batch = video_sites.len() == self.download_notice_rows.len();
+        let same_video_site = video_sites.first().and_then(|first| {
+            video_sites
+                .iter()
+                .all(|site| site == first)
+                .then(|| first.clone())
+        });
         self.download_notice_rows.clear();
         if succeeded == 0 && failed == 0 {
             self.operation_notice = None;
             return;
         }
         self.operation_notice = Some(if failed == 0 {
-            let text = if youtube_batch && succeeded == 1 {
-                "Downloaded YouTube video.".to_owned()
-            } else if youtube_batch {
-                format!("Downloaded {succeeded} YouTube videos.")
+            let text = if video_batch && succeeded == 1 {
+                format!(
+                    "Downloaded video from {}.",
+                    same_video_site.as_deref().unwrap_or("multiple sites")
+                )
+            } else if video_batch {
+                match same_video_site.as_deref() {
+                    Some(site) => format!("Downloaded {succeeded} videos from {site}."),
+                    None => format!("Downloaded {succeeded} videos from multiple sites."),
+                }
             } else if succeeded == 1 {
                 format!("Downloaded \"{last_file_name}\".")
             } else {
@@ -706,7 +719,7 @@ fn ytdlp_result_from_process(
     stderr: &[u8],
 ) -> Result<DownloadResult, String> {
     if success {
-        return Ok(DownloadResult::YoutubeVideo);
+        return Ok(DownloadResult::Video);
     }
 
     let stderr = bounded_ytdlp_message(stderr);
@@ -999,7 +1012,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn youtube_downloads_share_the_existing_batch_summary(cx: &mut TestAppContext) {
+    fn same_site_video_downloads_share_the_existing_batch_summary(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
 
@@ -1008,20 +1021,24 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         id: 1,
-                        kind: DownloadNoticeKind::YoutubeVideo,
-                        file_name: "YouTube video".to_owned(),
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "vimeo.com".to_owned(),
+                        },
+                        file_name: "Video from vimeo.com".to_owned(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
                         id: 2,
-                        kind: DownloadNoticeKind::YoutubeVideo,
-                        file_name: "YouTube video".to_owned(),
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "vimeo.com".to_owned(),
+                        },
+                        file_name: "Video from vimeo.com".to_owned(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
-                view.complete_download(1, Ok(DownloadResult::YoutubeVideo), cx);
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
                 assert!(view.operation_notice.is_none());
-                view.complete_download(2, Ok(DownloadResult::YoutubeVideo), cx);
+                view.complete_download(2, Ok(DownloadResult::Video), cx);
             });
         });
 
@@ -1032,7 +1049,47 @@ mod tests {
                 view.operation_notice
                     .as_ref()
                     .map(|notice| notice.text.as_str()),
-                Some("Downloaded 2 YouTube videos.")
+                Some("Downloaded 2 videos from vimeo.com.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn mixed_site_video_downloads_use_a_generic_batch_summary(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "vimeo.com".to_owned(),
+                        },
+                        file_name: "Video from vimeo.com".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "dailymotion.com".to_owned(),
+                        },
+                        file_name: "Video from dailymotion.com".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(2, Ok(DownloadResult::Video), cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
+                Some("Downloaded 2 videos from multiple sites.")
             );
         });
     }

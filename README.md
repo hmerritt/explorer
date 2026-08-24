@@ -174,7 +174,7 @@ Example with sidebar and contextmenu items:
 ```
 
 `app.ytdlp_options` is an array of command-line arguments passed to `yt-dlp`
-when a YouTube video URL is pasted into a folder. For example,
+when a supported video URL is pasted into a folder. For example,
 `["--cookies-from-browser", "firefox"]`. Explorer invokes `yt-dlp` directly,
 so each array entry is passed as one argument without shell parsing.
 

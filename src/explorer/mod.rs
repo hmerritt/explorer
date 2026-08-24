@@ -58,6 +58,7 @@ mod view;
 mod watcher;
 #[cfg(target_os = "windows")]
 mod windows_shell;
+mod ytdlp_sites;
 
 pub(crate) const EXPLORER_LARGE_ICONS_KEY_CONTEXT: &str = "Explorer view = large_icons";
 pub(crate) const EXPLORER_LARGE_ICONS_BINDING_CONTEXT: &str = "Explorer && view == large_icons";

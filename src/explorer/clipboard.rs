@@ -58,8 +58,9 @@ impl std::fmt::Debug for ClipboardDownload {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ClipboardYoutubeDownload {
+pub(super) struct ClipboardVideoDownload {
     pub(super) url: Url,
+    pub(super) site_domain: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,7 +72,7 @@ pub(super) struct ClipboardMaterialization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ClipboardTextPayload {
     Downloads(Vec<ClipboardDownload>),
-    YoutubeDownloads(Vec<ClipboardYoutubeDownload>),
+    VideoDownloads(Vec<ClipboardVideoDownload>),
     Materialization(ClipboardMaterialization),
 }
 
@@ -308,11 +309,7 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
         ClipboardTextPayload::Downloads(downloads) => {
             clipboard_count_label(downloads.len(), "URL download", "URL downloads")
         }
-        ClipboardTextPayload::YoutubeDownloads(downloads) => clipboard_count_label(
-            downloads.len(),
-            "YouTube video download",
-            "YouTube video downloads",
-        ),
+        ClipboardTextPayload::VideoDownloads(downloads) => video_download_summary_label(&downloads),
         ClipboardTextPayload::Materialization(materialization) => clipboard_typed_summary_label(
             clipboard_materialization_type_label(materialization.file_name),
             materialization.contents.len() as u64,
@@ -508,8 +505,8 @@ pub(super) fn clipboard_text_payload_from_item(
     }
 
     let text = item.text().unwrap_or_default();
-    if let Some(downloads) = youtube_downloads_from_text(&text) {
-        return Some(ClipboardTextPayload::YoutubeDownloads(downloads));
+    if let Some(downloads) = video_downloads_from_text(&text) {
+        return Some(ClipboardTextPayload::VideoDownloads(downloads));
     }
     if let Some(downloads) = downloads_from_text(&text) {
         return Some(ClipboardTextPayload::Downloads(downloads));
@@ -559,7 +556,7 @@ fn materialization(file_name: &'static str, contents: impl Into<Vec<u8>>) -> Cli
     })
 }
 
-fn youtube_downloads_from_text(text: &str) -> Option<Vec<ClipboardYoutubeDownload>> {
+fn video_downloads_from_text(text: &str) -> Option<Vec<ClipboardVideoDownload>> {
     let lines = text
         .lines()
         .map(str::trim)
@@ -571,70 +568,35 @@ fn youtube_downloads_from_text(text: &str) -> Option<Vec<ClipboardYoutubeDownloa
 
     lines
         .into_iter()
-        .map(youtube_download_from_url_text)
+        .map(video_download_from_url_text)
         .collect()
 }
 
-fn youtube_download_from_url_text(text: &str) -> Option<ClipboardYoutubeDownload> {
+fn video_download_from_url_text(text: &str) -> Option<ClipboardVideoDownload> {
     let url = Url::parse(text).ok()?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return None;
-    }
+    let site_domain = crate::explorer::ytdlp_sites::video_site_domain(&url)?;
+    Some(ClipboardVideoDownload { url, site_domain })
+}
 
-    let host = url.host_str()?.to_ascii_lowercase();
-    let is_video_url = if host == "youtu.be" {
-        youtube_short_url_video_id(&url).is_some_and(youtube_video_id_is_valid)
-    } else if host == "youtube.com" || host.ends_with(".youtube.com") {
-        youtube_url_has_video_id(&url)
+fn video_download_summary_label(downloads: &[ClipboardVideoDownload]) -> String {
+    let Some(first) = downloads.first() else {
+        return "Download videos".to_owned();
+    };
+    if downloads.len() == 1 {
+        return format!("Download video from {}", first.site_domain);
+    }
+    if downloads
+        .iter()
+        .all(|download| download.site_domain == first.site_domain)
+    {
+        format!(
+            "Download {} videos from {}",
+            downloads.len(),
+            first.site_domain
+        )
     } else {
-        return None;
-    };
-    if !is_video_url {
-        return None;
+        format!("Download {} videos from multiple sites", downloads.len())
     }
-
-    Some(ClipboardYoutubeDownload { url })
-}
-
-fn youtube_short_url_video_id(url: &Url) -> Option<&str> {
-    let mut segments = url.path_segments()?;
-    let video_id = segments.next()?;
-    if segments.any(|segment| !segment.is_empty()) {
-        return None;
-    }
-    Some(video_id)
-}
-
-fn youtube_url_has_video_id(url: &Url) -> bool {
-    if url.path() == "/watch" {
-        return url
-            .query_pairs()
-            .any(|(key, value)| key == "v" && youtube_video_id_is_valid(&value));
-    }
-
-    let Some(mut segments) = url.path_segments() else {
-        return false;
-    };
-    let Some(route) = segments.next() else {
-        return false;
-    };
-    if !matches!(route, "shorts" | "live" | "embed" | "v") {
-        return false;
-    }
-    let Some(video_id) = segments.next() else {
-        return false;
-    };
-    if segments.any(|segment| !segment.is_empty()) {
-        return false;
-    }
-    youtube_video_id_is_valid(video_id)
-}
-
-fn youtube_video_id_is_valid(video_id: &str) -> bool {
-    video_id.len() == 11
-        && video_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn downloads_from_text(text: &str) -> Option<Vec<ClipboardDownload>> {
@@ -1117,24 +1079,45 @@ mod tests {
     }
 
     #[test]
-    fn youtube_clipboard_accepts_supported_video_urls() {
-        for text in [
-            "https://youtube.com/watch?v=dQw4w9WgXcQ",
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
-            "https://m.youtube.com/shorts/dQw4w9WgXcQ?feature=share",
-            "https://youtube.com/live/dQw4w9WgXcQ",
-            "https://www.youtube.com/embed/dQw4w9WgXcQ",
-            "https://youtube.com/v/dQw4w9WgXcQ",
-            "https://youtu.be/dQw4w9WgXcQ?si=share-token",
+    fn video_clipboard_accepts_supported_video_urls() {
+        for (text, expected_site) in [
+            ("https://youtube.com/watch?v=dQw4w9WgXcQ", "youtube.com"),
+            ("https://youtu.be/dQw4w9WgXcQ?si=share-token", "youtu.be"),
+            ("https://player.vimeo.com/video/76979871", "vimeo.com"),
+            (
+                "https://www.dailymotion.com/video/x84sh87",
+                "dailymotion.com",
+            ),
+            (
+                "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+                "tiktok.com",
+            ),
+            ("https://x.com/jack/status/20", "x.com"),
+            (
+                "https://www.instagram.com/reel/Example123/",
+                "instagram.com",
+            ),
+            ("https://www.facebook.com/watch/?v=123456", "facebook.com"),
+            ("https://www.twitch.tv/videos/123456", "twitch.tv"),
+            (
+                "https://www.reddit.com/r/videos/comments/example/title/",
+                "reddit.com",
+            ),
+            (
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                "bilibili.com",
+            ),
+            ("https://www.bbc.co.uk/iplayer/episode/example", "bbc.co.uk"),
         ] {
             let item = ClipboardItem::new_string(text.to_owned());
-            let Some(ClipboardTextPayload::YoutubeDownloads(downloads)) =
+            let Some(ClipboardTextPayload::VideoDownloads(downloads)) =
                 clipboard_text_payload_from_item(&item)
             else {
-                panic!("expected YouTube download for {text:?}");
+                panic!("expected video download for {text:?}");
             };
             assert_eq!(downloads.len(), 1);
             assert_eq!(downloads[0].url.as_str(), text);
+            assert_eq!(downloads[0].site_domain, expected_site);
             assert!(clipboard_item_can_paste(Some(&item)));
         }
     }
@@ -1159,7 +1142,7 @@ mod tests {
             assert!(
                 !matches!(
                     clipboard_text_payload_from_item(&ClipboardItem::new_string(text.to_owned())),
-                    Some(ClipboardTextPayload::YoutubeDownloads(_))
+                    Some(ClipboardTextPayload::VideoDownloads(_))
                 ),
                 "unexpectedly accepted {text:?}"
             );
@@ -1167,15 +1150,15 @@ mod tests {
     }
 
     #[test]
-    fn youtube_clipboard_accepts_batches_and_rejects_mixed_url_lists() {
+    fn video_clipboard_accepts_batches_and_rejects_mixed_url_lists() {
         let item = ClipboardItem::new_string(
             "https://youtu.be/dQw4w9WgXcQ\n\n https://www.youtube.com/shorts/aqz-KE-bpKQ "
                 .to_owned(),
         );
-        let Some(ClipboardTextPayload::YoutubeDownloads(downloads)) =
+        let Some(ClipboardTextPayload::VideoDownloads(downloads)) =
             clipboard_text_payload_from_item(&item)
         else {
-            panic!("expected YouTube batch");
+            panic!("expected video batch");
         };
         assert_eq!(downloads.len(), 2);
 
@@ -1574,7 +1557,38 @@ mod tests {
                 .expect("YouTube URL summary")
                 .summary
                 .label,
-            "2 YouTube video downloads"
+            "Download 2 videos from multiple sites"
+        );
+
+        let vimeo_url = ClipboardItem::new_string("https://vimeo.com/76979871".to_owned());
+        assert_eq!(
+            clipboard_summary_inspection(&vimeo_url)
+                .expect("single Vimeo URL summary")
+                .summary
+                .label,
+            "Download video from vimeo.com"
+        );
+
+        let vimeo_urls = ClipboardItem::new_string(
+            "https://vimeo.com/76979871\nhttps://player.vimeo.com/video/22439234".to_owned(),
+        );
+        assert_eq!(
+            clipboard_summary_inspection(&vimeo_urls)
+                .expect("Vimeo URL summary")
+                .summary
+                .label,
+            "Download 2 videos from vimeo.com"
+        );
+
+        let mixed_video_urls = ClipboardItem::new_string(
+            "https://vimeo.com/76979871\nhttps://www.dailymotion.com/video/x84sh87".to_owned(),
+        );
+        assert_eq!(
+            clipboard_summary_inspection(&mixed_video_urls)
+                .expect("mixed video URL summary")
+                .summary
+                .label,
+            "Download 2 videos from multiple sites"
         );
     }
 

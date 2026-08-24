@@ -2,9 +2,6 @@
 
 "ytdlp_options": ["-S", "ext:mp4:m4a", "--merge-output-format", "mp4"]
 
-- Expand yt-dlp usage by detecting more supported video URLs that yt-dlp can handle (add as many as possible). Update UI copy to read "Download video from [site name]" (to save creating a map, you could extract the domain name from the URL for the site name)
-- Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
-
 ---
 
 - Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk . Add "Google Drive" to Network group when found. Add a config option "view.google_drive" true/false default to true.
