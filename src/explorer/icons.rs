@@ -163,6 +163,7 @@ png_icon!(DOWNLOADS_SIDEBAR_ICON, "sidebar", "downloads.png");
 png_icon!(MUSIC_SIDEBAR_ICON, "sidebar", "music.png");
 png_icon!(PICTURES_SIDEBAR_ICON, "sidebar", "pictures.png");
 png_icon!(VIDEOS_SIDEBAR_ICON, "sidebar", "videos.png");
+svg_icon!(GOOGLE_DRIVE_ICON, "sidebar", "google_drive.svg");
 
 svg_icon!(COPY_ICON, "utility", "copy.svg");
 svg_icon!(COPY_AS_PATH_ICON, "utility", "copy_as_path.svg");
@@ -500,6 +501,14 @@ pub(super) fn network_drive_icon_sized(state: NetworkDriveState, size: f32) -> A
     image_icon(network_drive_image_for_state(state), size, size)
 }
 
+pub(super) fn google_drive_icon() -> AnyElement {
+    image_sidebar_icon(GOOGLE_DRIVE_ICON.clone())
+}
+
+pub(super) fn google_drive_icon_sized(size: f32) -> AnyElement {
+    image_icon(GOOGLE_DRIVE_ICON.clone(), size, size)
+}
+
 fn network_drive_image_for_state(state: NetworkDriveState) -> Arc<Image> {
     match state {
         NetworkDriveState::Connected => NETWORK_DRIVE_ICON.clone(),
@@ -610,6 +619,12 @@ mod tests {
         assert_eq!(NETWORK_DRIVE_DISCONNECTED_ICON.format, ImageFormat::Png);
         assert!(!NETWORK_DRIVE_ICON.bytes.is_empty());
         assert!(!NETWORK_DRIVE_DISCONNECTED_ICON.bytes.is_empty());
+    }
+
+    #[test]
+    fn google_drive_svg_asset_loads_as_an_svg_image() {
+        assert_eq!(GOOGLE_DRIVE_ICON.format, ImageFormat::Svg);
+        assert!(!GOOGLE_DRIVE_ICON.bytes.is_empty());
     }
 
     #[test]

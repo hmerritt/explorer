@@ -323,12 +323,12 @@ fn is_filesystem_directory_link(link_metadata: &Metadata) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell_shortcut_target(_: &Path) -> Option<PathBuf> {
+pub(super) fn shell_shortcut_target(_: &Path) -> Option<PathBuf> {
     None
 }
 
 #[cfg(target_os = "windows")]
-fn shell_shortcut_target(path: &Path) -> Option<PathBuf> {
+pub(super) fn shell_shortcut_target(path: &Path) -> Option<PathBuf> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 
     if !path

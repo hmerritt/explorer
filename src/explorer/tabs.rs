@@ -1893,6 +1893,7 @@ mod tests {
                 view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
                     &view.sidebar_settings,
                     &view.filesystem_name,
+                    view.google_drive,
                 );
             });
         });

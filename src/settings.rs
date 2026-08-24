@@ -664,6 +664,7 @@ pub struct ViewSettings {
     pub filesystem_name: String,
     #[serde(default = "default_font")]
     pub font: String,
+    pub google_drive: bool,
     #[serde(
         default = "default_media_preview_size",
         deserialize_with = "deserialize_media_preview_size"
@@ -806,6 +807,7 @@ impl Default for ViewSettings {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             filesystem_name: default_filesystem_name(),
             font: default_font(),
+            google_drive: true,
             media_preview_size: default_media_preview_size(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
@@ -2471,6 +2473,7 @@ mod tests {
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        assert!(settings.view.google_drive);
         assert_eq!(settings.view.media_preview_size, DEFAULT_MEDIA_PREVIEW_SIZE);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
@@ -2840,6 +2843,7 @@ mod tests {
         assert!(settings.view.show_dotfiles);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
+        assert!(settings.view.google_drive);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
         #[cfg(target_os = "windows")]
@@ -3175,6 +3179,20 @@ mod tests {
             let value = serde_json::to_value(settings).expect("serialize media preview size");
             assert_eq!(value["view"]["media_preview_size"], expected);
         }
+    }
+
+    #[test]
+    fn google_drive_defaults_to_enabled_and_round_trips_false() {
+        let missing: ExplorerSettings = serde_json::from_str(r#"{"view":{}}"#)
+            .expect("deserialize default Google Drive setting");
+        assert!(missing.view.google_drive);
+
+        let disabled: ExplorerSettings = serde_json::from_str(r#"{"view":{"google_drive":false}}"#)
+            .expect("deserialize disabled Google Drive setting");
+        assert!(!disabled.view.google_drive);
+
+        let value = serde_json::to_value(disabled).expect("serialize Google Drive setting");
+        assert_eq!(value["view"]["google_drive"], false);
     }
 
     #[test]
@@ -3536,6 +3554,7 @@ mod tests {
         ));
         assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
+        assert!(json.contains("\n    \"google_drive\": true"));
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             assert_eq!(document["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);
@@ -4306,6 +4325,7 @@ mod tests {
         assert!(object["view"].get("future_view").is_none());
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
+        assert_eq!(object["view"]["google_drive"], true);
         assert_eq!(object["view"]["native_icons"], true);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(object["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);

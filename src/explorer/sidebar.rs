@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+use crate::explorer::entry::shell_shortcut_target;
 use crate::explorer::filesystem::{
     NetworkDrive, NetworkDriveState, network_drives, path_is_remote_drive,
     windows_local_os_drive_root,
@@ -25,6 +27,7 @@ pub(super) enum SidebarItemKind {
     Drive,
     DriveWindows,
     DriveNetwork(NetworkDriveState),
+    GoogleDrive,
     PortableDevice,
     DriveWsl,
 }
@@ -32,6 +35,7 @@ pub(super) enum SidebarItemKind {
 pub(super) fn sidebar_sections(
     settings: &SidebarSettings,
     filesystem_name: &str,
+    google_drive: bool,
 ) -> SidebarSections {
     let (network_roots, drive_roots) = local_drive_roots()
         .into_iter()
@@ -42,6 +46,7 @@ pub(super) fn sidebar_sections(
         drive_roots,
         network_roots,
         network_drives(),
+        google_drive_item(google_drive),
         wsl_drive_roots(),
         portable_device_roots(),
     )
@@ -53,11 +58,13 @@ fn sidebar_sections_from_roots_internal(
     drive_roots: Vec<PathBuf>,
     network_roots: Vec<PathBuf>,
     discovered_network_drives: Vec<NetworkDrive>,
+    google_drive: Option<SidebarItem>,
     wsl_roots: Vec<PathBuf>,
     portable_roots: Vec<PortableDeviceRoot>,
 ) -> SidebarSections {
     let mut network_drives = network_drive_items_from_roots(network_roots, filesystem_name);
     network_drives.extend(network_drive_items(discovered_network_drives));
+    network_drives.extend(google_drive);
     SidebarSections {
         user_directories: configured_sidebar_items(&settings.items, filesystem_name),
         drives: {
@@ -83,6 +90,7 @@ fn sidebar_sections_from_roots(
         drive_roots,
         Vec::new(),
         Vec::new(),
+        None,
         wsl_roots,
         Vec::new(),
     )
@@ -95,6 +103,7 @@ fn sidebar_sections_from_sources(
     drive_roots: Vec<PathBuf>,
     network_roots: Vec<PathBuf>,
     network_drives: Vec<NetworkDrive>,
+    google_drive: Option<SidebarItem>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     sidebar_sections_from_roots_internal(
@@ -103,6 +112,7 @@ fn sidebar_sections_from_sources(
         drive_roots,
         network_roots,
         network_drives,
+        google_drive,
         wsl_roots,
         Vec::new(),
     )
@@ -204,6 +214,7 @@ fn sidebar_item_label_for_path(
             sidebar_drive_label(path, filesystem_name)
         }
         SidebarItemKind::DriveNetwork(_) => home_sidebar_label(path),
+        SidebarItemKind::GoogleDrive => "Google Drive".to_owned(),
         SidebarItemKind::PortableDevice => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
@@ -279,6 +290,43 @@ fn network_drive_items_from_roots(roots: Vec<PathBuf>, filesystem_name: &str) ->
             configured_index: None,
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn google_drive_item(enabled: bool) -> Option<SidebarItem> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    google_drive_item_from_local_app_data(enabled, &local_app_data)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn google_drive_item(_: bool) -> Option<SidebarItem> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn google_drive_item_from_local_app_data(
+    enabled: bool,
+    local_app_data: &Path,
+) -> Option<SidebarItem> {
+    if !enabled {
+        return None;
+    }
+
+    let shortcut = local_app_data
+        .join("Google")
+        .join("Google Drive Streaming")
+        .join("My Drive.lnk");
+    let target = shell_shortcut_target(&shortcut)?;
+    if !target.is_dir() {
+        return None;
+    }
+
+    Some(SidebarItem {
+        label: "Google Drive".to_owned(),
+        path: target,
+        kind: SidebarItemKind::GoogleDrive,
+        configured_index: None,
+    })
 }
 
 fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
@@ -590,6 +638,7 @@ mod tests {
             vec![native.clone()],
             Vec::new(),
             Vec::new(),
+            None,
             Vec::new(),
             vec![
                 PortableDeviceRoot {
@@ -634,6 +683,7 @@ mod tests {
                 local_name: Some("S:".to_owned()),
                 remote_name: r"\\server\team".to_owned(),
             }],
+            None,
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
 
@@ -657,6 +707,104 @@ mod tests {
         );
         assert_eq!(sections.wsl_drives.len(), 1);
         assert_eq!(sections.wsl_drives[0].kind, SidebarItemKind::DriveWsl);
+    }
+
+    #[test]
+    fn google_drive_is_appended_to_the_network_group() {
+        let mapped_path = PathBuf::from(r"S:\");
+        let google_path = PathBuf::from("google-drive");
+        let google_drive = SidebarItem {
+            label: "Google Drive".to_owned(),
+            path: google_path.clone(),
+            kind: SidebarItemKind::GoogleDrive,
+            configured_index: None,
+        };
+        let sections = sidebar_sections_from_sources(
+            &SidebarSettings {
+                items: Vec::new(),
+                ..SidebarSettings::default()
+            },
+            "Filesystem",
+            Vec::new(),
+            Vec::new(),
+            vec![NetworkDrive {
+                label: "Team Share (S:)".to_owned(),
+                path: mapped_path.clone(),
+                state: NetworkDriveState::Connected,
+                local_name: Some("S:".to_owned()),
+                remote_name: r"\\server\team".to_owned(),
+            }],
+            Some(google_drive.clone()),
+            Vec::new(),
+        );
+
+        assert!(sections.drives.is_empty());
+        assert!(sections.wsl_drives.is_empty());
+        assert_eq!(sections.network_drives.len(), 2);
+        assert_eq!(sections.network_drives[0].path, mapped_path);
+        assert_eq!(sections.network_drives[1], google_drive);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn google_drive_discovery_requires_an_enabled_valid_directory_shortcut() {
+        let local_app_data = TempDir::new();
+        let shortcut = local_app_data
+            .path()
+            .join("Google")
+            .join("Google Drive Streaming")
+            .join("My Drive.lnk");
+        fs::create_dir_all(shortcut.parent().unwrap()).expect("create Google Drive metadata path");
+
+        let target = local_app_data.path().join("synced-drive");
+        fs::create_dir(&target).expect("create Google Drive target");
+        crate::explorer::windows_shell::create_shell_shortcut(&shortcut, &target)
+            .expect("create Google Drive shortcut");
+
+        assert_eq!(
+            google_drive_item_from_local_app_data(true, local_app_data.path()),
+            Some(SidebarItem {
+                label: "Google Drive".to_owned(),
+                path: target.clone(),
+                kind: SidebarItemKind::GoogleDrive,
+                configured_index: None,
+            })
+        );
+        assert_eq!(
+            google_drive_item_from_local_app_data(false, local_app_data.path()),
+            None
+        );
+
+        let file_target = local_app_data.path().join("drive.txt");
+        fs::write(&file_target, b"not a directory").expect("create file shortcut target");
+        crate::explorer::windows_shell::create_shell_shortcut(&shortcut, &file_target)
+            .expect("replace shortcut with file target");
+        assert_eq!(
+            google_drive_item_from_local_app_data(true, local_app_data.path()),
+            None
+        );
+
+        crate::explorer::windows_shell::create_shell_shortcut(
+            &shortcut,
+            &local_app_data.path().join("missing"),
+        )
+        .expect("replace shortcut with broken target");
+        assert_eq!(
+            google_drive_item_from_local_app_data(true, local_app_data.path()),
+            None
+        );
+
+        fs::write(&shortcut, b"not a shell shortcut").expect("create malformed shortcut");
+        assert_eq!(
+            google_drive_item_from_local_app_data(true, local_app_data.path()),
+            None
+        );
+
+        fs::remove_file(&shortcut).expect("remove shortcut");
+        assert_eq!(
+            google_drive_item_from_local_app_data(true, local_app_data.path()),
+            None
+        );
     }
 
     #[test]

@@ -1,10 +1,5 @@
 ## 1
 
-"ytdlp_options": ["-S", "ext:mp4:m4a", "--merge-output-format", "mp4"]
-
----
-
-- Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk . Add "Google Drive" to Network group when found. Add a config option "view.google_drive" true/false default to true.
 - New UI feature: Hovering over the status bar clipboard summary button shows a popup UI box with the exact content of the clipboard.
     - Folder count, file count, URL address, RAW text content, and total size
 
