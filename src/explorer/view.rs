@@ -98,7 +98,7 @@ pub struct ExplorerView {
     pub(super) read_error: Option<String>,
     pub(super) operation_notice: Option<OperationNotice>,
     pub(super) download_notice_rows: Vec<DownloadNoticeRow>,
-    pub(super) download_tasks: Vec<Task<()>>,
+    pub(super) download_tasks: Vec<(u64, Task<()>)>,
     pub(super) next_download_id: u64,
     pub(super) download_batch_succeeded: usize,
     pub(super) download_batch_failed: usize,

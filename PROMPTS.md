@@ -1,7 +1,6 @@
 ## 1
 
 - Bug: When a file/folder is selected, and I navigate onto a different program/window, when I come back it is still highlighted (which is good) but I can't press F2 to rename without clicking on it again, or paste into the current directory.
-- URL download X button (right-aligned) to cancel+delete immediately
 - Settings option to bypass copy verification "app.copy_verify" true/false. Default to true.
 - Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
 - Paste a YouTube URL (either youtube.com or the shortened URL youtu.be) downloads via yt-dlp if it exists in the path (show error if not in the path)

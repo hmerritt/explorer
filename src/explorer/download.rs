@@ -52,9 +52,40 @@ struct DownloadProgress {
     total_bytes: Option<u64>,
 }
 
+struct PendingDownload {
+    temporary: NamedTempFile,
+    destination: PathBuf,
+    file_name: String,
+}
+
 #[derive(Debug)]
 struct DownloadResult {
     path: PathBuf,
+}
+
+impl PendingDownload {
+    fn persist(mut self) -> Result<DownloadResult, String> {
+        let mut index = 1usize;
+        loop {
+            let file_name = download_file_name(&self.file_name, index);
+            let path = self.destination.join(&file_name);
+            match self.temporary.persist_noclobber(&path) {
+                Ok(_) => return Ok(DownloadResult { path }),
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.temporary = error.file;
+                    index = index.checked_add(1).ok_or_else(|| {
+                        format!(
+                            "Could not save \"{}\": too many existing names",
+                            self.file_name
+                        )
+                    })?;
+                }
+                Err(error) => {
+                    return Err(format!("Could not save \"{file_name}\": {}", error.error));
+                }
+            }
+        }
+    }
 }
 
 impl ExplorerView {
@@ -94,11 +125,15 @@ impl ExplorerView {
                 let operation_task = cx.background_executor().spawn({
                     let finished = finished.clone();
                     async move {
-                        let result =
-                            download_url_to_directory(client, download, &destination, |progress| {
+                        let result = download_url_to_temporary_file(
+                            client,
+                            download,
+                            &destination,
+                            |progress| {
                                 let _ = progress_tx.send(progress);
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                         finished.store(true, Ordering::Relaxed);
                         result
                     }
@@ -111,7 +146,7 @@ impl ExplorerView {
                     Self::drain_download_progress(&this, cx, id, &progress_rx);
                 }
 
-                let result = operation_task.await;
+                let result = operation_task.await.and_then(PendingDownload::persist);
                 Self::drain_download_progress(&this, cx, id, &progress_rx);
                 let _ = this.update(cx, |explorer, cx| {
                     explorer.complete_download(id, result, cx);
@@ -119,7 +154,30 @@ impl ExplorerView {
                 });
             }
         });
-        self.download_tasks.push(task);
+        self.download_tasks.push((id, task));
+        cx.notify();
+    }
+
+    pub(super) fn cancel_download(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(row_index) = self
+            .download_notice_rows
+            .iter()
+            .position(|row| row.id == id && row.status.is_active())
+        else {
+            return;
+        };
+
+        self.download_notice_rows.remove(row_index);
+        if let Some(task_index) = self
+            .download_tasks
+            .iter()
+            .position(|(task_id, _)| *task_id == id)
+        {
+            let (_, task) = self.download_tasks.swap_remove(task_index);
+            drop(task);
+        }
+
+        self.finish_download_batch_if_idle();
         cx.notify();
     }
 
@@ -187,6 +245,10 @@ impl ExplorerView {
             }
         }
 
+        self.finish_download_batch_if_idle();
+    }
+
+    fn finish_download_batch_if_idle(&mut self) {
         if self
             .download_notice_rows
             .iter()
@@ -204,6 +266,10 @@ impl ExplorerView {
             .map(|row| row.file_name.clone())
             .unwrap_or_default();
         self.download_notice_rows.clear();
+        if succeeded == 0 && failed == 0 {
+            self.operation_notice = None;
+            return;
+        }
         self.operation_notice = Some(if failed == 0 {
             let text = if succeeded == 1 {
                 format!("Downloaded \"{last_file_name}\".")
@@ -224,12 +290,12 @@ impl ExplorerView {
     }
 }
 
-async fn download_url_to_directory(
+async fn download_url_to_temporary_file(
     client: Arc<dyn HttpClient>,
     download: ClipboardDownload,
     destination: &Path,
     mut on_progress: impl FnMut(DownloadProgress),
-) -> Result<DownloadResult, String> {
+) -> Result<PendingDownload, String> {
     let url = download.url.as_str();
     let mut response = client
         .get(url, ().into(), true)
@@ -294,26 +360,11 @@ async fn download_url_to_directory(
         .flush()
         .map_err(|error| format!("Could not save \"{}\": {error}", download.file_name))?;
 
-    let mut index = 1usize;
-    loop {
-        let file_name = download_file_name(&download.file_name, index);
-        let path = destination.join(&file_name);
-        match temporary.persist_noclobber(&path) {
-            Ok(_) => return Ok(DownloadResult { path }),
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                temporary = error.file;
-                index = index.checked_add(1).ok_or_else(|| {
-                    format!(
-                        "Could not save \"{}\": too many existing names",
-                        download.file_name
-                    )
-                })?;
-            }
-            Err(error) => {
-                return Err(format!("Could not save \"{file_name}\": {}", error.error));
-            }
-        }
-    }
+    Ok(PendingDownload {
+        temporary,
+        destination: destination.to_path_buf(),
+        file_name: download.file_name,
+    })
 }
 
 fn download_file_name(file_name: &str, index: usize) -> String {
@@ -368,7 +419,7 @@ mod tests {
         let progress = Arc::new(Mutex::new(Vec::new()));
         let captured_progress = progress.clone();
 
-        let result = futures::executor::block_on(download_url_to_directory(
+        let result = futures::executor::block_on(download_url_to_temporary_file(
             client,
             ClipboardDownload {
                 url: Url::parse("https://example.com/file.zip").unwrap(),
@@ -377,6 +428,7 @@ mod tests {
             temp.path(),
             move |value| captured_progress.lock().unwrap().push(value),
         ))
+        .and_then(PendingDownload::persist)
         .expect("download");
 
         assert_eq!(std::fs::read(result.path).unwrap(), b"streamed body");
@@ -401,7 +453,7 @@ mod tests {
                 Ok(response.body(AsyncBody::from(b"short".to_vec()))?)
             });
 
-            let result = futures::executor::block_on(download_url_to_directory(
+            let result = futures::executor::block_on(download_url_to_temporary_file(
                 client,
                 ClipboardDownload {
                     url: Url::parse("https://example.com/file.zip").unwrap(),
@@ -426,7 +478,7 @@ mod tests {
                 .body(AsyncBody::from(b"new".to_vec()))?)
         });
 
-        let result = futures::executor::block_on(download_url_to_directory(
+        let result = futures::executor::block_on(download_url_to_temporary_file(
             client,
             ClipboardDownload {
                 url: Url::parse("https://example.com/file.zip").unwrap(),
@@ -435,6 +487,7 @@ mod tests {
             temp.path(),
             |_| {},
         ))
+        .and_then(PendingDownload::persist)
         .expect("download");
 
         assert_eq!(result.path.file_name().unwrap(), "file (2).zip");
@@ -533,6 +586,107 @@ mod tests {
                     .as_ref()
                     .map(|notice| notice.text.as_str()),
                 Some("Downloaded 2 files.")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_download_drops_partial_file_without_a_summary(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let destination = temp.path().to_path_buf();
+        let mut partial = NamedTempFile::new_in(&destination).expect("partial file");
+        partial.write_all(b"partial").expect("partial contents");
+        let (view, cx) = test_view_entity_at_path(cx, destination.clone());
+
+        cx.update(|_, app| {
+            let task = app.background_executor().spawn(async move {
+                let _partial = partial;
+                futures::future::pending::<()>().await;
+            });
+            view.update(app, |view, cx| {
+                view.download_notice_rows.push(DownloadNoticeRow {
+                    id: 7,
+                    file_name: "partial.zip".to_owned(),
+                    status: DownloadNoticeStatus::Downloading {
+                        downloaded_bytes: 7,
+                        total_bytes: Some(100),
+                    },
+                });
+                view.download_tasks.push((7, task));
+                view.cancel_download(7, cx);
+            });
+        });
+
+        cx.run_until_parked();
+        assert!(std::fs::read_dir(&destination).unwrap().next().is_none());
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert!(view.download_tasks.is_empty());
+            assert!(view.operation_notice.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_one_download_excludes_it_from_the_batch_summary(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        file_name: "complete.zip".to_owned(),
+                        status: DownloadNoticeStatus::Completed,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        file_name: "cancel.zip".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.download_batch_succeeded = 1;
+                view.download_tasks.push((2, gpui::Task::ready(())));
+                view.cancel_download(2, cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert_eq!(
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
+                Some("Downloaded \"complete.zip\".")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_completed_download_is_ignored_and_keeps_its_file(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let destination = temp.path().to_path_buf();
+        let completed_path = destination.join("complete.zip");
+        std::fs::write(&completed_path, b"complete").expect("completed download");
+        let (view, cx) = test_view_entity_at_path(cx, destination);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows.push(DownloadNoticeRow {
+                    id: 3,
+                    file_name: "complete.zip".to_owned(),
+                    status: DownloadNoticeStatus::Completed,
+                });
+                view.cancel_download(3, cx);
+            });
+        });
+
+        assert_eq!(std::fs::read(completed_path).unwrap(), b"complete");
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 1);
+            assert_eq!(
+                view.download_notice_rows[0].status,
+                DownloadNoticeStatus::Completed
             );
         });
     }

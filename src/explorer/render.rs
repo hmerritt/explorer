@@ -128,6 +128,8 @@ const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP: f32 = 8.0;
 const DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE: f32 = 2.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
+const DOWNLOAD_CANCEL_GLYPH: &str = "\u{E711}";
+const DOWNLOAD_CANCEL_BUTTON_SIZE: f32 = 22.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
 const FILE_ENTRY_BG: u32 = 0xffffff;
 const FILE_ENTRY_SELECTED_BG: u32 = 0xcce8ff;
@@ -3599,7 +3601,7 @@ impl Render for ExplorerView {
                                 this.child(render_operation_notice(notice))
                             })
                             .when(!self.download_notice_rows.is_empty(), |this| {
-                                this.child(render_download_notices(&self.download_notice_rows))
+                                this.child(render_download_notices(&self.download_notice_rows, cx))
                             })
                             .when(self.recursive_search_is_working(), |this| {
                                 this.child(linear_indeterminate(
@@ -3977,18 +3979,28 @@ fn render_operation_notice(notice: &OperationNotice) -> AnyElement {
         .into_any_element()
 }
 
-fn render_download_notices(rows: &[DownloadNoticeRow]) -> AnyElement {
+fn render_download_notices(
+    rows: &[DownloadNoticeRow],
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
+    let rows = rows
+        .iter()
+        .map(|row| render_download_notice_row(row, cx))
+        .collect::<Vec<_>>();
     div()
         .id("download-notices")
         .debug_selector(|| "download-notices".to_owned())
         .w_full()
         .flex()
         .flex_col()
-        .children(rows.iter().map(render_download_notice_row))
+        .children(rows)
         .into_any_element()
 }
 
-fn render_download_notice_row(row: &DownloadNoticeRow) -> AnyElement {
+fn render_download_notice_row(
+    row: &DownloadNoticeRow,
+    cx: &mut Context<ExplorerView>,
+) -> AnyElement {
     let (kind, text) = match &row.status {
         DownloadNoticeStatus::Connecting => (
             OperationNoticeKind::Info,
@@ -4045,15 +4057,57 @@ fn render_download_notice_row(row: &DownloadNoticeRow) -> AnyElement {
         .border_color(rgb(border))
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
                 .py(px(OPEN_ERROR_VERTICAL_PADDING))
                 .px(px(OPEN_ERROR_HORIZONTAL_PADDING))
                 .text_size(px(12.0))
                 .text_color(rgb(text_color))
-                .child(SharedString::from(text)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(SharedString::from(text)),
+                )
+                .when(row.status.is_active(), |this| {
+                    this.child(download_cancel_button(id, cx))
+                }),
         )
         .when_some(download_progress_element(row), |this, progress| {
             this.child(progress)
         })
+        .into_any_element()
+}
+
+fn download_cancel_button(id: u64, cx: &mut Context<ExplorerView>) -> AnyElement {
+    div()
+        .id(("download-cancel", id))
+        .debug_selector(move || format!("download-cancel-{id}"))
+        .ml(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .w(px(DOWNLOAD_CANCEL_BUTTON_SIZE))
+        .h(px(DOWNLOAD_CANCEL_BUTTON_SIZE))
+        .rounded(px(3.0))
+        .font(nav_icon_font())
+        .text_size(px(11.0))
+        .text_color(rgb(0x404040))
+        .cursor_default()
+        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.cancel_download(id, cx);
+            cx.stop_propagation();
+        }))
+        .tooltip(explorer_tooltip("Cancel download"))
+        .child(DOWNLOAD_CANCEL_GLYPH)
         .into_any_element()
 }
 
@@ -11702,7 +11756,7 @@ mod tests {
         cx.set_global(SettingsState::for_test(
             crate::settings::ExplorerSettings::default(),
         ));
-        let (_, cx) = cx.add_window_view(move |window, cx| {
+        let (view, cx) = cx.add_window_view(move |window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
             let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
@@ -11723,6 +11777,16 @@ mod tests {
                         total_bytes: None,
                     },
                 },
+                DownloadNoticeRow {
+                    id: 12,
+                    file_name: "complete.zip".to_owned(),
+                    status: DownloadNoticeStatus::Completed,
+                },
+                DownloadNoticeRow {
+                    id: 13,
+                    file_name: "failed.zip".to_owned(),
+                    status: DownloadNoticeStatus::Failed("Download failed".to_owned()),
+                },
             ];
             view
         });
@@ -11738,6 +11802,23 @@ mod tests {
         assert!(first.origin.y < second.origin.y);
         assert!(cx.debug_bounds("download-progress-10").is_some());
         assert!(cx.debug_bounds("download-progress-11").is_some());
+        let cancel = cx
+            .debug_bounds("download-cancel-10")
+            .expect("active download cancel button");
+        assert!(cancel.center().x > first.center().x);
+        assert!(cx.debug_bounds("download-cancel-11").is_some());
+        assert!(cx.debug_bounds("download-cancel-12").is_none());
+        assert!(cx.debug_bounds("download-cancel-13").is_none());
+
+        cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.iter().all(|row| row.id != 10));
+        });
+        assert!(cx.debug_bounds("download-notice-11").is_some());
+        assert!(cx.debug_bounds("download-notice-12").is_some());
     }
 
     #[test]
