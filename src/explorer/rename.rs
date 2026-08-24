@@ -983,6 +983,18 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn restore_focus_after_window_activation(&self, window: &mut Window) {
+        let focus_handle = self
+            .active_rename_focus_handle()
+            .or_else(|| self.active_address_focus_handle())
+            .or_else(|| self.active_search_focus_handle())
+            .or_else(|| self.focus_handle.clone());
+
+        if let Some(focus_handle) = focus_handle {
+            focus_handle.focus(window);
+        }
+    }
+
     fn selected_rename_text(&self) -> Option<String> {
         self.active_rename.as_ref()?.selected_text()
     }

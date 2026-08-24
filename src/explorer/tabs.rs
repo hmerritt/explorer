@@ -103,7 +103,7 @@ impl ExplorerTabs {
         });
         observe_tab_view(&view, window, cx);
         observe_settings(cx);
-        observe_clipboard_summary(window, cx);
+        observe_window_activation(window, cx);
         crate::explorer::clipboard::refresh_clipboard_summary(cx);
 
         Self {
@@ -968,9 +968,14 @@ fn observe_settings(cx: &mut Context<ExplorerTabs>) {
         .detach();
 }
 
-fn observe_clipboard_summary(window: &mut Window, cx: &mut Context<ExplorerTabs>) {
-    cx.observe_window_activation(window, |_, window, cx| {
+fn observe_window_activation(window: &mut Window, cx: &mut Context<ExplorerTabs>) {
+    cx.observe_window_activation(window, |this, window, cx| {
         if window.is_window_active() {
+            if let Some(tab) = this.active_tab() {
+                tab.view
+                    .read(cx)
+                    .restore_focus_after_window_activation(window);
+            }
             crate::explorer::clipboard::refresh_clipboard_summary(cx);
         }
     })
@@ -1201,8 +1206,8 @@ mod tests {
     use crate::explorer::{
         actions::{
             CreateNewFile, CreateNewFolder, EnterSelectedInNewTab, MoveDown, OpenSelectedInNewTab,
-            PasteClipboard, RecursiveSearchEdit, RenameCancel, RenameCommit, SearchCommit,
-            SearchEdit,
+            PasteClipboard, RecursiveSearchEdit, RenameCancel, RenameCommit, RenameSelected,
+            SearchCommit, SearchEdit,
         },
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
@@ -1512,6 +1517,66 @@ mod tests {
             assert_eq!(view.font.family, "Inter");
             assert_eq!(view.search_mode, crate::settings::SearchMode::Compact);
         });
+    }
+
+    #[gpui::test]
+    fn window_reactivation_restores_rename_and_paste_keyboard_target(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let temp = TempDir::new();
+        let selected = temp.path().join("selected.txt");
+        fs::write(&selected, b"selected").expect("create selected file");
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new(path, focus_handle, window, cx)
+        });
+        let view = active_test_view(&tabs, cx);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&selected);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.deactivate_window();
+        cx.update(|window, _| window.blur());
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert_active_tab_focused(&tabs, cx);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec!["selected.txt"]);
+        });
+
+        cx.dispatch_action(RenameSelected);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.rename_is_active_for_path(&selected));
+        });
+        cx.dispatch_action(RenameCancel);
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                ImageFormat::Png,
+                vec![1, 2, 3, 4],
+            )));
+        });
+        cx.deactivate_window();
+        cx.update(|window, _| window.blur());
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        assert_active_tab_focused(&tabs, cx);
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+        assert_eq!(
+            fs::read(temp.path().join("image.png")).unwrap(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[gpui::test]
