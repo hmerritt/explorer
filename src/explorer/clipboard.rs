@@ -500,6 +500,9 @@ pub(super) fn clipboard_text_payload_from_item(
     if let Some(csv) = tab_separated_text_to_csv(&text) {
         return Some(materialization("table.csv", csv));
     }
+    if is_comma_separated_table(&text) {
+        return Some(materialization("table.csv", text));
+    }
 
     if is_svg_document(&text) {
         return Some(materialization("vector.svg", text));
@@ -600,8 +603,7 @@ pub(super) fn clipboard_item_can_paste(item: Option<&ClipboardItem>) -> bool {
 
 fn tab_separated_text_to_csv(text: &str) -> Option<String> {
     let rows = parse_delimited_rows(text, '\t')?;
-    let width = rows.first()?.len();
-    if width < 2 || rows.iter().any(|row| row.len() != width) {
+    if !delimited_rows_have_table_shape(&rows, 1) {
         return None;
     }
 
@@ -624,6 +626,17 @@ fn tab_separated_text_to_csv(text: &str) -> Option<String> {
         }
     }
     Some(csv)
+}
+
+fn is_comma_separated_table(text: &str) -> bool {
+    parse_delimited_rows(text, ',').is_some_and(|rows| delimited_rows_have_table_shape(&rows, 2))
+}
+
+fn delimited_rows_have_table_shape(rows: &[Vec<String>], minimum_rows: usize) -> bool {
+    let Some(width) = rows.first().map(Vec::len) else {
+        return false;
+    };
+    rows.len() >= minimum_rows && width >= 2 && rows.iter().all(|row| row.len() == width)
 }
 
 fn parse_delimited_rows(text: &str, delimiter: char) -> Option<Vec<Vec<String>>> {
@@ -1110,6 +1123,67 @@ mod tests {
     }
 
     #[test]
+    fn comma_separated_tables_materialize_as_csv_without_changing_source() {
+        for source in ["Name,Age\nAda,36", "Name,Age\r\nAda,36"] {
+            let item = ClipboardItem::new_string(source.to_owned());
+            let Some(ClipboardTextPayload::Materialization(materialization)) =
+                clipboard_text_payload_from_item(&item)
+            else {
+                panic!("expected CSV for {source:?}");
+            };
+
+            assert_eq!(materialization.file_name, "table.csv");
+            assert_eq!(materialization.contents, source.as_bytes());
+        }
+
+        let source = "Name,Note\r\nAda,\"one,\r\ntwo\"\r\nLin,\"said \"\"hi\"\"\"";
+        let item = ClipboardItem::new_string(source.to_owned());
+        let Some(ClipboardTextPayload::Materialization(materialization)) =
+            clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected quoted CSV");
+        };
+
+        assert_eq!(materialization.file_name, "table.csv");
+        assert_eq!(materialization.contents, source.as_bytes());
+    }
+
+    #[test]
+    fn comma_separated_detection_rejects_weak_or_malformed_tables() {
+        for source in [
+            "hello, world",
+            "a,b\n1",
+            "a,b\n1,\"unterminated",
+            "a,b\n1,\"quoted\"suffix",
+            "a;b\n1;2",
+        ] {
+            let item = ClipboardItem::new_string(source.to_owned());
+            let Some(ClipboardTextPayload::Materialization(materialization)) =
+                clipboard_text_payload_from_item(&item)
+            else {
+                panic!("expected text fallback for {source:?}");
+            };
+
+            assert_eq!(materialization.file_name, "text.txt", "source: {source:?}");
+            assert_eq!(materialization.contents, source.as_bytes());
+        }
+    }
+
+    #[test]
+    fn json_precedes_comma_separated_detection() {
+        let source = "[\n  [1, 2],\n  [3, 4]\n]";
+        let item = ClipboardItem::new_string(source.to_owned());
+        let Some(ClipboardTextPayload::Materialization(materialization)) =
+            clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected JSON");
+        };
+
+        assert_eq!(materialization.file_name, "data.json");
+        assert_eq!(materialization.contents, source.as_bytes());
+    }
+
+    #[test]
     fn svg_detection_accepts_complete_roots_and_rejects_nested_or_malformed_source() {
         for source in [
             "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
@@ -1185,6 +1259,10 @@ mod tests {
             (
                 ClipboardItem::new_string("a\tb\n1\t2".to_owned()),
                 "CSV file · 8 bytes",
+            ),
+            (
+                ClipboardItem::new_string("a,b\n1,2".to_owned()),
+                "CSV file · 7 bytes",
             ),
             (
                 ClipboardItem::new_string_with_markdown(
