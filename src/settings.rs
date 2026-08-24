@@ -187,7 +187,7 @@ impl Serialize for SerializableAppSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(4))?;
+        let mut map = serializer.serialize_map(Some(5))?;
         map.serialize_entry(
             "cache_cleanup_interval_days",
             &self.settings.cache_cleanup_interval_days,
@@ -198,6 +198,7 @@ impl Serialize for SerializableAppSettings<'_> {
             "start",
             &format_configured_path(&self.settings.start, self.slash),
         )?;
+        map.serialize_entry("ytdlp_options", &self.settings.ytdlp_options)?;
         map.end()
     }
 }
@@ -604,6 +605,8 @@ pub struct AppSettings {
         deserialize_with = "deserialize_app_start_path"
     )]
     pub start: PathBuf,
+    #[serde(default)]
+    pub ytdlp_options: Vec<String>,
 }
 
 impl Serialize for AppSettings {
@@ -771,6 +774,7 @@ impl Default for AppSettings {
             copy_verify: default_copy_verify(),
             new_window_behaviour: NewWindowBehaviour::Focus,
             start: default_app_start_path(),
+            ytdlp_options: Vec::new(),
         }
     }
 }
@@ -2498,6 +2502,7 @@ mod tests {
         assert_eq!(settings.app.start, default_app_start_path());
         assert!(settings.app.copy_verify);
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
+        assert!(settings.app.ytdlp_options.is_empty());
         assert_eq!(
             settings.app.cache_cleanup_interval_days,
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
@@ -2916,6 +2921,43 @@ mod tests {
             serde_json::to_value(&settings).expect("serialize disabled copy verification")["app"]["copy_verify"],
             false
         );
+    }
+
+    #[test]
+    fn app_ytdlp_options_default_and_round_trip_as_argument_array() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{}}"#).expect("deserialize default app settings");
+        assert!(settings.app.ytdlp_options.is_empty());
+
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"app":{"ytdlp_options":["--cookies-from-browser","firefox","-o","%(title)s.%(ext)s"]}}"#,
+        )
+        .expect("deserialize yt-dlp options");
+        assert_eq!(
+            settings.app.ytdlp_options,
+            [
+                "--cookies-from-browser",
+                "firefox",
+                "-o",
+                "%(title)s.%(ext)s"
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&settings).expect("serialize yt-dlp options")["app"]["ytdlp_options"],
+            serde_json::json!([
+                "--cookies-from-browser",
+                "firefox",
+                "-o",
+                "%(title)s.%(ext)s"
+            ])
+        );
+
+        for invalid in [
+            r#"{"app":{"ytdlp_options":"--extract-audio"}}"#,
+            r#"{"app":{"ytdlp_options":["--format",42]}}"#,
+        ] {
+            assert!(serde_json::from_str::<ExplorerSettings>(invalid).is_err());
+        }
     }
 
     #[test]
@@ -3463,6 +3505,7 @@ mod tests {
         );
         assert_eq!(document["app"]["new_window_behaviour"], "focus");
         assert_eq!(document["app"]["copy_verify"], true);
+        assert_eq!(document["app"]["ytdlp_options"], serde_json::json!([]));
         assert!(document["app"]["start"].is_string());
         assert_eq!(
             document["sidebar"]["expanded_groups"],

@@ -1,7 +1,8 @@
 ## 1
 
+"ytdlp_options": ["-S", "ext:mp4:m4a", "--merge-output-format", "mp4"]
+
 - Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
-- Paste a YouTube URL (either youtube.com or the shortened URL youtu.be) downloads via yt-dlp if it exists in the path (show error if not in the path)
 - Archive file native navigation (same as Windows Explorer). Archives can be opened and navagated into like a folder.
 
 ---

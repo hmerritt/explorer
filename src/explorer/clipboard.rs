@@ -44,6 +44,11 @@ pub(super) struct ClipboardDownload {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardYoutubeDownload {
+    pub(super) url: Url,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ClipboardMaterialization {
     pub(super) file_name: &'static str,
     pub(super) contents: Vec<u8>,
@@ -52,6 +57,7 @@ pub(super) struct ClipboardMaterialization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ClipboardTextPayload {
     Downloads(Vec<ClipboardDownload>),
+    YoutubeDownloads(Vec<ClipboardYoutubeDownload>),
     Materialization(ClipboardMaterialization),
 }
 
@@ -288,6 +294,11 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
         ClipboardTextPayload::Downloads(downloads) => {
             clipboard_count_label(downloads.len(), "URL download", "URL downloads")
         }
+        ClipboardTextPayload::YoutubeDownloads(downloads) => clipboard_count_label(
+            downloads.len(),
+            "YouTube video download",
+            "YouTube video downloads",
+        ),
         ClipboardTextPayload::Materialization(materialization) => clipboard_typed_summary_label(
             clipboard_materialization_type_label(materialization.file_name),
             materialization.contents.len() as u64,
@@ -483,6 +494,9 @@ pub(super) fn clipboard_text_payload_from_item(
     }
 
     let text = item.text().unwrap_or_default();
+    if let Some(downloads) = youtube_downloads_from_text(&text) {
+        return Some(ClipboardTextPayload::YoutubeDownloads(downloads));
+    }
     if let Some(downloads) = downloads_from_text(&text) {
         return Some(ClipboardTextPayload::Downloads(downloads));
     }
@@ -529,6 +543,84 @@ fn materialization(file_name: &'static str, contents: impl Into<Vec<u8>>) -> Cli
         file_name,
         contents: contents.into(),
     })
+}
+
+fn youtube_downloads_from_text(text: &str) -> Option<Vec<ClipboardYoutubeDownload>> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+
+    lines
+        .into_iter()
+        .map(youtube_download_from_url_text)
+        .collect()
+}
+
+fn youtube_download_from_url_text(text: &str) -> Option<ClipboardYoutubeDownload> {
+    let url = Url::parse(text).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = url.host_str()?.to_ascii_lowercase();
+    let is_video_url = if host == "youtu.be" {
+        youtube_short_url_video_id(&url).is_some_and(youtube_video_id_is_valid)
+    } else if host == "youtube.com" || host.ends_with(".youtube.com") {
+        youtube_url_has_video_id(&url)
+    } else {
+        return None;
+    };
+    if !is_video_url {
+        return None;
+    }
+
+    Some(ClipboardYoutubeDownload { url })
+}
+
+fn youtube_short_url_video_id(url: &Url) -> Option<&str> {
+    let mut segments = url.path_segments()?;
+    let video_id = segments.next()?;
+    if segments.any(|segment| !segment.is_empty()) {
+        return None;
+    }
+    Some(video_id)
+}
+
+fn youtube_url_has_video_id(url: &Url) -> bool {
+    if url.path() == "/watch" {
+        return url
+            .query_pairs()
+            .any(|(key, value)| key == "v" && youtube_video_id_is_valid(&value));
+    }
+
+    let Some(mut segments) = url.path_segments() else {
+        return false;
+    };
+    let Some(route) = segments.next() else {
+        return false;
+    };
+    if !matches!(route, "shorts" | "live" | "embed" | "v") {
+        return false;
+    }
+    let Some(video_id) = segments.next() else {
+        return false;
+    };
+    if segments.any(|segment| !segment.is_empty()) {
+        return false;
+    }
+    youtube_video_id_is_valid(video_id)
+}
+
+fn youtube_video_id_is_valid(video_id: &str) -> bool {
+    video_id.len() == 11
+        && video_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn downloads_from_text(text: &str) -> Option<Vec<ClipboardDownload>> {
@@ -1011,6 +1103,83 @@ mod tests {
     }
 
     #[test]
+    fn youtube_clipboard_accepts_supported_video_urls() {
+        for text in [
+            "https://youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
+            "https://m.youtube.com/shorts/dQw4w9WgXcQ?feature=share",
+            "https://youtube.com/live/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://youtube.com/v/dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?si=share-token",
+        ] {
+            let item = ClipboardItem::new_string(text.to_owned());
+            let Some(ClipboardTextPayload::YoutubeDownloads(downloads)) =
+                clipboard_text_payload_from_item(&item)
+            else {
+                panic!("expected YouTube download for {text:?}");
+            };
+            assert_eq!(downloads.len(), 1);
+            assert_eq!(downloads[0].url.as_str(), text);
+            assert!(clipboard_item_can_paste(Some(&item)));
+        }
+    }
+
+    #[test]
+    fn youtube_clipboard_rejects_non_video_and_deceptive_urls() {
+        for text in [
+            "youtube.com/watch?v=dQw4w9WgXcQ",
+            "ftp://youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com/",
+            "https://youtube.com/watch",
+            "https://youtube.com/watch?v=short",
+            "https://youtube.com/playlist?list=PL123",
+            "https://youtube.com/channel/UC123",
+            "https://youtube.com/@example",
+            "https://notyoutube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com.example/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/",
+            "https://youtu.be/dQw4w9WgXcQ/extra",
+            "https://youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        ] {
+            assert!(
+                !matches!(
+                    clipboard_text_payload_from_item(&ClipboardItem::new_string(text.to_owned())),
+                    Some(ClipboardTextPayload::YoutubeDownloads(_))
+                ),
+                "unexpectedly accepted {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn youtube_clipboard_accepts_batches_and_rejects_mixed_url_lists() {
+        let item = ClipboardItem::new_string(
+            "https://youtu.be/dQw4w9WgXcQ\n\n https://www.youtube.com/shorts/aqz-KE-bpKQ "
+                .to_owned(),
+        );
+        let Some(ClipboardTextPayload::YoutubeDownloads(downloads)) =
+            clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected YouTube batch");
+        };
+        assert_eq!(downloads.len(), 2);
+
+        let mixed = ClipboardItem::new_string(
+            "https://youtu.be/dQw4w9WgXcQ\nhttps://example.com/video.mp4".to_owned(),
+        );
+        assert!(matches!(
+            clipboard_text_payload_from_item(&mixed),
+            Some(ClipboardTextPayload::Materialization(
+                ClipboardMaterialization {
+                    file_name: "text.txt",
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn download_clipboard_rejects_non_files_and_unsafe_names() {
         for text in [
             "plain text",
@@ -1354,6 +1523,17 @@ mod tests {
                 .summary
                 .label,
             "2 URL downloads"
+        );
+
+        let youtube_urls = ClipboardItem::new_string(
+            "https://youtu.be/dQw4w9WgXcQ\nhttps://youtube.com/watch?v=aqz-KE-bpKQ".to_owned(),
+        );
+        assert_eq!(
+            clipboard_summary_inspection(&youtube_urls)
+                .expect("YouTube URL summary")
+                .summary
+                .label,
+            "2 YouTube video downloads"
         );
     }
 

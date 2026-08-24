@@ -62,7 +62,7 @@ use crate::explorer::{
         context_menu_item_is_visually_active, context_menu_item_top, context_menu_path_is_active,
         context_menu_pointer_tip_origin, context_submenu_left,
     },
-    download::{DownloadNoticeRow, DownloadNoticeStatus},
+    download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
         drop_indicator_origin, row_drop_destination_for_entry,
@@ -4004,7 +4004,11 @@ fn render_download_notice_row(
     let (kind, text) = match &row.status {
         DownloadNoticeStatus::Connecting => (
             OperationNoticeKind::Info,
-            format!("Downloading \"{}\"...", row.file_name),
+            if row.kind == DownloadNoticeKind::YoutubeVideo {
+                "Downloading YouTube video...".to_owned()
+            } else {
+                format!("Downloading \"{}\"...", row.file_name)
+            },
         ),
         DownloadNoticeStatus::Downloading {
             downloaded_bytes,
@@ -4039,7 +4043,11 @@ fn render_download_notice_row(
         ),
         DownloadNoticeStatus::Completed => (
             OperationNoticeKind::Info,
-            format!("Downloaded \"{}\".", row.file_name),
+            if row.kind == DownloadNoticeKind::YoutubeVideo {
+                "Downloaded YouTube video.".to_owned()
+            } else {
+                format!("Downloaded \"{}\".", row.file_name)
+            },
         ),
         DownloadNoticeStatus::Failed(error) => (OperationNoticeKind::Error, error.clone()),
     };
@@ -4071,7 +4079,7 @@ fn render_download_notice_row(
                         .overflow_hidden()
                         .child(SharedString::from(text)),
                 )
-                .when(row.status.is_active(), |this| {
+                .when(row.status.is_active() && row.kind.can_cancel(), |this| {
                     this.child(download_cancel_button(id, cx))
                 }),
         )
@@ -7701,7 +7709,7 @@ mod tests {
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
             NAV_BUTTON_ACTIVE_OPACITY,
         },
-        download::{DownloadNoticeRow, DownloadNoticeStatus},
+        download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
         entry::FileEntry,
         filesystem::NetworkDriveState,
         git_status::{GitDivergence, GitRepositoryStatus},
@@ -11763,6 +11771,7 @@ mod tests {
             view.download_notice_rows = vec![
                 DownloadNoticeRow {
                     id: 10,
+                    kind: DownloadNoticeKind::File,
                     file_name: "known.zip".to_owned(),
                     status: DownloadNoticeStatus::Downloading {
                         downloaded_bytes: 25,
@@ -11771,6 +11780,7 @@ mod tests {
                 },
                 DownloadNoticeRow {
                     id: 11,
+                    kind: DownloadNoticeKind::File,
                     file_name: "unknown.zip".to_owned(),
                     status: DownloadNoticeStatus::Downloading {
                         downloaded_bytes: 25,
@@ -11779,13 +11789,21 @@ mod tests {
                 },
                 DownloadNoticeRow {
                     id: 12,
+                    kind: DownloadNoticeKind::File,
                     file_name: "complete.zip".to_owned(),
                     status: DownloadNoticeStatus::Completed,
                 },
                 DownloadNoticeRow {
                     id: 13,
+                    kind: DownloadNoticeKind::File,
                     file_name: "failed.zip".to_owned(),
                     status: DownloadNoticeStatus::Failed("Download failed".to_owned()),
+                },
+                DownloadNoticeRow {
+                    id: 14,
+                    kind: DownloadNoticeKind::YoutubeVideo,
+                    file_name: "YouTube video".to_owned(),
+                    status: DownloadNoticeStatus::Connecting,
                 },
             ];
             view
@@ -11809,6 +11827,8 @@ mod tests {
         assert!(cx.debug_bounds("download-cancel-11").is_some());
         assert!(cx.debug_bounds("download-cancel-12").is_none());
         assert!(cx.debug_bounds("download-cancel-13").is_none());
+        assert!(cx.debug_bounds("download-progress-14").is_some());
+        assert!(cx.debug_bounds("download-cancel-14").is_none());
 
         cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());

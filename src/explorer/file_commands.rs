@@ -188,6 +188,9 @@ impl ExplorerView {
                         self.start_clipboard_download(download, cx);
                     }
                 }
+                ClipboardTextPayload::YoutubeDownloads(downloads) => {
+                    self.start_youtube_downloads(downloads, cx);
+                }
                 ClipboardTextPayload::Materialization(materialization) => {
                     self.paste_clipboard_materialization(materialization, window, cx);
                 }

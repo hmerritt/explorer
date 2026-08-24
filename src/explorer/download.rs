@@ -1,6 +1,9 @@
 use std::{
-    io::{self, Write},
+    env,
+    ffi::{OsStr, OsString},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -9,22 +12,43 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use futures::AsyncReadExt;
 use gpui::{Context, http_client::HttpClient};
 use tempfile::NamedTempFile;
 
 use crate::explorer::{
-    clipboard::ClipboardDownload,
+    clipboard::{ClipboardDownload, ClipboardYoutubeDownload},
     portable_devices,
     view::{ExplorerView, OperationNotice},
 };
 
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
+const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DownloadNoticeKind {
+    File,
+    YoutubeVideo,
+}
+
+impl DownloadNoticeKind {
+    pub(super) fn can_cancel(self) -> bool {
+        self == Self::File
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct DownloadNoticeRow {
     pub(super) id: u64,
+    pub(super) kind: DownloadNoticeKind,
     pub(super) file_name: String,
     pub(super) status: DownloadNoticeStatus,
 }
@@ -59,8 +83,9 @@ struct PendingDownload {
 }
 
 #[derive(Debug)]
-struct DownloadResult {
-    path: PathBuf,
+enum DownloadResult {
+    File(PathBuf),
+    YoutubeVideo,
 }
 
 impl PendingDownload {
@@ -70,7 +95,7 @@ impl PendingDownload {
             let file_name = download_file_name(&self.file_name, index);
             let path = self.destination.join(&file_name);
             match self.temporary.persist_noclobber(&path) {
-                Ok(_) => return Ok(DownloadResult { path }),
+                Ok(_) => return Ok(DownloadResult::File(path)),
                 Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
                     self.temporary = error.file;
                     index = index.checked_add(1).ok_or_else(|| {
@@ -99,18 +124,13 @@ impl ExplorerView {
             return;
         }
 
-        if self.download_notice_rows.is_empty() {
-            self.download_tasks.clear();
-            self.download_batch_succeeded = 0;
-            self.download_batch_failed = 0;
-            self.download_batch_last_error = None;
-            self.clear_operation_notice();
-        }
+        self.begin_download_batch_if_needed();
 
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
         self.download_notice_rows.push(DownloadNoticeRow {
             id,
+            kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
@@ -158,11 +178,86 @@ impl ExplorerView {
         cx.notify();
     }
 
+    pub(super) fn start_youtube_downloads(
+        &mut self,
+        downloads: Vec<ClipboardYoutubeDownload>,
+        cx: &mut Context<Self>,
+    ) {
+        if portable_devices::is_portable_path(&self.path) || !self.path.is_dir() {
+            self.set_error_notice("Could not download to this location.");
+            return;
+        }
+
+        let Some(executable) = ytdlp_executable_from_path() else {
+            self.set_error_notice(
+                "Could not download YouTube video: yt-dlp was not found in PATH.",
+            );
+            return;
+        };
+        let options = cx
+            .try_global::<crate::settings::SettingsState>()
+            .map(|settings| settings.value.app.ytdlp_options.clone())
+            .unwrap_or_default();
+
+        for download in downloads {
+            self.start_youtube_download(download, executable.clone(), options.clone(), cx);
+        }
+    }
+
+    fn start_youtube_download(
+        &mut self,
+        download: ClipboardYoutubeDownload,
+        executable: PathBuf,
+        options: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_download_batch_if_needed();
+
+        let id = self.next_download_id;
+        self.next_download_id = self.next_download_id.wrapping_add(1);
+        self.download_notice_rows.push(DownloadNoticeRow {
+            id,
+            kind: DownloadNoticeKind::YoutubeVideo,
+            file_name: "YouTube video".to_owned(),
+            status: DownloadNoticeStatus::Connecting,
+        });
+
+        let command = ytdlp_command_spec(
+            executable,
+            options,
+            download.url.as_str(),
+            self.path.clone(),
+        );
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { run_ytdlp_download(command) })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.complete_download(id, result, cx);
+                cx.notify();
+            });
+        });
+        self.download_tasks.push((id, task));
+        cx.notify();
+    }
+
+    fn begin_download_batch_if_needed(&mut self) {
+        if !self.download_notice_rows.is_empty() {
+            return;
+        }
+        self.download_tasks.clear();
+        self.download_batch_succeeded = 0;
+        self.download_batch_failed = 0;
+        self.download_batch_last_error = None;
+        self.clear_operation_notice();
+    }
+
     pub(super) fn cancel_download(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(row_index) = self
             .download_notice_rows
             .iter()
-            .position(|row| row.id == id && row.status.is_active())
+            .position(|row| row.id == id && row.status.is_active() && row.kind.can_cancel())
         else {
             return;
         };
@@ -224,18 +319,23 @@ impl ExplorerView {
         };
 
         match result {
-            Ok(result) => {
+            Ok(DownloadResult::File(path)) => {
                 self.download_batch_succeeded += 1;
-                let final_name = result
-                    .path
+                let final_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.download_notice_rows[row_index].file_name.clone());
                 self.download_notice_rows[row_index].file_name = final_name;
                 self.download_notice_rows[row_index].status = DownloadNoticeStatus::Completed;
-                if result.path.parent() == Some(self.path.as_path()) {
+                if path.parent() == Some(self.path.as_path()) {
                     self.reload_with_entry_metadata_resolution(cx);
                 }
+                self.emit_filesystem_changed(cx);
+            }
+            Ok(DownloadResult::YoutubeVideo) => {
+                self.download_batch_succeeded += 1;
+                self.download_notice_rows[row_index].status = DownloadNoticeStatus::Completed;
+                self.reload_with_entry_metadata_resolution(cx);
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
@@ -265,13 +365,21 @@ impl ExplorerView {
             .last()
             .map(|row| row.file_name.clone())
             .unwrap_or_default();
+        let youtube_batch = self
+            .download_notice_rows
+            .last()
+            .is_some_and(|row| row.kind == DownloadNoticeKind::YoutubeVideo);
         self.download_notice_rows.clear();
         if succeeded == 0 && failed == 0 {
             self.operation_notice = None;
             return;
         }
         self.operation_notice = Some(if failed == 0 {
-            let text = if succeeded == 1 {
+            let text = if youtube_batch && succeeded == 1 {
+                "Downloaded YouTube video.".to_owned()
+            } else if youtube_batch {
+                format!("Downloaded {succeeded} YouTube videos.")
+            } else if succeeded == 1 {
                 format!("Downloaded \"{last_file_name}\".")
             } else {
                 format!("Downloaded {succeeded} files.")
@@ -287,6 +395,170 @@ impl ExplorerView {
             };
             OperationNotice::error(text)
         });
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct YtDlpCommandSpec {
+    executable: PathBuf,
+    args: Vec<OsString>,
+    current_dir: PathBuf,
+}
+
+fn ytdlp_command_spec(
+    executable: PathBuf,
+    options: Vec<String>,
+    url: &str,
+    current_dir: PathBuf,
+) -> YtDlpCommandSpec {
+    let mut args = options.into_iter().map(OsString::from).collect::<Vec<_>>();
+    args.push(OsString::from("--no-playlist"));
+    args.push(OsString::from("--"));
+    args.push(OsString::from(url));
+    YtDlpCommandSpec {
+        executable,
+        args,
+        current_dir,
+    }
+}
+
+fn run_ytdlp_download(command_spec: YtDlpCommandSpec) -> Result<DownloadResult, String> {
+    let mut command = Command::new(&command_spec.executable);
+    command
+        .args(&command_spec.args)
+        .current_dir(&command_spec.current_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stderr| read_bounded_tail(stderr, YTDLP_ERROR_MESSAGE_LIMIT))
+        .transpose()
+        .map_err(|error| format!("Could not read yt-dlp error output: {error}"))?
+        .unwrap_or_default();
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not wait for yt-dlp: {error}"))?;
+    ytdlp_result_from_process(status.success(), &status.to_string(), &stderr)
+}
+
+fn ytdlp_result_from_process(
+    success: bool,
+    status: &str,
+    stderr: &[u8],
+) -> Result<DownloadResult, String> {
+    if success {
+        return Ok(DownloadResult::YoutubeVideo);
+    }
+
+    let stderr = bounded_ytdlp_message(stderr);
+    if stderr.is_empty() {
+        Err(format!("yt-dlp exited with {status}."))
+    } else {
+        Err(format!("yt-dlp exited with {status}: {stderr}"))
+    }
+}
+
+fn read_bounded_tail(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(limit);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        tail.extend_from_slice(&buffer[..read]);
+        if tail.len() > limit {
+            tail.drain(..tail.len() - limit);
+        }
+    }
+}
+
+fn bounded_ytdlp_message(bytes: &[u8]) -> String {
+    let output = String::from_utf8_lossy(bytes);
+    let message = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    if message.len() <= YTDLP_ERROR_MESSAGE_LIMIT {
+        return message;
+    }
+
+    let mut start = message.len() - YTDLP_ERROR_MESSAGE_LIMIT;
+    while !message.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &message[start..])
+}
+
+fn ytdlp_executable_from_path() -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    let extensions = ytdlp_path_extensions();
+    resolve_ytdlp_executable_with(&path_var, &extensions, executable_file_is_usable)
+}
+
+fn resolve_ytdlp_executable_with(
+    path_var: &OsStr,
+    extensions: &[OsString],
+    mut is_usable: impl FnMut(&Path) -> bool,
+) -> Option<PathBuf> {
+    for directory in env::split_paths(path_var) {
+        let direct = directory.join("yt-dlp");
+        if is_usable(&direct) {
+            return Some(direct);
+        }
+        for extension in extensions {
+            let candidate = directory.join(format!("yt-dlp{}", extension.to_string_lossy()));
+            if is_usable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn ytdlp_path_extensions() -> Vec<OsString> {
+    env::var_os("PATHEXT")
+        .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"))
+        .to_string_lossy()
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(OsString::from)
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ytdlp_path_extensions() -> Vec<OsString> {
+    Vec::new()
+}
+
+fn executable_file_is_usable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -403,6 +675,118 @@ mod tests {
     }
 
     #[test]
+    fn ytdlp_command_appends_video_only_guard_and_url_after_custom_options() {
+        let destination = PathBuf::from("downloads");
+        let spec = ytdlp_command_spec(
+            PathBuf::from("yt-dlp"),
+            vec![
+                "--cookies-from-browser".to_owned(),
+                "firefox profile".to_owned(),
+                "--yes-playlist".to_owned(),
+            ],
+            "https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
+            destination.clone(),
+        );
+
+        assert_eq!(spec.executable, Path::new("yt-dlp"));
+        assert_eq!(spec.current_dir, destination);
+        assert_eq!(
+            spec.args,
+            [
+                OsString::from("--cookies-from-browser"),
+                OsString::from("firefox profile"),
+                OsString::from("--yes-playlist"),
+                OsString::from("--no-playlist"),
+                OsString::from("--"),
+                OsString::from("https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ytdlp_path_resolution_searches_direct_names_and_extensions() {
+        let first = PathBuf::from("first-bin");
+        let second = PathBuf::from("second-bin");
+        let path_var = std::env::join_paths([&first, &second]).expect("join test PATH");
+        let expected = second.join("yt-dlp.EXE");
+
+        assert_eq!(
+            resolve_ytdlp_executable_with(
+                &path_var,
+                &[OsString::from(".EXE"), OsString::from(".CMD")],
+                |candidate| candidate == expected,
+            ),
+            Some(expected)
+        );
+        assert_eq!(
+            resolve_ytdlp_executable_with(&path_var, &[], |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn ytdlp_process_errors_prefer_stderr_and_bound_the_message() {
+        let error = ytdlp_result_from_process(
+            false,
+            "exit code: 1",
+            b"WARNING: preceding detail\nERROR: unavailable video\n",
+        )
+        .expect_err("failed yt-dlp");
+        assert_eq!(
+            error,
+            "yt-dlp exited with exit code: 1: ERROR: unavailable video"
+        );
+
+        let empty =
+            ytdlp_result_from_process(false, "exit code: 2", b" \n").expect_err("failed yt-dlp");
+        assert_eq!(empty, "yt-dlp exited with exit code: 2.");
+
+        let oversized = vec![b'x'; YTDLP_ERROR_MESSAGE_LIMIT + 100];
+        let tail = read_bounded_tail(oversized.as_slice(), YTDLP_ERROR_MESSAGE_LIMIT)
+            .expect("bounded tail");
+        assert_eq!(tail.len(), YTDLP_ERROR_MESSAGE_LIMIT);
+    }
+
+    #[gpui::test]
+    fn youtube_downloads_share_the_existing_batch_summary(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        kind: DownloadNoticeKind::YoutubeVideo,
+                        file_name: "YouTube video".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        kind: DownloadNoticeKind::YoutubeVideo,
+                        file_name: "YouTube video".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.complete_download(1, Ok(DownloadResult::YoutubeVideo), cx);
+                assert!(view.operation_notice.is_none());
+                view.complete_download(2, Ok(DownloadResult::YoutubeVideo), cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert_eq!(view.download_batch_succeeded, 2);
+            assert_eq!(
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
+                Some("Downloaded 2 YouTube videos.")
+            );
+        });
+    }
+
+    #[test]
     fn streaming_download_persists_bytes_and_reports_progress() {
         let temp = tempfile::tempdir().expect("temp directory");
         let body = b"streamed body".to_vec();
@@ -431,7 +815,11 @@ mod tests {
         .and_then(PendingDownload::persist)
         .expect("download");
 
-        assert_eq!(std::fs::read(result.path).unwrap(), b"streamed body");
+        let DownloadResult::File(path) = result else {
+            panic!("expected file download");
+        };
+
+        assert_eq!(std::fs::read(path).unwrap(), b"streamed body");
         assert_eq!(
             progress.lock().unwrap().last().copied(),
             Some(DownloadProgress {
@@ -490,12 +878,16 @@ mod tests {
         .and_then(PendingDownload::persist)
         .expect("download");
 
-        assert_eq!(result.path.file_name().unwrap(), "file (2).zip");
+        let DownloadResult::File(path) = result else {
+            panic!("expected file download");
+        };
+
+        assert_eq!(path.file_name().unwrap(), "file (2).zip");
         assert_eq!(
             std::fs::read(temp.path().join("file.zip")).unwrap(),
             b"existing"
         );
-        assert_eq!(std::fs::read(result.path).unwrap(), b"new");
+        assert_eq!(std::fs::read(path).unwrap(), b"new");
     }
 
     #[gpui::test]
@@ -606,6 +998,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
                     id: 7,
+                    kind: DownloadNoticeKind::File,
                     file_name: "partial.zip".to_owned(),
                     status: DownloadNoticeStatus::Downloading {
                         downloaded_bytes: 7,
@@ -636,11 +1029,13 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         id: 1,
+                        kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
                         status: DownloadNoticeStatus::Completed,
                     },
                     DownloadNoticeRow {
                         id: 2,
+                        kind: DownloadNoticeKind::File,
                         file_name: "cancel.zip".to_owned(),
                         status: DownloadNoticeStatus::Connecting,
                     },
@@ -674,6 +1069,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
                     id: 3,
+                    kind: DownloadNoticeKind::File,
                     file_name: "complete.zip".to_owned(),
                     status: DownloadNoticeStatus::Completed,
                 });
