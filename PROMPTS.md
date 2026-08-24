@@ -1,18 +1,17 @@
 ## 1
 
-- If clipboard content is one word (no spaces), do NOT paste into a file, do nothing with it (do not show clipboard summary UI in the status bar, or allow pasting it as a file). Only paste when content has at least one space. This is a security measure to prevent passwords being pasted as files.
 - Bug: When a file/folder is selected, and I navigate onto a different program/window, when I come back it is still highlighted (which is good) but I can't press F2 to rename without clicking on it again, or paste into the current directory.
 - URL download X button (right-aligned) to cancel+delete immediately
 - Settings option to bypass copy verification "app.copy_verify" true/false. Default to true.
+- Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
+- Paste a YouTube URL (either youtube.com or the shortened URL youtu.be) downloads via yt-dlp if it exists in the path (show error if not in the path)
+    - Archive file native navigation (same as Windows Explorer). Archives can be opened and navagated into like a folder.
 
 ---
 
-- Paste a YouTube URL (either youtube.com or the shortened URL youtu.be) downloads via yt-dlp if it exists in the path (show error if not in the path)
-- Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
-- Archive file native navigation (same as Windows Explorer). Archives can be opened and navagated into like a folder.
 - New UI feature: Hovering over the status bar clipboard summary button shows a popup UI box with the exact content of the clipboard.
     - Folder count, file count, URL address, RAW text content, and total size
-- Video thumbnail generation refactor. Currently the first frame is taken as the thumbnail to maximise speed. While maintaining a focus on extream speed of extraction, I want a fixed 2 second
+- Video thumbnail generation refactor. Currently the first frame is taken as the thumbnail to maximise speed. While maintaining a focus on extream speed of extraction, I want a fixed 4 second thumbnail instead. Do NOT probe for the video length, just take the shortest possible path to extract a frame at the 4 second mark. If it fails, fallback on the first frame. Speed and compute are extreamly important here, it needs to be lightning fast and efficient.
 
 ## 2
 

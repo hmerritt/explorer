@@ -7638,7 +7638,8 @@ mod tests {
         DirectoryKind,
         clipboard::{
             FileClipboard, FileClipboardOperation, clipboard_item_can_paste,
-            clipboard_item_for_files, initialize_clipboard_summary, write_to_clipboard_and_refresh,
+            clipboard_item_for_files, clipboard_summary, initialize_clipboard_summary,
+            write_to_clipboard_and_refresh,
         },
         codebase_summary::{CodebaseLanguageSummary, CodebaseSummary},
         constants::{
@@ -8761,7 +8762,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_button_availability_accepts_files_images_urls_and_plain_text() {
+    fn paste_button_availability_accepts_supported_payloads_and_rejects_single_tokens() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
             vec![PathBuf::from("a.txt")],
@@ -8770,12 +8771,14 @@ mod tests {
         let image = Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
         let image_item = ClipboardItem::new_image(&image);
         let download_item = ClipboardItem::new_string("https://example.com/archive.zip".to_owned());
-        let plain_item = ClipboardItem::new_string("a.txt".to_owned());
+        let plain_item = ClipboardItem::new_string("plain text".to_owned());
+        let single_token_item = ClipboardItem::new_string("a.txt".to_owned());
 
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
         assert!(clipboard_item_can_paste(Some(&image_item)));
         assert!(clipboard_item_can_paste(Some(&download_item)));
         assert!(clipboard_item_can_paste(Some(&plain_item)));
+        assert!(!clipboard_item_can_paste(Some(&single_token_item)));
         assert!(!clipboard_item_can_paste(None));
     }
 
@@ -11454,7 +11457,7 @@ mod tests {
     ) {
         cx.update(|app| {
             initialize_clipboard_summary(app);
-            write_to_clipboard_and_refresh(ClipboardItem::new_string(String::new()), app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("password".to_owned()), app);
         });
         let temp = TempDir::new();
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
@@ -11467,6 +11470,26 @@ mod tests {
                 view.navigate_to_sidebar_group(SidebarGroupKind::Pinned, cx);
                 cx.notify();
             });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_none());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_removes_summary_for_single_token_text(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+        });
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_some());
+
+        cx.update(|_, app| {
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("password".to_owned()), app);
+            assert!(clipboard_summary(app).is_none());
+            view.update(app, |_, cx| cx.notify());
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("clipboard-status").is_none());

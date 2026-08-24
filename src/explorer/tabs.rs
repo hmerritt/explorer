@@ -2677,9 +2677,9 @@ mod tests {
         let view = observe_active_test_view(&tabs, cx);
         let cases = [
             (
-                ClipboardItem::new_string("{\"ok\":true}".to_owned()),
+                ClipboardItem::new_string("{\"ok\": true}".to_owned()),
                 "data.json",
-                "{\"ok\":true}",
+                "{\"ok\": true}",
             ),
             (
                 ClipboardItem::new_string("a\tb\n1\t2".to_owned()),
@@ -2726,6 +2726,25 @@ mod tests {
             cx.dispatch_action(RenameCancel);
             cx.run_until_parked();
         }
+    }
+
+    #[gpui::test]
+    fn paste_single_token_clipboard_text_does_nothing(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = observe_active_test_view(&tabs, cx);
+
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string("password".to_owned()));
+        });
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.operation_notice.is_none());
+            assert!(selected_names(view).is_empty());
+            assert!(view.active_rename_focus_handle().is_none());
+        });
     }
 
     #[gpui::test]

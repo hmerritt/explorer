@@ -479,12 +479,15 @@ pub(super) fn clipboard_text_payload_from_item(
     item: &ClipboardItem,
 ) -> Option<ClipboardTextPayload> {
     if let Some(markdown) = item.markdown().filter(|markdown| !markdown.is_empty()) {
-        return Some(materialization("document.md", markdown));
+        return text_can_materialize(&markdown).then(|| materialization("document.md", markdown));
     }
 
     let text = item.text().unwrap_or_default();
     if let Some(downloads) = downloads_from_text(&text) {
         return Some(ClipboardTextPayload::Downloads(downloads));
+    }
+    if !text_can_materialize(&text) {
+        return None;
     }
     let trimmed = text.trim();
     if !trimmed.is_empty()
@@ -514,6 +517,11 @@ pub(super) fn clipboard_text_payload_from_item(
         return Some(materialization("text.txt", text));
     }
     None
+}
+
+fn text_can_materialize(text: &str) -> bool {
+    text.bytes()
+        .any(|byte| matches!(byte, b' ' | b'\n' | b'\r'))
 }
 
 fn materialization(file_name: &'static str, contents: impl Into<Vec<u8>>) -> ClipboardTextPayload {
@@ -962,26 +970,30 @@ mod tests {
     }
 
     #[test]
-    fn paste_payload_accepts_files_and_plain_text_but_rejects_empty_clipboard() {
+    fn paste_payload_accepts_files_and_spaced_text_but_rejects_single_tokens() {
         let explorer_item = clipboard_item_for_files(&FileClipboard::new(
             FileClipboardOperation::Copy,
             vec![PathBuf::from("a.txt")],
         ))
         .expect("clipboard item");
-        let plain_item = ClipboardItem::new_string("plain text".to_owned());
-
         assert!(clipboard_item_can_paste(Some(&explorer_item)));
-        assert!(clipboard_item_can_paste(Some(&plain_item)));
-        assert!(!clipboard_item_can_paste(Some(&ClipboardItem::new_string(
-            String::new()
-        ))));
+        for allowed in ["plain text", "plain\ntext", "plain\rtext"] {
+            assert!(clipboard_item_can_paste(Some(&ClipboardItem::new_string(
+                allowed.to_owned()
+            ))));
+        }
+        for blocked in ["", "password", "a.txt", "{\"ok\":true}", "<svg/>", "a\tb"] {
+            assert!(!clipboard_item_can_paste(Some(&ClipboardItem::new_string(
+                blocked.to_owned()
+            ))));
+        }
         assert!(!clipboard_item_can_paste(None));
     }
 
     #[test]
     fn download_clipboard_accepts_http_files_and_decodes_the_file_name() {
         let item = ClipboardItem::new_string(
-            "  https://example.com/releases/My%20File.tar.gz?download=1#asset  ".to_owned(),
+            "https://example.com/releases/My%20File.tar.gz?download=1#asset".to_owned(),
         );
 
         let ClipboardTextPayload::Downloads(downloads) =
@@ -1055,7 +1067,6 @@ mod tests {
         for (source, expected_name) in [
             (" {\n  \"ok\": true\n} ", "data.json"),
             ("[1, 2, 3]", "data.json"),
-            ("<div>hello</div>", "text.txt"),
             ("# Heading\nBody", "document.md"),
             ("ordinary prose", "text.txt"),
         ] {
@@ -1068,14 +1079,17 @@ mod tests {
             assert_eq!(materialization.file_name, expected_name);
             assert_eq!(materialization.contents, source.as_bytes());
         }
-        for scalar in ["true", "42", "\"string\""] {
-            let item = ClipboardItem::new_string(scalar.to_owned());
-            let Some(ClipboardTextPayload::Materialization(materialization)) =
-                clipboard_text_payload_from_item(&item)
-            else {
-                panic!("expected scalar text");
-            };
-            assert_eq!(materialization.file_name, "text.txt");
+        for single_token in [
+            "true",
+            "42",
+            "\"string\"",
+            "<div>hello</div>",
+            "{\"ok\":true}",
+            "<svg/>",
+            "a\tb",
+        ] {
+            let item = ClipboardItem::new_string(single_token.to_owned());
+            assert_eq!(clipboard_text_payload_from_item(&item), None);
         }
     }
 
@@ -1083,7 +1097,7 @@ mod tests {
     fn native_markdown_precedes_other_plain_text_classifiers() {
         let item = ClipboardItem::new_string_with_markdown(
             "https://example.com/file.zip".to_owned(),
-            "[download](https://example.com/file.zip)".to_owned(),
+            "[download link](https://example.com/file.zip)".to_owned(),
         );
         let Some(ClipboardTextPayload::Materialization(materialization)) =
             clipboard_text_payload_from_item(&item)
@@ -1093,8 +1107,19 @@ mod tests {
         assert_eq!(materialization.file_name, "document.md");
         assert_eq!(
             materialization.contents,
-            b"[download](https://example.com/file.zip)"
+            b"[download link](https://example.com/file.zip)"
         );
+    }
+
+    #[test]
+    fn native_markdown_without_a_space_or_newline_is_rejected() {
+        let item = ClipboardItem::new_string_with_markdown(
+            "password".to_owned(),
+            "**password**".to_owned(),
+        );
+
+        assert_eq!(clipboard_text_payload_from_item(&item), None);
+        assert!(!clipboard_item_can_paste(Some(&item)));
     }
 
     #[test]
@@ -1188,7 +1213,7 @@ mod tests {
         for source in [
             "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
             " <?xml version=\"1.0\"?>\n<SVG viewBox=\"0 0 1 1\"></SVG> ",
-            "<svg/>",
+            "<svg />",
         ] {
             let item = ClipboardItem::new_string(source.to_owned());
             let Some(ClipboardTextPayload::Materialization(materialization)) =
@@ -1253,8 +1278,8 @@ mod tests {
     fn clipboard_summary_classifies_materialized_text_payloads() {
         for (item, expected) in [
             (
-                ClipboardItem::new_string("{\"ok\":true}".to_owned()),
-                "JSON file · 11 bytes",
+                ClipboardItem::new_string("{\"ok\": true}".to_owned()),
+                "JSON file · 12 bytes",
             ),
             (
                 ClipboardItem::new_string("a\tb\n1\t2".to_owned()),
@@ -1272,8 +1297,8 @@ mod tests {
                 "MD file · 9 bytes",
             ),
             (
-                ClipboardItem::new_string("<svg/>".to_owned()),
-                "SVG vector file · 6 bytes",
+                ClipboardItem::new_string("<svg viewBox=\"0 0 1 1\"/>".to_owned()),
+                "SVG vector file · 24 bytes",
             ),
             (
                 ClipboardItem::new_string("ordinary prose".to_owned()),
@@ -1286,6 +1311,16 @@ mod tests {
                     .summary
                     .label,
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_summary_ignores_single_token_text() {
+        for text in ["password", "a.txt", "{\"ok\":true}", "<svg/>", "a\tb"] {
+            assert!(
+                clipboard_summary_inspection(&ClipboardItem::new_string(text.to_owned())).is_none(),
+                "unexpected summary for {text:?}"
             );
         }
     }
