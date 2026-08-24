@@ -79,6 +79,7 @@ fn run_scheduled_cache_cleanup(
         super::image_thumbnails::cleanup_stale_path_cache_entries();
         super::app_icons::cleanup_stale_path_cache_entries();
         super::portable_devices::cleanup_open_cache();
+        super::archive_fs::cleanup_materialization_cache();
     })
 }
 

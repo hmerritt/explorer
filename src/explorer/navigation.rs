@@ -29,6 +29,8 @@ pub(super) enum HistoryMode {
 pub(super) enum EntryAction {
     OpenFile(PathBuf),
     OpenDirectoryInNewTab(PathBuf),
+    OpenArchive(PathBuf),
+    OpenArchiveInNewTab(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,7 +40,9 @@ pub(super) enum DirectoryOpenMode {
 }
 
 fn navigation_parent(path: &Path) -> Option<PathBuf> {
-    if crate::explorer::portable_devices::is_portable_path(path) {
+    if crate::explorer::archive_fs::is_archive_path(path) {
+        crate::explorer::archive_fs::parent(path)
+    } else if crate::explorer::portable_devices::is_portable_path(path) {
         crate::explorer::portable_devices::parent(path)
     } else {
         path.parent().map(Path::to_path_buf)
@@ -628,6 +632,15 @@ impl ExplorerView {
         if self.is_sidebar_group_view() {
             return;
         }
+        if let Some((parent, selected)) = crate::explorer::archive_fs::exit_selection(&self.path) {
+            self.navigate_to_directory_with_watcher_selecting(
+                parent,
+                HistoryMode::Record,
+                vec![selected],
+                cx,
+            );
+            return;
+        }
         if let Some(parent) = navigation_parent(&self.path) {
             self.navigate_to_directory_with_watcher(parent, HistoryMode::Record, cx);
         }
@@ -742,7 +755,12 @@ impl ExplorerView {
 
         self.entry_click_sequence = None;
 
-        if entry.is_app_bundle() {
+        if crate::explorer::archive_fs::is_supported_archive_file(&entry.path) {
+            Some(match directory_open_mode {
+                DirectoryOpenMode::CurrentTab => EntryAction::OpenArchive(entry.path.clone()),
+                DirectoryOpenMode::NewTab => EntryAction::OpenArchiveInNewTab(entry.path.clone()),
+            })
+        } else if entry.is_app_bundle() {
             Some(EntryAction::OpenFile(entry.path.clone()))
         } else if entry.is_directory_like() {
             self.activate_directory(
@@ -818,7 +836,17 @@ impl ExplorerView {
     ) -> Option<PathBuf> {
         self.cancel_pending_click_rename();
 
-        let target = directory_new_tab_target(entry)?;
+        let target = if crate::explorer::archive_fs::is_supported_archive_file(&entry.path) {
+            match crate::explorer::archive_fs::mount(&entry.path) {
+                Ok(root) => root,
+                Err(error) => {
+                    self.set_error_notice(error);
+                    return None;
+                }
+            }
+        } else {
+            directory_new_tab_target(entry)?
+        };
 
         if let Some(ix) = self.entry_index_by_path(&entry.path) {
             self.apply_click_selection(ix, modifiers);
@@ -868,7 +896,12 @@ impl ExplorerView {
         let entry = self.focused_entry()?.clone();
         self.clear_operation_notice();
 
-        if entry.is_app_bundle() {
+        if crate::explorer::archive_fs::is_supported_archive_file(&entry.path) {
+            Some(match directory_open_mode {
+                DirectoryOpenMode::CurrentTab => EntryAction::OpenArchive(entry.path),
+                DirectoryOpenMode::NewTab => EntryAction::OpenArchiveInNewTab(entry.path),
+            })
+        } else if entry.is_app_bundle() {
             if open_files {
                 Some(EntryAction::OpenFile(entry.path))
             } else {
@@ -916,6 +949,16 @@ impl ExplorerView {
             EntryAction::OpenFile(path) => self.open_file_with_default_app(&path, window, cx),
             EntryAction::OpenDirectoryInNewTab(path) => {
                 cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(path));
+            }
+            EntryAction::OpenArchive(path) => match crate::explorer::archive_fs::mount(&path) {
+                Ok(root) => self.navigate_to_directory_with_watcher(root, HistoryMode::Record, cx),
+                Err(error) => self.set_error_notice(error),
+            },
+            EntryAction::OpenArchiveInNewTab(path) => {
+                match crate::explorer::archive_fs::mount(&path) {
+                    Ok(root) => cx.emit(ExplorerViewEvent::OpenDirectoryInNewTab(root)),
+                    Err(error) => self.set_error_notice(error),
+                }
             }
         }
     }
@@ -1614,6 +1657,22 @@ mod tests {
             Some(EntryAction::OpenFile(PathBuf::from("file.txt")))
         );
         assert_eq!(view.path, PathBuf::from("root"));
+    }
+
+    #[test]
+    fn focused_archive_activation_opens_it_as_a_folder() {
+        let temp = TempDir::new();
+        let archive = temp.path().join("sample.zip");
+        fs::write(&archive, b"archive contents are loaded after activation")
+            .expect("create archive-shaped file");
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.entries = vec![FileEntry::from_path(archive.clone()).expect("archive entry")];
+        view.select_single_index(0);
+
+        assert_eq!(
+            view.activate_focused_entry(true),
+            Some(EntryAction::OpenArchive(archive))
+        );
     }
 
     #[test]

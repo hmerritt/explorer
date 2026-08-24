@@ -2,6 +2,7 @@ mod actions;
 mod address_bar;
 mod app_icons;
 mod archive_diagnostics;
+mod archive_fs;
 mod breadcrumb;
 mod cache_cleanup;
 mod cache_directory;

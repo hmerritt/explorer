@@ -31,6 +31,16 @@ pub(super) fn path_breadcrumb_segments(
     path: &Path,
     filesystem_name: &str,
 ) -> Vec<BreadcrumbSegment> {
+    if let Some(info) = crate::explorer::archive_fs::breadcrumb_info(path) {
+        let mut segments = path_breadcrumb_segments(&info.physical_parent, filesystem_name);
+        segments.extend(
+            info.segments
+                .into_iter()
+                .map(|(label, target)| BreadcrumbSegment { label, target }),
+        );
+        return segments;
+    }
+
     if let Some(segments) = crate::explorer::portable_devices::breadcrumb_segments(path) {
         return segments
             .into_iter()

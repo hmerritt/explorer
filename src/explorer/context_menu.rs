@@ -228,7 +228,7 @@ impl ExplorerView {
             origin,
             folder_context_menu_items_with_custom(
                 &self.path,
-                can_paste,
+                can_paste && crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path),
                 &self.date_format,
                 &custom_items,
             ),
@@ -695,7 +695,13 @@ impl ExplorerView {
             .selected_indices
             .iter()
             .filter_map(|ix| self.entries.get(*ix))
-            .filter_map(directory_new_tab_target)
+            .filter_map(|entry| {
+                directory_new_tab_target(entry).or_else(|| {
+                    crate::explorer::archive_fs::is_supported_archive_file(&entry.path)
+                        .then(|| crate::explorer::archive_fs::mount(&entry.path).ok())
+                        .flatten()
+                })
+            })
             .collect()
     }
 
@@ -707,12 +713,23 @@ impl ExplorerView {
             .collect()
     }
 
-    fn open_selected_files_with_default_app(
+    pub(super) fn open_selected_files_with_default_app(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_files_with_default_app(self.selected_file_open_targets(), window, cx);
+        let targets = self.selected_file_open_targets();
+        if let [path] = targets.as_slice()
+            && crate::explorer::archive_fs::is_supported_archive_file(path)
+        {
+            self.perform_entry_action(
+                crate::explorer::navigation::EntryAction::OpenArchive(path.clone()),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.open_files_with_default_app(targets, window, cx);
     }
 
     #[cfg(test)]
@@ -1373,8 +1390,9 @@ fn entry_context_menu_items_with_custom_in_directory(
 ) -> Vec<ContextMenuItem> {
     let mut items = Vec::new();
     let can_delete = targets.iter().all(|path| {
-        !crate::explorer::portable_devices::is_portable_path(path)
-            || crate::explorer::portable_devices::capabilities(path).can_delete
+        !crate::explorer::archive_fs::is_archive_path(path)
+            && (!crate::explorer::portable_devices::is_portable_path(path)
+                || crate::explorer::portable_devices::capabilities(path).can_delete)
     });
 
     if selected_count == 1 {
@@ -1504,7 +1522,9 @@ fn entry_context_menu_items_with_custom_in_directory(
         && let Some(entry) = selected_entries.first()
     {
         let is_folder = directory_new_tab_target(entry).is_some();
-        if !crate::explorer::portable_devices::is_portable_path(&entry.path) {
+        if !crate::explorer::portable_devices::is_portable_path(&entry.path)
+            && !crate::explorer::archive_fs::is_archive_path(&entry.path)
+        {
             items.push(copy_path_context_menu_item(
                 "context-menu-entry-copy-path",
                 &entry.path,
@@ -1595,6 +1615,7 @@ fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bo
     !selected_entries.is_empty()
         && selected_entries.iter().all(|entry| {
             !crate::explorer::portable_devices::is_portable_path(&entry.path)
+                && !crate::explorer::archive_fs::is_archive_path(&entry.path)
                 && entry.is_open_with_target()
                 && archive_path_is_supported(&entry.path)
         })
@@ -1645,7 +1666,8 @@ fn folder_context_menu_items_with_custom(
     date_format: &str,
     custom_items: &[CustomContextMenuItem],
 ) -> Vec<ContextMenuItem> {
-    let path_is_transfer_path = false;
+    let path_is_archive = crate::explorer::archive_fs::is_archive_path(path);
+    let path_is_transfer_path = path_is_archive;
 
     let (created, modified) = if path_is_transfer_path {
         (None, None)
@@ -1697,7 +1719,8 @@ fn folder_context_menu_items_from_times_with_format(
     modified: Option<SystemTime>,
     date_format: &str,
 ) -> Vec<ContextMenuItem> {
-    let path_is_transfer_path = false;
+    let path_is_archive = crate::explorer::archive_fs::is_archive_path(path);
+    let path_is_transfer_path = path_is_archive;
     let portable_capabilities = crate::explorer::portable_devices::capabilities(path);
     let is_portable = crate::explorer::portable_devices::is_portable_path(path);
 
@@ -1707,7 +1730,9 @@ fn folder_context_menu_items_from_times_with_format(
             icon: Some(ContextMenuIcon::Paste),
             label: "Paste".to_owned(),
             command: ContextMenuCommand::Paste,
-            enabled: can_paste && (!is_portable || portable_capabilities.can_upload),
+            enabled: !path_is_archive
+                && can_paste
+                && (!is_portable || portable_capabilities.can_upload),
         },
         ContextMenuItem::Submenu {
             id: "context-menu-new".to_owned(),
@@ -1719,19 +1744,26 @@ fn folder_context_menu_items_from_times_with_format(
                     icon: Some(ContextMenuIcon::File),
                     label: "File".to_owned(),
                     command: ContextMenuCommand::NewFile,
-                    enabled: !is_portable || portable_capabilities.can_upload,
+                    enabled: !path_is_archive && (!is_portable || portable_capabilities.can_upload),
                 },
                 ContextMenuItem::Action {
                     id: "context-menu-new-folder".to_owned(),
                     icon: Some(ContextMenuIcon::Folder),
                     label: "Folder".to_owned(),
                     command: ContextMenuCommand::NewFolder,
-                    enabled: !is_portable || portable_capabilities.can_create_folder,
+                    enabled: !path_is_archive
+                        && (!is_portable || portable_capabilities.can_create_folder),
                 },
             ],
         },
-        copy_path_context_menu_item("context-menu-folder-copy-path", path, true),
     ];
+    if !path_is_archive {
+        items.push(copy_path_context_menu_item(
+            "context-menu-folder-copy-path",
+            path,
+            true,
+        ));
+    }
     if !path_is_transfer_path
         && let Some(relative_path) = repo_relative_path_text(path, true).filter(|path| path != ".")
     {
@@ -1763,7 +1795,7 @@ fn folder_context_menu_items_from_times_with_format(
             command: ContextMenuCommand::PropertiesForPath {
                 path: path.to_path_buf(),
             },
-            enabled: true,
+            enabled: !path_is_archive,
         },
     ]);
     items

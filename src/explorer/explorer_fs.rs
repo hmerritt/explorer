@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::explorer::{
+    archive_fs,
     entry::FileEntry,
     filesystem::{EntryVisibility, should_hide_entry},
     portable_devices,
@@ -13,6 +14,7 @@ use crate::explorer::{
 pub(super) enum ExplorerLocation {
     Local(PathBuf),
     Portable(PathBuf),
+    Archive(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +34,9 @@ impl ExplorerFs {
     }
 
     pub(super) fn classify(&self, path: &Path) -> ExplorerLocation {
-        if portable_devices::is_portable_path(path) {
+        if archive_fs::is_archive_path(path) {
+            ExplorerLocation::Archive(path.to_path_buf())
+        } else if portable_devices::is_portable_path(path) {
             ExplorerLocation::Portable(path.to_path_buf())
         } else {
             ExplorerLocation::Local(path.to_path_buf())
@@ -48,6 +52,7 @@ impl ExplorerFs {
                         .parent()
                         .is_some_and(|parent| portable_devices::capabilities(parent).can_mutate())
             }
+            ExplorerLocation::Archive(_) => false,
         }
     }
 
@@ -59,6 +64,9 @@ impl ExplorerFs {
         match self.classify(path) {
             ExplorerLocation::Local(_) => Ok(path.exists()),
             ExplorerLocation::Portable(_) => Ok(portable_devices::exists(path)),
+            ExplorerLocation::Archive(_) => {
+                Ok(archive_fs::is_dir(path) || archive_fs::is_file(path))
+            }
         }
     }
 
@@ -66,6 +74,7 @@ impl ExplorerFs {
         match self.classify(path) {
             ExplorerLocation::Local(_) => Ok(path.is_dir()),
             ExplorerLocation::Portable(_) => Ok(portable_devices::is_dir(path)),
+            ExplorerLocation::Archive(_) => Ok(archive_fs::is_dir(path)),
         }
     }
 
@@ -78,6 +87,7 @@ impl ExplorerFs {
         match self.classify(path) {
             ExplorerLocation::Local(_) => list_local_dir(path, visibility),
             ExplorerLocation::Portable(_) => portable_devices::list_dir(path),
+            ExplorerLocation::Archive(_) => archive_fs::list_dir(path),
         }
     }
 
@@ -99,6 +109,7 @@ impl ExplorerFs {
                     .ok_or_else(|| "Portable-device folder name is invalid.".to_owned())?;
                 portable_devices::create_folder(parent, name).map(|_| ())
             }
+            ExplorerLocation::Archive(_) => Err(self.read_only_error()),
         }
     }
 
@@ -123,6 +134,7 @@ impl ExplorerFs {
                     .ok_or_else(|| "Portable-device file name is invalid.".to_owned())?;
                 portable_devices::write_file(parent, name, bytes).map(|_| ())
             }
+            ExplorerLocation::Archive(_) => Err(self.read_only_error()),
         }
     }
 
@@ -136,6 +148,7 @@ impl ExplorerFs {
                     ExplorerRefreshDriver::Poll
                 }
             }
+            ExplorerLocation::Archive(_) => ExplorerRefreshDriver::Poll,
         }
     }
 }

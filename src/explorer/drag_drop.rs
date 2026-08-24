@@ -720,6 +720,7 @@ impl ExplorerView {
 
     pub(super) fn can_start_item_drag_for_index(&self, ix: usize) -> bool {
         !self.is_sidebar_group_view()
+            && !crate::explorer::archive_fs::is_archive_path(&self.path)
             && self.mouse_selection_drag.is_none()
             && self.entries.get(ix).is_some()
             && self.entry_is_selected(ix)
@@ -727,6 +728,7 @@ impl ExplorerView {
 
     pub(super) fn can_start_individual_item_drag_for_index(&self, ix: usize) -> bool {
         !self.is_sidebar_group_view()
+            && !crate::explorer::archive_fs::is_archive_path(&self.path)
             && self.mouse_selection_drag.is_none()
             && self.entries.get(ix).is_some()
             && !self.entry_is_selected(ix)
@@ -759,7 +761,7 @@ impl ExplorerView {
         destination: &DropDestination,
         modifiers: Modifiers,
     ) -> bool {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view() || !ExplorerFs::new().can_mutate(&self.path) {
             return false;
         }
         self.drop_resolution_for_value(dragged_value, destination, modifiers)
@@ -777,7 +779,7 @@ impl ExplorerView {
         #[cfg(test)]
         self.drop_predicate_evaluation_count
             .set(self.drop_predicate_evaluation_count.get() + 1);
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view() || !ExplorerFs::new().can_mutate(&self.path) {
             return false;
         }
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
@@ -820,7 +822,7 @@ impl ExplorerView {
         modifiers: Modifiers,
         mouse_position: Point<Pixels>,
     ) -> (CursorStyle, Option<DropIndicator>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view() || !ExplorerFs::new().can_mutate(&self.path) {
             return (CursorStyle::OperationNotAllowed, None);
         }
         let resolution = self.drop_resolution_for_value(dragged_value, destination, modifiers);

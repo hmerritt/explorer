@@ -547,19 +547,23 @@ impl ExplorerView {
                         this.truncate().child(SharedString::from(text))
                     }),
             )
-            .when(!self.is_sidebar_group_view(), |this| {
-                this.child(search_bar_icon_button(
-                    "recursive-search-toggle",
-                    RECURSIVE_SEARCH_ICON,
-                    "Search subfolders",
-                    self.recursive_search_is_enabled(),
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.toggle_recursive_search(cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ))
-            })
+            .when(
+                !self.is_sidebar_group_view()
+                    && !crate::explorer::archive_fs::is_archive_path(&self.path),
+                |this| {
+                    this.child(search_bar_icon_button(
+                        "recursive-search-toggle",
+                        RECURSIVE_SEARCH_ICON,
+                        "Search subfolders",
+                        self.recursive_search_is_enabled(),
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.toggle_recursive_search(cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                },
+            )
             .child(
                 div()
                     .flex_shrink_0()
@@ -582,8 +586,10 @@ impl ExplorerView {
         let can_extract = self.selected_archive_paths().is_some();
         let can_mount = self.selected_mountable_image_path().is_some();
         let read_only_group = self.is_sidebar_group_view();
+        let can_mutate_location = !read_only_group
+            && crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path);
         let clipboard = cx.read_from_clipboard();
-        let can_paste = !read_only_group && clipboard_item_can_paste(clipboard.as_ref());
+        let can_paste = can_mutate_location && clipboard_item_can_paste(clipboard.as_ref());
 
         div()
             .flex()
@@ -624,7 +630,7 @@ impl ExplorerView {
                 Some(utility_new_icon().into_any_element()),
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
-                !read_only_group,
+                can_mutate_location,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
                     this.cancel_pending_click_rename();
@@ -642,7 +648,7 @@ impl ExplorerView {
                 "utility-cut",
                 CUT_ICON.clone(),
                 "Cut",
-                has_selection && !read_only_group,
+                has_selection && can_mutate_location,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
                     this.open_utility_menu = None;
@@ -702,7 +708,7 @@ impl ExplorerView {
                 "utility-delete",
                 DELETE_ICON.clone(),
                 "Delete",
-                has_selection && !read_only_group,
+                has_selection && can_mutate_location,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.close_context_menu();
                     this.open_utility_menu = None;

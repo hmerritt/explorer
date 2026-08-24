@@ -288,7 +288,8 @@ impl ExplorerView {
     }
 
     pub(super) fn toggle_recursive_search(&mut self, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view() || crate::explorer::archive_fs::is_archive_path(&self.path)
+        {
             self.search.recursive_enabled = false;
             self.refresh_search_filter(cx);
             return;
@@ -301,7 +302,8 @@ impl ExplorerView {
     }
 
     fn set_recursive_search_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view() || crate::explorer::archive_fs::is_archive_path(&self.path)
+        {
             self.search.recursive_enabled = false;
             self.refresh_search_filter(cx);
             return;

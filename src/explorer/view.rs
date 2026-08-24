@@ -104,6 +104,7 @@ pub struct ExplorerView {
     pub(super) download_batch_failed: usize,
     pub(super) download_batch_last_error: Option<String>,
     pub(super) open_with_task: Option<Task<()>>,
+    pub(super) archive_copy_task: Option<Task<()>>,
     pub(super) run_elevated_task: Option<Task<()>>,
     pub(super) volume_eject_task: Option<Task<()>>,
     pub(super) image_mount_task: Option<Task<()>>,
@@ -514,6 +515,7 @@ impl ExplorerView {
             download_batch_failed: 0,
             download_batch_last_error: None,
             open_with_task: None,
+            archive_copy_task: None,
             run_elevated_task: None,
             volume_eject_task: None,
             image_mount_task: None,
@@ -1911,6 +1913,7 @@ impl ExplorerView {
         self.active_sidebar_group()
             .map(sidebar_group_label)
             .map(str::to_owned)
+            .or_else(|| crate::explorer::archive_fs::display_name_for_path(&self.path))
             .unwrap_or_else(|| tab_label_for_path(&self.path))
     }
 
@@ -1920,6 +1923,7 @@ impl ExplorerView {
 
     pub(super) fn has_background_operation(&self) -> bool {
         self.has_active_file_operation()
+            || self.archive_copy_task.is_some()
             || self.pending_trash_task.is_some()
             || self.network_connection_is_working()
     }

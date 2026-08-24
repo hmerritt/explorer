@@ -336,6 +336,13 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if crate::explorer::archive_fs::is_archive_path(&self.path)
+            && self.selection.selected_indices.len() > 1
+        {
+            self.open_selected_files_with_default_app(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = self.activate_focused_entry_with_watcher(true, cx) {
             self.perform_entry_action(action, window, cx);
         }

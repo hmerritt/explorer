@@ -732,6 +732,10 @@ impl ExplorerView {
     ) -> bool {
         self.cancel_pending_click_rename();
 
+        if !self.can_start_selected_rename() {
+            return false;
+        }
+
         let Some(ix) = self.selection.selected_indices.iter().next().copied() else {
             return false;
         };

@@ -242,7 +242,9 @@ impl ExplorerView {
         let paths = match paths
             .into_iter()
             .map(|path| {
-                if crate::explorer::portable_devices::is_portable_path(&path) {
+                if crate::explorer::archive_fs::is_archive_path(&path) {
+                    crate::explorer::archive_fs::materialize_for_open(&path)
+                } else if crate::explorer::portable_devices::is_portable_path(&path) {
                     crate::explorer::portable_devices::materialize_for_open(&path)
                 } else {
                     Ok(path)
@@ -252,7 +254,7 @@ impl ExplorerView {
         {
             Ok(paths) => paths,
             Err(error) => {
-                self.set_error_notice(format!("Could not open the portable file: {error}"));
+                self.set_error_notice(format!("Could not open the selected file: {error}"));
                 cx.notify();
                 return;
             }

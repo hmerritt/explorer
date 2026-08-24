@@ -4,7 +4,6 @@
 
 - Expand yt-dlp usage by detecting more supported video URLs that yt-dlp can handle (add as many as possible). Update UI copy to read "Download video from [site name]" (to save creating a map, you could extract the domain name from the URL for the site name)
 - Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
-- Archive file native navigation (same as Windows Explorer). Archives can be opened and navagated into like a folder.
 
 ---
 

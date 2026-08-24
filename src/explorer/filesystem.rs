@@ -1732,7 +1732,9 @@ pub(super) fn load_entries(
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
     let visibility = visibility.into();
-    if crate::explorer::portable_devices::is_portable_path(path) {
+    if crate::explorer::portable_devices::is_portable_path(path)
+        || crate::explorer::archive_fs::is_archive_path(path)
+    {
         return crate::explorer::explorer_fs::ExplorerFs::new().list_dir(path, visibility);
     }
     load_entries_with_options(path, EntryLoadOptions::for_path(path, visibility))
@@ -2512,6 +2514,158 @@ pub(super) fn archive_path_is_supported(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
         .is_some_and(archive_name_has_supported_extension)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ArchiveListedEntry {
+    pub(super) path: PathBuf,
+    pub(super) is_directory: bool,
+}
+
+pub(super) fn list_archive_entries(archive: &Path) -> Result<Vec<ArchiveListedEntry>, String> {
+    if archive_is_7z(archive) {
+        let file = File::open(archive)
+            .map_err(|error| format!("Could not open {}: {error}", path_display_name(archive)))?;
+        let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
+            .map_err(|error| {
+                format!(
+                    "Could not read 7z archive {}: {error}",
+                    path_display_name(archive)
+                )
+            })?;
+        let mut entries = Vec::new();
+        let mut by_path = HashMap::new();
+        reader
+            .for_each_entries(|entry, _| {
+                push_archive_listed_entry(
+                    &mut entries,
+                    &mut by_path,
+                    Path::new(entry.name()),
+                    entry.is_directory(),
+                );
+                Ok(true)
+            })
+            .map_err(|error| {
+                format!(
+                    "Could not list 7z archive {}: {error}",
+                    path_display_name(archive)
+                )
+            })?;
+        return Ok(entries);
+    }
+
+    if archive_is_rar(archive) {
+        let archive_file = archive.to_string_lossy().into_owned();
+        let reader = unrar::Archive::new(archive_file).list().map_err(|error| {
+            format!(
+                "Could not list RAR archive {}: {error}",
+                path_display_name(archive)
+            )
+        })?;
+        let mut entries = Vec::new();
+        let mut by_path = HashMap::new();
+        for entry in reader {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "Could not list RAR archive {}: {error}",
+                    path_display_name(archive)
+                )
+            })?;
+            push_archive_listed_entry(
+                &mut entries,
+                &mut by_path,
+                Path::new(&entry.filename),
+                entry.is_directory(),
+            );
+        }
+        return Ok(entries);
+    }
+
+    let listing = archive_listing(archive)?;
+    let mut entries = Vec::<ArchiveListedEntry>::with_capacity(listing.entries.len());
+    let mut by_path = HashMap::<PathBuf, usize>::with_capacity(listing.entries.len());
+
+    for raw_path in listing.entries {
+        let raw_text = raw_path.to_string_lossy();
+        let is_directory = raw_text.ends_with('/') || raw_text.ends_with('\\');
+        push_archive_listed_entry(&mut entries, &mut by_path, &raw_path, is_directory);
+    }
+
+    Ok(entries)
+}
+
+fn push_archive_listed_entry(
+    entries: &mut Vec<ArchiveListedEntry>,
+    by_path: &mut HashMap<PathBuf, usize>,
+    raw_path: &Path,
+    is_directory: bool,
+) {
+    let path = sanitized_archive_entry_path(raw_path);
+    if !archive_sanitized_entry_should_extract(&path) {
+        return;
+    }
+
+    if let Some(index) = by_path.get(&path).copied() {
+        entries[index].is_directory |= is_directory;
+        return;
+    }
+    by_path.insert(path.clone(), entries.len());
+    entries.push(ArchiveListedEntry { path, is_directory });
+}
+
+pub(super) fn extract_archive_entries_to_directory(
+    archive: &Path,
+    entries: &[PathBuf],
+    destination: &Path,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination)
+        .map_err(|error| format_path_error("create", destination, error))?;
+
+    let archive_size = fs::metadata(archive)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let mut planned = entries
+        .iter()
+        .map(|relative| ArchiveExtractEntry {
+            display_path: relative.clone(),
+            destination: destination.join(relative),
+            conflict: false,
+            byte_weight: 0,
+        })
+        .collect::<Vec<_>>();
+    assign_archive_entry_byte_weights(&mut planned, archive_size);
+    let plan = ArchiveExtractPlan::new(planned);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut progress = FileOperationProgress {
+        kind: FileOperationKind::Extract,
+        phase: FileOperationPhase::Copying,
+        total_bytes: archive_size,
+        copied_bytes: 0,
+        verified_bytes: 0,
+        work_total_bytes: archive_size,
+        work_completed_bytes: 0,
+        total_files: entries.len(),
+        completed_files: 0,
+        current_item: None,
+        cancellable: false,
+    };
+    extract_archive_with_entry_progress(
+        archive,
+        destination,
+        &plan,
+        ConflictChoice::Replace,
+        &cancel,
+        &mut progress,
+        &mut |_| {},
+        None,
+    )
+    .map_err(|error| match error {
+        FileOperationError::Failed(message) => message,
+        FileOperationError::Cancelled => "Archive extraction was cancelled.".to_owned(),
+    })
 }
 
 pub(super) fn mountable_image_path_is_supported(path: &Path) -> bool {
@@ -5436,9 +5590,11 @@ fn extract_rar_archive_to_temp(
                 .map_err(|error| operation_error("remove", &output, error))?;
             continue;
         }
-        let planned_entry = plan
-            .entry_by_display_path(&display_path)
-            .or_else(|| plan.entries.get(index));
+        // Selective archive navigation may provide a plan containing only a
+        // subset of members. Never fall back to matching by archive position:
+        // doing so could copy an unselected RAR member to a selected member's
+        // destination.
+        let planned_entry = plan.entry_by_display_path(&display_path);
         index += 1;
 
         let Some(planned_entry) = planned_entry else {
@@ -5736,8 +5892,12 @@ fn archive_sanitized_entry_should_extract(path: &Path) -> bool {
 }
 
 fn sanitized_archive_entry_path(path: &Path) -> PathBuf {
+    // Archive formats conventionally use `/`, but archives produced on Windows
+    // sometimes contain `\` separators. Normalize both so the virtual hierarchy
+    // and the selective-extraction plan agree on every host platform.
+    let normalized = path.to_string_lossy().replace('\\', "/");
     let mut sanitized = PathBuf::new();
-    for component in path.components() {
+    for component in Path::new(&normalized).components() {
         if let Component::Normal(name) = component {
             sanitized.push(name);
         }
@@ -6997,6 +7157,18 @@ mod tests {
         ];
         let sanitized = sanitized_entries_from_listing(&entries);
         assert_eq!(sanitized, vec![PathBuf::from("folder/file.txt")]);
+    }
+
+    #[test]
+    fn archive_paths_normalize_windows_separators_on_every_platform() {
+        assert_eq!(
+            sanitized_archive_entry_path(Path::new(r"folder\nested\file.txt")),
+            PathBuf::from("folder").join("nested").join("file.txt")
+        );
+        assert_eq!(
+            sanitized_archive_entry_path(Path::new(r"..\outside.txt")),
+            PathBuf::from("outside.txt")
+        );
     }
 
     #[test]

@@ -572,6 +572,9 @@ impl ExplorerView {
     }
 
     pub(super) fn address_text_for_path(&self, path: &Path) -> String {
+        if let Some(address) = crate::explorer::archive_fs::display_address(path) {
+            return address;
+        }
         #[cfg(target_os = "windows")]
         {
             format_address_path(path, self.address_slash)
@@ -925,6 +928,12 @@ fn resolve_address_input_with_env(
         return Err("The address is empty.".to_owned());
     }
 
+    if crate::explorer::archive_fs::display_address(current_path)
+        .is_some_and(|address| address == cleaned)
+    {
+        return Ok(current_path.to_path_buf());
+    }
+
     if let Some(path) = crate::explorer::portable_devices::path_for_display_address(&cleaned) {
         return Ok(path);
     }
@@ -938,6 +947,9 @@ fn resolve_address_input_with_env(
     };
 
     let candidate_exists = candidate.exists();
+    if candidate.is_file() && crate::explorer::filesystem::archive_path_is_supported(&candidate) {
+        return crate::explorer::archive_fs::mount(&candidate);
+    }
     let Some(directory) = address_directory_target(&candidate) else {
         if candidate_exists {
             return Err(format!("{} is not a folder.", candidate.display()));

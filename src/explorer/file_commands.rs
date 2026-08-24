@@ -101,7 +101,9 @@ impl ExplorerView {
     }
 
     fn create_new_item(&mut self, kind: NewItemKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view()
+            || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
+        {
             return;
         }
         match create_new_item_in_directory(&self.path, kind) {
@@ -131,6 +133,14 @@ impl ExplorerView {
     }
 
     pub(super) fn copy_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let selected_paths = self.selected_paths();
+        if selected_paths
+            .iter()
+            .any(|path| crate::explorer::archive_fs::is_archive_path(path))
+        {
+            self.copy_selected_archive_entries_to_clipboard(selected_paths, cx);
+            return;
+        }
         let Some(clipboard) = self.selected_file_clipboard(FileClipboardOperation::Copy) else {
             return;
         };
@@ -145,8 +155,61 @@ impl ExplorerView {
         }
     }
 
+    fn copy_selected_archive_entries_to_clipboard(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() || self.archive_copy_task.is_some() {
+            return;
+        }
+        self.set_info_notice(format!(
+            "Preparing {} from the archive...",
+            if paths.len() == 1 {
+                "1 item".to_owned()
+            } else {
+                format!("{} items", paths.len())
+            }
+        ));
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::explorer::archive_fs::materialize_paths(&paths) })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.archive_copy_task = None;
+                match result {
+                    Ok(paths) => {
+                        let clipboard = FileClipboard::new(FileClipboardOperation::Copy, paths);
+                        match clipboard_item_for_files(&clipboard) {
+                            Ok(item) => {
+                                crate::explorer::clipboard::write_to_clipboard_and_refresh(
+                                    item, cx,
+                                );
+                                explorer.cut_paths.clear();
+                                explorer.clear_operation_notice();
+                            }
+                            Err(error) => explorer.set_error_notice(error),
+                        }
+                    }
+                    Err(error) => explorer.set_error_notice(error),
+                }
+                cx.notify();
+            });
+        });
+        self.archive_copy_task = Some(task);
+    }
+
     pub(super) fn cut_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
         if self.is_sidebar_group_view() {
+            return;
+        }
+        if self
+            .selected_paths()
+            .iter()
+            .any(|path| crate::explorer::archive_fs::is_archive_path(path))
+        {
+            self.set_error_notice("Items inside archives cannot be cut.".to_owned());
             return;
         }
         let Some(clipboard) = self.selected_file_clipboard(FileClipboardOperation::Cut) else {
@@ -164,7 +227,9 @@ impl ExplorerView {
     }
 
     pub(super) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view()
+            || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
+        {
             return;
         }
         let Some(item) = cx.read_from_clipboard() else {
@@ -359,7 +424,9 @@ impl ExplorerView {
     }
 
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view()
+            || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
+        {
             return;
         }
         if self.pending_trash_task.is_some() {
@@ -489,7 +556,9 @@ impl ExplorerView {
     }
 
     pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
-        if self.is_sidebar_group_view() {
+        if self.is_sidebar_group_view()
+            || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
+        {
             return;
         }
         let paths = self.selected_paths();
