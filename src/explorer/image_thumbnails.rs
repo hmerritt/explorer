@@ -119,7 +119,7 @@ impl ImageThumbnailUsage {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image",
             (Self::Standard, ImageThumbnailKind::Pdf) => "pdf",
-            (Self::Standard, ImageThumbnailKind::Video) => "video",
+            (Self::Standard, ImageThumbnailKind::Video) => "video-v2",
             (Self::HoverPreview, ImageThumbnailKind::Image) => "image-hover-preview-v2",
             (Self::HoverPreview, ImageThumbnailKind::Pdf) => "pdf-hover-preview-v1",
             (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview",
@@ -2017,6 +2017,26 @@ mod tests {
         assert_ne!(
             image_thumbnail_key(&entry, ImageThumbnailKind::Image),
             image_thumbnail_key(&entry, ImageThumbnailKind::Video)
+        );
+    }
+
+    #[test]
+    fn standard_video_thumbnail_cache_namespace_is_versioned_independently() {
+        assert_eq!(
+            ImageThumbnailUsage::Standard.cache_namespace(ImageThumbnailKind::Image),
+            "image"
+        );
+        assert_eq!(
+            ImageThumbnailUsage::Standard.cache_namespace(ImageThumbnailKind::Pdf),
+            "pdf"
+        );
+        assert_eq!(
+            ImageThumbnailUsage::Standard.cache_namespace(ImageThumbnailKind::Video),
+            "video-v2"
+        );
+        assert_eq!(
+            ImageThumbnailUsage::HoverPreview.cache_namespace(ImageThumbnailKind::Video),
+            "video-hover-preview"
         );
     }
 

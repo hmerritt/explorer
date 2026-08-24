@@ -18,7 +18,7 @@ use crate::explorer::video::{ffmpeg_executable_path, ffmpeg_seek_argument};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const STATIC_THUMBNAIL_FALLBACK_SEEK_SECONDS: f64 = 1.0;
+const STATIC_THUMBNAIL_SEEK_SECONDS: f64 = 4.0;
 const STATIC_THUMBNAIL_DECODER_THREADS: u32 = 1;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(4);
 const STDERR_LIMIT: u64 = 64 * 1024;
@@ -109,7 +109,7 @@ pub(super) fn load_video_thumbnail_rgba(
     }
 
     let total_started = Instant::now();
-    let fast_args = static_video_thumbnail_args(path, None, size);
+    let fast_args = static_video_thumbnail_args(path, Some(STATIC_THUMBNAIL_SEEK_SECONDS), size);
     let fast = run_ffmpeg_ppm_stream(&fast_args, cancel, |_, frame| Some(frame));
     match fast {
         Ok(mut extraction) => {
@@ -130,11 +130,7 @@ pub(super) fn load_video_thumbnail_rgba(
             if cancel.load(Ordering::Relaxed) {
                 return Err(VideoExtractionError::cancelled());
             }
-            let fallback_args = static_video_thumbnail_args(
-                path,
-                Some(STATIC_THUMBNAIL_FALLBACK_SEEK_SECONDS),
-                size,
-            );
+            let fallback_args = static_video_thumbnail_args(path, None, size);
             let mut extraction =
                 run_ffmpeg_ppm_stream(&fallback_args, cancel, |_, frame| Some(frame))?;
             let image = extraction.value.pop().ok_or_else(|| {
@@ -780,15 +776,20 @@ mod tests {
     }
 
     #[test]
-    fn static_thumbnail_primary_args_decode_opening_frame_with_one_thread() {
-        let args = static_video_thumbnail_args(Path::new("clip.mp4"), None, 128);
+    fn static_thumbnail_primary_args_seek_to_four_seconds_with_one_thread() {
+        let args = static_video_thumbnail_args(
+            Path::new("clip.mp4"),
+            Some(STATIC_THUMBNAIL_SEEK_SECONDS),
+            128,
+        );
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         let index = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
 
-        assert!(!args.iter().any(|arg| arg == "-ss"));
+        assert!(index("-ss") < index("-i"));
+        assert_eq!(args[index("-ss") + 1], "4.000");
         assert!(!args.iter().any(|arg| arg == "-noaccurate_seek"));
         assert!(!args.iter().any(|arg| arg == "-skip_frame"));
         assert_eq!(args[index("-threads") + 1], "1");
@@ -801,16 +802,13 @@ mod tests {
     }
 
     #[test]
-    fn static_thumbnail_fallback_seeks_before_input_without_keyframe_filtering() {
-        let args = static_video_thumbnail_args(Path::new("clip.mp4"), Some(1.0), 128);
+    fn static_thumbnail_fallback_decodes_opening_frame_without_seeking() {
+        let args = static_video_thumbnail_args(Path::new("clip.mp4"), None, 128);
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let index = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
-
-        assert!(index("-ss") < index("-i"));
-        assert_eq!(args[index("-ss") + 1], "1.000");
+        assert!(!args.iter().any(|arg| arg == "-ss"));
         assert!(!args.iter().any(|arg| arg == "-noaccurate_seek"));
         assert!(!args.iter().any(|arg| arg == "-skip_frame"));
     }

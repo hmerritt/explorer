@@ -5,10 +5,10 @@
 - Expand yt-dlp usage by detecting more supported video URLs that yt-dlp can handle (add as many as possible). Update UI copy to read "Download video from [site name]" (to save creating a map, you could extract the domain name from the URL for the site name)
 - Add FTP/SFTP URL scheme for paste-to-download. Try SSH keys for seemless experience. Fall back on a username/password popup failing that.
 - Archive file native navigation (same as Windows Explorer). Archives can be opened and navagated into like a folder.
-- Video thumbnail generation refactor. Currently the first frame is taken as the thumbnail to maximize speed. While maintaining a focus on extreme speed of extraction, I want a fixed 4 second thumbnail instead. Do NOT probe for the video length, just take the shortest possible path to extract a frame at the 4 second mark. If it fails, fallback on the first frame. Speed and compute are extremely important here, it needs to be lightning fast and efficient.
 
 ---
 
+- Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk . Add "Google Drive" to Network group when found. Add a config option "view.google_drive" true/false default to true.
 - New UI feature: Hovering over the status bar clipboard summary button shows a popup UI box with the exact content of the clipboard.
     - Folder count, file count, URL address, RAW text content, and total size
 
@@ -20,7 +20,6 @@
 - Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).
 - UI refinement and improvements (tighten everything up, make it look nice)
 - Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
-- Support Google Drive when synced: Default windows location is: C:\Users\hrmer\AppData\Local\Google\Google Drive Streaming\My Drive.lnk
 
 ## 3
 
