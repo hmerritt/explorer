@@ -138,7 +138,11 @@ impl ExplorerView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_large_icon_selection(LargeIconSelectionDirection::Previous);
+        if self.selection.selected_indices.is_empty() {
+            self.navigate_up_with_watcher(cx);
+        } else {
+            self.move_large_icon_selection(LargeIconSelectionDirection::Previous);
+        }
         cx.notify();
     }
 
@@ -503,6 +507,62 @@ mod tests {
 
                 view.handle_select_all(&SelectAll, window, cx);
                 assert_eq!(selected_names(view), vec!["a.txt", "b.txt", "c.txt"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn large_icon_left_without_selection_navigates_up(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child directory");
+        fs::write(child.join("inside.txt"), b"inside").expect("create child entry");
+        let root = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, child);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.selection.selected_indices.is_empty());
+                view.handle_move_large_icon_left(&MoveLargeIconLeft, window, cx);
+                assert_eq!(view.path, root);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn large_icon_left_with_focused_but_deselected_item_navigates_up(cx: &mut TestAppContext) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).expect("create child directory");
+        fs::write(child.join("inside.txt"), b"inside").expect("create child entry");
+        let root = temp.path().to_path_buf();
+        let (view, cx) = test_view_entity_at_path(cx, child);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                view.toggle_selection_index(0);
+                assert_eq!(view.selection.focused_index, Some(0));
+                assert!(view.selection.selected_indices.is_empty());
+
+                view.handle_move_large_icon_left(&MoveLargeIconLeft, window, cx);
+                assert_eq!(view.path, root);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn large_icon_left_with_selection_moves_to_previous_item(cx: &mut TestAppContext) {
+        let (temp, view, cx) = test_view_entity(cx, &["a.txt", "b.txt"]);
+        let root = temp.path().to_path_buf();
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(1);
+                view.handle_move_large_icon_left(&MoveLargeIconLeft, window, cx);
+
+                assert_eq!(view.path, root);
+                assert_eq!(selected_names(view), vec!["a.txt"]);
             });
         });
     }

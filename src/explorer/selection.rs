@@ -370,10 +370,11 @@ impl ExplorerView {
             return;
         }
 
-        if self
-            .selection
-            .focused_index
-            .is_none_or(|ix| ix >= self.entries.len())
+        if self.selection.selected_indices.is_empty()
+            || self
+                .selection
+                .focused_index
+                .is_none_or(|ix| ix >= self.entries.len())
         {
             self.select_single_index(0);
             return;
@@ -467,9 +468,11 @@ fn large_icon_selection_target(
             (focused_index + 1 < entry_count).then_some(focused_index + 1)
         }
         LargeIconSelectionDirection::Above => focused_index.checked_sub(columns),
-        LargeIconSelectionDirection::Below => focused_index
-            .checked_add(columns)
-            .filter(|target| *target < entry_count),
+        LargeIconSelectionDirection::Below => {
+            let last_index = entry_count - 1;
+            (focused_index / columns < last_index / columns)
+                .then(|| focused_index.saturating_add(columns).min(last_index))
+        }
     }
 }
 
@@ -592,7 +595,8 @@ mod tests {
         assert_eq!(large_icon_selection_target(Some(4), 8, 3, Above), Some(1));
         assert_eq!(large_icon_selection_target(Some(1), 8, 3, Below), Some(4));
         assert_eq!(large_icon_selection_target(Some(4), 8, 3, Below), Some(7));
-        assert_eq!(large_icon_selection_target(Some(5), 8, 3, Below), None);
+        assert_eq!(large_icon_selection_target(Some(5), 8, 3, Below), Some(7));
+        assert_eq!(large_icon_selection_target(Some(2), 4, 3, Below), Some(3));
         assert_eq!(large_icon_selection_target(Some(7), 8, 3, Below), None);
     }
 
@@ -618,6 +622,20 @@ mod tests {
             assert_eq!(selected_names(&view), vec!["a.txt"]);
         }
 
+        for direction in [
+            LargeIconSelectionDirection::Next,
+            LargeIconSelectionDirection::Above,
+            LargeIconSelectionDirection::Below,
+        ] {
+            view.select_single_index(4);
+            view.toggle_selection_index(4);
+            assert!(view.selection.selected_indices.is_empty());
+            assert_eq!(view.selection.focused_index, Some(4));
+
+            view.move_large_icon_selection(direction);
+            assert_eq!(selected_names(&view), vec!["a.txt"]);
+        }
+
         view.select_single_index(1);
         view.extend_selection_to_index(4);
         view.move_large_icon_selection(LargeIconSelectionDirection::Above);
@@ -629,7 +647,7 @@ mod tests {
 
         view.select_single_index(5);
         view.move_large_icon_selection(LargeIconSelectionDirection::Below);
-        assert_eq!(selected_names(&view), vec!["f.txt"]);
+        assert_eq!(selected_names(&view), vec!["h.txt"]);
 
         view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
             4,
