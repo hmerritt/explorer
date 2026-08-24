@@ -689,7 +689,7 @@ impl ExplorerView {
 
     fn start_file_operation(
         &mut self,
-        job: FileOperationJob,
+        mut job: FileOperationJob,
         conflict_choice: ConflictChoice,
         cx: &mut Context<Self>,
     ) {
@@ -697,6 +697,8 @@ impl ExplorerView {
             self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
+
+        job.set_copy_verify(self.copy_verify);
 
         let cancel = Arc::new(AtomicBool::new(false));
         let terminate = Arc::new(AtomicBool::new(false));
@@ -912,7 +914,7 @@ impl ExplorerView {
                 Ok(UndoSelection::Clear)
             }
             FileOperationUndo::Move { paths } => {
-                let restored_paths = undo_moved_paths(&paths)?;
+                let restored_paths = undo_moved_paths(&paths, self.copy_verify)?;
                 self.remove_cut_paths(&restored_paths);
                 Ok(UndoSelection::Paths(restored_paths))
             }
@@ -1038,7 +1040,10 @@ fn remove_created_directory_for_undo(path: &Path) -> Result<(), String> {
     }
 }
 
-fn undo_moved_paths(paths: &[FileOperationMove]) -> Result<Vec<PathBuf>, String> {
+fn undo_moved_paths(
+    paths: &[FileOperationMove],
+    copy_verify: bool,
+) -> Result<Vec<PathBuf>, String> {
     preflight_move_undo(paths)?;
 
     let mut by_parent = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
@@ -1055,7 +1060,8 @@ fn undo_moved_paths(paths: &[FileOperationMove]) -> Result<Vec<PathBuf>, String>
 
     for (parent, destinations) in by_parent {
         match prepare_move_paths_to_directory(&destinations, &parent)? {
-            PreparedFileOperation::Ready(job) => {
+            PreparedFileOperation::Ready(mut job) => {
+                job.set_copy_verify(copy_verify);
                 execute_file_operation(job, ConflictChoice::Replace)?;
             }
             PreparedFileOperation::Conflicts(_) => {

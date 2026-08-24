@@ -187,11 +187,12 @@ impl Serialize for SerializableAppSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(3))?;
+        let mut map = serializer.serialize_map(Some(4))?;
         map.serialize_entry(
             "cache_cleanup_interval_days",
             &self.settings.cache_cleanup_interval_days,
         )?;
+        map.serialize_entry("copy_verify", &self.settings.copy_verify)?;
         map.serialize_entry("new_window_behaviour", &self.settings.new_window_behaviour)?;
         map.serialize_entry(
             "start",
@@ -594,6 +595,8 @@ pub struct AppSettings {
         deserialize_with = "deserialize_cache_cleanup_interval_days"
     )]
     pub cache_cleanup_interval_days: u32,
+    #[serde(default = "default_copy_verify")]
+    pub copy_verify: bool,
     #[serde(default)]
     pub new_window_behaviour: NewWindowBehaviour,
     #[serde(
@@ -765,6 +768,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             cache_cleanup_interval_days: DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS,
+            copy_verify: default_copy_verify(),
             new_window_behaviour: NewWindowBehaviour::Focus,
             start: default_app_start_path(),
         }
@@ -2099,6 +2103,10 @@ fn default_cache_cleanup_interval_days() -> u32 {
     DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
 }
 
+fn default_copy_verify() -> bool {
+    true
+}
+
 fn default_show_dotfiles() -> bool {
     true
 }
@@ -2488,6 +2496,7 @@ mod tests {
         );
         assert_eq!(settings.view.file_columns.name_width, None);
         assert_eq!(settings.app.start, default_app_start_path());
+        assert!(settings.app.copy_verify);
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
         assert_eq!(
             settings.app.cache_cleanup_interval_days,
@@ -2888,6 +2897,25 @@ mod tests {
             serde_json::from_str(r#"{"app":{"cache_cleanup_interval_days":45}}"#)
                 .expect("deserialize app settings");
         assert_eq!(settings.app.cache_cleanup_interval_days, 45);
+    }
+
+    #[test]
+    fn app_copy_verify_deserializes_defaults_and_round_trips() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{}}"#).expect("deserialize default app settings");
+        assert!(settings.app.copy_verify);
+
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"app":{"copy_verify":true}}"#)
+            .expect("deserialize enabled copy verification");
+        assert!(settings.app.copy_verify);
+
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"app":{"copy_verify":false}}"#)
+            .expect("deserialize disabled copy verification");
+        assert!(!settings.app.copy_verify);
+        assert_eq!(
+            serde_json::to_value(&settings).expect("serialize disabled copy verification")["app"]["copy_verify"],
+            false
+        );
     }
 
     #[test]
@@ -3434,6 +3462,7 @@ mod tests {
             ))
         );
         assert_eq!(document["app"]["new_window_behaviour"], "focus");
+        assert_eq!(document["app"]["copy_verify"], true);
         assert!(document["app"]["start"].is_string());
         assert_eq!(
             document["sidebar"]["expanded_groups"],

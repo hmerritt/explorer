@@ -2825,13 +2825,13 @@ enum CopyEngine {
     ResumableDelta,
 }
 
-fn copy_options_for_operation() -> CopyOptions {
+fn copy_options_for_operation(copy_verify: bool) -> CopyOptions {
     let durability = if crate::debug_options::copy_fast_enabled() {
         CopyDurability::Fast
     } else {
         CopyDurability::Safe
     };
-    CopyOptions::rsync_update(durability)
+    CopyOptions::rsync_update(durability).with_post_write_verification(copy_verify)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2841,9 +2841,14 @@ pub(super) struct FileOperationJob {
     steps: Vec<FileOperationStep>,
     roots: Vec<FileOperationRoot>,
     archive_diagnostics: Option<ArchiveDiagnostics>,
+    copy_verify: bool,
 }
 
 impl FileOperationJob {
+    pub(super) fn set_copy_verify(&mut self, copy_verify: bool) {
+        self.copy_verify = copy_verify;
+    }
+
     pub(super) fn initial_progress(&self) -> FileOperationProgress {
         FileOperationProgress {
             kind: self.kind,
@@ -3147,6 +3152,7 @@ fn prepare_file_operation(
         steps,
         roots,
         archive_diagnostics: None,
+        copy_verify: true,
     })
 }
 
@@ -3351,6 +3357,7 @@ fn prepare_link_operation(
         steps,
         roots,
         archive_diagnostics: None,
+        copy_verify: true,
     })
 }
 
@@ -3390,6 +3397,7 @@ fn prepare_compress_operation(paths: &[PathBuf]) -> Result<FileOperationJob, Str
         })],
         roots: Vec::new(),
         archive_diagnostics: None,
+        copy_verify: true,
     })
 }
 
@@ -3621,6 +3629,7 @@ fn prepare_extract_archive_operation(
         steps,
         roots,
         archive_diagnostics,
+        copy_verify: true,
     };
     total_timing.ok();
     Ok(job)
@@ -3703,7 +3712,7 @@ fn execute_copy_move_operation_with_progress_impl(
     cancel: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
-    let copy_options = copy_options_for_operation();
+    let copy_options = copy_options_for_operation(job.copy_verify);
     let mut operated_destinations = HashSet::new();
     let mut copy_undo = FileOperationCopyUndo::default();
     let mut progress = job.initial_progress();
@@ -4524,7 +4533,7 @@ pub(super) fn execute_file_operation_with_progress(
         )
     });
     let mut operated_destinations = HashSet::new();
-    let copy_options = copy_options_for_operation();
+    let copy_options = copy_options_for_operation(job.copy_verify);
     let mut progress = job.initial_progress();
     on_progress(progress.clone());
 
@@ -8266,6 +8275,41 @@ mod tests {
     }
 
     #[test]
+    fn copy_job_can_disable_final_verification() {
+        let temp = TempDir::new();
+        let source = temp.path().join("file.bin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).expect("create destination");
+        let data = vec![19; COPY_BUFFER_SIZE + 128];
+        fs::write(&source, &data).expect("create source");
+        let mut job = ready_job(prepare_copy_paths_to_directory(
+            std::slice::from_ref(&source),
+            &destination,
+        ));
+        job.set_copy_verify(false);
+        let mut progress_events = Vec::new();
+
+        execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            |progress| progress_events.push(progress),
+        )
+        .expect("copy without final verification");
+
+        assert_eq!(fs::read(destination.join("file.bin")).unwrap(), data);
+        assert!(
+            progress_events
+                .iter()
+                .all(|progress| progress.phase != FileOperationPhase::Verifying)
+        );
+        let finished = progress_events.last().expect("finished progress");
+        assert_eq!(finished.verified_bytes, 0);
+        assert_eq!(finished.work_total_bytes, data.len() as u64);
+    }
+
+    #[test]
     fn progress_copy_reports_intermediate_bytes_for_parallel_large_file() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
@@ -8335,11 +8379,12 @@ mod tests {
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
             &mut |_| {},
-            CopyOptions::explorer_safe(),
+            CopyOptions::explorer_safe().with_post_write_verification(false),
         )
         .expect("fallback finalization");
 
         assert_eq!(fs::read(&destination).unwrap(), b"finished data");
+        assert_eq!(progress.verified_bytes, metadata.len());
         assert!(!partial.exists());
     }
 

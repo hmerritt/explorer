@@ -118,6 +118,7 @@ Minimal example:
 ```json
 {
     "app": {
+        "copy_verify": true,
         "start": "~/Downloads"
     },
     "view": {
@@ -130,6 +131,10 @@ Minimal example:
     }
 }
 ```
+
+`app.copy_verify` controls the final read-back verification for newly copied files. It defaults
+to `true`; set it to `false` to skip that verification while retaining checks needed for existing
+destinations, resumable copies, and safe fallback behavior.
 
 `view.search_mode` controls recursive search result density. It accepts `"detailed"`
 (the default, with the full path beneath each filename) or `"compact"` (single-line

@@ -48,10 +48,21 @@ pub(super) enum CopySyncMode {
     RsyncUpdate,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CopyOptions {
     pub(super) sync_mode: CopySyncMode,
     pub(super) durability: CopyDurability,
+    verify_after_write: bool,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self {
+            sync_mode: CopySyncMode::default(),
+            durability: CopyDurability::default(),
+            verify_after_write: true,
+        }
+    }
 }
 
 impl CopyOptions {
@@ -59,6 +70,7 @@ impl CopyOptions {
         Self {
             sync_mode: CopySyncMode::ExplorerReplace,
             durability: CopyDurability::Safe,
+            verify_after_write: true,
         }
     }
 
@@ -66,7 +78,17 @@ impl CopyOptions {
         Self {
             sync_mode: CopySyncMode::RsyncUpdate,
             durability,
+            verify_after_write: durability == CopyDurability::Safe,
         }
+    }
+
+    pub(super) fn with_post_write_verification(mut self, enabled: bool) -> Self {
+        self.verify_after_write &= enabled;
+        self
+    }
+
+    pub(super) fn should_verify_after_write(self) -> bool {
+        self.verify_after_write
     }
 
     pub(super) fn should_sync(self) -> bool {
@@ -470,7 +492,7 @@ fn copy_with_delta_progress_impl(
     };
 
     let should_verify_after_write =
-        options.durability == CopyDurability::Safe || basis.is_some() || resume_partial;
+        options.should_verify_after_write() || basis.is_some() || resume_partial;
     if should_verify_after_write {
         progress.reserve_work_bytes(source_len);
     }
@@ -2075,6 +2097,66 @@ mod tests {
     }
 
     #[test]
+    fn disabled_post_write_verification_skips_new_file_read_back() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"aaaabbbbccccdddd").expect("write source");
+        let mut progress = test_progress(16);
+        let mut progress_events = Vec::new();
+
+        copy_with_delta_progress_impl(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |progress| progress_events.push(progress),
+            CopyOptions::rsync_update(CopyDurability::Safe).with_post_write_verification(false),
+        )
+        .expect("copy without final read-back");
+
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(progress.copied_bytes, 16);
+        assert_eq!(progress.verified_bytes, 0);
+        assert_eq!(progress.work_total_bytes, 16);
+        assert_eq!(progress.work_completed_bytes, 16);
+        assert!(
+            progress_events
+                .iter()
+                .all(|progress| progress.phase != FileOperationPhase::Verifying)
+        );
+    }
+
+    #[test]
+    fn disabled_post_write_verification_keeps_existing_destination_checks() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"same content").expect("write source");
+        fs::write(&destination, b"same content").expect("write destination");
+        let modified = FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source, modified).expect("set source mtime");
+        filetime::set_file_mtime(&destination, modified).expect("set destination mtime");
+        let mut progress = test_progress(12);
+
+        copy_with_delta_progress_impl(
+            &source,
+            &destination,
+            4,
+            &Arc::new(AtomicBool::new(false)),
+            &mut progress,
+            &mut |_| {},
+            CopyOptions::rsync_update(CopyDurability::Safe).with_post_write_verification(false),
+        )
+        .expect("confirm existing destination");
+
+        assert_eq!(progress.copied_bytes, 0);
+        assert_eq!(progress.verified_bytes, 12);
+        assert_eq!(fs::read(&destination).unwrap(), b"same content");
+    }
+
+    #[test]
     fn identical_destination_preserves_source_metadata_without_data_copy() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
@@ -2138,7 +2220,7 @@ mod tests {
     }
 
     #[test]
-    fn rsync_update_does_not_skip_same_size_same_mtime_changed_content() {
+    fn disabled_post_write_verification_still_repairs_delta_basis() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
@@ -2156,12 +2238,13 @@ mod tests {
             &Arc::new(AtomicBool::new(false)),
             &mut progress,
             &mut |_| {},
-            CopyOptions::rsync_update(CopyDurability::Safe),
+            CopyOptions::rsync_update(CopyDurability::Safe).with_post_write_verification(false),
         )
         .expect("delta update");
 
         assert_eq!(fs::read(&destination).unwrap(), b"aaaabbbb");
         assert!(progress.copied_bytes > 0);
+        assert!(progress.verified_bytes > 0);
     }
 
     #[test]
