@@ -24,11 +24,16 @@ use tempfile::NamedTempFile;
 use crate::explorer::{
     clipboard::{ClipboardDownload, ClipboardYoutubeDownload},
     portable_devices,
+    remote_dialog::{open_remote_credentials_dialog, open_remote_host_key_dialog},
+    remote_download::{
+        RemoteCredentials, RemoteDownloadError, RemoteHostKey, download_remote_to_temporary_file,
+        embedded_credentials, endpoint_key, is_remote_download, remember_host_key,
+    },
     view::{ExplorerView, OperationNotice},
 };
 
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
+pub(super) const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
 const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -56,6 +61,8 @@ pub(super) struct DownloadNoticeRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DownloadNoticeStatus {
     Connecting,
+    WaitingForCredentials,
+    WaitingForHostConfirmation,
     Downloading {
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
@@ -66,20 +73,32 @@ pub(super) enum DownloadNoticeStatus {
 
 impl DownloadNoticeStatus {
     pub(super) fn is_active(&self) -> bool {
-        matches!(self, Self::Connecting | Self::Downloading { .. })
+        matches!(
+            self,
+            Self::Connecting
+                | Self::WaitingForCredentials
+                | Self::WaitingForHostConfirmation
+                | Self::Downloading { .. }
+        )
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DownloadProgress {
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
+pub(super) struct DownloadProgress {
+    pub(super) downloaded_bytes: u64,
+    pub(super) total_bytes: Option<u64>,
 }
 
-struct PendingDownload {
-    temporary: NamedTempFile,
-    destination: PathBuf,
-    file_name: String,
+pub(super) struct PendingDownload {
+    pub(super) temporary: NamedTempFile,
+    pub(super) destination: PathBuf,
+    pub(super) file_name: String,
+}
+
+pub(super) struct ActiveRemoteDownload {
+    pub(super) id: u64,
+    pub(super) download: ClipboardDownload,
+    pub(super) credentials: Option<RemoteCredentials>,
 }
 
 #[derive(Debug)]
@@ -121,6 +140,11 @@ impl ExplorerView {
     ) {
         if portable_devices::is_portable_path(&self.path) || !self.path.is_dir() {
             self.set_error_notice("Could not download to this location.".to_owned());
+            return;
+        }
+
+        if is_remote_download(&download) {
+            self.enqueue_remote_download(download, cx);
             return;
         }
 
@@ -176,6 +200,229 @@ impl ExplorerView {
         });
         self.download_tasks.push((id, task));
         cx.notify();
+    }
+
+    fn enqueue_remote_download(&mut self, download: ClipboardDownload, cx: &mut Context<Self>) {
+        self.begin_download_batch_if_needed();
+        self.pending_remote_downloads.push_back(download);
+        if self.active_remote_download.is_none() {
+            self.start_next_remote_download(cx);
+        }
+    }
+
+    fn start_next_remote_download(&mut self, cx: &mut Context<Self>) {
+        let Some(download) = self.pending_remote_downloads.pop_front() else {
+            self.remote_credentials.clear();
+            self.finish_download_batch_if_idle();
+            cx.notify();
+            return;
+        };
+
+        let id = self.next_download_id;
+        self.next_download_id = self.next_download_id.wrapping_add(1);
+        self.download_notice_rows.push(DownloadNoticeRow {
+            id,
+            kind: DownloadNoticeKind::File,
+            file_name: download.file_name.clone(),
+            status: DownloadNoticeStatus::Connecting,
+        });
+        let credentials = embedded_credentials(&download).or_else(|| {
+            endpoint_key(&download).and_then(|key| self.remote_credentials.get(&key).cloned())
+        });
+        self.active_remote_download = Some(ActiveRemoteDownload {
+            id,
+            download,
+            credentials,
+        });
+        self.start_active_remote_attempt(cx);
+    }
+
+    fn start_active_remote_attempt(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active_remote_download.as_ref() else {
+            return;
+        };
+        let id = active.id;
+        let download = active.download.clone();
+        let credentials = active.credentials.clone();
+        if let Some(row) = self
+            .download_notice_rows
+            .iter_mut()
+            .find(|row| row.id == id)
+        {
+            row.status = DownloadNoticeStatus::Connecting;
+        }
+        self.remove_download_task(id);
+
+        let destination = self.path.clone();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = cx.spawn({
+            let finished = finished.clone();
+            async move |this, cx| {
+                let operation_task = cx.background_executor().spawn({
+                    let finished = finished.clone();
+                    async move {
+                        let result = download_remote_to_temporary_file(
+                            download,
+                            credentials,
+                            &destination,
+                            |progress| {
+                                let _ = progress_tx.send(progress);
+                            },
+                        );
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    cx.background_executor()
+                        .timer(DOWNLOAD_PROGRESS_INTERVAL)
+                        .await;
+                    Self::drain_download_progress(&this, cx, id, &progress_rx);
+                }
+
+                let result = operation_task.await;
+                Self::drain_download_progress(&this, cx, id, &progress_rx);
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.finish_remote_attempt(id, result, cx);
+                    cx.notify();
+                });
+            }
+        });
+        self.download_tasks.push((id, task));
+        cx.notify();
+    }
+
+    fn finish_remote_attempt(
+        &mut self,
+        id: u64,
+        result: Result<PendingDownload, RemoteDownloadError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_remote_download.as_ref().map(|active| active.id) != Some(id) {
+            return;
+        }
+        self.remove_download_task(id);
+        match result {
+            Ok(download) => {
+                self.complete_download(id, download.persist(), cx);
+                self.finish_active_remote_download(cx);
+            }
+            Err(RemoteDownloadError::Fatal(error)) => {
+                self.complete_download(id, Err(error), cx);
+                self.finish_active_remote_download(cx);
+            }
+            Err(RemoteDownloadError::CredentialsRequired {
+                host,
+                username,
+                message,
+            }) => {
+                if let Some(row) = self
+                    .download_notice_rows
+                    .iter_mut()
+                    .find(|row| row.id == id)
+                {
+                    row.status = DownloadNoticeStatus::WaitingForCredentials;
+                }
+                match open_remote_credentials_dialog(cx.entity(), id, host, username, message, cx) {
+                    Ok(handle) => self.active_dialog_window = Some(handle),
+                    Err(error) => {
+                        self.complete_download(
+                            id,
+                            Err(format!("Could not open the sign-in dialog: {error}")),
+                            cx,
+                        );
+                        self.finish_active_remote_download(cx);
+                    }
+                }
+            }
+            Err(RemoteDownloadError::UnknownHost(key)) => {
+                if let Some(row) = self
+                    .download_notice_rows
+                    .iter_mut()
+                    .find(|row| row.id == id)
+                {
+                    row.status = DownloadNoticeStatus::WaitingForHostConfirmation;
+                }
+                match open_remote_host_key_dialog(cx.entity(), id, *key, cx) {
+                    Ok(handle) => self.active_dialog_window = Some(handle),
+                    Err(error) => {
+                        self.complete_download(
+                            id,
+                            Err(format!("Could not open the host confirmation: {error}")),
+                            cx,
+                        );
+                        self.finish_active_remote_download(cx);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn submit_remote_credentials(
+        &mut self,
+        id: u64,
+        credentials: RemoteCredentials,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self
+            .active_remote_download
+            .as_mut()
+            .filter(|active| active.id == id)
+        else {
+            return;
+        };
+        if let Some(key) = endpoint_key(&active.download) {
+            self.remote_credentials.insert(key, credentials.clone());
+        }
+        active.credentials = Some(credentials);
+        self.clear_active_dialog_window();
+        self.start_active_remote_attempt(cx);
+    }
+
+    pub(super) fn confirm_remote_host_key(
+        &mut self,
+        id: u64,
+        key: RemoteHostKey,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_remote_download.as_ref().map(|active| active.id) != Some(id) {
+            return;
+        }
+        self.clear_active_dialog_window();
+        match remember_host_key(&key) {
+            Ok(()) => self.start_active_remote_attempt(cx),
+            Err(error) => {
+                self.complete_download(id, Err(error), cx);
+                self.finish_active_remote_download(cx);
+            }
+        }
+    }
+
+    pub(super) fn cancel_remote_prompt(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.active_remote_download.as_ref().map(|active| active.id) != Some(id) {
+            return;
+        }
+        self.clear_active_dialog_window();
+        self.complete_download(id, Err("Download cancelled.".to_owned()), cx);
+        self.finish_active_remote_download(cx);
+    }
+
+    fn finish_active_remote_download(&mut self, cx: &mut Context<Self>) {
+        self.active_remote_download = None;
+        self.start_next_remote_download(cx);
+    }
+
+    fn remove_download_task(&mut self, id: u64) {
+        if let Some(index) = self
+            .download_tasks
+            .iter()
+            .position(|(task_id, _)| *task_id == id)
+        {
+            let (_, task) = self.download_tasks.swap_remove(index);
+            drop(task);
+        }
     }
 
     pub(super) fn start_youtube_downloads(
@@ -263,13 +510,14 @@ impl ExplorerView {
         };
 
         self.download_notice_rows.remove(row_index);
-        if let Some(task_index) = self
-            .download_tasks
-            .iter()
-            .position(|(task_id, _)| *task_id == id)
-        {
-            let (_, task) = self.download_tasks.swap_remove(task_index);
-            drop(task);
+        self.remove_download_task(id);
+        if self.active_remote_download.as_ref().map(|active| active.id) == Some(id) {
+            if let Some(handle) = self.active_dialog_window.take() {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            self.active_remote_download = None;
+            self.start_next_remote_download(cx);
+            return;
         }
 
         self.finish_download_batch_if_idle();
@@ -349,6 +597,9 @@ impl ExplorerView {
     }
 
     fn finish_download_batch_if_idle(&mut self) {
+        if self.active_remote_download.is_some() || !self.pending_remote_downloads.is_empty() {
+            return;
+        }
         if self
             .download_notice_rows
             .iter()

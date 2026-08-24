@@ -34,6 +34,8 @@ mod pdf_hover_preview;
 mod portable_devices;
 mod properties;
 mod recursive_search;
+mod remote_dialog;
+mod remote_download;
 mod rename;
 mod render;
 mod resumable_copy;

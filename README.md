@@ -58,7 +58,8 @@ scoop install hmerritt/explorer
 - [x] Arrow keys navigation
 - [x] Sidebar custom pins (drag-to-pin)
 - [x] Key bindings for ~~everything~~ most things
-- [x] File URLs can be downloaded directly when pasted
+- [x] HTTP, HTTPS, FTP, and SFTP file URLs can be downloaded directly when pasted
+- [x] `yt-dlp` integration, supported URLs can be downloaded as videos when pasted
 - [x] Native ZIP creation with Finder-style `Compress` naming and progress
 - [x] A simple, functional, built-in image viewer (you can set `explorer` as the default image viewer)
 - [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)

@@ -4016,6 +4016,17 @@ fn render_download_notice_row(
                 format!("Downloading \"{}\"...", row.file_name)
             },
         ),
+        DownloadNoticeStatus::WaitingForCredentials => (
+            OperationNoticeKind::Info,
+            format!("Waiting for sign-in to download \"{}\"...", row.file_name),
+        ),
+        DownloadNoticeStatus::WaitingForHostConfirmation => (
+            OperationNoticeKind::Info,
+            format!(
+                "Waiting for server confirmation to download \"{}\"...",
+                row.file_name
+            ),
+        ),
         DownloadNoticeStatus::Downloading {
             downloaded_bytes,
             total_bytes: Some(total_bytes),
@@ -4132,6 +4143,8 @@ fn download_progress_element(row: &DownloadNoticeRow) -> Option<AnyElement> {
 
     match row.status {
         DownloadNoticeStatus::Connecting
+        | DownloadNoticeStatus::WaitingForCredentials
+        | DownloadNoticeStatus::WaitingForHostConfirmation
         | DownloadNoticeStatus::Downloading {
             total_bytes: None, ..
         } => {

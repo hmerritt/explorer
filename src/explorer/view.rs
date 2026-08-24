@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, VecDeque},
     io,
     path::{Path, PathBuf},
     sync::{
@@ -25,9 +25,10 @@ use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
+    clipboard::ClipboardDownload,
     codebase_summary::{CodebaseSummary, find_git_repository_root, scan_codebase_summary},
     context_menu::ContextMenuState,
-    download::DownloadNoticeRow,
+    download::{ActiveRemoteDownload, DownloadNoticeRow},
     drag_drop::DropIndicator,
     entry::{FileEntry, ShellShortcutTargetKind, resolve_shell_shortcut_target_kind},
     explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
@@ -99,6 +100,12 @@ pub struct ExplorerView {
     pub(super) operation_notice: Option<OperationNotice>,
     pub(super) download_notice_rows: Vec<DownloadNoticeRow>,
     pub(super) download_tasks: Vec<(u64, Task<()>)>,
+    pub(super) pending_remote_downloads: VecDeque<ClipboardDownload>,
+    pub(super) active_remote_download: Option<ActiveRemoteDownload>,
+    pub(super) remote_credentials: HashMap<
+        crate::explorer::remote_download::RemoteEndpointKey,
+        crate::explorer::remote_download::RemoteCredentials,
+    >,
     pub(super) next_download_id: u64,
     pub(super) download_batch_succeeded: usize,
     pub(super) download_batch_failed: usize,
@@ -510,6 +517,9 @@ impl ExplorerView {
             operation_notice: None,
             download_notice_rows: Vec::new(),
             download_tasks: Vec::new(),
+            pending_remote_downloads: VecDeque::new(),
+            active_remote_download: None,
+            remote_credentials: HashMap::new(),
             next_download_id: 0,
             download_batch_succeeded: 0,
             download_batch_failed: 0,

@@ -37,10 +37,24 @@ pub(super) struct FileClipboard {
     pub(super) paths: Vec<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(super) struct ClipboardDownload {
     pub(super) url: Url,
     pub(super) file_name: String,
+}
+
+impl std::fmt::Debug for ClipboardDownload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut url = self.url.clone();
+        if url.password().is_some() {
+            let _ = url.set_password(Some("<redacted>"));
+        }
+        formatter
+            .debug_struct("ClipboardDownload")
+            .field("url", &url)
+            .field("file_name", &self.file_name)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -638,7 +652,7 @@ fn downloads_from_text(text: &str) -> Option<Vec<ClipboardDownload>> {
 
 fn download_from_url_text(text: &str) -> Option<ClipboardDownload> {
     let url = Url::parse(text).ok()?;
-    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+    if !matches!(url.scheme(), "http" | "https" | "ftp" | "sftp") || url.host().is_none() {
         return None;
     }
 
@@ -1184,7 +1198,6 @@ mod tests {
         for text in [
             "plain text",
             "example.com/file.zip",
-            "ftp://example.com/file.zip",
             "https://example.com/folder/",
             "https://example.com/README",
             "https://example.com/a%2Fb.zip",
@@ -1199,6 +1212,34 @@ mod tests {
                 "unexpectedly accepted {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn download_clipboard_accepts_ftp_and_sftp_file_urls() {
+        let item = ClipboardItem::new_string(
+            "ftp://example.com/releases/one.zip\nsftp://alice@example.com/files/two.tar.gz"
+                .to_owned(),
+        );
+        let Some(ClipboardTextPayload::Downloads(downloads)) =
+            clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected remote URL batch");
+        };
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0].url.scheme(), "ftp");
+        assert_eq!(downloads[0].file_name, "one.zip");
+        assert_eq!(downloads[1].url.scheme(), "sftp");
+        assert_eq!(downloads[1].file_name, "two.tar.gz");
+    }
+
+    #[test]
+    fn clipboard_download_debug_redacts_url_passwords() {
+        let download =
+            download_from_url_text("sftp://alice:super-secret@example.com/files/archive.zip")
+                .unwrap();
+        let debug = format!("{download:?}");
+        assert!(!debug.contains("super-secret"));
+        assert!(debug.contains("%3Credacted%3E") || debug.contains("<redacted>"));
     }
 
     #[test]
