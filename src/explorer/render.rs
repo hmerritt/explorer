@@ -110,7 +110,7 @@ use crate::explorer::{
         TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
         hover_preview_kind, text_hover_preview_line_limit,
     },
-    tooltip::{clipboard_status_tooltip, explorer_tooltip},
+    tooltip::{clipboard_status_popup, explorer_tooltip},
     video_hover_preview::VideoHoverPreviewLookup,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
@@ -172,6 +172,12 @@ const CODEBASE_MAKEUP_SEPARATOR_COLOR: u32 = 0x3d444d;
 const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const STATUS_BAR_CLIPBOARD_MAX_WIDTH: f32 = 320.0;
+const CLIPBOARD_STATUS_POPUP_SHOW_DELAY: Duration = Duration::from_millis(250);
+const CLIPBOARD_STATUS_POPUP_WIDTH: f32 = 360.0;
+const CLIPBOARD_STATUS_POPUP_MAX_HEIGHT: f32 = 300.0;
+const CLIPBOARD_STATUS_POPUP_RIGHT_INSET: f32 = STATUS_BAR_HORIZONTAL_PADDING;
+const CLIPBOARD_STATUS_POPUP_STATUS_GAP: f32 = 8.0;
+const CLIPBOARD_STATUS_POPUP_TOP_INSET: f32 = 16.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
 const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
 const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
@@ -185,6 +191,14 @@ struct CodebaseMakeupSegment {
     color: u32,
     round_left: bool,
     round_right: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ClipboardStatusPopupLayout {
+    width: f32,
+    max_height: f32,
+    right: f32,
+    bottom: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2956,6 +2970,73 @@ impl ExplorerView {
         .into_any_element()
     }
 
+    fn set_clipboard_status_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.clipboard_status_hovered == hovered {
+            return;
+        }
+
+        self.clipboard_status_hover_generation =
+            self.clipboard_status_hover_generation.wrapping_add(1);
+        let generation = self.clipboard_status_hover_generation;
+        self.clipboard_status_hovered = hovered;
+        self.clipboard_status_popup_visible = false;
+
+        if hovered {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(CLIPBOARD_STATUS_POPUP_SHOW_DELAY)
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.clipboard_status_hovered
+                        && this.clipboard_status_hover_generation == generation
+                        && !this.is_sidebar_group_view()
+                        && clipboard_summary(cx).is_some()
+                    {
+                        this.clipboard_status_popup_visible = true;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+
+        cx.notify();
+    }
+
+    fn render_clipboard_status_popup_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.clipboard_status_hovered
+            || !self.clipboard_status_popup_visible
+            || self.is_sidebar_group_view()
+        {
+            return None;
+        }
+
+        let summary = clipboard_summary(cx).cloned()?;
+        let layout = clipboard_status_popup_layout(window.viewport_size());
+        let destination_label = self.address_text_for_path(&self.path);
+        let can_paste = crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path);
+
+        Some(
+            div()
+                .absolute()
+                .right(px(layout.right))
+                .bottom(px(layout.bottom))
+                .child(clipboard_status_popup(
+                    summary,
+                    &self.path,
+                    destination_label,
+                    can_paste,
+                    layout.width,
+                    layout.max_height,
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let summary = folder_status_summary(&self.entries, &self.selection.selected_indices);
         let codebase_summary = self
@@ -2970,6 +3051,7 @@ impl ExplorerView {
 
         div()
             .id("explorer-status-bar")
+            .debug_selector(|| "explorer-status-bar".to_owned())
             .flex()
             .flex_row()
             .items_center()
@@ -3008,13 +3090,7 @@ impl ExplorerView {
                 this.when(has_other_right_status, |this| {
                     this.child(clipboard_status_bar_separator())
                 })
-                .child(render_clipboard_status(
-                    clipboard_summary,
-                    self.path.clone(),
-                    self.address_text_for_path(&self.path),
-                    crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path),
-                    cx,
-                ))
+                .child(render_clipboard_status(clipboard_summary, cx))
             })
             .into_any_element()
     }
@@ -3387,6 +3463,14 @@ impl Render for ExplorerView {
             window_width,
             self.sidebar_auto_hide_expanded,
         );
+        if (self.is_sidebar_group_view() || clipboard_summary(cx).is_none())
+            && (self.clipboard_status_hovered || self.clipboard_status_popup_visible)
+        {
+            self.clipboard_status_hover_generation =
+                self.clipboard_status_hover_generation.wrapping_add(1);
+            self.clipboard_status_hovered = false;
+            self.clipboard_status_popup_visible = false;
+        }
 
         div()
             .key_context(key_context)
@@ -3627,6 +3711,10 @@ impl Render for ExplorerView {
                             })
                             .child(self.render_status_bar(cx)),
                     ),
+            )
+            .when_some(
+                self.render_clipboard_status_popup_overlay(window, cx),
+                |this, popup| this.child(popup),
             )
             .when_some(
                 self.render_utility_menu_overlay(sidebar_auto_hide_active, cx),
@@ -7538,9 +7626,6 @@ fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
 
 fn render_clipboard_status(
     summary: ClipboardSummary,
-    destination: PathBuf,
-    destination_label: String,
-    can_paste: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     div()
@@ -7558,6 +7643,9 @@ fn render_clipboard_status(
         .cursor_default()
         .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
         .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            this.set_clipboard_status_hovered(*hovered, cx);
+        }))
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
@@ -7570,11 +7658,6 @@ fn render_clipboard_status(
             cx.stop_propagation();
             cx.notify();
         }))
-        .tooltip(clipboard_status_tooltip(
-            destination,
-            destination_label,
-            can_paste,
-        ))
         .child(
             div()
                 .flex_shrink_0()
@@ -7587,6 +7670,21 @@ fn render_clipboard_status(
                 .child(SharedString::from(summary.label)),
         )
         .into_any_element()
+}
+
+fn clipboard_status_popup_layout(viewport_size: gpui::Size<Pixels>) -> ClipboardStatusPopupLayout {
+    let viewport_width = f32::from(viewport_size.width);
+    let viewport_height = f32::from(viewport_size.height);
+    let bottom = STATUS_BAR_HEIGHT + CLIPBOARD_STATUS_POPUP_STATUS_GAP;
+    let available_width = (viewport_width - CLIPBOARD_STATUS_POPUP_RIGHT_INSET * 2.0).max(1.0);
+    let available_height = (viewport_height - bottom - CLIPBOARD_STATUS_POPUP_TOP_INSET).max(1.0);
+
+    ClipboardStatusPopupLayout {
+        width: CLIPBOARD_STATUS_POPUP_WIDTH.min(available_width),
+        max_height: CLIPBOARD_STATUS_POPUP_MAX_HEIGHT.min(available_height),
+        right: CLIPBOARD_STATUS_POPUP_RIGHT_INSET,
+        bottom,
+    }
 }
 
 fn status_bar_icon_label(
@@ -7772,8 +7870,9 @@ mod tests {
     };
 
     use super::{
-        CODEBASE_MAKEUP_BAR_WIDTH, CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH,
-        CONTEXT_MENU_MIN_WIDTH, CUT_ITEM_OPACITY, CodebaseMakeupSegment,
+        CLIPBOARD_STATUS_POPUP_SHOW_DELAY, CODEBASE_MAKEUP_BAR_WIDTH,
+        CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH, CONTEXT_MENU_MIN_WIDTH,
+        CUT_ITEM_OPACITY, ClipboardStatusPopupLayout, CodebaseMakeupSegment,
         DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE, DROP_INDICATOR_TARGET_MAX_WIDTH,
         DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG,
         FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE, IMAGE_HOVER_PREVIEW_OFFSET_X,
@@ -7781,7 +7880,7 @@ mod tests {
         NAME_ICON_TEXT_GAP, RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT,
         RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP, SIDEBAR_GROUP_GAP,
         SIDEBAR_ITEM_GAP, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, codebase_makeup_segments,
+        available_filename_text_width, clipboard_status_popup_layout, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
@@ -11565,7 +11664,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clipboard_status_shows_tooltip_and_pastes_into_current_folder(
+    fn clipboard_status_shows_fixed_popup_and_pastes_into_current_folder(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|app| {
@@ -11577,18 +11676,22 @@ mod tests {
         let (_, cx) = test_view_entity_at_path(cx, destination.clone());
 
         cx.run_until_parked();
-        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
-        let tooltip = cx
-            .debug_bounds("clipboard-status-tooltip")
-            .expect("clipboard tooltip bounds");
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+        let popup = cx
+            .debug_bounds("clipboard-status-popup")
+            .expect("clipboard popup bounds");
         let status = cx
             .debug_bounds("clipboard-status")
             .expect("clipboard status bounds");
-        assert_eq!(tooltip.size.width, gpui::px(360.0));
-        assert!(tooltip.bottom() <= status.origin.y);
-        assert!(cx.debug_bounds("clipboard-tooltip-action").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-destination").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-text-preview").is_some());
+        let status_bar = cx
+            .debug_bounds("explorer-status-bar")
+            .expect("status bar bounds");
+        assert_eq!(popup.size.width, gpui::px(360.0));
+        assert_eq!(popup.right(), status.right());
+        assert_eq!(popup.bottom(), status_bar.origin.y - gpui::px(8.0));
+        assert!(cx.debug_bounds("clipboard-popup-action").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-destination").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-text-preview").is_some());
         let position = cx
             .debug_bounds("clipboard-status")
             .expect("clipboard status bounds")
@@ -11600,7 +11703,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clipboard_status_tooltip_receives_recursive_counts_and_total_size(
+    fn clipboard_status_popup_receives_recursive_counts_and_total_size(
         cx: &mut gpui::TestAppContext,
     ) {
         let source = TempDir::new();
@@ -11638,14 +11741,14 @@ mod tests {
             ));
         });
 
-        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
-        assert!(cx.debug_bounds("clipboard-tooltip-folder-count").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-file-count").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-total-size").is_some());
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+        assert!(cx.debug_bounds("clipboard-popup-folder-count").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-file-count").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-total-size").is_some());
     }
 
     #[gpui::test]
-    fn clipboard_status_tooltip_shows_exact_url_preview(cx: &mut gpui::TestAppContext) {
+    fn clipboard_status_popup_shows_exact_url_preview(cx: &mut gpui::TestAppContext) {
         cx.update(|app| {
             initialize_clipboard_summary(app);
             write_to_clipboard_and_refresh(
@@ -11659,11 +11762,104 @@ mod tests {
         let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
 
         cx.run_until_parked();
-        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
 
-        assert!(cx.debug_bounds("clipboard-tooltip-url-preview").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-url-0").is_some());
-        assert!(cx.debug_bounds("clipboard-tooltip-url-count").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-url-preview").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-url-0").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-url-count").is_some());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_cancels_delayed_show_and_hides_on_leave(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+        });
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        let clipboard_position = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds")
+            .center();
+        let outside_position = cx.debug_bounds("back").expect("back bounds").center();
+
+        cx.simulate_mouse_move(
+            clipboard_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status-popup").is_none());
+
+        cx.simulate_mouse_move(
+            outside_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status-popup").is_none());
+
+        cx.simulate_mouse_move(
+            clipboard_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.executor()
+            .advance_clock(CLIPBOARD_STATUS_POPUP_SHOW_DELAY);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status-popup").is_some());
+
+        cx.simulate_mouse_move(
+            outside_position,
+            Option::<MouseButton>::None,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status-popup").is_none());
+        cx.read_entity(&view, |view, _| {
+            assert!(!view.clipboard_status_hovered);
+            assert!(!view.clipboard_status_popup_visible);
+            assert_eq!(view.clipboard_status_hover_generation, 4);
+        });
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_clamps_to_small_viewport(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(
+                    "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight".to_owned(),
+                ),
+                app,
+            );
+        });
+        let temp = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.simulate_resize(gpui::size(gpui::px(280.0), gpui::px(180.0)));
+        cx.run_until_parked();
+
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+        let popup = cx
+            .debug_bounds("clipboard-status-popup")
+            .expect("clipboard popup bounds");
+        let status = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds");
+        let status_bar = cx
+            .debug_bounds("explorer-status-bar")
+            .expect("status bar bounds");
+        assert_eq!(popup.size.width, gpui::px(248.0));
+        assert!(popup.origin.x >= gpui::px(16.0));
+        assert!(popup.origin.y >= gpui::px(16.0));
+        assert_eq!(popup.right(), status.right());
+        assert_eq!(popup.bottom(), status_bar.origin.y - gpui::px(8.0));
     }
 
     #[gpui::test]
@@ -12594,25 +12790,58 @@ mod tests {
         );
     }
 
-    fn hover_selector_until_clipboard_tooltip(
+    #[test]
+    fn clipboard_status_popup_layout_uses_fixed_anchor_and_clamps_dimensions() {
+        assert_eq!(
+            clipboard_status_popup_layout(gpui::size(gpui::px(800.0), gpui::px(600.0))),
+            ClipboardStatusPopupLayout {
+                width: 360.0,
+                max_height: 300.0,
+                right: 16.0,
+                bottom: 32.0,
+            }
+        );
+        assert_eq!(
+            clipboard_status_popup_layout(gpui::size(gpui::px(280.0), gpui::px(180.0))),
+            ClipboardStatusPopupLayout {
+                width: 248.0,
+                max_height: 132.0,
+                right: 16.0,
+                bottom: 32.0,
+            }
+        );
+    }
+
+    fn hover_selector_until_clipboard_popup(
         cx: &mut gpui::VisualTestContext,
         selector: &'static str,
     ) {
         assert!(
-            cx.debug_bounds("clipboard-status-tooltip").is_none(),
-            "clipboard tooltip should be hidden before hovering {selector}"
+            cx.debug_bounds("clipboard-status-popup").is_none(),
+            "clipboard popup should be hidden before hovering {selector}"
         );
         let position = cx
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} bounds"))
             .center();
         cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
-        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("clipboard-status-popup").is_none(),
+            "clipboard popup should not appear immediately"
+        );
+        cx.executor().advance_clock(Duration::from_millis(249));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("clipboard-status-popup").is_none(),
+            "clipboard popup should remain hidden during its hover delay"
+        );
+        cx.executor().advance_clock(Duration::from_millis(1));
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("clipboard-status-tooltip").is_some(),
-            "{selector} should show the rich clipboard tooltip after hover delay"
+            cx.debug_bounds("clipboard-status-popup").is_some(),
+            "{selector} should show the rich clipboard popup after hover delay"
         );
         assert!(cx.debug_bounds("explorer-tooltip").is_none());
     }

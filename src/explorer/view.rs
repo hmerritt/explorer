@@ -168,6 +168,9 @@ pub struct ExplorerView {
     pub(super) active_address_bar: Option<AddressBarState>,
     pub(super) directory_bar_hovered: bool,
     pub(super) directory_bar_hover_generation: usize,
+    pub(super) clipboard_status_hovered: bool,
+    pub(super) clipboard_status_hover_generation: u64,
+    pub(super) clipboard_status_popup_visible: bool,
     #[cfg(target_os = "windows")]
     pub(super) address_slash: crate::settings::AddressSlash,
     pub(super) search: SearchState,
@@ -583,6 +586,9 @@ impl ExplorerView {
             active_address_bar: None,
             directory_bar_hovered: false,
             directory_bar_hover_generation: 0,
+            clipboard_status_hovered: false,
+            clipboard_status_hover_generation: 0,
+            clipboard_status_popup_visible: false,
             #[cfg(target_os = "windows")]
             address_slash: settings.view.address_slash,
             search: SearchState::default(),

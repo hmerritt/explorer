@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::Path, time::Duration};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, Context, FontWeight,
@@ -10,7 +10,7 @@ use thousands::Separable as _;
 use crate::explorer::{
     clipboard::{
         ClipboardMetric, ClipboardSummary, ClipboardSummaryDetails, ClipboardTextPreview,
-        ClipboardUrlPreview, FileClipboardOperation, clipboard_summary,
+        ClipboardUrlPreview, FileClipboardOperation,
     },
     formatting::format_size,
     icons::{PASTE_ICON, image_icon},
@@ -18,13 +18,11 @@ use crate::explorer::{
 
 const TOOLTIP_FADE_MS: u64 = 80;
 const TOOLTIP_MAX_WIDTH: f32 = 260.0;
-const CLIPBOARD_TOOLTIP_WIDTH: f32 = 360.0;
-const CLIPBOARD_TOOLTIP_MAX_HEIGHT: f32 = 300.0;
-const CLIPBOARD_TOOLTIP_PRIMARY_TEXT: u32 = 0x1f1f1f;
-const CLIPBOARD_TOOLTIP_SECONDARY_TEXT: u32 = 0x595959;
-const CLIPBOARD_TOOLTIP_TERTIARY_TEXT: u32 = 0x767676;
-const CLIPBOARD_TOOLTIP_SEPARATOR: u32 = 0xe5e5e5;
-const CLIPBOARD_TOOLTIP_PREVIEW_BG: u32 = 0xf5f5f5;
+const CLIPBOARD_POPUP_RADIUS: f32 = 15.0;
+const CLIPBOARD_POPUP_PRIMARY_TEXT: u32 = 0x1f1f1f;
+const CLIPBOARD_POPUP_SECONDARY_TEXT: u32 = 0x595959;
+const CLIPBOARD_POPUP_TERTIARY_TEXT: u32 = 0x767676;
+const CLIPBOARD_POPUP_PREVIEW_BG: u32 = 0xf5f5f5;
 
 pub(super) struct ExplorerTooltip {
     label: SharedString,
@@ -77,125 +75,80 @@ pub(crate) fn explorer_tooltip(
     }
 }
 
-pub(super) struct ClipboardStatusTooltip {
-    destination: PathBuf,
+pub(super) fn clipboard_status_popup(
+    summary: ClipboardSummary,
+    destination: &Path,
     destination_label: String,
     can_paste: bool,
-}
+    width: f32,
+    max_height: f32,
+) -> AnyElement {
+    let destination_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&destination_label);
+    let action = clipboard_action_label(&summary, destination_name, can_paste);
 
-impl ClipboardStatusTooltip {
-    fn new(
-        destination: PathBuf,
-        destination_label: String,
-        can_paste: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        cx.observe_global::<crate::explorer::clipboard::ClipboardSummaryState>(|_, cx| {
-            cx.notify();
-        })
-        .detach();
-        Self {
-            destination,
-            destination_label,
-            can_paste,
-        }
-    }
-}
-
-impl Render for ClipboardStatusTooltip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(summary) = clipboard_summary(cx).cloned() else {
-            return div().into_any_element();
-        };
-        let destination_name = self
-            .destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&self.destination_label);
-        let action = clipboard_action_label(&summary, destination_name, self.can_paste);
-
-        div()
-            .id("clipboard-status-tooltip")
-            .debug_selector(|| "clipboard-status-tooltip".to_owned())
-            .flex()
-            .flex_col()
-            .w(px(CLIPBOARD_TOOLTIP_WIDTH))
-            .max_h(px(CLIPBOARD_TOOLTIP_MAX_HEIGHT))
-            .overflow_hidden()
-            .rounded(px(2.0))
-            .border_1()
-            .border_color(rgb(0x767676))
-            .bg(rgb(0xffffff))
-            .shadow_md()
-            .text_color(rgb(CLIPBOARD_TOOLTIP_PRIMARY_TEXT))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(8.0))
-                    .px(px(12.0))
-                    .pt(px(10.0))
-                    .pb(px(8.0))
-                    .child(div().flex_shrink_0().pt(px(1.0)).child(image_icon(
-                        PASTE_ICON.clone(),
-                        16.0,
-                        16.0,
-                    )))
-                    .child(
-                        div()
-                            .id("clipboard-tooltip-action")
-                            .debug_selector(|| "clipboard-tooltip-action".to_owned())
-                            .min_w(px(0.0))
-                            .text_size(px(13.0))
-                            .line_height(px(18.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(action),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(1.0))
-                    .w_full()
-                    .bg(rgb(CLIPBOARD_TOOLTIP_SEPARATOR)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .px(px(12.0))
-                    .py(px(9.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .child(clipboard_detail_row(
-                        "Destination",
-                        self.destination_label.clone(),
-                        "clipboard-tooltip-destination",
-                    ))
-                    .child(render_clipboard_summary_details(summary.details)),
-            )
-            .with_animation(
-                "clipboard-status-tooltip-fade",
-                Animation::new(Duration::from_millis(TOOLTIP_FADE_MS)),
-                |this, delta| this.opacity(delta),
-            )
-            .into_any_element()
-    }
-}
-
-pub(super) fn clipboard_status_tooltip(
-    destination: PathBuf,
-    destination_label: String,
-    can_paste: bool,
-) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    move |_, cx| {
-        let destination = destination.clone();
-        let destination_label = destination_label.clone();
-        cx.new(|cx| ClipboardStatusTooltip::new(destination, destination_label, can_paste, cx))
-            .into()
-    }
+    div()
+        .id("clipboard-status-popup")
+        .debug_selector(|| "clipboard-status-popup".to_owned())
+        .flex()
+        .flex_col()
+        .w(px(width))
+        .max_h(px(max_height))
+        .overflow_hidden()
+        .rounded(px(CLIPBOARD_POPUP_RADIUS))
+        .bg(rgb(0xffffff))
+        .shadow_md()
+        .text_color(rgb(CLIPBOARD_POPUP_PRIMARY_TEXT))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.0))
+                .px(px(12.0))
+                .pt(px(10.0))
+                .pb(px(8.0))
+                .child(div().flex_shrink_0().pt(px(1.0)).child(image_icon(
+                    PASTE_ICON.clone(),
+                    16.0,
+                    16.0,
+                )))
+                .child(
+                    div()
+                        .id("clipboard-popup-action")
+                        .debug_selector(|| "clipboard-popup-action".to_owned())
+                        .min_w(px(0.0))
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(action),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(12.0))
+                .py(px(9.0))
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .child(clipboard_detail_row(
+                    "Destination",
+                    destination_label,
+                    "clipboard-popup-destination",
+                ))
+                .child(render_clipboard_summary_details(summary.details)),
+        )
+        .with_animation(
+            "clipboard-status-popup-fade",
+            Animation::new(Duration::from_millis(TOOLTIP_FADE_MS)),
+            |this, delta| this.opacity(delta),
+        )
+        .into_any_element()
 }
 
 fn clipboard_action_label(
@@ -248,22 +201,22 @@ fn render_clipboard_summary_details(details: ClipboardSummaryDetails) -> AnyElem
                     FileClipboardOperation::Copy => "Copy files and folders",
                     FileClipboardOperation::Cut => "Move files and folders",
                 },
-                "clipboard-tooltip-operation",
+                "clipboard-popup-operation",
             ))
             .child(clipboard_detail_row(
                 "Folders",
                 count_metric_label(folder_count),
-                "clipboard-tooltip-folder-count",
+                "clipboard-popup-folder-count",
             ))
             .child(clipboard_detail_row(
                 "Files",
                 count_metric_label(file_count),
-                "clipboard-tooltip-file-count",
+                "clipboard-popup-file-count",
             ))
             .child(clipboard_detail_row(
                 "Total size",
                 size_metric_label(total_size),
-                "clipboard-tooltip-total-size",
+                "clipboard-popup-total-size",
             ))
             .into_any_element(),
         ClipboardSummaryDetails::Image {
@@ -277,17 +230,17 @@ fn render_clipboard_summary_details(details: ClipboardSummaryDetails) -> AnyElem
             .child(clipboard_detail_row(
                 "Clipboard type",
                 image_format_label(source_format),
-                "clipboard-tooltip-image-format",
+                "clipboard-popup-image-format",
             ))
             .child(clipboard_detail_row(
                 "Output",
                 format!("{output_file_name} (or next available name)"),
-                "clipboard-tooltip-output",
+                "clipboard-popup-output",
             ))
             .child(clipboard_detail_row(
                 "Size",
                 format_size(Some(byte_size)),
-                "clipboard-tooltip-total-size",
+                "clipboard-popup-total-size",
             ))
             .child(clipboard_after_paste_note())
             .into_any_element(),
@@ -298,12 +251,12 @@ fn render_clipboard_summary_details(details: ClipboardSummaryDetails) -> AnyElem
             .child(clipboard_detail_row(
                 "Contents",
                 count_label(count, "URL", "URLs"),
-                "clipboard-tooltip-url-count",
+                "clipboard-popup-url-count",
             ))
             .child(clipboard_detail_row(
                 "Total size",
                 "Unknown until download",
-                "clipboard-tooltip-total-size",
+                "clipboard-popup-total-size",
             ))
             .child(render_url_preview(urls))
             .into_any_element(),
@@ -318,17 +271,17 @@ fn render_clipboard_summary_details(details: ClipboardSummaryDetails) -> AnyElem
             .child(clipboard_detail_row(
                 "Contents",
                 count_label(count, "video URL", "video URLs"),
-                "clipboard-tooltip-url-count",
+                "clipboard-popup-url-count",
             ))
             .child(clipboard_detail_row(
                 "Site",
                 site_summary,
-                "clipboard-tooltip-video-site",
+                "clipboard-popup-video-site",
             ))
             .child(clipboard_detail_row(
                 "Total size",
                 "Unknown until download",
-                "clipboard-tooltip-total-size",
+                "clipboard-popup-total-size",
             ))
             .child(render_url_preview(urls))
             .into_any_element(),
@@ -344,18 +297,18 @@ fn render_clipboard_summary_details(details: ClipboardSummaryDetails) -> AnyElem
             .child(clipboard_detail_row(
                 "Output",
                 format!("{output_file_name} (or next available name)"),
-                "clipboard-tooltip-output",
+                "clipboard-popup-output",
             ))
             .child(clipboard_detail_row(
                 "Total size",
                 format_size(Some(output_size)),
-                "clipboard-tooltip-total-size",
+                "clipboard-popup-total-size",
             ))
             .when(source_size != output_size, |this| {
                 this.child(clipboard_detail_row(
                     "Source size",
                     format_size(Some(source_size)),
-                    "clipboard-tooltip-source-size",
+                    "clipboard-popup-source-size",
                 ))
             })
             .child(render_text_preview(source_preview))
@@ -380,13 +333,13 @@ fn clipboard_detail_row(
             div()
                 .w(px(78.0))
                 .flex_shrink_0()
-                .text_color(rgb(CLIPBOARD_TOOLTIP_TERTIARY_TEXT))
+                .text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT))
                 .child(label.into()),
         )
         .child(
             div()
                 .min_w(px(0.0))
-                .text_color(rgb(CLIPBOARD_TOOLTIP_SECONDARY_TEXT))
+                .text_color(rgb(CLIPBOARD_POPUP_SECONDARY_TEXT))
                 .child(value.into()),
         )
         .into_any_element()
@@ -394,8 +347,8 @@ fn clipboard_detail_row(
 
 fn render_url_preview(preview: ClipboardUrlPreview) -> AnyElement {
     let mut content = div()
-        .id("clipboard-tooltip-url-preview")
-        .debug_selector(|| "clipboard-tooltip-url-preview".to_owned())
+        .id("clipboard-popup-url-preview")
+        .debug_selector(|| "clipboard-popup-url-preview".to_owned())
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -403,35 +356,33 @@ fn render_url_preview(preview: ClipboardUrlPreview) -> AnyElement {
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(2.0))
-        .bg(rgb(CLIPBOARD_TOOLTIP_PREVIEW_BG))
+        .bg(rgb(CLIPBOARD_POPUP_PREVIEW_BG))
         .text_size(px(11.0))
         .line_height(px(15.0))
         .font(clipboard_preview_font())
-        .text_color(rgb(CLIPBOARD_TOOLTIP_SECONDARY_TEXT));
+        .text_color(rgb(CLIPBOARD_POPUP_SECONDARY_TEXT));
     for (index, url) in preview.urls.into_iter().enumerate() {
         content = content.child(
             div()
-                .id(SharedString::from(format!("clipboard-tooltip-url-{index}")))
-                .debug_selector(move || format!("clipboard-tooltip-url-{index}"))
+                .id(SharedString::from(format!("clipboard-popup-url-{index}")))
+                .debug_selector(move || format!("clipboard-popup-url-{index}"))
                 .min_w(px(0.0))
                 .truncate()
                 .child(url),
         );
     }
     if preview.omitted_count > 0 {
-        content = content.child(
-            div()
-                .text_color(rgb(CLIPBOARD_TOOLTIP_TERTIARY_TEXT))
-                .child(format!(
-                    "+ {}",
-                    count_label(preview.omitted_count, "more URL", "more URLs")
-                )),
-        );
+        content = content.child(div().text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT)).child(
+            format!(
+                "+ {}",
+                count_label(preview.omitted_count, "more URL", "more URLs")
+            ),
+        ));
     }
     if preview.truncated {
         content = content.child(
             div()
-                .text_color(rgb(CLIPBOARD_TOOLTIP_TERTIARY_TEXT))
+                .text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT))
                 .child("… URL preview truncated"),
         );
     }
@@ -440,8 +391,8 @@ fn render_url_preview(preview: ClipboardUrlPreview) -> AnyElement {
 
 fn render_text_preview(preview: ClipboardTextPreview) -> AnyElement {
     let mut content = div()
-        .id("clipboard-tooltip-text-preview")
-        .debug_selector(|| "clipboard-tooltip-text-preview".to_owned())
+        .id("clipboard-popup-text-preview")
+        .debug_selector(|| "clipboard-popup-text-preview".to_owned())
         .flex()
         .flex_col()
         .gap(px(1.0))
@@ -449,18 +400,18 @@ fn render_text_preview(preview: ClipboardTextPreview) -> AnyElement {
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(2.0))
-        .bg(rgb(CLIPBOARD_TOOLTIP_PREVIEW_BG))
+        .bg(rgb(CLIPBOARD_POPUP_PREVIEW_BG))
         .text_size(px(11.0))
         .line_height(px(15.0))
         .font(clipboard_preview_font())
-        .text_color(rgb(CLIPBOARD_TOOLTIP_SECONDARY_TEXT));
+        .text_color(rgb(CLIPBOARD_POPUP_SECONDARY_TEXT));
     for (index, line) in preview.lines.into_iter().enumerate() {
         content = content.child(
             div()
                 .id(SharedString::from(format!(
-                    "clipboard-tooltip-text-line-{index}"
+                    "clipboard-popup-text-line-{index}"
                 )))
-                .debug_selector(move || format!("clipboard-tooltip-text-line-{index}"))
+                .debug_selector(move || format!("clipboard-popup-text-line-{index}"))
                 .min_w(px(0.0))
                 .truncate()
                 .child(if line.is_empty() { " " } else { &line }.to_owned()),
@@ -469,7 +420,7 @@ fn render_text_preview(preview: ClipboardTextPreview) -> AnyElement {
     if preview.truncated {
         content = content.child(
             div()
-                .text_color(rgb(CLIPBOARD_TOOLTIP_TERTIARY_TEXT))
+                .text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT))
                 .child("… raw clipboard text truncated"),
         );
     }
@@ -480,7 +431,7 @@ fn clipboard_after_paste_note() -> AnyElement {
     div()
         .mt(px(2.0))
         .text_size(px(11.0))
-        .text_color(rgb(CLIPBOARD_TOOLTIP_TERTIARY_TEXT))
+        .text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT))
         .child("The new file will be selected for renaming.")
         .into_any_element()
 }
