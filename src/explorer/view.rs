@@ -176,7 +176,6 @@ pub struct ExplorerView {
     pub(super) date_format: String,
     pub(super) filesystem_name: String,
     pub(super) font: Font,
-    pub(super) google_drive: bool,
     pub(super) copy_verify: bool,
     pub(super) show_dotfiles: bool,
     pub(super) show_hidden_files: bool,
@@ -592,7 +591,6 @@ impl ExplorerView {
             date_format: settings.view.date_format.clone(),
             filesystem_name: filesystem_name.clone(),
             font: crate::settings::app_font(settings),
-            google_drive: settings.view.google_drive,
             copy_verify: settings.app.copy_verify,
             show_dotfiles: settings.view.show_dotfiles,
             show_hidden_files: settings.view.show_hidden,
@@ -615,11 +613,7 @@ impl ExplorerView {
             device_catalog_poll_task: None,
             portable_hotplug_task: None,
             sidebar_settings: settings.sidebar.clone(),
-            sidebar_sections: sidebar_sections(
-                &settings.sidebar,
-                &filesystem_name,
-                settings.view.google_drive,
-            ),
+            sidebar_sections: sidebar_sections(&settings.sidebar, &filesystem_name),
             sidebar_group_view: None,
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
@@ -647,7 +641,6 @@ impl ExplorerView {
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
         let filesystem_name = crate::settings::filesystem_name(settings);
         let filesystem_name_changed = self.filesystem_name != filesystem_name;
-        let google_drive_changed = self.google_drive != settings.view.google_drive;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
         let file_sort_changed = self.file_sort != settings.view.sort;
         let media_preview_size_changed =
@@ -655,7 +648,6 @@ impl ExplorerView {
         self.date_format.clone_from(&settings.view.date_format);
         self.filesystem_name = filesystem_name;
         self.font = crate::settings::app_font(settings);
-        self.google_drive = settings.view.google_drive;
         self.copy_verify = settings.app.copy_verify;
         self.show_dotfiles = settings.view.show_dotfiles;
         self.show_hidden_files = settings.view.show_hidden;
@@ -730,11 +722,7 @@ impl ExplorerView {
 
         if self.is_sidebar_group_view() {
             self.invalidate_recursive_search_cache();
-            self.sidebar_sections = sidebar_sections(
-                &self.sidebar_settings,
-                &self.filesystem_name,
-                self.google_drive,
-            );
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
             self.rebuild_active_sidebar_group_items(true);
             self.schedule_sidebar_group_capacities(cx);
         } else if visibility_changed {
@@ -763,11 +751,7 @@ impl ExplorerView {
             if file_sort_changed {
                 self.apply_file_sort_preserving_selection();
             }
-            if sidebar_changed
-                || filesystem_name_changed
-                || google_drive_changed
-                || !folder_size_changed
-            {
+            if sidebar_changed || filesystem_name_changed || !folder_size_changed {
                 self.rebuild_fast_sidebar_sections();
             }
         }
@@ -876,11 +860,7 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(
-                &self.sidebar_settings,
-                &self.filesystem_name,
-                self.google_drive,
-            );
+            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -1265,11 +1245,7 @@ impl ExplorerView {
     }
 
     fn rebuild_fast_sidebar_sections(&mut self) {
-        self.sidebar_sections = sidebar_sections(
-            &self.sidebar_settings,
-            &self.filesystem_name,
-            self.google_drive,
-        );
+        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
         self.rebuild_active_sidebar_group_items(true);
     }
 
@@ -1355,11 +1331,7 @@ impl ExplorerView {
         if self.sidebar_group_view.is_none() {
             return;
         }
-        self.sidebar_sections = sidebar_sections(
-            &self.sidebar_settings,
-            &self.filesystem_name,
-            self.google_drive,
-        );
+        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
         self.rebuild_active_sidebar_group_items(true);
         self.schedule_sidebar_group_capacities(cx);
     }
@@ -1920,11 +1892,7 @@ impl ExplorerView {
 
     #[allow(dead_code)]
     fn refresh_device_catalog(&mut self, cx: &mut Context<Self>) {
-        let sections = sidebar_sections(
-            &self.sidebar_settings,
-            &self.filesystem_name,
-            self.google_drive,
-        );
+        let sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
         if sections != self.sidebar_sections {
             self.sidebar_sections = sections;
             if self.is_sidebar_group_view() {
@@ -3125,7 +3093,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn apply_settings_disables_google_drive_and_rebuilds_sidebar(cx: &mut gpui::TestAppContext) {
+    fn apply_settings_hides_google_drive_and_rebuilds_sidebar(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let focus_handle = cx.focus_handle();
             focus_handle.focus(window);
@@ -3148,9 +3116,9 @@ mod tests {
             view.update(app, |view, cx| {
                 view.apply_settings(
                     &ExplorerSettings {
-                        view: crate::settings::ViewSettings {
-                            google_drive: false,
-                            ..crate::settings::ViewSettings::default()
+                        sidebar: crate::settings::SidebarSettings {
+                            hide_items: vec![crate::settings::SidebarHiddenItem::GoogleDrive],
+                            ..crate::settings::SidebarSettings::default()
                         },
                         ..ExplorerSettings::default()
                     },
@@ -3160,7 +3128,10 @@ mod tests {
         });
 
         cx.read_entity(&view, |view, _| {
-            assert!(!view.google_drive);
+            assert_eq!(
+                view.sidebar_settings.hide_items,
+                vec![crate::settings::SidebarHiddenItem::GoogleDrive]
+            );
             assert!(
                 view.sidebar_sections
                     .network_drives

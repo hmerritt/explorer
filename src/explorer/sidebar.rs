@@ -10,7 +10,7 @@ use crate::explorer::portable_devices::{PortableDeviceRoot, portable_device_root
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
 };
-use crate::settings::{SidebarSettings, expand_configured_path};
+use crate::settings::{SidebarHiddenItem, SidebarSettings, expand_configured_path};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -28,6 +28,7 @@ pub(super) enum SidebarItemKind {
     DriveWindows,
     DriveNetwork(NetworkDriveState),
     GoogleDrive,
+    OneDrive,
     PortableDevice,
     DriveWsl,
 }
@@ -35,18 +36,22 @@ pub(super) enum SidebarItemKind {
 pub(super) fn sidebar_sections(
     settings: &SidebarSettings,
     filesystem_name: &str,
-    google_drive: bool,
 ) -> SidebarSections {
     let (network_roots, drive_roots) = local_drive_roots()
         .into_iter()
         .partition(|path| path_is_remote_drive(path));
+    let google_drive_visible = !settings
+        .hide_items
+        .contains(&SidebarHiddenItem::GoogleDrive);
+    let onedrive_visible = !settings.hide_items.contains(&SidebarHiddenItem::OneDrive);
     sidebar_sections_from_roots_internal(
         settings,
         filesystem_name,
         drive_roots,
         network_roots,
         network_drives(),
-        google_drive_item(google_drive),
+        google_drive_item(google_drive_visible),
+        onedrive_item(onedrive_visible),
         wsl_drive_roots(),
         portable_device_roots(),
     )
@@ -59,13 +64,15 @@ fn sidebar_sections_from_roots_internal(
     network_roots: Vec<PathBuf>,
     discovered_network_drives: Vec<NetworkDrive>,
     google_drive: Option<SidebarItem>,
+    onedrive: Option<SidebarItem>,
     wsl_roots: Vec<PathBuf>,
     portable_roots: Vec<PortableDeviceRoot>,
 ) -> SidebarSections {
     let mut network_drives = network_drive_items_from_roots(network_roots, filesystem_name);
     network_drives.extend(network_drive_items(discovered_network_drives));
     network_drives.extend(google_drive);
-    SidebarSections {
+    network_drives.extend(onedrive);
+    let mut sections = SidebarSections {
         user_directories: configured_sidebar_items(&settings.items, filesystem_name),
         drives: {
             let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
@@ -74,7 +81,17 @@ fn sidebar_sections_from_roots_internal(
         },
         network_drives,
         wsl_drives: wsl_drive_items_from_roots(wsl_roots),
-    }
+    };
+    sections
+        .drives
+        .retain(|item| !sidebar_item_is_hidden(item, settings));
+    sections
+        .network_drives
+        .retain(|item| !sidebar_item_is_hidden(item, settings));
+    sections
+        .wsl_drives
+        .retain(|item| !sidebar_item_is_hidden(item, settings));
+    sections
 }
 
 #[cfg(test)]
@@ -91,6 +108,7 @@ fn sidebar_sections_from_roots(
         Vec::new(),
         Vec::new(),
         None,
+        None,
         wsl_roots,
         Vec::new(),
     )
@@ -104,6 +122,7 @@ fn sidebar_sections_from_sources(
     network_roots: Vec<PathBuf>,
     network_drives: Vec<NetworkDrive>,
     google_drive: Option<SidebarItem>,
+    onedrive: Option<SidebarItem>,
     wsl_roots: Vec<PathBuf>,
 ) -> SidebarSections {
     sidebar_sections_from_roots_internal(
@@ -113,6 +132,7 @@ fn sidebar_sections_from_sources(
         network_roots,
         network_drives,
         google_drive,
+        onedrive,
         wsl_roots,
         Vec::new(),
     )
@@ -215,6 +235,7 @@ fn sidebar_item_label_for_path(
         }
         SidebarItemKind::DriveNetwork(_) => home_sidebar_label(path),
         SidebarItemKind::GoogleDrive => "Google Drive".to_owned(),
+        SidebarItemKind::OneDrive => "OneDrive".to_owned(),
         SidebarItemKind::PortableDevice => home_sidebar_label(path),
         SidebarItemKind::DriveWsl => sidebar_wsl_drive_label(path),
         SidebarItemKind::CustomDirectory => home_sidebar_label(path),
@@ -327,6 +348,56 @@ fn google_drive_item_from_local_app_data(
         kind: SidebarItemKind::GoogleDrive,
         configured_index: None,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn onedrive_item(enabled: bool) -> Option<SidebarItem> {
+    onedrive_item_with_env(enabled, |name| std::env::var_os(name))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn onedrive_item(_: bool) -> Option<SidebarItem> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn onedrive_item_with_env(
+    enabled: bool,
+    mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Option<SidebarItem> {
+    if !enabled {
+        return None;
+    }
+
+    let configured = env_var("OneDrive").map(PathBuf::from);
+    let fallback = env_var("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|path| path.join("OneDrive"));
+    configured
+        .into_iter()
+        .chain(fallback)
+        .find(|path| path.is_dir())
+        .map(|path| SidebarItem {
+            label: "OneDrive".to_owned(),
+            path,
+            kind: SidebarItemKind::OneDrive,
+            configured_index: None,
+        })
+}
+
+pub(super) fn sidebar_hidden_item(item: &SidebarItem) -> Option<SidebarHiddenItem> {
+    if item.configured_index.is_some() {
+        return None;
+    }
+    Some(match item.kind {
+        SidebarItemKind::GoogleDrive => SidebarHiddenItem::GoogleDrive,
+        SidebarItemKind::OneDrive => SidebarHiddenItem::OneDrive,
+        _ => SidebarHiddenItem::Path(item.path.clone()),
+    })
+}
+
+fn sidebar_item_is_hidden(item: &SidebarItem, settings: &SidebarSettings) -> bool {
+    sidebar_hidden_item(item).is_some_and(|item| settings.hide_items.contains(&item))
 }
 
 fn wsl_drive_items_from_roots(roots: Vec<PathBuf>) -> Vec<SidebarItem> {
@@ -639,6 +710,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
             Vec::new(),
             vec![
                 PortableDeviceRoot {
@@ -684,6 +756,7 @@ mod tests {
                 remote_name: r"\\server\team".to_owned(),
             }],
             None,
+            None,
             vec![PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\")],
         );
 
@@ -710,13 +783,19 @@ mod tests {
     }
 
     #[test]
-    fn google_drive_is_appended_to_the_network_group() {
+    fn cloud_drives_are_appended_to_the_network_group_in_provider_order() {
         let mapped_path = PathBuf::from(r"S:\");
         let google_path = PathBuf::from("google-drive");
         let google_drive = SidebarItem {
             label: "Google Drive".to_owned(),
             path: google_path.clone(),
             kind: SidebarItemKind::GoogleDrive,
+            configured_index: None,
+        };
+        let onedrive = SidebarItem {
+            label: "OneDrive".to_owned(),
+            path: PathBuf::from("onedrive"),
+            kind: SidebarItemKind::OneDrive,
             configured_index: None,
         };
         let sections = sidebar_sections_from_sources(
@@ -735,14 +814,16 @@ mod tests {
                 remote_name: r"\\server\team".to_owned(),
             }],
             Some(google_drive.clone()),
+            Some(onedrive.clone()),
             Vec::new(),
         );
 
         assert!(sections.drives.is_empty());
         assert!(sections.wsl_drives.is_empty());
-        assert_eq!(sections.network_drives.len(), 2);
+        assert_eq!(sections.network_drives.len(), 3);
         assert_eq!(sections.network_drives[0].path, mapped_path);
         assert_eq!(sections.network_drives[1], google_drive);
+        assert_eq!(sections.network_drives[2], onedrive);
     }
 
     #[cfg(target_os = "windows")]
@@ -805,6 +886,106 @@ mod tests {
             google_drive_item_from_local_app_data(true, local_app_data.path()),
             None
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn onedrive_discovery_prefers_the_environment_root_and_falls_back_to_the_profile() {
+        let temp = TempDir::new();
+        let configured = temp.path().join("configured-onedrive");
+        let profile = temp.path().join("profile");
+        let fallback = profile.join("OneDrive");
+        fs::create_dir(&configured).expect("create configured OneDrive root");
+        fs::create_dir(&profile).expect("create user profile");
+        fs::create_dir(&fallback).expect("create fallback OneDrive root");
+
+        let discovered = onedrive_item_with_env(true, |name| match name {
+            "OneDrive" => Some(configured.clone().into_os_string()),
+            "USERPROFILE" => Some(profile.clone().into_os_string()),
+            _ => None,
+        });
+        assert_eq!(
+            discovered,
+            Some(SidebarItem {
+                label: "OneDrive".to_owned(),
+                path: configured,
+                kind: SidebarItemKind::OneDrive,
+                configured_index: None,
+            })
+        );
+
+        let discovered = onedrive_item_with_env(true, |name| match name {
+            "OneDrive" => Some(temp.path().join("missing").into_os_string()),
+            "USERPROFILE" => Some(profile.clone().into_os_string()),
+            _ => None,
+        });
+        assert_eq!(discovered.unwrap().path, fallback);
+        assert!(onedrive_item_with_env(false, |_| None).is_none());
+
+        let file = temp.path().join("onedrive.txt");
+        fs::write(&file, b"not a directory").expect("create OneDrive file candidate");
+        assert!(
+            onedrive_item_with_env(true, |name| {
+                (name == "OneDrive").then(|| file.clone().into_os_string())
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn hidden_items_filter_dynamic_sections_without_filtering_pinned_items() {
+        let temp = TempDir::new();
+        let pinned_and_drive = temp.path().join("drive");
+        let network = temp.path().join("network");
+        let portable = temp.path().join("portable");
+        let wsl = temp.path().join("wsl");
+        fs::create_dir(&pinned_and_drive).expect("create pinned directory");
+        let settings = SidebarSettings {
+            hide_items: vec![
+                SidebarHiddenItem::Path(pinned_and_drive.clone()),
+                SidebarHiddenItem::Path(network.clone()),
+                SidebarHiddenItem::Path(portable.clone()),
+                SidebarHiddenItem::Path(wsl.clone()),
+                SidebarHiddenItem::GoogleDrive,
+                SidebarHiddenItem::OneDrive,
+            ],
+            items: vec![pinned_and_drive.clone()],
+            ..SidebarSettings::default()
+        };
+        let google_drive = SidebarItem {
+            label: "Google Drive".to_owned(),
+            path: temp.path().join("google"),
+            kind: SidebarItemKind::GoogleDrive,
+            configured_index: None,
+        };
+        let onedrive = SidebarItem {
+            label: "OneDrive".to_owned(),
+            path: temp.path().join("onedrive"),
+            kind: SidebarItemKind::OneDrive,
+            configured_index: None,
+        };
+
+        let sections = sidebar_sections_from_roots_internal(
+            &settings,
+            "Filesystem",
+            vec![pinned_and_drive.clone()],
+            vec![network],
+            Vec::new(),
+            Some(google_drive),
+            Some(onedrive),
+            vec![wsl],
+            vec![PortableDeviceRoot {
+                label: "Phone".to_owned(),
+                path: portable,
+                unavailable_reason: None,
+            }],
+        );
+
+        assert_eq!(sections.user_directories.len(), 1);
+        assert_eq!(sections.user_directories[0].path, pinned_and_drive);
+        assert!(sections.drives.is_empty());
+        assert!(sections.network_drives.is_empty());
+        assert!(sections.wsl_drives.is_empty());
     }
 
     #[test]

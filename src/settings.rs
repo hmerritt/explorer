@@ -74,6 +74,28 @@ pub enum SidebarGroupKind {
     Wsl,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SidebarHiddenItem {
+    GoogleDrive,
+    OneDrive,
+    Path(PathBuf),
+}
+
+impl Serialize for SidebarHiddenItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::GoogleDrive => serializer.serialize_str("google_drive"),
+            Self::OneDrive => serializer.serialize_str("onedrive"),
+            Self::Path(path) => {
+                serializer.serialize_str(&format_configured_path(path, AddressSlash::Forward))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressSlash {
@@ -222,9 +244,16 @@ impl Serialize for SerializableSidebarSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(4))?;
+        let mut map = serializer.serialize_map(Some(5))?;
         map.serialize_entry("expanded_groups", &self.settings.expanded_groups)?;
         map.serialize_entry("hide_groups", &self.settings.hide_groups)?;
+        map.serialize_entry(
+            "hide_items",
+            &SerializableSidebarHiddenItems {
+                items: &self.settings.hide_items,
+                slash: self.slash,
+            },
+        )?;
         map.serialize_entry(
             "items",
             &SerializableSidebarItems {
@@ -234,6 +263,29 @@ impl Serialize for SerializableSidebarSettings<'_> {
         )?;
         map.serialize_entry("width", &self.settings.width)?;
         map.end()
+    }
+}
+
+struct SerializableSidebarHiddenItems<'a> {
+    items: &'a [SidebarHiddenItem],
+    slash: AddressSlash,
+}
+
+impl Serialize for SerializableSidebarHiddenItems<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let items = self
+            .items
+            .iter()
+            .map(|item| match item {
+                SidebarHiddenItem::GoogleDrive => "google_drive".to_owned(),
+                SidebarHiddenItem::OneDrive => "onedrive".to_owned(),
+                SidebarHiddenItem::Path(path) => format_configured_path(path, self.slash),
+            })
+            .collect::<Vec<_>>();
+        items.serialize(serializer)
     }
 }
 
@@ -628,6 +680,8 @@ pub struct SidebarSettings {
     pub expanded_groups: Vec<SidebarGroupKind>,
     #[serde(default, deserialize_with = "deserialize_sidebar_hide_groups")]
     pub hide_groups: Vec<SidebarGroupKind>,
+    #[serde(default, deserialize_with = "deserialize_sidebar_hide_items")]
+    pub hide_items: Vec<SidebarHiddenItem>,
     #[serde(
         default = "default_sidebar_items",
         deserialize_with = "deserialize_sidebar_items"
@@ -664,7 +718,6 @@ pub struct ViewSettings {
     pub filesystem_name: String,
     #[serde(default = "default_font")]
     pub font: String,
-    pub google_drive: bool,
     #[serde(
         default = "default_media_preview_size",
         deserialize_with = "deserialize_media_preview_size"
@@ -785,6 +838,7 @@ impl Default for SidebarSettings {
         Self {
             expanded_groups: default_sidebar_expanded_groups(),
             hide_groups: Vec::new(),
+            hide_items: Vec::new(),
             items: default_sidebar_items(),
             width: SIDEBAR_DEFAULT_WIDTH,
         }
@@ -807,7 +861,6 @@ impl Default for ViewSettings {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             filesystem_name: default_filesystem_name(),
             font: default_font(),
-            google_drive: true,
             media_preview_size: default_media_preview_size(),
             mode: FileViewMode::Details,
             mode_media: default_media_view_mode(),
@@ -1125,6 +1178,10 @@ pub(crate) fn unpin_sidebar_item(
     })
 }
 
+pub(crate) fn hide_sidebar_item(item: SidebarHiddenItem, cx: &mut impl BorrowAppContext) -> bool {
+    update_settings(cx, |settings| hide_sidebar_item_in_settings(item, settings))
+}
+
 fn update_settings<R>(
     cx: &mut impl BorrowAppContext,
     update: impl FnOnce(&mut ExplorerSettings) -> R,
@@ -1229,6 +1286,14 @@ fn unpin_sidebar_item_in_settings(
 ) -> Option<PathBuf> {
     (configured_index < settings.sidebar.items.len())
         .then(|| settings.sidebar.items.remove(configured_index))
+}
+
+fn hide_sidebar_item_in_settings(item: SidebarHiddenItem, settings: &mut ExplorerSettings) -> bool {
+    if settings.sidebar.hide_items.contains(&item) {
+        return false;
+    }
+    settings.sidebar.hide_items.push(item);
+    true
 }
 
 fn set_sidebar_group_expanded_in_settings(
@@ -1375,6 +1440,7 @@ fn load_settings_document_from_path_for(
     let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
     let mut value =
         serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
+    migrate_legacy_google_drive_setting(&document, &mut value);
     migrate_settings_for_platform(&mut value, platform);
     validate_settings(&value)?;
 
@@ -1395,6 +1461,25 @@ fn load_settings_document_from_path_for(
     }
 
     Ok(LoadedSettings { value, document })
+}
+
+fn migrate_legacy_google_drive_setting(document: &Value, settings: &mut ExplorerSettings) {
+    if document
+        .get("sidebar")
+        .and_then(Value::as_object)
+        .is_some_and(|sidebar| sidebar.contains_key("hide_items"))
+    {
+        return;
+    }
+    if document
+        .get("view")
+        .and_then(Value::as_object)
+        .and_then(|view| view.get("google_drive"))
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        hide_sidebar_item_in_settings(SidebarHiddenItem::GoogleDrive, settings);
+    }
 }
 
 fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: ConfigPlatform) {
@@ -2190,6 +2275,41 @@ where
     Ok(sidebar_group_kinds_from_value(value, Vec::new()))
 }
 
+fn deserialize_sidebar_hide_items<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SidebarHiddenItem>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Some(values) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+
+    let mut items = Vec::new();
+    for item in values
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(sidebar_hidden_item_from_str)
+    {
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
+fn sidebar_hidden_item_from_str(value: &str) -> Option<SidebarHiddenItem> {
+    match value {
+        "google_drive" => Some(SidebarHiddenItem::GoogleDrive),
+        "onedrive" => Some(SidebarHiddenItem::OneDrive),
+        _ => {
+            let path = PathBuf::from(value);
+            path.is_absolute().then_some(SidebarHiddenItem::Path(path))
+        }
+    }
+}
+
 fn deserialize_sidebar_expanded_groups<'de, D>(
     deserializer: D,
 ) -> Result<Vec<SidebarGroupKind>, D::Error>
@@ -2473,7 +2593,7 @@ mod tests {
         assert!(!settings.view.show_hidden);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
-        assert!(settings.view.google_drive);
+        assert!(settings.sidebar.hide_items.is_empty());
         assert_eq!(settings.view.media_preview_size, DEFAULT_MEDIA_PREVIEW_SIZE);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
@@ -2843,7 +2963,7 @@ mod tests {
         assert!(settings.view.show_dotfiles);
         assert_eq!(settings.view.date_format, DEFAULT_DATE_FORMAT);
         assert_eq!(settings.view.font, DEFAULT_FONT);
-        assert!(settings.view.google_drive);
+        assert!(settings.sidebar.hide_items.is_empty());
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(settings.view.filesystem_name, DEFAULT_FILESYSTEM_NAME);
         #[cfg(target_os = "windows")]
@@ -3125,6 +3245,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_google_drive_false_migrates_to_hidden_item_and_is_removed() {
+        let path = unique_temp_dir("legacy-google-drive").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"view":{"google_drive":false}}"#).unwrap();
+
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        assert_eq!(
+            loaded.value.sidebar.hide_items,
+            vec![SidebarHiddenItem::GoogleDrive]
+        );
+
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            normalized["sidebar"]["hide_items"],
+            serde_json::json!(["google_drive"])
+        );
+        assert!(normalized["view"].get("google_drive").is_none());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn explicit_hide_items_are_authoritative_over_legacy_google_drive() {
+        let path = unique_temp_dir("explicit-hide-items").join(SETTINGS_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"sidebar":{"hide_items":["onedrive","onedrive"]},"view":{"google_drive":false}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        assert_eq!(
+            loaded.value.sidebar.hide_items,
+            vec![SidebarHiddenItem::OneDrive]
+        );
+
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            normalized["sidebar"]["hide_items"],
+            serde_json::json!(["onedrive"])
+        );
+        assert!(normalized["view"].get("google_drive").is_none());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn sidebar_expanded_groups_default_to_pinned() {
         let settings: ExplorerSettings =
             serde_json::from_str(r#"{"sidebar":{}}"#).expect("deserialize sidebar settings");
@@ -3182,17 +3348,22 @@ mod tests {
     }
 
     #[test]
-    fn google_drive_defaults_to_enabled_and_round_trips_false() {
-        let missing: ExplorerSettings = serde_json::from_str(r#"{"view":{}}"#)
-            .expect("deserialize default Google Drive setting");
-        assert!(missing.view.google_drive);
+    fn sidebar_hide_items_accept_providers_and_absolute_paths_and_ignore_invalid_values() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{"sidebar":{"hide_items":["google_drive","onedrive","C:\\\\","google_drive","relative",42]}}"#,
+        )
+        .expect("deserialize hidden sidebar items");
 
-        let disabled: ExplorerSettings = serde_json::from_str(r#"{"view":{"google_drive":false}}"#)
-            .expect("deserialize disabled Google Drive setting");
-        assert!(!disabled.view.google_drive);
+        let mut expected = vec![SidebarHiddenItem::GoogleDrive, SidebarHiddenItem::OneDrive];
+        if cfg!(target_os = "windows") {
+            expected.push(SidebarHiddenItem::Path(PathBuf::from("C:\\")));
+        }
+        assert_eq!(settings.sidebar.hide_items, expected);
 
-        let value = serde_json::to_value(disabled).expect("serialize Google Drive setting");
-        assert_eq!(value["view"]["google_drive"], false);
+        let malformed: ExplorerSettings =
+            serde_json::from_str(r#"{"sidebar":{"hide_items":"google_drive"}}"#)
+                .expect("deserialize malformed hidden sidebar items");
+        assert!(malformed.sidebar.hide_items.is_empty());
     }
 
     #[test]
@@ -3335,6 +3506,47 @@ mod tests {
             vec![SidebarGroupKind::Drives]
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[gpui::test]
+    fn hide_sidebar_item_deduplicates_and_persists_provider_and_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = unique_temp_dir("hide-sidebar-item");
+        let path = directory.join(SETTINGS_FILE_NAME);
+        cx.set_global(SettingsState {
+            value: ExplorerSettings::default(),
+            document: settings_document(&ExplorerSettings::default()),
+            path: path.clone(),
+            _watcher: None,
+        });
+
+        let changes = cx.update(|cx| {
+            (
+                hide_sidebar_item(SidebarHiddenItem::OneDrive, cx),
+                hide_sidebar_item(SidebarHiddenItem::OneDrive, cx),
+                hide_sidebar_item(SidebarHiddenItem::Path(directory.clone()), cx),
+            )
+        });
+
+        assert_eq!(changes, (true, false, true));
+        assert_eq!(
+            load_settings_from_path(&path).unwrap().sidebar.hide_items,
+            vec![
+                SidebarHiddenItem::OneDrive,
+                SidebarHiddenItem::Path(directory.clone()),
+            ]
+        );
+        let document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(document["sidebar"]["hide_items"][0], "onedrive");
+        assert_eq!(
+            document["sidebar"]["hide_items"][1],
+            format_configured_path(
+                &directory,
+                settings_address_slash(&ExplorerSettings::default())
+            )
+        );
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[gpui::test]
@@ -3531,6 +3743,7 @@ mod tests {
         );
         assert!(json.contains("\n    \"expanded_groups\": [\"pinned\"],"));
         assert!(json.contains("\n    \"hide_groups\": [],"));
+        assert!(json.contains("\n    \"hide_items\": [],"));
         assert!(document["sidebar"].get("hide").is_none());
         let expected_sidebar_items = settings
             .sidebar
@@ -3554,7 +3767,6 @@ mod tests {
         ));
         assert!(!json.contains("name_width"));
         assert!(json.contains("\n    \"font\": \"default\""));
-        assert!(json.contains("\n    \"google_drive\": true"));
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             assert_eq!(document["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);
@@ -4325,7 +4537,8 @@ mod tests {
         assert!(object["view"].get("future_view").is_none());
         assert_eq!(object["view"]["mode"], "details");
         assert_eq!(object["view"]["mode_media"], "large_icons");
-        assert_eq!(object["view"]["google_drive"], true);
+        assert_eq!(object["sidebar"]["hide_items"], serde_json::json!([]));
+        assert!(object["view"].get("google_drive").is_none());
         assert_eq!(object["view"]["native_icons"], true);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_eq!(object["view"]["filesystem_name"], DEFAULT_FILESYSTEM_NAME);

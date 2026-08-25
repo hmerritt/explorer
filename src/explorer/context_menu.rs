@@ -21,7 +21,7 @@ use crate::explorer::{
 };
 use crate::settings::{
     ContextMenuAction, ContextMenuConfiguredIcon, ContextMenuOnlyFilter, CustomContextMenuItem,
-    resolve_context_menu_only_filter,
+    SidebarHiddenItem, resolve_context_menu_only_filter,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +161,9 @@ pub(super) enum ContextMenuCommand {
     UnpinSidebar {
         configured_index: usize,
     },
+    HideSidebarItem {
+        item: SidebarHiddenItem,
+    },
 }
 
 impl ContextMenuState {
@@ -242,6 +245,7 @@ impl ExplorerView {
         path: PathBuf,
         row_id: usize,
         configured_index: Option<usize>,
+        hide_item: Option<SidebarHiddenItem>,
         open_icon_kind: Option<DirectoryKind>,
         can_eject: bool,
         window: &mut Window,
@@ -258,7 +262,13 @@ impl ExplorerView {
         self.open_utility_menu = None;
         self.context_menu = Some(ContextMenuState::new_with_source(
             origin,
-            sidebar_context_menu_items(path, configured_index, open_icon_kind, can_eject),
+            sidebar_context_menu_items(
+                path,
+                configured_index,
+                hide_item,
+                open_icon_kind,
+                can_eject,
+            ),
             ContextMenuSource::SidebarItem { row_id },
         ));
         true
@@ -497,6 +507,12 @@ impl ExplorerView {
             }
             ContextMenuCommand::UnpinSidebar { configured_index } => {
                 crate::settings::unpin_sidebar_item(configured_index, cx);
+            }
+            ContextMenuCommand::HideSidebarItem { item } => {
+                if crate::settings::hide_sidebar_item(item, cx) {
+                    let settings = cx.global::<crate::settings::SettingsState>().value.clone();
+                    self.apply_settings(&settings, cx);
+                }
             }
         }
     }
@@ -914,6 +930,7 @@ struct SelectedEntryContext {
 pub(super) fn sidebar_context_menu_items(
     path: PathBuf,
     configured_index: Option<usize>,
+    hide_item: Option<SidebarHiddenItem>,
     open_icon_kind: Option<DirectoryKind>,
     can_eject: bool,
 ) -> Vec<ContextMenuItem> {
@@ -953,6 +970,15 @@ pub(super) fn sidebar_context_menu_items(
             icon: Some(ContextMenuIcon::Unpin),
             label: "Unpin".to_owned(),
             command: ContextMenuCommand::UnpinSidebar { configured_index },
+            enabled: true,
+        });
+    } else if let Some(item) = hide_item {
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Action {
+            id: "context-menu-sidebar-hide".to_owned(),
+            icon: Some(ContextMenuIcon::Unpin),
+            label: "Hide".to_owned(),
+            command: ContextMenuCommand::HideSidebarItem { item },
             enabled: true,
         });
     }
@@ -2724,6 +2750,7 @@ mod tests {
         let items = sidebar_context_menu_items(
             path.clone(),
             Some(2),
+            None,
             Some(DirectoryKind::Downloads),
             false,
         );
@@ -2768,12 +2795,17 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_sidebar_menu_omits_separator_and_unpin() {
+    fn unconfigured_sidebar_menu_contains_hide_with_unpin_icon() {
         let path = PathBuf::from("/tmp/drive");
-        let items =
-            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive), false);
+        let items = sidebar_context_menu_items(
+            path.clone(),
+            None,
+            Some(SidebarHiddenItem::Path(path.clone())),
+            Some(DirectoryKind::Drive),
+            false,
+        );
 
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 4);
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
@@ -2793,7 +2825,20 @@ mod tests {
                 id: "context-menu-sidebar-open-new-tab".to_owned(),
                 icon: Some(ContextMenuIcon::NewTab),
                 label: "Open in new tab".to_owned(),
-                command: ContextMenuCommand::OpenDirectoryInNewTab { path },
+                command: ContextMenuCommand::OpenDirectoryInNewTab { path: path.clone() },
+                enabled: true,
+            }
+        );
+        assert!(matches!(items[2], ContextMenuItem::Separator));
+        assert_eq!(
+            items[3],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-hide".to_owned(),
+                icon: Some(ContextMenuIcon::Unpin),
+                label: "Hide".to_owned(),
+                command: ContextMenuCommand::HideSidebarItem {
+                    item: SidebarHiddenItem::Path(path),
+                },
                 enabled: true,
             }
         );
@@ -2802,10 +2847,15 @@ mod tests {
     #[test]
     fn unconfigured_wsl_sidebar_menu_uses_wsl_icon_kind() {
         let path = PathBuf::from("\\\\wsl.localhost\\Ubuntu-24.04\\");
-        let items =
-            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::DriveWsl), false);
+        let items = sidebar_context_menu_items(
+            path.clone(),
+            None,
+            Some(SidebarHiddenItem::Path(path.clone())),
+            Some(DirectoryKind::DriveWsl),
+            false,
+        );
 
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 4);
         assert_eq!(
             items[0],
             ContextMenuItem::Action {
@@ -2834,10 +2884,15 @@ mod tests {
     #[test]
     fn ejectable_sidebar_drive_menu_contains_eject() {
         let path = PathBuf::from("/Volumes/Backup");
-        let items =
-            sidebar_context_menu_items(path.clone(), None, Some(DirectoryKind::Drive), true);
+        let items = sidebar_context_menu_items(
+            path.clone(),
+            None,
+            Some(SidebarHiddenItem::Path(path.clone())),
+            Some(DirectoryKind::Drive),
+            true,
+        );
 
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 6);
         assert!(matches!(items[2], ContextMenuItem::Separator));
         assert_eq!(
             items[3],
@@ -2845,7 +2900,20 @@ mod tests {
                 id: "context-menu-sidebar-eject".to_owned(),
                 icon: Some(ContextMenuIcon::Eject),
                 label: "Eject".to_owned(),
-                command: ContextMenuCommand::EjectMountedVolume { path },
+                command: ContextMenuCommand::EjectMountedVolume { path: path.clone() },
+                enabled: true,
+            }
+        );
+        assert!(matches!(items[4], ContextMenuItem::Separator));
+        assert_eq!(
+            items[5],
+            ContextMenuItem::Action {
+                id: "context-menu-sidebar-hide".to_owned(),
+                icon: Some(ContextMenuIcon::Unpin),
+                label: "Hide".to_owned(),
+                command: ContextMenuCommand::HideSidebarItem {
+                    item: SidebarHiddenItem::Path(path),
+                },
                 enabled: true,
             }
         );
@@ -3108,6 +3176,54 @@ mod tests {
             assert_eq!(view.back_stack, vec![temp.path().to_path_buf()]);
             assert!(view.forward_stack.is_empty());
             assert!(view.context_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn hide_sidebar_command_updates_settings_and_rebuilds_sidebar_immediately(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.sidebar_sections
+                    .network_drives
+                    .push(crate::explorer::sidebar::SidebarItem {
+                        label: "Google Drive".to_owned(),
+                        path: temp.path().join("google-drive"),
+                        kind: crate::explorer::sidebar::SidebarItemKind::GoogleDrive,
+                        configured_index: None,
+                    });
+                view.execute_context_menu_command(
+                    ContextMenuCommand::HideSidebarItem {
+                        item: SidebarHiddenItem::GoogleDrive,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+
+        let hidden_items = cx.update(|_, cx| {
+            cx.global::<crate::settings::SettingsState>()
+                .value
+                .sidebar
+                .hide_items
+                .clone()
+        });
+        assert_eq!(hidden_items, vec![SidebarHiddenItem::GoogleDrive]);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.sidebar_settings.hide_items,
+                vec![SidebarHiddenItem::GoogleDrive]
+            );
+            assert!(
+                view.sidebar_sections
+                    .network_drives
+                    .iter()
+                    .all(|item| item.kind != crate::explorer::sidebar::SidebarItemKind::GoogleDrive)
+            );
         });
     }
 

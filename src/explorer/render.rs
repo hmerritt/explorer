@@ -83,8 +83,8 @@ use crate::explorer::{
         executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
         folder_icon_sized, google_drive_icon, google_drive_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font, network_drive_icon,
-        network_drive_icon_sized, network_group_icon, pinned_group_icon, portable_device_icon,
-        portable_device_icon_sized,
+        network_drive_icon_sized, network_group_icon, onedrive_icon, onedrive_icon_sized,
+        pinned_group_icon, portable_device_icon, portable_device_icon_sized,
     },
     image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
@@ -103,7 +103,7 @@ use crate::explorer::{
     },
     search::search_text_element,
     selection::SelectionModifiers,
-    sidebar::{SidebarItem, SidebarItemKind},
+    sidebar::{SidebarItem, SidebarItemKind, sidebar_hidden_item},
     sidebar_group_view::{drive_capacity_text, used_capacity_fraction},
     text_hover_preview::{
         HoverPreviewKind, TEXT_HOVER_PREVIEW_LINE_HEIGHT, TEXT_HOVER_PREVIEW_PADDING,
@@ -2024,6 +2024,7 @@ impl ExplorerView {
                 | SidebarItemKind::DriveWindows
                 | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
                 | SidebarItemKind::GoogleDrive
+                | SidebarItemKind::OneDrive
                 | SidebarItemKind::DriveWsl
         );
         let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
@@ -2109,7 +2110,7 @@ impl ExplorerView {
                     .child(SharedString::from(label)),
             );
 
-        let (context_path, context_configured_index, open_icon_kind, can_eject) =
+        let (context_path, context_configured_index, hide_item, open_icon_kind, can_eject) =
             context_menu_target;
         row = row.on_mouse_up(
             MouseButton::Right,
@@ -2120,6 +2121,7 @@ impl ExplorerView {
                     context_path.clone(),
                     id,
                     context_configured_index,
+                    hide_item.clone(),
                     open_icon_kind,
                     can_eject,
                     window,
@@ -3831,7 +3833,13 @@ fn sidebar_item_is_dragging(
 
 fn sidebar_context_menu_target(
     item: &SidebarItem,
-) -> (PathBuf, Option<usize>, Option<DirectoryKind>, bool) {
+) -> (
+    PathBuf,
+    Option<usize>,
+    Option<crate::settings::SidebarHiddenItem>,
+    Option<DirectoryKind>,
+    bool,
+) {
     let open_icon_kind = match item.kind {
         SidebarItemKind::Directory(kind) => Some(kind),
         SidebarItemKind::CustomDirectory => crate::explorer::resolve_directory_kind(&item.path),
@@ -3839,6 +3847,7 @@ fn sidebar_context_menu_target(
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
         SidebarItemKind::DriveNetwork(_) => Some(DirectoryKind::Drive),
         SidebarItemKind::GoogleDrive => None,
+        SidebarItemKind::OneDrive => None,
         SidebarItemKind::PortableDevice => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWsl => Some(DirectoryKind::DriveWsl),
     };
@@ -3851,6 +3860,7 @@ fn sidebar_context_menu_target(
     (
         item.path.clone(),
         item.configured_index,
+        sidebar_hidden_item(item),
         open_icon_kind,
         can_eject,
     )
@@ -3919,6 +3929,7 @@ fn sidebar_group_item_icon_sized(item: &SidebarItem, size: f32) -> AnyElement {
         }
         SidebarItemKind::DriveNetwork(state) => network_drive_icon_sized(state, size),
         SidebarItemKind::GoogleDrive => google_drive_icon_sized(size),
+        SidebarItemKind::OneDrive => onedrive_icon_sized(size),
         SidebarItemKind::PortableDevice => portable_device_icon_sized(size).into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_sized_for_path(&item.path, size),
     }
@@ -3933,6 +3944,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveNetwork(state) => network_drive_icon(state).into_any_element(),
         SidebarItemKind::GoogleDrive => google_drive_icon(),
+        SidebarItemKind::OneDrive => onedrive_icon(),
         SidebarItemKind::PortableDevice => portable_device_icon().into_any_element(),
         SidebarItemKind::DriveWsl => drive_wsl_icon_for_path(path).into_any_element(),
     }
@@ -4552,6 +4564,7 @@ fn open_sidebar_context_menu_from_event(
     path: PathBuf,
     row_id: usize,
     configured_index: Option<usize>,
+    hide_item: Option<crate::settings::SidebarHiddenItem>,
     open_icon_kind: Option<DirectoryKind>,
     can_eject: bool,
     window: &mut Window,
@@ -4563,6 +4576,7 @@ fn open_sidebar_context_menu_from_event(
         path,
         row_id,
         configured_index,
+        hide_item,
         open_icon_kind,
         can_eject,
         window,
@@ -7775,7 +7789,7 @@ mod tests {
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
-        SidebarGroupKind, SortDirection,
+        SidebarGroupKind, SidebarHiddenItem, SortDirection,
     };
 
     fn entry_names(view: &ExplorerView) -> Vec<String> {
@@ -9130,30 +9144,44 @@ mod tests {
 
         assert_eq!(
             sidebar_context_menu_target(&custom),
-            (path.clone(), Some(3), None, false)
+            (path.clone(), Some(3), None, None, false)
         );
         assert_eq!(
             sidebar_context_menu_target(&builtin_configured),
             (
                 path.join("downloads"),
                 Some(1),
+                None,
                 Some(DirectoryKind::Downloads),
                 false
             )
         );
         assert_eq!(
             sidebar_context_menu_target(&custom_unconfigured),
-            (PathBuf::from("/other"), None, None, false)
+            (
+                PathBuf::from("/other"),
+                None,
+                Some(SidebarHiddenItem::Path(PathBuf::from("/other"))),
+                None,
+                false
+            )
         );
         assert_eq!(
             sidebar_context_menu_target(&drive),
-            (PathBuf::from("/"), None, Some(DirectoryKind::Drive), false)
+            (
+                PathBuf::from("/"),
+                None,
+                Some(SidebarHiddenItem::Path(PathBuf::from("/"))),
+                Some(DirectoryKind::Drive),
+                false
+            )
         );
         assert_eq!(
             sidebar_context_menu_target(&windows_drive),
             (
                 PathBuf::from("C:\\"),
                 None,
+                Some(SidebarHiddenItem::Path(PathBuf::from("C:\\"))),
                 Some(DirectoryKind::DriveWindows),
                 false
             )
@@ -9163,6 +9191,7 @@ mod tests {
             (
                 PathBuf::from(r"S:\"),
                 None,
+                Some(SidebarHiddenItem::Path(PathBuf::from(r"S:\"))),
                 Some(DirectoryKind::Drive),
                 false
             )
@@ -9172,6 +9201,9 @@ mod tests {
             (
                 PathBuf::from("\\\\wsl.localhost\\Ubuntu\\"),
                 None,
+                Some(SidebarHiddenItem::Path(PathBuf::from(
+                    "\\\\wsl.localhost\\Ubuntu\\",
+                ))),
                 Some(DirectoryKind::DriveWsl),
                 false
             )
@@ -9195,7 +9227,13 @@ mod tests {
 
         assert_eq!(
             sidebar_context_menu_target(&drive),
-            (path, None, Some(DirectoryKind::Drive), true)
+            (
+                path.clone(),
+                None,
+                Some(SidebarHiddenItem::Path(path)),
+                Some(DirectoryKind::Drive),
+                true
+            )
         );
     }
 

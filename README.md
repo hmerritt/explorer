@@ -123,7 +123,6 @@ Minimal example:
         "start": "~/Downloads"
     },
     "view": {
-        "google_drive": true,
         "media_preview_size": 400,
         "mode": "details",
         "search_mode": "detailed",
@@ -151,7 +150,6 @@ Example with sidebar and contextmenu items:
         "ytdlp_options": []
     },
     "view": {
-        "google_drive": true,
         "mode": "details",
         "search_mode": "detailed",
         "show_extensions": true,
@@ -160,6 +158,7 @@ Example with sidebar and contextmenu items:
     },
     "sidebar": {
         "hide_groups": ["network", "wsl"],
+        "hide_items": ["google_drive", "C:/"],
         "items": ["~", "~/Downloads", "~/Documents", "~/Pictures"],
         "width": 225
     },
@@ -183,8 +182,12 @@ so each array entry is passed as one argument without shell parsing.
 `sidebar.hide_groups` removes matching groups from the sidebar. It accepts
 `"pinned"`, `"drives"`, `"network"`, and `"wsl"`; the default is an empty array.
 
-On Windows, `view.google_drive` controls whether a synced Google Drive discovered at its default
-Google Drive for desktop location appears in the Network group. It defaults to `true`.
+`sidebar.hide_items` removes individual non-Pinned sidebar items. It accepts the reserved
+provider IDs `"google_drive"` and `"onedrive"`, plus absolute filesystem or Explorer virtual
+paths for drives, mapped shares, portable devices, and WSL distributions. Its default is an
+empty array. The sidebar Hide context-menu action appends the corresponding value; remove it
+from this array to restore the item. On Windows, visible Google Drive and OneDrive roots are
+discovered from their default sync locations and appear in the Network group.
 
 Context-menu entries can launch an external executable or invoke a built-in action. The native
 no-dialog ZIP action is configured as:

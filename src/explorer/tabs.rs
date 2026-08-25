@@ -1893,7 +1893,6 @@ mod tests {
                 view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
                     &view.sidebar_settings,
                     &view.filesystem_name,
-                    view.google_drive,
                 );
             });
         });
@@ -2409,6 +2408,7 @@ mod tests {
                     gpui::point(gpui::px(20.0), gpui::px(20.0)),
                     sidebar_path,
                     42,
+                    None,
                     None,
                     None,
                     false,
