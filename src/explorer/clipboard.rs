@@ -17,12 +17,18 @@ use thousands::Separable;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::explorer::{
-    folder_size::{FolderSizeError, calculate_folder_size},
+    folder_size::{
+        FolderSizeError, RecursiveContentCounts, calculate_folder_size,
+        calculate_recursive_content_counts,
+    },
     formatting::format_size,
 };
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
 const CLIPBOARD_VERSION: u8 = 1;
+const CLIPBOARD_DETAIL_MAX_URLS: usize = 5;
+const CLIPBOARD_DETAIL_MAX_PREVIEW_LINES: usize = 8;
+const CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +85,57 @@ pub(super) enum ClipboardTextPayload {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ClipboardSummary {
     pub(super) label: String,
+    pub(super) details: ClipboardSummaryDetails,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ClipboardMetric<T> {
+    Pending { discovered: Option<T> },
+    Ready(T),
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardTextPreview {
+    pub(super) lines: Vec<String>,
+    pub(super) truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardUrlPreview {
+    pub(super) urls: Vec<String>,
+    pub(super) omitted_count: usize,
+    pub(super) truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ClipboardSummaryDetails {
+    Files {
+        operation: FileClipboardOperation,
+        folder_count: ClipboardMetric<usize>,
+        file_count: ClipboardMetric<usize>,
+        total_size: ClipboardMetric<u64>,
+    },
+    Image {
+        source_format: ImageFormat,
+        output_file_name: String,
+        byte_size: u64,
+    },
+    Downloads {
+        count: usize,
+        urls: ClipboardUrlPreview,
+    },
+    VideoDownloads {
+        count: usize,
+        site_summary: String,
+        urls: ClipboardUrlPreview,
+    },
+    Materialization {
+        output_file_name: &'static str,
+        source_size: u64,
+        output_size: u64,
+        source_preview: ClipboardTextPreview,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,58 +258,138 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
     let Some(cancel) = cancel else {
         return;
     };
+    let initial_label = inspection.summary.label.clone();
+    let ClipboardSummaryDetails::Files { operation, .. } = inspection.summary.details else {
+        return;
+    };
     let fingerprint = inspection.fingerprint;
 
     cx.spawn(async move |cx| {
         let metadata_cancel = cancel.clone();
-        let metadata_task = cx
-            .background_executor()
-            .spawn(async move { scan_clipboard_filesystem_metadata(&paths, &metadata_cancel) });
-        let Ok(metadata) = metadata_task.await else {
-            return;
+        let metadata_paths = paths.clone();
+        let metadata_task = cx.background_executor().spawn(async move {
+            scan_clipboard_filesystem_metadata(&metadata_paths, &metadata_cancel)
+        });
+        let metadata = match metadata_task.await {
+            Ok(metadata) => metadata,
+            Err(ClipboardSummaryScanError::Cancelled) => return,
+            Err(ClipboardSummaryScanError::Unavailable) => {
+                let unavailable = ClipboardSummary {
+                    label: initial_label,
+                    details: ClipboardSummaryDetails::Files {
+                        operation,
+                        folder_count: ClipboardMetric::Unavailable,
+                        file_count: ClipboardMetric::Unavailable,
+                        total_size: ClipboardMetric::Unavailable,
+                    },
+                };
+                let _ = cx.update(|cx| {
+                    update_clipboard_summary_if_current(cx, generation, &fingerprint, unavailable)
+                });
+                return;
+            }
         };
         if cancel.load(Ordering::Relaxed) {
             return;
         }
 
-        let summary = ClipboardSummary {
+        let top_level_summary = ClipboardSummary {
             label: clipboard_filesystem_summary_label(
                 metadata.folder_count,
                 metadata.file_count,
-                metadata
-                    .folder_paths
-                    .is_empty()
-                    .then_some(metadata.file_size),
+                None,
             ),
+            details: ClipboardSummaryDetails::Files {
+                operation,
+                folder_count: ClipboardMetric::Pending {
+                    discovered: Some(metadata.folder_count),
+                },
+                file_count: ClipboardMetric::Pending {
+                    discovered: Some(metadata.file_count),
+                },
+                total_size: ClipboardMetric::Pending { discovered: None },
+            },
         };
         if cx
-            .update(|cx| update_clipboard_summary_if_current(cx, generation, &fingerprint, summary))
+            .update(|cx| {
+                update_clipboard_summary_if_current(cx, generation, &fingerprint, top_level_summary)
+            })
             .ok()
             != Some(true)
-            || metadata.folder_paths.is_empty()
         {
             return;
         }
 
-        let folder_paths = metadata.folder_paths;
+        let recursive_paths = paths.clone();
+        let count_cancel = cancel.clone();
+        let count_task = cx
+            .background_executor()
+            .spawn(async move { scan_clipboard_recursive_counts(&recursive_paths, &count_cancel) });
+        let count_result = count_task.await;
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let (folder_count, file_count) = match count_result {
+            Ok(counts) => (
+                ClipboardMetric::Ready(counts.folder_count),
+                ClipboardMetric::Ready(counts.file_count),
+            ),
+            Err(ClipboardSummaryScanError::Cancelled) => return,
+            Err(ClipboardSummaryScanError::Unavailable) => {
+                (ClipboardMetric::Unavailable, ClipboardMetric::Unavailable)
+            }
+        };
+        let counted_summary = ClipboardSummary {
+            label: clipboard_filesystem_summary_label(
+                metadata.folder_count,
+                metadata.file_count,
+                None,
+            ),
+            details: ClipboardSummaryDetails::Files {
+                operation,
+                folder_count: folder_count.clone(),
+                file_count: file_count.clone(),
+                total_size: ClipboardMetric::Pending { discovered: None },
+            },
+        };
+        if cx
+            .update(|cx| {
+                update_clipboard_summary_if_current(cx, generation, &fingerprint, counted_summary)
+            })
+            .ok()
+            != Some(true)
+        {
+            return;
+        }
+
+        let folder_paths = metadata.folder_paths.clone();
         let file_size = metadata.file_size;
         let folder_cancel = cancel.clone();
         let folder_size_task = cx.background_executor().spawn(async move {
             scan_clipboard_folder_sizes(&folder_paths, file_size, &folder_cancel)
         });
-        let Ok(total_size) = folder_size_task.await else {
-            return;
-        };
+        let size_result = folder_size_task.await;
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        let (label_size, total_size) = match size_result {
+            Ok(size) => (Some(size), ClipboardMetric::Ready(size)),
+            Err(ClipboardSummaryScanError::Cancelled) => return,
+            Err(ClipboardSummaryScanError::Unavailable) => (None, ClipboardMetric::Unavailable),
+        };
 
         let final_summary = ClipboardSummary {
             label: clipboard_filesystem_summary_label(
                 metadata.folder_count,
                 metadata.file_count,
-                Some(total_size),
+                label_size,
             ),
+            details: ClipboardSummaryDetails::Files {
+                operation,
+                folder_count,
+                file_count,
+                total_size,
+            },
         };
         let _ = cx.update(|cx| {
             update_clipboard_summary_if_current(cx, generation, &fingerprint, final_summary)
@@ -267,6 +404,12 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
     {
         let summary = ClipboardSummary {
             label: clipboard_count_label(clipboard.paths.len(), "item", "items"),
+            details: ClipboardSummaryDetails::Files {
+                operation: clipboard.operation,
+                folder_count: ClipboardMetric::Pending { discovered: None },
+                file_count: ClipboardMetric::Pending { discovered: None },
+                total_size: ClipboardMetric::Pending { discovered: None },
+            },
         };
         return Some(ClipboardInspection {
             fingerprint: ClipboardFingerprint::Files {
@@ -292,6 +435,11 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
             },
             summary: ClipboardSummary {
                 label: clipboard_typed_summary_label(label, image.bytes().len() as u64),
+                details: ClipboardSummaryDetails::Image {
+                    source_format: image.format(),
+                    output_file_name: clipboard_image_output_file_name(image.format()),
+                    byte_size: image.bytes().len() as u64,
+                },
             },
             file_paths: None,
         });
@@ -305,15 +453,37 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
     fingerprint_bytes.push(0);
     fingerprint_bytes.extend_from_slice(markdown.as_bytes());
 
-    let label = match payload {
-        ClipboardTextPayload::Downloads(downloads) => {
-            clipboard_count_label(downloads.len(), "URL download", "URL downloads")
-        }
-        ClipboardTextPayload::VideoDownloads(downloads) => video_download_summary_label(&downloads),
-        ClipboardTextPayload::Materialization(materialization) => clipboard_typed_summary_label(
-            clipboard_materialization_type_label(materialization.file_name),
-            materialization.contents.len() as u64,
+    let (label, details) = match payload {
+        ClipboardTextPayload::Downloads(downloads) => (
+            clipboard_count_label(downloads.len(), "URL download", "URL downloads"),
+            ClipboardSummaryDetails::Downloads {
+                count: downloads.len(),
+                urls: clipboard_url_preview(&text),
+            },
         ),
+        ClipboardTextPayload::VideoDownloads(downloads) => (
+            video_download_summary_label(&downloads),
+            ClipboardSummaryDetails::VideoDownloads {
+                count: downloads.len(),
+                site_summary: video_download_site_summary(&downloads),
+                urls: clipboard_url_preview(&text),
+            },
+        ),
+        ClipboardTextPayload::Materialization(materialization) => {
+            let source = clipboard_materialization_source(item, materialization.file_name, &text);
+            (
+                clipboard_typed_summary_label(
+                    clipboard_materialization_type_label(materialization.file_name),
+                    materialization.contents.len() as u64,
+                ),
+                ClipboardSummaryDetails::Materialization {
+                    output_file_name: materialization.file_name,
+                    source_size: source.len() as u64,
+                    output_size: materialization.contents.len() as u64,
+                    source_preview: clipboard_text_preview(&source),
+                },
+            )
+        }
     };
 
     Some(ClipboardInspection {
@@ -321,9 +491,111 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
             byte_len: fingerprint_bytes.len(),
             digest: xxh3_64(&fingerprint_bytes),
         },
-        summary: ClipboardSummary { label },
+        summary: ClipboardSummary { label, details },
         file_paths: None,
     })
+}
+
+fn clipboard_image_output_file_name(format: ImageFormat) -> String {
+    let extension = match format {
+        ImageFormat::Png | ImageFormat::Tiff => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+    };
+    format!("image.{extension}")
+}
+
+fn clipboard_materialization_source(item: &ClipboardItem, file_name: &str, text: &str) -> String {
+    if file_name == "document.md"
+        && let Some(markdown) = item.markdown().filter(|markdown| !markdown.is_empty())
+    {
+        markdown
+    } else {
+        text.to_owned()
+    }
+}
+
+fn clipboard_text_preview(source: &str) -> ClipboardTextPreview {
+    let mut lines = Vec::new();
+    let mut used_bytes = 0usize;
+    let mut truncated = false;
+    let source_lines = source.split('\n').collect::<Vec<_>>();
+
+    for (index, line) in source_lines.iter().enumerate() {
+        if index >= CLIPBOARD_DETAIL_MAX_PREVIEW_LINES
+            || used_bytes >= CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES
+        {
+            truncated = true;
+            break;
+        }
+
+        let separator_bytes = usize::from(index > 0);
+        let available = CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES
+            .saturating_sub(used_bytes)
+            .saturating_sub(separator_bytes);
+        if line.len() > available {
+            lines.push(utf8_prefix(line, available).to_owned());
+            truncated = true;
+            break;
+        }
+
+        lines.push((*line).to_owned());
+        used_bytes = used_bytes.saturating_add(separator_bytes + line.len());
+    }
+
+    if lines.len() < source_lines.len() {
+        truncated = true;
+    }
+    ClipboardTextPreview { lines, truncated }
+}
+
+fn clipboard_url_preview(source: &str) -> ClipboardUrlPreview {
+    let source_urls = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut urls = Vec::new();
+    let mut used_bytes = 0usize;
+    let mut truncated = false;
+
+    for url in source_urls.iter().take(CLIPBOARD_DETAIL_MAX_URLS) {
+        let separator_bytes = usize::from(!urls.is_empty());
+        let available = CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES
+            .saturating_sub(used_bytes)
+            .saturating_sub(separator_bytes);
+        if available == 0 {
+            truncated = true;
+            break;
+        }
+        let prefix = utf8_prefix(url, available);
+        truncated |= prefix.len() < url.len();
+        urls.push(prefix.to_owned());
+        used_bytes = used_bytes.saturating_add(separator_bytes + prefix.len());
+        if prefix.len() < url.len() {
+            break;
+        }
+    }
+
+    ClipboardUrlPreview {
+        omitted_count: source_urls.len().saturating_sub(urls.len()),
+        urls,
+        truncated,
+    }
+}
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut boundary = max_bytes.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &text[..boundary]
 }
 
 fn clipboard_materialization_type_label(file_name: &str) -> &'static str {
@@ -413,6 +685,27 @@ fn scan_clipboard_folder_sizes(
         size = size.saturating_add(folder_size);
     }
     Ok(size)
+}
+
+fn scan_clipboard_recursive_counts(
+    paths: &[PathBuf],
+    cancel: &Arc<AtomicBool>,
+) -> Result<RecursiveContentCounts, ClipboardSummaryScanError> {
+    let mut counts = RecursiveContentCounts::default();
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ClipboardSummaryScanError::Cancelled);
+        }
+        let path_counts = calculate_recursive_content_counts(path, cancel.clone()).map_err(
+            |error| match error {
+                FolderSizeError::Cancelled => ClipboardSummaryScanError::Cancelled,
+                FolderSizeError::Unavailable => ClipboardSummaryScanError::Unavailable,
+            },
+        )?;
+        counts.folder_count = counts.folder_count.saturating_add(path_counts.folder_count);
+        counts.file_count = counts.file_count.saturating_add(path_counts.file_count);
+    }
+    Ok(counts)
 }
 
 fn update_clipboard_summary_if_current(
@@ -596,6 +889,20 @@ fn video_download_summary_label(downloads: &[ClipboardVideoDownload]) -> String 
         )
     } else {
         format!("Download {} videos from multiple sites", downloads.len())
+    }
+}
+
+fn video_download_site_summary(downloads: &[ClipboardVideoDownload]) -> String {
+    let Some(first) = downloads.first() else {
+        return "Unknown site".to_owned();
+    };
+    if downloads
+        .iter()
+        .all(|download| download.site_domain == first.site_domain)
+    {
+        first.site_domain.clone()
+    } else {
+        "Multiple sites".to_owned()
     }
 }
 
@@ -1593,6 +1900,95 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_summary_details_keep_exact_urls_and_payload_actions() {
+        let source = "sftp://alice:secret@example.com/files/archive.zip?token=visible";
+        let summary = clipboard_summary_inspection(&ClipboardItem::new_string(source.to_owned()))
+            .expect("download summary")
+            .summary;
+        let ClipboardSummaryDetails::Downloads { count, urls } = summary.details else {
+            panic!("expected download details");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(urls.urls, vec![source]);
+        assert_eq!(urls.omitted_count, 0);
+        assert!(!urls.truncated);
+
+        let image = Image::from_bytes(ImageFormat::Tiff, vec![1, 2, 3]);
+        let image_summary = clipboard_summary_inspection(&ClipboardItem::new_image(&image))
+            .expect("image summary")
+            .summary;
+        assert!(matches!(
+            image_summary.details,
+            ClipboardSummaryDetails::Image {
+                source_format: ImageFormat::Tiff,
+                output_file_name,
+                byte_size: 3,
+            } if output_file_name == "image.png"
+        ));
+    }
+
+    #[test]
+    fn clipboard_text_details_preview_raw_source_before_materialization() {
+        let source = "Name\tNote\nAda\tone, two";
+        let summary = clipboard_summary_inspection(&ClipboardItem::new_string(source.to_owned()))
+            .expect("TSV summary")
+            .summary;
+        let ClipboardSummaryDetails::Materialization {
+            output_file_name,
+            source_size,
+            output_size,
+            source_preview,
+        } = summary.details
+        else {
+            panic!("expected materialization details");
+        };
+        assert_eq!(output_file_name, "table.csv");
+        assert_eq!(source_size, source.len() as u64);
+        assert_ne!(source_size, output_size);
+        assert_eq!(source_preview.lines, vec!["Name\tNote", "Ada\tone, two"]);
+        assert!(!source_preview.truncated);
+
+        let markdown = ClipboardItem::new_string_with_markdown(
+            "rendered fallback".to_owned(),
+            "# Raw markdown".to_owned(),
+        );
+        let summary = clipboard_summary_inspection(&markdown)
+            .expect("Markdown summary")
+            .summary;
+        let ClipboardSummaryDetails::Materialization { source_preview, .. } = summary.details
+        else {
+            panic!("expected Markdown details");
+        };
+        assert_eq!(source_preview.lines, vec!["# Raw markdown"]);
+    }
+
+    #[test]
+    fn clipboard_detail_previews_are_utf8_safe_and_explicitly_bounded() {
+        let text = (0..10)
+            .map(|index| format!("líne {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = clipboard_text_preview(&text);
+        assert_eq!(preview.lines.len(), CLIPBOARD_DETAIL_MAX_PREVIEW_LINES);
+        assert!(preview.truncated);
+
+        let long_url = format!("https://example.com/{}.zip", "é".repeat(2_000));
+        let urls = clipboard_url_preview(&long_url);
+        assert_eq!(urls.urls.len(), 1);
+        assert!(urls.urls[0].len() <= CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES);
+        assert!(urls.urls[0].is_char_boundary(urls.urls[0].len()));
+        assert!(urls.truncated);
+
+        let many_urls = (0..7)
+            .map(|index| format!("https://example.com/{index}.zip"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let urls = clipboard_url_preview(&many_urls);
+        assert_eq!(urls.urls.len(), CLIPBOARD_DETAIL_MAX_URLS);
+        assert_eq!(urls.omitted_count, 2);
+    }
+
+    #[test]
     fn clipboard_summary_uses_existing_size_precision() {
         assert_eq!(
             clipboard_typed_summary_label("Image file", 200 * KB_BYTES),
@@ -1608,13 +2004,16 @@ mod tests {
     fn clipboard_filesystem_summary_counts_top_level_items_and_recurses_for_size() {
         let temp = TempDir::new();
         let folder = temp.path().join("folder");
+        let nested = folder.join("nested");
         fs::create_dir(&folder).expect("create folder");
-        fs::write(folder.join("nested.bin"), vec![0; 5]).expect("write nested file");
+        fs::create_dir(&nested).expect("create nested folder");
+        fs::write(nested.join("nested.bin"), vec![0; 5]).expect("write nested file");
         let file = temp.path().join("top.bin");
         fs::write(&file, vec![0; 7]).expect("write top-level file");
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let metadata = scan_clipboard_filesystem_metadata(&[folder.clone(), file], cancel.as_ref())
+        let paths = vec![folder.clone(), file];
+        let metadata = scan_clipboard_filesystem_metadata(&paths, cancel.as_ref())
             .expect("clipboard metadata");
         assert_eq!(metadata.folder_count, 1);
         assert_eq!(metadata.file_count, 1);
@@ -1632,6 +2031,11 @@ mod tests {
             clipboard_filesystem_summary_label(1, 1, Some(total)),
             "1 folder, 1 file · 12 bytes"
         );
+
+        let recursive =
+            scan_clipboard_recursive_counts(&paths, &cancel).expect("recursive clipboard counts");
+        assert_eq!(recursive.folder_count, 2);
+        assert_eq!(recursive.file_count, 2);
     }
 
     #[test]
@@ -1652,6 +2056,10 @@ mod tests {
         );
         assert_eq!(
             scan_clipboard_folder_sizes(&[PathBuf::from("ignored")], 0, &cancel),
+            Err(ClipboardSummaryScanError::Cancelled)
+        );
+        assert_eq!(
+            scan_clipboard_recursive_counts(&[PathBuf::from("ignored")], &cancel),
             Err(ClipboardSummaryScanError::Cancelled)
         );
     }
@@ -1698,6 +2106,15 @@ mod tests {
                 },
                 ClipboardSummary {
                     label: "stale".to_owned(),
+                    details: ClipboardSummaryDetails::Materialization {
+                        output_file_name: "text.txt",
+                        source_size: 5,
+                        output_size: 5,
+                        source_preview: ClipboardTextPreview {
+                            lines: vec!["stale".to_owned()],
+                            truncated: false,
+                        },
+                    },
                 },
             ));
             assert!(app.global::<ClipboardSummaryState>().summary.is_none());

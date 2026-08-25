@@ -110,7 +110,7 @@ use crate::explorer::{
         TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
         hover_preview_kind, text_hover_preview_line_limit,
     },
-    tooltip::explorer_tooltip,
+    tooltip::{clipboard_status_tooltip, explorer_tooltip},
     video_hover_preview::VideoHoverPreviewLookup,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
@@ -3008,7 +3008,13 @@ impl ExplorerView {
                 this.when(has_other_right_status, |this| {
                     this.child(clipboard_status_bar_separator())
                 })
-                .child(render_clipboard_status(clipboard_summary, cx))
+                .child(render_clipboard_status(
+                    clipboard_summary,
+                    self.path.clone(),
+                    self.address_text_for_path(&self.path),
+                    crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path),
+                    cx,
+                ))
             })
             .into_any_element()
     }
@@ -7532,6 +7538,9 @@ fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
 
 fn render_clipboard_status(
     summary: ClipboardSummary,
+    destination: PathBuf,
+    destination_label: String,
+    can_paste: bool,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     div()
@@ -7561,8 +7570,10 @@ fn render_clipboard_status(
             cx.stop_propagation();
             cx.notify();
         }))
-        .tooltip(explorer_tooltip(
-            "Paste clipboard contents into this folder.",
+        .tooltip(clipboard_status_tooltip(
+            destination,
+            destination_label,
+            can_paste,
         ))
         .child(
             div()
@@ -7739,9 +7750,9 @@ mod tests {
     use crate::explorer::{
         DirectoryKind,
         clipboard::{
-            FileClipboard, FileClipboardOperation, clipboard_item_can_paste,
-            clipboard_item_for_files, clipboard_summary, initialize_clipboard_summary,
-            write_to_clipboard_and_refresh,
+            ClipboardMetric, ClipboardSummaryDetails, FileClipboard, FileClipboardOperation,
+            clipboard_item_can_paste, clipboard_item_for_files, clipboard_summary,
+            initialize_clipboard_summary, write_to_clipboard_and_refresh,
         },
         codebase_summary::{CodebaseLanguageSummary, CodebaseSummary},
         constants::{
@@ -11566,7 +11577,18 @@ mod tests {
         let (_, cx) = test_view_entity_at_path(cx, destination.clone());
 
         cx.run_until_parked();
-        hover_selector_until_tooltip(cx, "clipboard-status");
+        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
+        let tooltip = cx
+            .debug_bounds("clipboard-status-tooltip")
+            .expect("clipboard tooltip bounds");
+        let status = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds");
+        assert_eq!(tooltip.size.width, gpui::px(360.0));
+        assert!(tooltip.bottom() <= status.origin.y);
+        assert!(cx.debug_bounds("clipboard-tooltip-action").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-destination").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-text-preview").is_some());
         let position = cx
             .debug_bounds("clipboard-status")
             .expect("clipboard status bounds")
@@ -11575,6 +11597,73 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(fs::read(destination.join("text.txt")).unwrap(), b"paste me");
+    }
+
+    #[gpui::test]
+    fn clipboard_status_tooltip_receives_recursive_counts_and_total_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source = TempDir::new();
+        let folder = source.path().join("folder");
+        let nested = folder.join("nested");
+        fs::create_dir(&folder).expect("create folder");
+        fs::create_dir(&nested).expect("create nested folder");
+        fs::write(folder.join("a.txt"), b"abc").expect("write first file");
+        fs::write(nested.join("b.txt"), b"defg").expect("write nested file");
+        let standalone = source.path().join("standalone.txt");
+        fs::write(&standalone, b"hello").expect("write standalone file");
+        let item = clipboard_item_for_files(&FileClipboard::new(
+            FileClipboardOperation::Copy,
+            vec![folder, standalone],
+        ))
+        .expect("file clipboard item");
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(item, app);
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        cx.read(|app| {
+            let summary = clipboard_summary(app).expect("clipboard summary");
+            assert!(matches!(
+                &summary.details,
+                ClipboardSummaryDetails::Files {
+                    folder_count: ClipboardMetric::Ready(2),
+                    file_count: ClipboardMetric::Ready(3),
+                    total_size: ClipboardMetric::Ready(12),
+                    ..
+                }
+            ));
+        });
+
+        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
+        assert!(cx.debug_bounds("clipboard-tooltip-folder-count").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-file-count").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-total-size").is_some());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_tooltip_shows_exact_url_preview(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(
+                    "https://alice:secret@example.com/archive.zip?token=visible".to_owned(),
+                ),
+                app,
+            );
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_tooltip(cx, "clipboard-status");
+
+        assert!(cx.debug_bounds("clipboard-tooltip-url-preview").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-url-0").is_some());
+        assert!(cx.debug_bounds("clipboard-tooltip-url-count").is_some());
     }
 
     #[gpui::test]
@@ -12503,6 +12592,29 @@ mod tests {
             cx.debug_bounds("explorer-tooltip").is_some(),
             "{selector} should show tooltip after hover delay"
         );
+    }
+
+    fn hover_selector_until_clipboard_tooltip(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) {
+        assert!(
+            cx.debug_bounds("clipboard-status-tooltip").is_none(),
+            "clipboard tooltip should be hidden before hovering {selector}"
+        );
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} bounds"))
+            .center();
+        cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_millis(280));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("clipboard-status-tooltip").is_some(),
+            "{selector} should show the rich clipboard tooltip after hover delay"
+        );
+        assert!(cx.debug_bounds("explorer-tooltip").is_none());
     }
 
     fn status_entries(file_count: usize, folder_count: usize) -> Vec<FileEntry> {

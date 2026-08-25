@@ -80,6 +80,12 @@ pub(super) enum FolderSizeError {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct RecursiveContentCounts {
+    pub(super) folder_count: usize,
+    pub(super) file_count: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FolderSizeCalculation {
     pub(super) path: PathBuf,
@@ -156,6 +162,73 @@ pub(super) fn calculate_folder_size(
         Err(FolderSizeError::Cancelled)
     } else {
         Ok(size)
+    }
+}
+
+pub(super) fn calculate_recursive_content_counts(
+    path: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<RecursiveContentCounts, FolderSizeError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(FolderSizeError::Cancelled);
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|_| FolderSizeError::Unavailable)?;
+    if metadata_is_directory_link(&metadata) || !metadata.is_dir() {
+        return Ok(RecursiveContentCounts {
+            folder_count: 0,
+            file_count: 1,
+        });
+    }
+
+    let mut counts = RecursiveContentCounts {
+        folder_count: 1,
+        file_count: 0,
+    };
+    let walker = WalkDirGeneric::<((), FolderSizeEntryState)>::new(path)
+        .skip_hidden(false)
+        .follow_links(false)
+        .sort(false)
+        .process_read_dir({
+            let cancel = cancel.clone();
+            move |depth, _, _, children| {
+                if cancel.load(Ordering::Relaxed) {
+                    children.clear();
+                    return;
+                }
+                if depth.is_some() {
+                    prepare_folder_size_entries(children);
+                }
+            }
+        });
+
+    for entry in walker {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(FolderSizeError::Cancelled);
+        }
+        let entry = entry.map_err(|_| FolderSizeError::Unavailable)?;
+        if entry.read_children_error.is_some() {
+            return Err(FolderSizeError::Unavailable);
+        }
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        match entry.client_state {
+            FolderSizeEntryState::Directory => {
+                counts.folder_count = counts.folder_count.saturating_add(1);
+            }
+            FolderSizeEntryState::Size(_) => {
+                counts.file_count = counts.file_count.saturating_add(1);
+            }
+            FolderSizeEntryState::Unavailable => return Err(FolderSizeError::Unavailable),
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        Err(FolderSizeError::Cancelled)
+    } else {
+        Ok(counts)
     }
 }
 
@@ -453,6 +526,35 @@ mod tests {
     }
 
     #[test]
+    fn recursive_content_counts_include_root_and_nested_entries() {
+        let temp = TempDir::new();
+        let folder = temp.path().join("folder");
+        let nested = folder.join("nested");
+        fs::create_dir(&folder).expect("create folder");
+        fs::create_dir(&nested).expect("create nested folder");
+        fs::write(folder.join("a.txt"), b"a").expect("create first file");
+        fs::write(nested.join("b.txt"), b"b").expect("create second file");
+
+        assert_eq!(
+            calculate_recursive_content_counts(&folder, Arc::new(AtomicBool::new(false)),),
+            Ok(RecursiveContentCounts {
+                folder_count: 2,
+                file_count: 2,
+            })
+        );
+        assert_eq!(
+            calculate_recursive_content_counts(
+                &folder.join("a.txt"),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Ok(RecursiveContentCounts {
+                folder_count: 0,
+                file_count: 1,
+            })
+        );
+    }
+
+    #[test]
     fn batched_folder_sizes_sum_multiple_visible_siblings() {
         let temp = TempDir::new();
         let first = temp.path().join("first");
@@ -555,6 +657,10 @@ mod tests {
             calculate_folder_sizes(temp.path(), vec![folder], cancel, |_| {}),
             Err(FolderSizeError::Cancelled)
         ));
+        assert_eq!(
+            calculate_recursive_content_counts(temp.path(), Arc::new(AtomicBool::new(true)),),
+            Err(FolderSizeError::Cancelled)
+        );
     }
 
     #[test]
@@ -587,6 +693,13 @@ mod tests {
         assert_eq!(
             calculate_folder_size(&folder, cancel.clone()),
             Ok(link_size)
+        );
+        assert_eq!(
+            calculate_recursive_content_counts(&folder, cancel.clone()),
+            Ok(RecursiveContentCounts {
+                folder_count: 1,
+                file_count: 1,
+            })
         );
         let calculations = collect_folder_sizes(temp.path(), vec![folder.clone()], cancel)
             .expect("calculate folder sizes");

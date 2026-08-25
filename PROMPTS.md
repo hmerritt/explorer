@@ -1,8 +1,5 @@
 ## 1
 
-- New UI feature: Hovering over the status bar clipboard summary button shows a popup (large-tooltip esk) UI box with more information about the content in the clipboard and the action that will be taken.
-    - Folder count, file count, URL address, RAW text content, and total size
-
 ## 2
 
 - Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).
