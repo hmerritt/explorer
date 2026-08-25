@@ -110,7 +110,7 @@ use crate::explorer::{
         TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
         hover_preview_kind, text_hover_preview_line_limit,
     },
-    tooltip::{clipboard_status_popup, explorer_tooltip},
+    tooltip::{clipboard_status_popup, clipboard_status_popup_preferred_width, explorer_tooltip},
     video_hover_preview::VideoHoverPreviewLookup,
     view::{
         ExplorerContentBranch, ExplorerView, ExplorerViewEvent, FileColumnResizeResult,
@@ -173,7 +173,8 @@ const STATUS_BAR_GIT_ICON_SIZE: f32 = 14.0;
 const STATUS_BAR_GIT_ITEM_GAP: f32 = 4.0;
 const STATUS_BAR_CLIPBOARD_MAX_WIDTH: f32 = 320.0;
 const CLIPBOARD_STATUS_POPUP_SHOW_DELAY: Duration = Duration::from_millis(250);
-const CLIPBOARD_STATUS_POPUP_WIDTH: f32 = 360.0;
+const CLIPBOARD_STATUS_POPUP_MIN_WIDTH: f32 = 360.0;
+const CLIPBOARD_STATUS_POPUP_MAX_WIDTH: f32 = CLIPBOARD_STATUS_POPUP_MIN_WIDTH * 2.0;
 const CLIPBOARD_STATUS_POPUP_MAX_HEIGHT: f32 = 300.0;
 const CLIPBOARD_STATUS_POPUP_RIGHT_INSET: f32 = STATUS_BAR_HORIZONTAL_PADDING;
 const CLIPBOARD_STATUS_POPUP_STATUS_GAP: f32 = 8.0;
@@ -3016,9 +3017,17 @@ impl ExplorerView {
         }
 
         let summary = clipboard_summary(cx).cloned()?;
-        let layout = clipboard_status_popup_layout(window.viewport_size());
         let destination_label = self.address_text_for_path(&self.path);
         let can_paste = crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path);
+        let preferred_width = clipboard_status_popup_preferred_width(
+            &summary,
+            &self.path,
+            &destination_label,
+            can_paste,
+            &self.font,
+            window,
+        );
+        let layout = clipboard_status_popup_layout(window.viewport_size(), preferred_width);
 
         Some(
             div()
@@ -3032,6 +3041,8 @@ impl ExplorerView {
                     can_paste,
                     layout.width,
                     layout.max_height,
+                    &self.font,
+                    window,
                 ))
                 .into_any_element(),
         )
@@ -7672,7 +7683,10 @@ fn render_clipboard_status(
         .into_any_element()
 }
 
-fn clipboard_status_popup_layout(viewport_size: gpui::Size<Pixels>) -> ClipboardStatusPopupLayout {
+fn clipboard_status_popup_layout(
+    viewport_size: gpui::Size<Pixels>,
+    preferred_width: f32,
+) -> ClipboardStatusPopupLayout {
     let viewport_width = f32::from(viewport_size.width);
     let viewport_height = f32::from(viewport_size.height);
     let bottom = STATUS_BAR_HEIGHT + CLIPBOARD_STATUS_POPUP_STATUS_GAP;
@@ -7680,7 +7694,10 @@ fn clipboard_status_popup_layout(viewport_size: gpui::Size<Pixels>) -> Clipboard
     let available_height = (viewport_height - bottom - CLIPBOARD_STATUS_POPUP_TOP_INSET).max(1.0);
 
     ClipboardStatusPopupLayout {
-        width: CLIPBOARD_STATUS_POPUP_WIDTH.min(available_width),
+        width: preferred_width
+            .max(CLIPBOARD_STATUS_POPUP_MIN_WIDTH)
+            .min(CLIPBOARD_STATUS_POPUP_MAX_WIDTH)
+            .min(available_width),
         max_height: CLIPBOARD_STATUS_POPUP_MAX_HEIGHT.min(available_height),
         right: CLIPBOARD_STATUS_POPUP_RIGHT_INSET,
         bottom,
@@ -11686,7 +11703,8 @@ mod tests {
         let status_bar = cx
             .debug_bounds("explorer-status-bar")
             .expect("status bar bounds");
-        assert_eq!(popup.size.width, gpui::px(360.0));
+        assert!(popup.size.width >= gpui::px(360.0));
+        assert!(popup.size.width <= gpui::px(720.0));
         assert_eq!(popup.right(), status.right());
         assert_eq!(popup.bottom(), status_bar.origin.y - gpui::px(8.0));
         assert!(cx.debug_bounds("clipboard-popup-action").is_some());
@@ -11742,9 +11760,136 @@ mod tests {
         });
 
         hover_selector_until_clipboard_popup(cx, "clipboard-status");
-        assert!(cx.debug_bounds("clipboard-popup-folder-count").is_some());
-        assert!(cx.debug_bounds("clipboard-popup-file-count").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-operation").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source-multiple").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source-path-0").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source-path-1").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source-overflow").is_none());
+        assert!(cx.debug_bounds("clipboard-popup-items").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-folder-count").is_none());
+        assert!(cx.debug_bounds("clipboard-popup-file-count").is_none());
         assert!(cx.debug_bounds("clipboard-popup-total-size").is_some());
+        let operation = cx
+            .debug_bounds("clipboard-popup-operation")
+            .expect("clipboard operation bounds");
+        let destination = cx
+            .debug_bounds("clipboard-popup-destination")
+            .expect("clipboard destination bounds");
+        let sources = cx
+            .debug_bounds("clipboard-popup-source")
+            .expect("clipboard sources bounds");
+        let items = cx
+            .debug_bounds("clipboard-popup-items")
+            .expect("clipboard items bounds");
+        let total_size = cx
+            .debug_bounds("clipboard-popup-total-size")
+            .expect("clipboard total size bounds");
+        assert!(operation.origin.y < destination.origin.y);
+        assert!(destination.origin.y < sources.origin.y);
+        assert!(sources.origin.y < items.origin.y);
+        assert!(items.origin.y < total_size.origin.y);
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_bounds_source_manifest_to_five_paths(cx: &mut gpui::TestAppContext) {
+        let source = TempDir::new();
+        let mut paths = Vec::new();
+        for index in 0..6 {
+            let path = source.path().join(format!("source-{index}.txt"));
+            fs::write(&path, b"source").expect("write clipboard source");
+            paths.push(path);
+        }
+        let hidden_folder = source.path().join("source-6-folder");
+        fs::create_dir(&hidden_folder).expect("create clipboard source folder");
+        paths.push(hidden_folder);
+        let item =
+            clipboard_item_for_files(&FileClipboard::new(FileClipboardOperation::Cut, paths))
+                .expect("file clipboard item");
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(item, app);
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+
+        assert!(cx.debug_bounds("clipboard-popup-source-multiple").is_some());
+        for selector in [
+            "clipboard-popup-source-path-0",
+            "clipboard-popup-source-path-1",
+            "clipboard-popup-source-path-2",
+            "clipboard-popup-source-path-3",
+            "clipboard-popup-source-path-4",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        assert!(cx.debug_bounds("clipboard-popup-source-path-5").is_none());
+        assert!(cx.debug_bounds("clipboard-popup-source-overflow").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-items").is_some());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_expands_for_long_source_paths(cx: &mut gpui::TestAppContext) {
+        let source = TempDir::new();
+        let long_name = format!("{}.txt", "long-source-component-".repeat(6));
+        let source_path = source.path().join(long_name);
+        fs::write(&source_path, b"source").expect("write long clipboard source");
+        let item = clipboard_item_for_files(&FileClipboard::new(
+            FileClipboardOperation::Copy,
+            vec![source_path],
+        ))
+        .expect("file clipboard item");
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(item, app);
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+
+        let popup = cx
+            .debug_bounds("clipboard-status-popup")
+            .expect("clipboard popup bounds");
+        assert_eq!(popup.size.width, gpui::px(720.0));
+        assert!(cx.debug_bounds("clipboard-popup-source").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-source-multiple").is_none());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_expands_non_file_payloads_from_visible_content(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(format!("raw clipboard text {}", "wide ".repeat(300))),
+                app,
+            );
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+
+        let popup = cx
+            .debug_bounds("clipboard-status-popup")
+            .expect("clipboard popup bounds");
+        let status = cx
+            .debug_bounds("clipboard-status")
+            .expect("clipboard status bounds");
+        let status_bar = cx
+            .debug_bounds("explorer-status-bar")
+            .expect("status bar bounds");
+        assert_eq!(popup.size.width, gpui::px(720.0));
+        assert_eq!(popup.right(), status.right());
+        assert_eq!(popup.bottom(), status_bar.origin.y - gpui::px(8.0));
+        assert!(cx.debug_bounds("clipboard-popup-text-preview").is_some());
     }
 
     #[gpui::test]
@@ -12793,7 +12938,7 @@ mod tests {
     #[test]
     fn clipboard_status_popup_layout_uses_fixed_anchor_and_clamps_dimensions() {
         assert_eq!(
-            clipboard_status_popup_layout(gpui::size(gpui::px(800.0), gpui::px(600.0))),
+            clipboard_status_popup_layout(gpui::size(gpui::px(800.0), gpui::px(600.0)), 200.0,),
             ClipboardStatusPopupLayout {
                 width: 360.0,
                 max_height: 300.0,
@@ -12802,13 +12947,23 @@ mod tests {
             }
         );
         assert_eq!(
-            clipboard_status_popup_layout(gpui::size(gpui::px(280.0), gpui::px(180.0))),
+            clipboard_status_popup_layout(gpui::size(gpui::px(280.0), gpui::px(180.0)), 720.0,),
             ClipboardStatusPopupLayout {
                 width: 248.0,
                 max_height: 132.0,
                 right: 16.0,
                 bottom: 32.0,
             }
+        );
+        assert_eq!(
+            clipboard_status_popup_layout(gpui::size(gpui::px(1_000.0), gpui::px(600.0)), 512.0,)
+                .width,
+            512.0
+        );
+        assert_eq!(
+            clipboard_status_popup_layout(gpui::size(gpui::px(1_000.0), gpui::px(600.0)), 900.0,)
+                .width,
+            720.0
         );
     }
 

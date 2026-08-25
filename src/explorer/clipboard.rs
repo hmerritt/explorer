@@ -26,6 +26,7 @@ use crate::explorer::{
 
 const CLIPBOARD_KIND: &str = "explorer.file-clipboard";
 const CLIPBOARD_VERSION: u8 = 1;
+const CLIPBOARD_DETAIL_MAX_FILE_SOURCES: usize = 5;
 const CLIPBOARD_DETAIL_MAX_URLS: usize = 5;
 const CLIPBOARD_DETAIL_MAX_PREVIEW_LINES: usize = 8;
 const CLIPBOARD_DETAIL_MAX_PREVIEW_BYTES: usize = 2 * 1024;
@@ -108,10 +109,24 @@ pub(super) struct ClipboardUrlPreview {
     pub(super) truncated: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardSourceCounts {
+    pub(super) folder_count: usize,
+    pub(super) file_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ClipboardFileSourcePreview {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) source_count: usize,
+    pub(super) omitted_counts: Option<ClipboardMetric<ClipboardSourceCounts>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ClipboardSummaryDetails {
     Files {
         operation: FileClipboardOperation,
+        source_preview: ClipboardFileSourcePreview,
         folder_count: ClipboardMetric<usize>,
         file_count: ClipboardMetric<usize>,
         total_size: ClipboardMetric<u64>,
@@ -177,6 +192,7 @@ struct ClipboardFilesystemMetadata {
     folder_count: usize,
     file_count: usize,
     file_size: u64,
+    omitted_source_counts: ClipboardSourceCounts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +212,31 @@ struct FileClipboardMetadata {
 impl FileClipboard {
     pub(super) fn new(operation: FileClipboardOperation, paths: Vec<PathBuf>) -> Self {
         Self { operation, paths }
+    }
+}
+
+impl ClipboardFileSourcePreview {
+    fn new(paths: &[PathBuf]) -> Self {
+        let source_count = paths.len();
+        let paths = paths
+            .iter()
+            .take(CLIPBOARD_DETAIL_MAX_FILE_SOURCES)
+            .cloned()
+            .collect::<Vec<_>>();
+        let omitted_counts =
+            (source_count > paths.len()).then_some(ClipboardMetric::Pending { discovered: None });
+        Self {
+            paths,
+            source_count,
+            omitted_counts,
+        }
+    }
+
+    fn with_omitted_counts(mut self, counts: ClipboardMetric<ClipboardSourceCounts>) -> Self {
+        if self.source_count > self.paths.len() {
+            self.omitted_counts = Some(counts);
+        }
+        self
     }
 }
 
@@ -259,7 +300,12 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
         return;
     };
     let initial_label = inspection.summary.label.clone();
-    let ClipboardSummaryDetails::Files { operation, .. } = inspection.summary.details else {
+    let ClipboardSummaryDetails::Files {
+        operation,
+        source_preview,
+        ..
+    } = inspection.summary.details
+    else {
         return;
     };
     let fingerprint = inspection.fingerprint;
@@ -278,6 +324,9 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
                     label: initial_label,
                     details: ClipboardSummaryDetails::Files {
                         operation,
+                        source_preview: source_preview
+                            .clone()
+                            .with_omitted_counts(ClipboardMetric::Unavailable),
                         folder_count: ClipboardMetric::Unavailable,
                         file_count: ClipboardMetric::Unavailable,
                         total_size: ClipboardMetric::Unavailable,
@@ -292,6 +341,8 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
+        let source_preview = source_preview
+            .with_omitted_counts(ClipboardMetric::Ready(metadata.omitted_source_counts));
 
         let top_level_summary = ClipboardSummary {
             label: clipboard_filesystem_summary_label(
@@ -301,6 +352,7 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
             ),
             details: ClipboardSummaryDetails::Files {
                 operation,
+                source_preview: source_preview.clone(),
                 folder_count: ClipboardMetric::Pending {
                     discovered: Some(metadata.folder_count),
                 },
@@ -347,6 +399,7 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
             ),
             details: ClipboardSummaryDetails::Files {
                 operation,
+                source_preview: source_preview.clone(),
                 folder_count: folder_count.clone(),
                 file_count: file_count.clone(),
                 total_size: ClipboardMetric::Pending { discovered: None },
@@ -386,6 +439,7 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
             ),
             details: ClipboardSummaryDetails::Files {
                 operation,
+                source_preview,
                 folder_count,
                 file_count,
                 total_size,
@@ -406,6 +460,7 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
             label: clipboard_count_label(clipboard.paths.len(), "item", "items"),
             details: ClipboardSummaryDetails::Files {
                 operation: clipboard.operation,
+                source_preview: ClipboardFileSourcePreview::new(&clipboard.paths),
                 folder_count: ClipboardMetric::Pending { discovered: None },
                 file_count: ClipboardMetric::Pending { discovered: None },
                 total_size: ClipboardMetric::Pending { discovered: None },
@@ -644,8 +699,12 @@ fn scan_clipboard_filesystem_metadata(
     let mut folder_paths = Vec::new();
     let mut file_count = 0usize;
     let mut file_size = 0u64;
+    let mut omitted_source_counts = ClipboardSourceCounts {
+        folder_count: 0,
+        file_count: 0,
+    };
 
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Err(ClipboardSummaryScanError::Cancelled);
         }
@@ -653,9 +712,17 @@ fn scan_clipboard_filesystem_metadata(
             fs::symlink_metadata(path).map_err(|_| ClipboardSummaryScanError::Unavailable)?;
         if metadata.is_dir() {
             folder_paths.push(path.clone());
+            if index >= CLIPBOARD_DETAIL_MAX_FILE_SOURCES {
+                omitted_source_counts.folder_count =
+                    omitted_source_counts.folder_count.saturating_add(1);
+            }
         } else {
             file_count += 1;
             file_size = file_size.saturating_add(metadata.len());
+            if index >= CLIPBOARD_DETAIL_MAX_FILE_SOURCES {
+                omitted_source_counts.file_count =
+                    omitted_source_counts.file_count.saturating_add(1);
+            }
         }
     }
 
@@ -664,6 +731,7 @@ fn scan_clipboard_filesystem_metadata(
         folder_paths,
         file_count,
         file_size,
+        omitted_source_counts,
     })
 }
 
@@ -1285,6 +1353,34 @@ mod tests {
             Some(ClipboardFileOperation::Move)
         );
         assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
+    }
+
+    #[test]
+    fn clipboard_file_details_keep_single_copy_and_cut_sources() {
+        for (operation, source) in [
+            (FileClipboardOperation::Copy, PathBuf::from("copied.txt")),
+            (FileClipboardOperation::Cut, PathBuf::from("moved-folder")),
+        ] {
+            let item =
+                clipboard_item_for_files(&FileClipboard::new(operation, vec![source.clone()]))
+                    .expect("file clipboard item");
+            let summary = clipboard_summary_inspection(&item)
+                .expect("clipboard file summary")
+                .summary;
+            let ClipboardSummaryDetails::Files {
+                operation: actual_operation,
+                source_preview,
+                ..
+            } = summary.details
+            else {
+                panic!("expected file summary details");
+            };
+
+            assert_eq!(actual_operation, operation);
+            assert_eq!(source_preview.paths, vec![source]);
+            assert_eq!(source_preview.source_count, 1);
+            assert_eq!(source_preview.omitted_counts, None);
+        }
     }
 
     #[test]
@@ -1989,6 +2085,38 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_file_source_preview_preserves_order_and_bounds_paths() {
+        let paths = (0..7)
+            .map(|index| PathBuf::from(format!("source-{index}")))
+            .collect::<Vec<_>>();
+        let preview = ClipboardFileSourcePreview::new(&paths);
+
+        assert_eq!(preview.source_count, 7);
+        assert_eq!(preview.paths, paths[..5]);
+        assert_eq!(
+            preview.omitted_counts,
+            Some(ClipboardMetric::Pending { discovered: None })
+        );
+
+        let ready = preview.with_omitted_counts(ClipboardMetric::Ready(ClipboardSourceCounts {
+            folder_count: 1,
+            file_count: 1,
+        }));
+        assert_eq!(
+            ready.omitted_counts,
+            Some(ClipboardMetric::Ready(ClipboardSourceCounts {
+                folder_count: 1,
+                file_count: 1,
+            }))
+        );
+
+        let single = ClipboardFileSourcePreview::new(&paths[..1]);
+        assert_eq!(single.paths, paths[..1]);
+        assert_eq!(single.source_count, 1);
+        assert_eq!(single.omitted_counts, None);
+    }
+
+    #[test]
     fn clipboard_summary_uses_existing_size_precision() {
         assert_eq!(
             clipboard_typed_summary_label("Image file", 200 * KB_BYTES),
@@ -2019,6 +2147,13 @@ mod tests {
         assert_eq!(metadata.file_count, 1);
         assert_eq!(metadata.file_size, 7);
         assert_eq!(
+            metadata.omitted_source_counts,
+            ClipboardSourceCounts {
+                folder_count: 0,
+                file_count: 0,
+            }
+        );
+        assert_eq!(
             clipboard_filesystem_summary_label(1, 1, None),
             "1 folder, 1 file"
         );
@@ -2036,6 +2171,36 @@ mod tests {
             scan_clipboard_recursive_counts(&paths, &cancel).expect("recursive clipboard counts");
         assert_eq!(recursive.folder_count, 2);
         assert_eq!(recursive.file_count, 2);
+    }
+
+    #[test]
+    fn clipboard_source_overflow_counts_only_hidden_top_level_items() {
+        let temp = TempDir::new();
+        let mut paths = Vec::new();
+        for index in 0..5 {
+            let path = temp.path().join(format!("visible-{index}.txt"));
+            fs::write(&path, b"visible").expect("write visible source");
+            paths.push(path);
+        }
+        let hidden_folder = temp.path().join("hidden-folder");
+        fs::create_dir(&hidden_folder).expect("create hidden folder source");
+        paths.push(hidden_folder);
+        let hidden_file = temp.path().join("hidden-file.txt");
+        fs::write(&hidden_file, b"hidden").expect("write hidden file source");
+        paths.push(hidden_file);
+
+        let metadata = scan_clipboard_filesystem_metadata(&paths, &AtomicBool::new(false))
+            .expect("clipboard metadata");
+
+        assert_eq!(
+            metadata.omitted_source_counts,
+            ClipboardSourceCounts {
+                folder_count: 1,
+                file_count: 1,
+            }
+        );
+        assert_eq!(metadata.folder_count, 1);
+        assert_eq!(metadata.file_count, 6);
     }
 
     #[test]
