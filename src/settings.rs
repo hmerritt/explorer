@@ -657,7 +657,7 @@ pub struct AppSettings {
         deserialize_with = "deserialize_app_start_path"
     )]
     pub start: PathBuf,
-    #[serde(default)]
+    #[serde(default = "default_ytdlp_options")]
     pub ytdlp_options: Vec<String>,
 }
 
@@ -828,7 +828,7 @@ impl Default for AppSettings {
             copy_verify: default_copy_verify(),
             new_window_behaviour: NewWindowBehaviour::Focus,
             start: default_app_start_path(),
-            ytdlp_options: Vec::new(),
+            ytdlp_options: default_ytdlp_options(),
         }
     }
 }
@@ -2198,6 +2198,10 @@ fn default_copy_verify() -> bool {
     true
 }
 
+fn default_ytdlp_options() -> Vec<String> {
+    vec!["-S".to_owned(), "ext:mp4".to_owned()]
+}
+
 fn default_show_dotfiles() -> bool {
     true
 }
@@ -2625,7 +2629,7 @@ mod tests {
         assert_eq!(settings.app.start, default_app_start_path());
         assert!(settings.app.copy_verify);
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
-        assert!(settings.app.ytdlp_options.is_empty());
+        assert_eq!(settings.app.ytdlp_options, ["-S", "ext:mp4"]);
         assert_eq!(
             settings.app.cache_cleanup_interval_days,
             DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS
@@ -3051,6 +3055,10 @@ mod tests {
     fn app_ytdlp_options_default_and_round_trip_as_argument_array() {
         let settings: ExplorerSettings =
             serde_json::from_str(r#"{"app":{}}"#).expect("deserialize default app settings");
+        assert_eq!(settings.app.ytdlp_options, ["-S", "ext:mp4"]);
+
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"app":{"ytdlp_options":[]}}"#)
+            .expect("deserialize explicitly empty yt-dlp options");
         assert!(settings.app.ytdlp_options.is_empty());
 
         let settings: ExplorerSettings = serde_json::from_str(
@@ -3735,7 +3743,10 @@ mod tests {
         );
         assert_eq!(document["app"]["new_window_behaviour"], "focus");
         assert_eq!(document["app"]["copy_verify"], true);
-        assert_eq!(document["app"]["ytdlp_options"], serde_json::json!([]));
+        assert_eq!(
+            document["app"]["ytdlp_options"],
+            serde_json::json!(["-S", "ext:mp4"])
+        );
         assert!(document["app"]["start"].is_string());
         assert_eq!(
             document["sidebar"]["expanded_groups"],

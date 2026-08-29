@@ -147,7 +147,7 @@ Example with sidebar and contextmenu items:
 {
     "app": {
         "start": "~/Downloads",
-        "ytdlp_options": []
+        "ytdlp_options": ["-S", "ext:mp4"]
     },
     "view": {
         "mode": "details",
@@ -177,7 +177,8 @@ Example with sidebar and contextmenu items:
 `app.ytdlp_options` is an array of command-line arguments passed to `yt-dlp`
 when a supported video URL is pasted into a folder. For example,
 `["--cookies-from-browser", "firefox"]`. Explorer invokes `yt-dlp` directly,
-so each array entry is passed as one argument without shell parsing.
+so each array entry is passed as one argument without shell parsing. The default
+is `["-S", "ext:mp4"]`, which prefers MP4 output.
 
 `sidebar.hide_groups` removes matching groups from the sidebar. It accepts
 `"pinned"`, `"drives"`, `"network"`, and `"wsl"`; the default is an empty array.
