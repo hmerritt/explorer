@@ -8039,6 +8039,10 @@ mod tests {
     }
 
     fn write_test_png_with_dimensions(path: &Path, width: u32, height: u32) {
+        fs::write(path, test_png_bytes(width, height)).expect("write test png");
+    }
+
+    fn test_png_bytes(width: u32, height: u32) -> Vec<u8> {
         let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             width,
             height,
@@ -8048,7 +8052,7 @@ mod tests {
         image
             .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
             .expect("encode test png");
-        fs::write(path, bytes).expect("write test png");
+        bytes
     }
 
     fn write_test_pdf_with_page_size(path: &Path, width: f32, height: f32) {
@@ -11912,6 +11916,61 @@ mod tests {
         assert!(cx.debug_bounds("clipboard-popup-url-preview").is_some());
         assert!(cx.debug_bounds("clipboard-popup-url-0").is_some());
         assert!(cx.debug_bounds("clipboard-popup-url-count").is_some());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_renders_centered_bounded_image_preview(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let image = Image::from_bytes(ImageFormat::Png, test_png_bytes(600, 300));
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_image(&image), app);
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+        cx.run_until_parked();
+
+        let popup = cx
+            .debug_bounds("clipboard-status-popup")
+            .expect("clipboard popup bounds");
+        let preview = cx
+            .debug_bounds("clipboard-popup-image-preview")
+            .expect("clipboard image preview bounds");
+        let size = cx
+            .debug_bounds("clipboard-popup-total-size")
+            .expect("clipboard image size bounds");
+        assert!(cx.debug_bounds("clipboard-popup-image-format").is_none());
+        assert!(preview.size.width <= popup.size.width - gpui::px(24.0));
+        assert!(preview.size.height <= gpui::px(150.0));
+        assert_eq!(preview.center().x, popup.center().x);
+        assert!(preview.origin.y >= size.bottom());
+    }
+
+    #[gpui::test]
+    fn clipboard_status_popup_omits_contents_for_video_downloads(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(
+                ClipboardItem::new_string(
+                    "https://youtu.be/dQw4w9WgXcQ\nhttps://vimeo.com/76979871".to_owned(),
+                ),
+                app,
+            );
+        });
+        let destination = TempDir::new();
+        let (_, cx) = test_view_entity_at_path(cx, destination.path().to_path_buf());
+
+        cx.run_until_parked();
+        hover_selector_until_clipboard_popup(cx, "clipboard-status");
+
+        assert!(cx.debug_bounds("clipboard-popup-url-count").is_none());
+        assert!(cx.debug_bounds("clipboard-popup-video-site").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-total-size").is_some());
+        assert!(cx.debug_bounds("clipboard-popup-url-preview").is_some());
     }
 
     #[gpui::test]

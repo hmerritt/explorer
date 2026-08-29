@@ -2,8 +2,9 @@ use std::{path::Path, time::Duration};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, Context, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    TextRun, Window, div, font, prelude::FluentBuilder as _, px, rgb,
+    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
+    Styled as _, StyledImage as _, TextRun, Window, div, font, img, prelude::FluentBuilder as _,
+    px, relative, rgb,
 };
 use thousands::Separable as _;
 
@@ -34,7 +35,7 @@ const CLIPBOARD_SOURCE_TREE_PREFIX_WIDTH: f32 = 28.0;
 const CLIPBOARD_SOURCE_TREE_LINE_HEIGHT: f32 = 16.0;
 const CLIPBOARD_PREVIEW_HORIZONTAL_PADDING: f32 = 8.0;
 const CLIPBOARD_PREVIEW_TEXT_SIZE: f32 = 11.0;
-const CLIPBOARD_AFTER_PASTE_NOTE: &str = "The new file will be selected for renaming.";
+const CLIPBOARD_IMAGE_PREVIEW_MAX_HEIGHT: f32 = 150.0;
 
 pub(super) struct ExplorerTooltip {
     label: SharedString,
@@ -280,24 +281,17 @@ pub(super) fn clipboard_status_popup_preferred_width(
             ));
         }
         ClipboardSummaryDetails::Image {
-            source_format,
             output_file_name,
             byte_size,
+            ..
         } => {
             for value in [
-                image_format_label(*source_format).to_owned(),
                 format!("{output_file_name} (or next available name)"),
                 format_size(Some(*byte_size)),
             ] {
                 preferred_width =
                     preferred_width.max(detail_value_required_width(&value, popup_font, window));
             }
-            preferred_width = preferred_width.max(plain_line_required_width(
-                CLIPBOARD_AFTER_PASTE_NOTE,
-                popup_font,
-                CLIPBOARD_PREVIEW_TEXT_SIZE,
-                window,
-            ));
         }
         ClipboardSummaryDetails::Downloads { count, urls } => {
             for value in [
@@ -346,12 +340,6 @@ pub(super) fn clipboard_status_popup_preferred_width(
             }
             preferred_width =
                 preferred_width.max(text_preview_required_width(source_preview, window));
-            preferred_width = preferred_width.max(plain_line_required_width(
-                CLIPBOARD_AFTER_PASTE_NOTE,
-                popup_font,
-                CLIPBOARD_PREVIEW_TEXT_SIZE,
-                window,
-            ));
         }
     }
 
@@ -404,7 +392,7 @@ fn render_clipboard_summary_details(
             ))
             .into_any_element(),
         ClipboardSummaryDetails::Image {
-            source_format,
+            preview,
             output_file_name,
             byte_size,
         } => div()
@@ -417,11 +405,6 @@ fn render_clipboard_summary_details(
                 "clipboard-popup-destination",
             ))
             .child(clipboard_detail_row(
-                "Clipboard type",
-                image_format_label(source_format),
-                "clipboard-popup-image-format",
-            ))
-            .child(clipboard_detail_row(
                 "Output",
                 format!("{output_file_name} (or next available name)"),
                 "clipboard-popup-output",
@@ -431,7 +414,7 @@ fn render_clipboard_summary_details(
                 format_size(Some(byte_size)),
                 "clipboard-popup-total-size",
             ))
-            .child(clipboard_after_paste_note())
+            .child(render_clipboard_image_preview(preview))
             .into_any_element(),
         ClipboardSummaryDetails::Downloads { count, urls } => div()
             .flex()
@@ -455,9 +438,7 @@ fn render_clipboard_summary_details(
             .child(render_url_preview(urls))
             .into_any_element(),
         ClipboardSummaryDetails::VideoDownloads {
-            count,
-            site_summary,
-            urls,
+            site_summary, urls, ..
         } => div()
             .flex()
             .flex_col()
@@ -466,11 +447,6 @@ fn render_clipboard_summary_details(
                 "Destination",
                 destination_label,
                 "clipboard-popup-destination",
-            ))
-            .child(clipboard_detail_row(
-                "Contents",
-                count_label(count, "video URL", "video URLs"),
-                "clipboard-popup-url-count",
             ))
             .child(clipboard_detail_row(
                 "Site",
@@ -516,9 +492,27 @@ fn render_clipboard_summary_details(
                 ))
             })
             .child(render_text_preview(source_preview))
-            .child(clipboard_after_paste_note())
             .into_any_element(),
     }
+}
+
+fn render_clipboard_image_preview(image: std::sync::Arc<gpui::Image>) -> AnyElement {
+    div()
+        .id("clipboard-popup-image-preview-container")
+        .debug_selector(|| "clipboard-popup-image-preview-container".to_owned())
+        .flex()
+        .w_full()
+        .justify_center()
+        .child(
+            img(image)
+                .id("clipboard-popup-image-preview")
+                .debug_selector(|| "clipboard-popup-image-preview".to_owned())
+                .max_w(relative(1.0))
+                .max_h(px(CLIPBOARD_IMAGE_PREVIEW_MAX_HEIGHT))
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(|| div().into_any_element()),
+        )
+        .into_any_element()
 }
 
 fn file_operation_label(operation: FileClipboardOperation) -> &'static str {
@@ -734,16 +728,6 @@ fn source_tree_required_width(value: &str, popup_font: &gpui::Font, window: &Win
     detail_value_required_width(value, popup_font, window) + CLIPBOARD_SOURCE_TREE_PREFIX_WIDTH
 }
 
-fn plain_line_required_width(
-    value: &str,
-    popup_font: &gpui::Font,
-    text_size: f32,
-    window: &Window,
-) -> f32 {
-    CLIPBOARD_POPUP_HORIZONTAL_PADDING * 2.0
-        + popup_text_width_at_size(value, popup_font, text_size, window)
-}
-
 fn preview_line_required_width(value: &str, window: &Window) -> f32 {
     let preview_font = clipboard_preview_font();
     CLIPBOARD_POPUP_HORIZONTAL_PADDING * 2.0
@@ -908,15 +892,6 @@ fn render_text_preview(preview: ClipboardTextPreview) -> AnyElement {
     content.into_any_element()
 }
 
-fn clipboard_after_paste_note() -> AnyElement {
-    div()
-        .mt(px(2.0))
-        .text_size(px(CLIPBOARD_PREVIEW_TEXT_SIZE))
-        .text_color(rgb(CLIPBOARD_POPUP_TERTIARY_TEXT))
-        .child(CLIPBOARD_AFTER_PASTE_NOTE)
-        .into_any_element()
-}
-
 fn items_metric_label(
     folder_count: ClipboardMetric<usize>,
     file_count: ClipboardMetric<usize>,
@@ -984,18 +959,6 @@ fn size_metric_label(metric: ClipboardMetric<u64>) -> String {
 fn count_label(count: usize, singular: &str, plural: &str) -> String {
     let noun = if count == 1 { singular } else { plural };
     format!("{} {noun}", count.separate_with_commas())
-}
-
-fn image_format_label(format: gpui::ImageFormat) -> &'static str {
-    match format {
-        gpui::ImageFormat::Png => "PNG image",
-        gpui::ImageFormat::Jpeg => "JPEG image",
-        gpui::ImageFormat::Webp => "WebP image",
-        gpui::ImageFormat::Gif => "GIF image",
-        gpui::ImageFormat::Svg => "SVG vector image",
-        gpui::ImageFormat::Bmp => "BMP image",
-        gpui::ImageFormat::Tiff => "TIFF image (converted to PNG)",
-    }
 }
 
 fn clipboard_preview_font() -> gpui::Font {

@@ -132,7 +132,7 @@ pub(super) enum ClipboardSummaryDetails {
         total_size: ClipboardMetric<u64>,
     },
     Image {
-        source_format: ImageFormat,
+        preview: Arc<Image>,
         output_file_name: String,
         byte_size: u64,
     },
@@ -491,7 +491,7 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
             summary: ClipboardSummary {
                 label: clipboard_typed_summary_label(label, image.bytes().len() as u64),
                 details: ClipboardSummaryDetails::Image {
-                    source_format: image.format(),
+                    preview: Arc::new(image.clone()),
                     output_file_name: clipboard_image_output_file_name(image.format()),
                     byte_size: image.bytes().len() as u64,
                 },
@@ -2016,10 +2016,12 @@ mod tests {
         assert!(matches!(
             image_summary.details,
             ClipboardSummaryDetails::Image {
-                source_format: ImageFormat::Tiff,
+                preview,
                 output_file_name,
                 byte_size: 3,
-            } if output_file_name == "image.png"
+            } if preview.format() == ImageFormat::Tiff
+                && preview.bytes() == [1, 2, 3]
+                && output_file_name == "image.png"
         ));
     }
 
