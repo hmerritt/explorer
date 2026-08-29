@@ -4153,33 +4153,16 @@ fn render_download_notice_row(
         DownloadNoticeStatus::Downloading {
             downloaded_bytes,
             total_bytes: Some(total_bytes),
-        } => {
-            let percent = if *total_bytes == 0 {
-                100
-            } else {
-                downloaded_bytes.saturating_mul(100) / total_bytes
-            };
-            (
-                OperationNoticeKind::Info,
-                format!(
-                    "Downloading \"{}\" — {} of {} ({}%)",
-                    row.file_name,
-                    format_size(Some(*downloaded_bytes)),
-                    format_size(Some(*total_bytes)),
-                    percent.min(100)
-                ),
-            )
-        }
+        } => (
+            OperationNoticeKind::Info,
+            downloading_notice_text(row, *downloaded_bytes, Some(*total_bytes)),
+        ),
         DownloadNoticeStatus::Downloading {
             downloaded_bytes,
             total_bytes: None,
         } => (
             OperationNoticeKind::Info,
-            format!(
-                "Downloading \"{}\" — {}",
-                row.file_name,
-                format_size(Some(*downloaded_bytes))
-            ),
+            downloading_notice_text(row, *downloaded_bytes, None),
         ),
         DownloadNoticeStatus::Completed => (
             OperationNoticeKind::Info,
@@ -4228,6 +4211,33 @@ fn render_download_notice_row(
             this.child(progress)
         })
         .into_any_element()
+}
+
+fn downloading_notice_text(
+    row: &DownloadNoticeRow,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) -> String {
+    let subject = match &row.kind {
+        DownloadNoticeKind::File => format!("Downloading \"{}\"", row.file_name),
+        DownloadNoticeKind::Video { site_domain } => {
+            format!("Downloading video from {site_domain}")
+        }
+    };
+    let downloaded = format_size(Some(downloaded_bytes));
+    let Some(total_bytes) = total_bytes else {
+        return format!("{subject} — {downloaded}");
+    };
+    let percent = if total_bytes == 0 {
+        100
+    } else {
+        downloaded_bytes.saturating_mul(100) / total_bytes
+    };
+    format!(
+        "{subject} — {downloaded} of {} ({}%)",
+        format_size(Some(total_bytes)),
+        percent.min(100)
+    )
 }
 
 fn download_cancel_button(id: u64, cx: &mut Context<ExplorerView>) -> AnyElement {
@@ -7902,7 +7912,7 @@ mod tests {
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
-        directory_open_mode_for_entry_click, drop_indicator_target_width,
+        directory_open_mode_for_entry_click, downloading_notice_text, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         file_entry_background_color, filename_text_width, folder_status_summary,
         format_address_path, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
@@ -12308,6 +12318,37 @@ mod tests {
         assert_eq!(
             operation_notice_style(OperationNoticeKind::Success),
             (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success")
+        );
+    }
+
+    #[test]
+    fn download_notice_text_uses_video_site_and_exact_byte_progress() {
+        let video = DownloadNoticeRow {
+            id: 1,
+            kind: DownloadNoticeKind::Video {
+                site_domain: "youtube.com".to_owned(),
+            },
+            file_name: "Video from youtube.com".to_owned(),
+            status: DownloadNoticeStatus::Connecting,
+        };
+        assert_eq!(
+            downloading_notice_text(&video, 25, Some(100)),
+            "Downloading video from youtube.com — 25 bytes of 100 bytes (25%)"
+        );
+        assert_eq!(
+            downloading_notice_text(&video, 25, None),
+            "Downloading video from youtube.com — 25 bytes"
+        );
+
+        let file = DownloadNoticeRow {
+            id: 2,
+            kind: DownloadNoticeKind::File,
+            file_name: "archive.zip".to_owned(),
+            status: DownloadNoticeStatus::Connecting,
+        };
+        assert_eq!(
+            downloading_notice_text(&file, 100, Some(50)),
+            "Downloading \"archive.zip\" — 100 bytes of 50 bytes (100%)"
         );
     }
 

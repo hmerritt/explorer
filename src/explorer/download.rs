@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -16,12 +16,15 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 #[cfg(target_os = "windows")]
-use std::os::windows::{io::AsRawHandle, process::CommandExt};
+use std::os::windows::{
+    io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    process::CommandExt,
+};
 
 #[cfg(target_os = "windows")]
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::HANDLE,
         System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -33,6 +36,7 @@ use windows::{
 
 use futures::AsyncReadExt;
 use gpui::{Context, http_client::HttpClient};
+use serde::Deserialize;
 use tempfile::NamedTempFile;
 
 use crate::explorer::{
@@ -50,6 +54,11 @@ const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
 const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
 const YTDLP_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const YTDLP_DOWNLOAD_PROGRESS_PREFIX: &str = "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__";
+const YTDLP_POSTPROCESS_PROGRESS_PREFIX: &str = "__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__";
+const YTDLP_DOWNLOAD_PROGRESS_TEMPLATE: &str = "download:__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__%(progress.{status,downloaded_bytes,total_bytes})j";
+const YTDLP_POSTPROCESS_PROGRESS_TEMPLATE: &str =
+    "postprocess:__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__%(progress.{status})j";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -98,6 +107,24 @@ pub(super) struct DownloadProgress {
     pub(super) total_bytes: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YtDlpProgressEvent {
+    Downloading(DownloadProgress),
+    PostProcessing,
+}
+
+#[derive(Debug, Deserialize)]
+struct YtDlpProgressRecord {
+    status: String,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YtDlpPostProcessRecord {
+    status: String,
+}
+
 pub(super) struct PendingDownload {
     pub(super) temporary: NamedTempFile,
     pub(super) destination: PathBuf,
@@ -132,12 +159,7 @@ struct YtDlpChild {
 }
 
 #[cfg(target_os = "windows")]
-struct WindowsJob(HANDLE);
-
-// Windows kernel handles may be used and closed from any thread. Access to the
-// process and job is serialized by YtDlpProcessState::child.
-#[cfg(target_os = "windows")]
-unsafe impl Send for WindowsJob {}
+struct WindowsJob(OwnedHandle);
 
 impl YtDlpProcessControl {
     fn new() -> Self {
@@ -259,12 +281,12 @@ impl WindowsJob {
     fn new() -> Result<Self, String> {
         let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
             .map_err(|error| format!("Could not create a yt-dlp process job: {error}"))?;
-        let job = Self(handle);
+        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle.0) });
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         unsafe {
             SetInformationJobObject(
-                job.0,
+                job.handle(),
                 JobObjectExtendedLimitInformation,
                 std::ptr::from_ref(&limits).cast(),
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -276,19 +298,16 @@ impl WindowsJob {
 
     fn assign(&self, child: &Child) -> Result<(), String> {
         let process = HANDLE(child.as_raw_handle());
-        unsafe { AssignProcessToJobObject(self.0, process) }
+        unsafe { AssignProcessToJobObject(self.handle(), process) }
             .map_err(|error| format!("Could not track the yt-dlp process tree: {error}"))
     }
 
     fn terminate(&self) -> windows::core::Result<()> {
-        unsafe { TerminateJobObject(self.0, 1) }
+        unsafe { TerminateJobObject(self.handle(), 1) }
     }
-}
 
-#[cfg(target_os = "windows")]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) }.ok();
+    fn handle(&self) -> HANDLE {
+        HANDLE(self.0.as_raw_handle())
     }
 }
 
@@ -659,16 +678,37 @@ impl ExplorerView {
         let process_control = YtDlpProcessControl::new();
         let process_state = process_control.shared();
         self.ytdlp_process_controls.push((id, process_control));
-        let task = cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { run_ytdlp_download(command, process_state) })
-                .await;
-            let _ = this.update(cx, |explorer, cx| {
-                explorer.remove_ytdlp_process_control(id);
-                explorer.complete_download(id, result, cx);
-                cx.notify();
-            });
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = cx.spawn({
+            let finished = finished.clone();
+            async move |this, cx| {
+                let operation_task = cx.background_executor().spawn({
+                    let finished = finished.clone();
+                    async move {
+                        let result = run_ytdlp_download(command, process_state, move |event| {
+                            let _ = progress_tx.send(event);
+                        });
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    cx.background_executor()
+                        .timer(DOWNLOAD_PROGRESS_INTERVAL)
+                        .await;
+                    Self::drain_ytdlp_progress(&this, cx, id, &progress_rx);
+                }
+
+                let result = operation_task.await;
+                Self::drain_ytdlp_progress(&this, cx, id, &progress_rx);
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.remove_ytdlp_process_control(id);
+                    explorer.complete_download(id, result, cx);
+                    cx.notify();
+                });
+            }
         });
         self.download_tasks.push((id, task));
         cx.notify();
@@ -751,6 +791,44 @@ impl ExplorerView {
                 }
             });
         }
+    }
+
+    fn drain_ytdlp_progress(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        id: u64,
+        progress_rx: &mpsc::Receiver<YtDlpProgressEvent>,
+    ) {
+        let mut latest = None;
+        while let Ok(progress) = progress_rx.try_recv() {
+            latest = Some(progress);
+        }
+
+        if let Some(progress) = latest {
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.apply_ytdlp_progress_event(id, progress) {
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    fn apply_ytdlp_progress_event(&mut self, id: u64, event: YtDlpProgressEvent) -> bool {
+        let Some(row) = self
+            .download_notice_rows
+            .iter_mut()
+            .find(|row| row.id == id)
+        else {
+            return false;
+        };
+        row.status = match event {
+            YtDlpProgressEvent::Downloading(progress) => DownloadNoticeStatus::Downloading {
+                downloaded_bytes: progress.downloaded_bytes,
+                total_bytes: progress.total_bytes,
+            },
+            YtDlpProgressEvent::PostProcessing => DownloadNoticeStatus::Connecting,
+        };
+        true
     }
 
     fn complete_download(
@@ -882,6 +960,15 @@ fn ytdlp_command_spec(
 ) -> YtDlpCommandSpec {
     let mut args = options.into_iter().map(OsString::from).collect::<Vec<_>>();
     args.push(OsString::from("--no-playlist"));
+    args.push(OsString::from("--no-quiet"));
+    args.push(OsString::from("--newline"));
+    args.push(OsString::from("--progress"));
+    args.push(OsString::from("--progress-delta"));
+    args.push(OsString::from("0.1"));
+    args.push(OsString::from("--progress-template"));
+    args.push(OsString::from(YTDLP_DOWNLOAD_PROGRESS_TEMPLATE));
+    args.push(OsString::from("--progress-template"));
+    args.push(OsString::from(YTDLP_POSTPROCESS_PROGRESS_TEMPLATE));
     args.push(OsString::from("--"));
     args.push(OsString::from(url));
     YtDlpCommandSpec {
@@ -894,28 +981,33 @@ fn ytdlp_command_spec(
 fn run_ytdlp_download(
     command_spec: YtDlpCommandSpec,
     process: Arc<YtDlpProcessState>,
+    on_progress: impl Fn(YtDlpProgressEvent) + Send + 'static,
 ) -> Result<DownloadResult, String> {
     let mut command = Command::new(&command_spec.executable);
     command
         .args(&command_spec.args)
         .current_dir(&command_spec.current_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    run_ytdlp_command(&mut command, process)
+    run_ytdlp_command(&mut command, process, on_progress)
 }
 
 fn run_ytdlp_command(
     command: &mut Command,
     process: Arc<YtDlpProcessState>,
+    on_progress: impl Fn(YtDlpProgressEvent) + Send + 'static,
 ) -> Result<DownloadResult, String> {
     let mut child = YtDlpChild::spawn(command)?;
+    let stdout = child.child.stdout.take();
     let stderr = child.child.stderr.take();
     process.register_child(child)?;
 
+    let stdout_reader =
+        stdout.map(|stdout| thread::spawn(move || read_ytdlp_progress(stdout, on_progress)));
     let stderr_reader = stderr
         .map(|stderr| thread::spawn(move || read_bounded_tail(stderr, YTDLP_ERROR_MESSAGE_LIMIT)));
     let status = loop {
@@ -924,6 +1016,14 @@ fn run_ytdlp_command(
         }
         thread::sleep(YTDLP_PROCESS_POLL_INTERVAL);
     };
+    stdout_reader
+        .map(|reader| {
+            reader
+                .join()
+                .map_err(|_| "Could not read yt-dlp progress output.".to_owned())?
+                .map_err(|error| format!("Could not read yt-dlp progress output: {error}"))
+        })
+        .transpose()?;
     let stderr = stderr_reader
         .map(|reader| {
             reader
@@ -934,6 +1034,55 @@ fn run_ytdlp_command(
         .transpose()?
         .unwrap_or_default();
     ytdlp_result_from_process(status.success(), &status.to_string(), &stderr)
+}
+
+fn read_ytdlp_progress(
+    reader: impl Read,
+    on_progress: impl Fn(YtDlpProgressEvent),
+) -> io::Result<()> {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        if let Some(event) = ytdlp_progress_event_from_line(&String::from_utf8_lossy(&line)) {
+            on_progress(event);
+        }
+    }
+}
+
+fn ytdlp_progress_event_from_line(line: &str) -> Option<YtDlpProgressEvent> {
+    if let Some(prefix) = line.find(YTDLP_DOWNLOAD_PROGRESS_PREFIX) {
+        let record = serde_json::from_str::<YtDlpProgressRecord>(
+            line[prefix + YTDLP_DOWNLOAD_PROGRESS_PREFIX.len()..].trim(),
+        )
+        .ok()?;
+        if !matches!(record.status.as_str(), "downloading" | "finished") {
+            return None;
+        }
+        let downloaded_bytes = record.downloaded_bytes.or_else(|| {
+            (record.status == "finished")
+                .then_some(record.total_bytes)
+                .flatten()
+        })?;
+        return Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+            downloaded_bytes,
+            total_bytes: record.total_bytes,
+        }));
+    }
+
+    let prefix = line.find(YTDLP_POSTPROCESS_PROGRESS_PREFIX)?;
+    let record = serde_json::from_str::<YtDlpPostProcessRecord>(
+        line[prefix + YTDLP_POSTPROCESS_PROGRESS_PREFIX.len()..].trim(),
+    )
+    .ok()?;
+    matches!(
+        record.status.as_str(),
+        "started" | "processing" | "finished"
+    )
+    .then_some(YtDlpProgressEvent::PostProcessing)
 }
 
 fn ytdlp_result_from_process(
@@ -1170,6 +1319,10 @@ mod tests {
                 "--cookies-from-browser".to_owned(),
                 "firefox profile".to_owned(),
                 "--yes-playlist".to_owned(),
+                "--quiet".to_owned(),
+                "--no-progress".to_owned(),
+                "--progress-template".to_owned(),
+                "download:user-template".to_owned(),
             ],
             "https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
             destination.clone(),
@@ -1183,11 +1336,149 @@ mod tests {
                 OsString::from("--cookies-from-browser"),
                 OsString::from("firefox profile"),
                 OsString::from("--yes-playlist"),
+                OsString::from("--quiet"),
+                OsString::from("--no-progress"),
+                OsString::from("--progress-template"),
+                OsString::from("download:user-template"),
                 OsString::from("--no-playlist"),
+                OsString::from("--no-quiet"),
+                OsString::from("--newline"),
+                OsString::from("--progress"),
+                OsString::from("--progress-delta"),
+                OsString::from("0.1"),
+                OsString::from("--progress-template"),
+                OsString::from(YTDLP_DOWNLOAD_PROGRESS_TEMPLATE),
+                OsString::from("--progress-template"),
+                OsString::from(YTDLP_POSTPROCESS_PROGRESS_TEMPLATE),
                 OsString::from("--"),
                 OsString::from("https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123"),
             ]
         );
+    }
+
+    #[test]
+    fn ytdlp_progress_parser_uses_only_exact_totals() {
+        assert_eq!(
+            ytdlp_progress_event_from_line(
+                "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"downloading\",\"downloaded_bytes\":25,\"total_bytes\":100,\"total_bytes_estimate\":120}\n"
+            ),
+            Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+                downloaded_bytes: 25,
+                total_bytes: Some(100),
+            }))
+        );
+        assert_eq!(
+            ytdlp_progress_event_from_line(
+                "2: __EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"downloading\",\"downloaded_bytes\":25,\"total_bytes_estimate\":120}\r\n"
+            ),
+            Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+                downloaded_bytes: 25,
+                total_bytes: None,
+            }))
+        );
+        assert_eq!(
+            ytdlp_progress_event_from_line(
+                "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"finished\",\"total_bytes\":100}\n"
+            ),
+            Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+                downloaded_bytes: 100,
+                total_bytes: Some(100),
+            }))
+        );
+    }
+
+    #[test]
+    fn ytdlp_progress_parser_handles_postprocessing_and_ignores_bad_output() {
+        assert_eq!(
+            ytdlp_progress_event_from_line(
+                "__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__{\"status\":\"started\"}\n"
+            ),
+            Some(YtDlpProgressEvent::PostProcessing)
+        );
+        for line in [
+            "[youtube] Extracting URL",
+            "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__not-json",
+            "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"error\",\"downloaded_bytes\":25}",
+            "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"downloading\",\"downloaded_bytes\":18446744073709551616}",
+            "__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__{\"status\":\"unknown\"}",
+        ] {
+            assert_eq!(ytdlp_progress_event_from_line(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn ytdlp_progress_reader_publishes_only_machine_records() {
+        let output = b"[youtube] Extracting URL\n__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"downloading\",\"downloaded_bytes\":10,\"total_bytes\":20}\nnoise\n__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__{\"status\":\"processing\"}\n";
+        let events = Mutex::new(Vec::new());
+        read_ytdlp_progress(output.as_slice(), |event| {
+            events.lock().unwrap().push(event)
+        })
+        .expect("read progress output");
+        assert_eq!(
+            events.into_inner().unwrap(),
+            [
+                YtDlpProgressEvent::Downloading(DownloadProgress {
+                    downloaded_bytes: 10,
+                    total_bytes: Some(20),
+                }),
+                YtDlpProgressEvent::PostProcessing,
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn ytdlp_progress_events_update_exact_unknown_and_postprocess_states(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.download_notice_rows = vec![DownloadNoticeRow {
+                    id: 7,
+                    kind: DownloadNoticeKind::Video {
+                        site_domain: "youtube.com".to_owned(),
+                    },
+                    file_name: "Video from youtube.com".to_owned(),
+                    status: DownloadNoticeStatus::Connecting,
+                }];
+
+                assert!(view.apply_ytdlp_progress_event(
+                    7,
+                    YtDlpProgressEvent::Downloading(DownloadProgress {
+                        downloaded_bytes: 25,
+                        total_bytes: Some(100),
+                    })
+                ));
+                assert_eq!(
+                    view.download_notice_rows[0].status,
+                    DownloadNoticeStatus::Downloading {
+                        downloaded_bytes: 25,
+                        total_bytes: Some(100),
+                    }
+                );
+
+                assert!(view.apply_ytdlp_progress_event(
+                    7,
+                    YtDlpProgressEvent::Downloading(DownloadProgress {
+                        downloaded_bytes: 50,
+                        total_bytes: None,
+                    })
+                ));
+                assert_eq!(
+                    view.download_notice_rows[0].status,
+                    DownloadNoticeStatus::Downloading {
+                        downloaded_bytes: 50,
+                        total_bytes: None,
+                    }
+                );
+
+                assert!(view.apply_ytdlp_progress_event(7, YtDlpProgressEvent::PostProcessing));
+                assert_eq!(
+                    view.download_notice_rows[0].status,
+                    DownloadNoticeStatus::Connecting
+                );
+                assert!(!view.apply_ytdlp_progress_event(99, YtDlpProgressEvent::PostProcessing));
+            });
+        });
     }
 
     #[test]
@@ -1327,7 +1618,7 @@ mod tests {
 
         thread::spawn(move || {
             let mut command = ytdlp_test_command(&directory);
-            let _ = result_tx.send(run_ytdlp_command(&mut command, state));
+            let _ = result_tx.send(run_ytdlp_command(&mut command, state, |_| {}));
         });
 
         let result = result_rx
@@ -1348,7 +1639,7 @@ mod tests {
 
         thread::spawn(move || {
             let mut command = ytdlp_test_command(&directory);
-            let _ = result_tx.send(run_ytdlp_command(&mut command, state));
+            let _ = result_tx.send(run_ytdlp_command(&mut command, state, |_| {}));
         });
 
         let ready = temp.path().join("parent-ready");
