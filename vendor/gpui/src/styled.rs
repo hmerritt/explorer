@@ -2,7 +2,8 @@ use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontStyle, FontWeight,
     GridPlacement, Hsla, JustifyContent, Length, SharedString, StrikethroughStyle, StyleRefinement,
-    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    TextAlign, TextOverflow, TextStyleRefinement, UnderlineStyle, WhiteSpace, WordBreak, px,
+    relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -75,6 +76,14 @@ pub trait Styled: Sized {
         self.text_style()
             .get_or_insert_with(Default::default)
             .white_space = Some(WhiteSpace::Nowrap);
+        self
+    }
+
+    /// Keeps continuous non-whitespace text together when it fits on a line.
+    fn word_break_keep_all(mut self) -> Self {
+        self.text_style()
+            .get_or_insert_with(Default::default)
+            .word_break = Some(WordBreak::KeepAll);
         self
     }
 

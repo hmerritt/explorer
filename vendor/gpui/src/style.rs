@@ -326,6 +326,17 @@ pub enum WhiteSpace {
     Nowrap,
 }
 
+/// How to choose line-break opportunities within non-whitespace text.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum WordBreak {
+    /// Use GPUI's normal language- and punctuation-aware wrapping behavior.
+    #[default]
+    Normal,
+    /// Keep continuous non-whitespace text together when it fits on a line.
+    /// Tokens wider than the available line width may still be split.
+    KeepAll,
+}
+
 /// How to truncate text that overflows the width of the element
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TextOverflow {
@@ -388,6 +399,9 @@ pub struct TextStyle {
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
 
+    /// How to choose line-break opportunities within non-whitespace text
+    pub word_break: WordBreak,
+
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
 
@@ -414,6 +428,7 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            word_break: WordBreak::Normal,
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,

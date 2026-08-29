@@ -1,4 +1,4 @@
-use crate::{FontId, FontRun, Pixels, PlatformTextSystem, SharedString, TextRun, px};
+use crate::{FontId, FontRun, Pixels, PlatformTextSystem, SharedString, TextRun, WordBreak, px};
 use collections::HashMap;
 use std::{iter, sync::Arc};
 
@@ -35,6 +35,16 @@ impl LineWrapper {
         fragments: &'a [LineFragment],
         wrap_width: Pixels,
     ) -> impl Iterator<Item = Boundary> + 'a {
+        self.wrap_line_with_word_break(fragments, wrap_width, WordBreak::Normal)
+    }
+
+    /// Wrap a line of text using the requested word-break policy.
+    pub fn wrap_line_with_word_break<'a>(
+        &'a mut self,
+        fragments: &'a [LineFragment],
+        wrap_width: Pixels,
+        word_break: WordBreak,
+    ) -> impl Iterator<Item = Boundary> + 'a {
         let mut width = px(0.);
         let mut first_non_whitespace_ix = None;
         let mut indent = None;
@@ -58,20 +68,40 @@ impl LineWrapper {
                             continue;
                         }
 
-                        if Self::is_word_char(c) {
-                            if prev_c == ' ' && c != ' ' && first_non_whitespace_ix.is_some() {
-                                last_candidate_ix = ix;
-                                last_candidate_width = width;
+                        match word_break {
+                            WordBreak::Normal => {
+                                if Self::is_word_char(c) {
+                                    if prev_c == ' '
+                                        && c != ' '
+                                        && first_non_whitespace_ix.is_some()
+                                    {
+                                        last_candidate_ix = ix;
+                                        last_candidate_width = width;
+                                    }
+                                } else {
+                                    // CJK may not be space separated, e.g.: `Hello world你好世界`
+                                    if c != ' ' && first_non_whitespace_ix.is_some() {
+                                        last_candidate_ix = ix;
+                                        last_candidate_width = width;
+                                    }
+                                }
                             }
-                        } else {
-                            // CJK may not be space separated, e.g.: `Hello world你好世界`
-                            if c != ' ' && first_non_whitespace_ix.is_some() {
-                                last_candidate_ix = ix;
-                                last_candidate_width = width;
+                            WordBreak::KeepAll => {
+                                if prev_c.is_whitespace()
+                                    && !c.is_whitespace()
+                                    && first_non_whitespace_ix.is_some()
+                                {
+                                    last_candidate_ix = ix;
+                                    last_candidate_width = width;
+                                }
                             }
                         }
 
-                        if c != ' ' && first_non_whitespace_ix.is_none() {
+                        let is_non_whitespace = match word_break {
+                            WordBreak::Normal => c != ' ',
+                            WordBreak::KeepAll => !c.is_whitespace(),
+                        };
+                        if is_non_whitespace && first_non_whitespace_ix.is_none() {
                             first_non_whitespace_ix = Some(ix);
                         }
 
@@ -315,10 +345,9 @@ impl Boundary {
 mod tests {
     use super::*;
     use crate::{
-        Font, FontFeatures, FontStyle, FontWeight, Hsla, TestAppContext, TestDispatcher, font,
+        Font, FontFeatures, FontStyle, FontWeight, Hsla, TestAppContext, TestDispatcher,
+        WindowTextSystem, WrapBoundary, font,
     };
-    #[cfg(target_os = "macos")]
-    use crate::{TextRun, WindowTextSystem, WrapBoundary};
     use rand::prelude::*;
 
     fn build_wrapper() -> LineWrapper {
@@ -484,6 +513,130 @@ mod tests {
                 Boundary::new(18, 0)
             ],
         );
+    }
+
+    fn text_width(wrapper: &mut LineWrapper, text: &str) -> Pixels {
+        text.chars()
+            .map(|character| wrapper.width_for_char(character))
+            .fold(px(0.0), |width, character_width| width + character_width)
+    }
+
+    #[test]
+    fn keep_all_wraps_filename_tokens_only_at_unicode_whitespace() {
+        let mut wrapper = build_wrapper();
+        let text = "Double Indemnity (1944).mkv";
+        let wrap_width = text_width(&mut wrapper, "(1944).mkv") + px(1.0);
+
+        assert_eq!(
+            wrapper
+                .wrap_line_with_word_break(
+                    &[LineFragment::text(text)],
+                    wrap_width,
+                    WordBreak::KeepAll,
+                )
+                .collect::<Vec<_>>(),
+            &[Boundary::new(7, 0), Boundary::new(17, 0)],
+        );
+
+        let text = "a\u{2003}(1944).mkv";
+        assert_eq!(
+            wrapper
+                .wrap_line_with_word_break(
+                    &[LineFragment::text(text)],
+                    wrap_width,
+                    WordBreak::KeepAll,
+                )
+                .collect::<Vec<_>>(),
+            &[Boundary::new(4, 0)],
+        );
+    }
+
+    #[test]
+    fn keep_all_keeps_brackets_punctuation_symbols_and_emoji_in_one_token() {
+        let mut wrapper = build_wrapper();
+        let token = "()[]{}<>!?,;:/\\@#$%^&*=+|~`🙂";
+        let text = format!("a {token} z");
+        let wrap_width = text_width(&mut wrapper, token) + text_width(&mut wrapper, " ") + px(1.0);
+        let suffix_start = text.rfind('z').expect("suffix");
+
+        assert_eq!(
+            wrapper
+                .wrap_line_with_word_break(
+                    &[LineFragment::text(&text)],
+                    wrap_width,
+                    WordBreak::KeepAll,
+                )
+                .collect::<Vec<_>>(),
+            &[Boundary::new(2, 0), Boundary::new(suffix_start, 0)],
+        );
+    }
+
+    #[test]
+    fn keep_all_splits_a_token_that_is_wider_than_the_line() {
+        let mut wrapper = build_wrapper();
+        let text = "abcdefghij";
+        let wrap_width = text_width(&mut wrapper, "abcd") + px(1.0);
+        let boundaries = wrapper
+            .wrap_line_with_word_break(&[LineFragment::text(text)], wrap_width, WordBreak::KeepAll)
+            .collect::<Vec<_>>();
+
+        assert_eq!(boundaries.first(), Some(&Boundary::new(4, 0)));
+        assert!(boundaries.iter().all(|boundary| boundary.ix < text.len()));
+    }
+
+    #[crate::test]
+    fn shaped_text_cache_separates_word_break_policies(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text_system = WindowTextSystem::new(cx.text_system().clone());
+            let text = "aa (b).c";
+            let font = font(".ZedMono");
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let mut token_run = run.clone();
+            token_run.len = "aa (b".len();
+            let wrap_width = text_system
+                .layout_line("aa (b", px(16.0), &[token_run], None)
+                .width
+                + px(1.0);
+
+            let normal = text_system
+                .shape_text(
+                    text.into(),
+                    px(16.0),
+                    std::slice::from_ref(&run),
+                    Some(wrap_width),
+                    None,
+                )
+                .expect("normal wrapped text");
+            let keep_all = text_system
+                .shape_text_with_word_break(
+                    text.into(),
+                    px(16.0),
+                    &[run],
+                    Some(wrap_width),
+                    None,
+                    WordBreak::KeepAll,
+                )
+                .expect("keep-all wrapped text");
+
+            assert_ne!(
+                normal[0].layout.wrap_boundaries(),
+                keep_all[0].layout.wrap_boundaries(),
+            );
+            assert_eq!(
+                keep_all[0].layout.wrap_boundaries(),
+                &[WrapBoundary {
+                    run_ix: 0,
+                    glyph_ix: 3,
+                },],
+            );
+        });
     }
 
     #[test]

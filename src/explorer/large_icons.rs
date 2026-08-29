@@ -1,4 +1,4 @@
-use gpui::{App, Font, LineFragment, px};
+use gpui::{App, Font, LineFragment, WordBreak, px};
 
 use crate::explorer::{
     constants::{
@@ -196,7 +196,11 @@ fn large_icon_text_row_count(text: &str, font: &Font, cx: &App) -> usize {
         .line_wrapper(font.clone(), px(LARGE_ICON_TEXT_SIZE));
     let fragments = [LineFragment::text(text)];
     (line_wrapper
-        .wrap_line(&fragments, px(large_icon_filename_text_width()))
+        .wrap_line_with_word_break(
+            &fragments,
+            px(large_icon_filename_text_width()),
+            WordBreak::KeepAll,
+        )
         .count()
         + 1)
     .clamp(1, LARGE_ICON_TEXT_ROWS)

@@ -7227,6 +7227,7 @@ fn large_icon_filename(
         .text_size(px(LARGE_ICON_TEXT_SIZE))
         .line_height(px(LARGE_ICON_TEXT_LINE_HEIGHT))
         .font(font.clone())
+        .word_break_keep_all()
         .text_ellipsis()
         .line_clamp(LARGE_ICON_TEXT_ROWS)
         .child(

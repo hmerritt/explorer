@@ -1,4 +1,6 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
+use crate::{
+    FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, WordBreak, point, px,
+};
 use collections::FxHashMap;
 use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use smallvec::SmallVec;
@@ -130,6 +132,7 @@ impl LineLayout {
         text: &str,
         wrap_width: Pixels,
         max_lines: Option<usize>,
+        word_break: WordBreak,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
         let mut first_non_whitespace_ix = None;
@@ -164,19 +167,34 @@ impl LineLayout {
 
             // Here is very similar to `LineWrapper::wrap_line` to determine text wrapping,
             // but there are some differences, so we have to duplicate the code here.
-            if LineWrapper::is_word_char(ch) {
-                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
+            match word_break {
+                WordBreak::Normal => {
+                    if LineWrapper::is_word_char(ch) {
+                        if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
+                            last_candidate_ix = Some(boundary);
+                            last_candidate_x = x;
+                        }
+                    } else if ch != ' ' && first_non_whitespace_ix.is_some() {
+                        last_candidate_ix = Some(boundary);
+                        last_candidate_x = x;
+                    }
                 }
-            } else {
-                if ch != ' ' && first_non_whitespace_ix.is_some() {
-                    last_candidate_ix = Some(boundary);
-                    last_candidate_x = x;
+                WordBreak::KeepAll => {
+                    if prev_ch.is_whitespace()
+                        && !ch.is_whitespace()
+                        && first_non_whitespace_ix.is_some()
+                    {
+                        last_candidate_ix = Some(boundary);
+                        last_candidate_x = x;
+                    }
                 }
             }
 
-            if ch != ' ' && first_non_whitespace_ix.is_none() {
+            let is_non_whitespace = match word_break {
+                WordBreak::Normal => ch != ' ',
+                WordBreak::KeepAll => !ch.is_whitespace(),
+            };
+            if is_non_whitespace && first_non_whitespace_ix.is_none() {
                 first_non_whitespace_ix = Some(boundary);
             }
 
@@ -465,13 +483,14 @@ impl LineLayoutCache {
         curr_frame.used_wrapped_lines.clear();
     }
 
-    pub fn layout_wrapped_line<Text>(
+    pub fn layout_wrapped_line_with_word_break<Text>(
         &self,
         text: Text,
         font_size: Pixels,
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        word_break: WordBreak,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -483,6 +502,7 @@ impl LineLayoutCache {
             runs,
             wrap_width,
             force_width: None,
+            word_break,
         } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
@@ -503,7 +523,12 @@ impl LineLayoutCache {
             let text = SharedString::from(text);
             let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
-                unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
+                unwrapped_layout.compute_wrap_boundaries(
+                    text.as_ref(),
+                    wrap_width,
+                    max_lines,
+                    word_break,
+                )
             } else {
                 SmallVec::new()
             };
@@ -518,6 +543,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 wrap_width,
                 force_width: None,
+                word_break,
             });
 
             let mut current_frame = self.current_frame.write();
@@ -547,6 +573,7 @@ impl LineLayoutCache {
             runs,
             wrap_width: None,
             force_width,
+            word_break: WordBreak::Normal,
         } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
@@ -583,6 +610,7 @@ impl LineLayoutCache {
                 runs: SmallVec::from(runs),
                 wrap_width: None,
                 force_width,
+                word_break: WordBreak::Normal,
             });
             let layout = Arc::new(layout);
             current_frame.lines.insert(key.clone(), layout.clone());
@@ -610,6 +638,7 @@ struct CacheKey {
     runs: SmallVec<[FontRun; 1]>,
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
+    word_break: WordBreak,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -619,6 +648,7 @@ struct CacheKeyRef<'a> {
     runs: &'a [FontRun],
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
+    word_break: WordBreak,
 }
 
 impl PartialEq for dyn AsCacheKeyRef + '_ {
@@ -643,6 +673,7 @@ impl AsCacheKeyRef for CacheKey {
             runs: self.runs.as_slice(),
             wrap_width: self.wrap_width,
             force_width: self.force_width,
+            word_break: self.word_break,
         }
     }
 }
