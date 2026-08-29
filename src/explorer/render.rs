@@ -4220,7 +4220,7 @@ fn render_download_notice_row(
                         .overflow_hidden()
                         .child(SharedString::from(text)),
                 )
-                .when(row.status.is_active() && row.kind.can_cancel(), |this| {
+                .when(row.status.is_active(), |this| {
                     this.child(download_cancel_button(id, cx))
                 }),
         )
@@ -12384,15 +12384,27 @@ mod tests {
         assert!(cx.debug_bounds("download-cancel-12").is_none());
         assert!(cx.debug_bounds("download-cancel-13").is_none());
         assert!(cx.debug_bounds("download-progress-14").is_some());
-        assert!(cx.debug_bounds("download-cancel-14").is_none());
+        let video_cancel = cx
+            .debug_bounds("download-cancel-14")
+            .expect("active video download cancel button");
 
-        cx.simulate_mouse_down(cancel.center(), MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_up(cancel.center(), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_down(
+            video_cancel.center(),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            video_cancel.center(),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
         cx.run_until_parked();
 
         cx.read_entity(&view, |view, _| {
-            assert!(view.download_notice_rows.iter().all(|row| row.id != 10));
+            assert!(view.download_notice_rows.iter().all(|row| row.id != 14));
+            assert!(view.download_notice_rows.iter().any(|row| row.id == 10));
         });
+        assert!(cx.debug_bounds("download-notice-10").is_some());
         assert!(cx.debug_bounds("download-notice-11").is_some());
         assert!(cx.debug_bounds("download-notice-12").is_some());
     }

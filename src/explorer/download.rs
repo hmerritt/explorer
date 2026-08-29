@@ -3,19 +3,33 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
+    thread,
     time::Duration,
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{io::AsRawHandle, process::CommandExt};
+
+#[cfg(target_os = "windows")]
+use windows::{
+    Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject,
+        },
+    },
+    core::PCWSTR,
+};
 
 use futures::AsyncReadExt;
 use gpui::{Context, http_client::HttpClient};
@@ -35,6 +49,7 @@ use crate::explorer::{
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
 const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
+const YTDLP_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -42,12 +57,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub(super) enum DownloadNoticeKind {
     File,
     Video { site_domain: String },
-}
-
-impl DownloadNoticeKind {
-    pub(super) fn can_cancel(&self) -> bool {
-        self == &Self::File
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,6 +114,182 @@ pub(super) struct ActiveRemoteDownload {
 enum DownloadResult {
     File(PathBuf),
     Video,
+}
+
+pub(super) struct YtDlpProcessControl {
+    shared: Arc<YtDlpProcessState>,
+}
+
+struct YtDlpProcessState {
+    cancelled: AtomicBool,
+    child: Mutex<Option<YtDlpChild>>,
+}
+
+struct YtDlpChild {
+    child: Child,
+    #[cfg(target_os = "windows")]
+    job: WindowsJob,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsJob(HANDLE);
+
+// Windows kernel handles may be used and closed from any thread. Access to the
+// process and job is serialized by YtDlpProcessState::child.
+#[cfg(target_os = "windows")]
+unsafe impl Send for WindowsJob {}
+
+impl YtDlpProcessControl {
+    fn new() -> Self {
+        Self {
+            shared: Arc::new(YtDlpProcessState {
+                cancelled: AtomicBool::new(false),
+                child: Mutex::new(None),
+            }),
+        }
+    }
+
+    fn shared(&self) -> Arc<YtDlpProcessState> {
+        self.shared.clone()
+    }
+
+    pub(super) fn cancel(&self) {
+        self.shared.cancel();
+    }
+}
+
+impl Drop for YtDlpProcessControl {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl YtDlpProcessState {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Ok(mut child) = self.child.lock()
+            && let Some(child) = child.as_mut()
+        {
+            child.terminate();
+        }
+    }
+
+    fn register_child(&self, child: YtDlpChild) -> Result<(), String> {
+        let mut slot = self
+            .child
+            .lock()
+            .map_err(|_| "Could not track the yt-dlp process.".to_owned())?;
+        *slot = Some(child);
+        if self.cancelled.load(Ordering::Relaxed)
+            && let Some(child) = slot.as_mut()
+        {
+            child.terminate();
+        }
+        Ok(())
+    }
+
+    fn poll_exit(&self) -> Result<Option<ExitStatus>, String> {
+        let mut slot = self
+            .child
+            .lock()
+            .map_err(|_| "Could not access the yt-dlp process.".to_owned())?;
+        let Some(child) = slot.as_mut() else {
+            return Err("The yt-dlp process was not available.".to_owned());
+        };
+        match child.child.try_wait() {
+            Ok(Some(status)) => {
+                slot.take();
+                Ok(Some(status))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(format!("Could not wait for yt-dlp: {error}")),
+        }
+    }
+}
+
+impl YtDlpChild {
+    fn spawn(command: &mut Command) -> Result<Self, String> {
+        #[cfg(unix)]
+        command.process_group(0);
+
+        #[cfg(target_os = "windows")]
+        let job = WindowsJob::new()?;
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+
+        #[cfg(target_os = "windows")]
+        if let Err(error) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+
+        Ok(Self {
+            child,
+            #[cfg(target_os = "windows")]
+            job,
+        })
+    }
+
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        {
+            let process_group = i32::try_from(self.child.id()).ok().map(|pid| -pid);
+            let killed_group =
+                process_group.is_some_and(|group| unsafe { libc::kill(group, libc::SIGKILL) == 0 });
+            if !killed_group {
+                let _ = self.child.kill();
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if self.job.terminate().is_err() {
+            let _ = self.child.kill();
+        }
+
+        #[cfg(not(any(unix, target_os = "windows")))]
+        let _ = self.child.kill();
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsJob {
+    fn new() -> Result<Self, String> {
+        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|error| format!("Could not create a yt-dlp process job: {error}"))?;
+        let job = Self(handle);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(|error| format!("Could not configure the yt-dlp process job: {error}"))?;
+        Ok(job)
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        let process = HANDLE(child.as_raw_handle());
+        unsafe { AssignProcessToJobObject(self.0, process) }
+            .map_err(|error| format!("Could not track the yt-dlp process tree: {error}"))
+    }
+
+    fn terminate(&self) -> windows::core::Result<()> {
+        unsafe { TerminateJobObject(self.0, 1) }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) }.ok();
+    }
 }
 
 impl PendingDownload {
@@ -471,12 +656,16 @@ impl ExplorerView {
         });
 
         let command = ytdlp_command_spec(executable, options, url.as_str(), self.path.clone());
+        let process_control = YtDlpProcessControl::new();
+        let process_state = process_control.shared();
+        self.ytdlp_process_controls.push((id, process_control));
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { run_ytdlp_download(command) })
+                .spawn(async move { run_ytdlp_download(command, process_state) })
                 .await;
             let _ = this.update(cx, |explorer, cx| {
+                explorer.remove_ytdlp_process_control(id);
                 explorer.complete_download(id, result, cx);
                 cx.notify();
             });
@@ -490,6 +679,7 @@ impl ExplorerView {
             return;
         }
         self.download_tasks.clear();
+        self.ytdlp_process_controls.clear();
         self.download_batch_succeeded = 0;
         self.download_batch_failed = 0;
         self.download_batch_last_error = None;
@@ -500,11 +690,14 @@ impl ExplorerView {
         let Some(row_index) = self
             .download_notice_rows
             .iter()
-            .position(|row| row.id == id && row.status.is_active() && row.kind.can_cancel())
+            .position(|row| row.id == id && row.status.is_active())
         else {
             return;
         };
 
+        if let Some(control) = self.take_ytdlp_process_control(id) {
+            control.cancel();
+        }
         self.download_notice_rows.remove(row_index);
         self.remove_download_task(id);
         if self.active_remote_download.as_ref().map(|active| active.id) == Some(id) {
@@ -518,6 +711,18 @@ impl ExplorerView {
 
         self.finish_download_batch_if_idle();
         cx.notify();
+    }
+
+    fn take_ytdlp_process_control(&mut self, id: u64) -> Option<YtDlpProcessControl> {
+        let index = self
+            .ytdlp_process_controls
+            .iter()
+            .position(|(download_id, _)| *download_id == id)?;
+        Some(self.ytdlp_process_controls.swap_remove(index).1)
+    }
+
+    fn remove_ytdlp_process_control(&mut self, id: u64) {
+        drop(self.take_ytdlp_process_control(id));
     }
 
     fn drain_download_progress(
@@ -686,7 +891,10 @@ fn ytdlp_command_spec(
     }
 }
 
-fn run_ytdlp_download(command_spec: YtDlpCommandSpec) -> Result<DownloadResult, String> {
+fn run_ytdlp_download(
+    command_spec: YtDlpCommandSpec,
+    process: Arc<YtDlpProcessState>,
+) -> Result<DownloadResult, String> {
     let mut command = Command::new(&command_spec.executable);
     command
         .args(&command_spec.args)
@@ -697,19 +905,34 @@ fn run_ytdlp_download(command_spec: YtDlpCommandSpec) -> Result<DownloadResult, 
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .map(|stderr| read_bounded_tail(stderr, YTDLP_ERROR_MESSAGE_LIMIT))
-        .transpose()
-        .map_err(|error| format!("Could not read yt-dlp error output: {error}"))?
+    run_ytdlp_command(&mut command, process)
+}
+
+fn run_ytdlp_command(
+    command: &mut Command,
+    process: Arc<YtDlpProcessState>,
+) -> Result<DownloadResult, String> {
+    let mut child = YtDlpChild::spawn(command)?;
+    let stderr = child.child.stderr.take();
+    process.register_child(child)?;
+
+    let stderr_reader = stderr
+        .map(|stderr| thread::spawn(move || read_bounded_tail(stderr, YTDLP_ERROR_MESSAGE_LIMIT)));
+    let status = loop {
+        if let Some(status) = process.poll_exit()? {
+            break status;
+        }
+        thread::sleep(YTDLP_PROCESS_POLL_INTERVAL);
+    };
+    let stderr = stderr_reader
+        .map(|reader| {
+            reader
+                .join()
+                .map_err(|_| "Could not read yt-dlp error output.".to_owned())?
+                .map_err(|error| format!("Could not read yt-dlp error output: {error}"))
+        })
+        .transpose()?
         .unwrap_or_default();
-    let status = child
-        .wait()
-        .map_err(|error| format!("Could not wait for yt-dlp: {error}"))?;
     ytdlp_result_from_process(status.success(), &status.to_string(), &stderr)
 }
 
@@ -1009,6 +1232,220 @@ mod tests {
         let tail = read_bounded_tail(oversized.as_slice(), YTDLP_ERROR_MESSAGE_LIMIT)
             .expect("bounded tail");
         assert_eq!(tail.len(), YTDLP_ERROR_MESSAGE_LIMIT);
+    }
+
+    const YTDLP_TEST_MODE: &str = "EXPLORER_TEST_YTDLP_MODE";
+    const YTDLP_TEST_READY: &str = "EXPLORER_TEST_YTDLP_READY";
+    const YTDLP_TEST_DESCENDANT_READY: &str = "EXPLORER_TEST_YTDLP_DESCENDANT_READY";
+    const YTDLP_TEST_DESCENDANT_FINISHED: &str = "EXPLORER_TEST_YTDLP_DESCENDANT_FINISHED";
+
+    #[test]
+    fn ytdlp_process_test_helper() {
+        let Some(_) = std::env::var_os(YTDLP_TEST_MODE) else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var_os(YTDLP_TEST_READY).expect("ready path"));
+        let descendant_ready = PathBuf::from(
+            std::env::var_os(YTDLP_TEST_DESCENDANT_READY).expect("descendant ready path"),
+        );
+        let _ = std::env::var_os(YTDLP_TEST_DESCENDANT_FINISHED).expect("descendant finished path");
+
+        #[cfg(target_os = "windows")]
+        let mut descendant = {
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[IO.File]::WriteAllText($env:EXPLORER_TEST_YTDLP_DESCENDANT_READY, 'ready'); Start-Sleep -Seconds 1; [IO.File]::WriteAllText($env:EXPLORER_TEST_YTDLP_DESCENDANT_FINISHED, 'finished'); Start-Sleep -Seconds 30",
+            ]);
+            command
+        };
+        #[cfg(unix)]
+        let mut descendant = {
+            let mut command = Command::new("/bin/sh");
+            command.args([
+                "-c",
+                "printf ready > \"$EXPLORER_TEST_YTDLP_DESCENDANT_READY\"; sleep 1; printf finished > \"$EXPLORER_TEST_YTDLP_DESCENDANT_FINISHED\"; sleep 30",
+            ]);
+            command
+        };
+        descendant
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut descendant = descendant.spawn().expect("spawn descendant helper");
+        wait_for_ytdlp_test_path(&descendant_ready, Duration::from_secs(5));
+        std::fs::write(ready, b"ready").expect("mark parent ready");
+        let _ = descendant.wait();
+    }
+
+    fn ytdlp_test_command(directory: &Path) -> Command {
+        let ready = directory.join("parent-ready");
+        let descendant_ready = directory.join("descendant-ready");
+        let descendant_finished = directory.join("descendant-finished");
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "explorer::download::tests::ytdlp_process_test_helper",
+                "--nocapture",
+            ])
+            .env(YTDLP_TEST_MODE, "parent")
+            .env(YTDLP_TEST_READY, ready)
+            .env(YTDLP_TEST_DESCENDANT_READY, descendant_ready)
+            .env(YTDLP_TEST_DESCENDANT_FINISHED, descendant_finished)
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+
+    fn wait_for_ytdlp_test_path(path: &Path, timeout: Duration) {
+        let started = std::time::Instant::now();
+        while !path.exists() {
+            assert!(
+                started.elapsed() < timeout,
+                "timed out waiting for {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn ytdlp_process_cancelled_before_registration_terminates_promptly() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let control = YtDlpProcessControl::new();
+        let state = control.shared();
+        control.cancel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let directory = temp.path().to_path_buf();
+
+        thread::spawn(move || {
+            let mut command = ytdlp_test_command(&directory);
+            let _ = result_tx.send(run_ytdlp_command(&mut command, state));
+        });
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("pre-cancelled process should stop promptly");
+        assert!(result.is_err());
+        assert!(control.shared.cancelled.load(Ordering::Relaxed));
+        assert!(control.shared.child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn ytdlp_process_cancel_terminates_registered_process_tree() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let control = YtDlpProcessControl::new();
+        let state = control.shared();
+        let (result_tx, result_rx) = mpsc::channel();
+        let directory = temp.path().to_path_buf();
+
+        thread::spawn(move || {
+            let mut command = ytdlp_test_command(&directory);
+            let _ = result_tx.send(run_ytdlp_command(&mut command, state));
+        });
+
+        let ready = temp.path().join("parent-ready");
+        let started = std::time::Instant::now();
+        while !ready.exists() {
+            if let Ok(result) = result_rx.try_recv() {
+                panic!("yt-dlp helper exited before becoming ready: {result:?}");
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "timed out waiting for {}",
+                ready.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        control.cancel();
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancelled process should stop promptly");
+        assert!(result.is_err());
+        assert!(control.shared.child.lock().unwrap().is_none());
+
+        thread::sleep(Duration::from_millis(1_250));
+        assert!(!temp.path().join("descendant-finished").exists());
+    }
+
+    #[gpui::test]
+    fn cancelling_one_video_keeps_other_downloads_and_excludes_it_from_summary(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        let continuing = YtDlpProcessControl::new();
+        let continuing_state = continuing.shared();
+        let cancelled = YtDlpProcessControl::new();
+        let cancelled_state = cancelled.shared();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "youtube.com".to_owned(),
+                        },
+                        file_name: "Video from youtube.com".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        kind: DownloadNoticeKind::Video {
+                            site_domain: "vimeo.com".to_owned(),
+                        },
+                        file_name: "Video from vimeo.com".to_owned(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.download_tasks = vec![(1, gpui::Task::ready(())), (2, gpui::Task::ready(()))];
+                view.ytdlp_process_controls = vec![(1, continuing), (2, cancelled)];
+                view.cancel_download(2, cx);
+
+                assert_eq!(
+                    view.download_notice_rows
+                        .iter()
+                        .map(|row| row.id)
+                        .collect::<Vec<_>>(),
+                    [1]
+                );
+                assert_eq!(
+                    view.download_tasks
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .collect::<Vec<_>>(),
+                    [1]
+                );
+                assert_eq!(view.ytdlp_process_controls[0].0, 1);
+                assert!(view.operation_notice.is_none());
+                assert!(cancelled_state.cancelled.load(Ordering::Relaxed));
+                assert!(!continuing_state.cancelled.load(Ordering::Relaxed));
+
+                view.remove_ytdlp_process_control(1);
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
+            });
+        });
+
+        assert!(cancelled_state.cancelled.load(Ordering::Relaxed));
+        assert!(continuing_state.cancelled.load(Ordering::Relaxed));
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_batch_succeeded, 1);
+            assert_eq!(view.download_batch_failed, 0);
+            assert_eq!(
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
+                Some("Downloaded video from youtube.com.")
+            );
+        });
     }
 
     #[gpui::test]
