@@ -30,22 +30,23 @@ use crate::explorer::{
     AddressSelectLeft, AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight,
     AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag,
     CloseTab, CopySelected, CreateNewFolder, CutSelected, DialogCancel, DialogConfirm,
-    DialogFocusPrimary, DialogFocusSecondary, EXPLORER_LARGE_ICONS_BINDING_CONTEXT, EnterSelected,
-    EnterSelectedInNewTab, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack,
-    GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveLargeIconDown, MoveLargeIconLeft,
-    MoveLargeIconRight, MoveLargeIconUp, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected,
-    OpenSelectedInNewTab, OpenSettings, PasteClipboard, PermanentlyDeleteSelected,
-    PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit, Refresh, RenameBackspace,
-    RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
-    RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
-    RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
-    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
-    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
-    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
-    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TextInputRedo, TextInputUndo, TrashSelected,
-    UndoFileOperation,
+    DialogFocusPrimary, DialogFocusSecondary, EXPLORER_LARGE_ICONS_BINDING_CONTEXT,
+    EXPLORER_SPLIT_PANE_BINDING_CONTEXT, EnterSelected, EnterSelectedInNewTab, ExplorerTabs,
+    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveLargeIconDown,
+    MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp, MoveUp, NewTab, NewWindow,
+    OpenProperties, OpenSelected, OpenSelectedInNewTab, OpenSettings, PasteClipboard,
+    PermanentlyDeleteSelected, PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit,
+    Refresh, RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy,
+    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
+    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
+    RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
+    RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy,
+    SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste,
+    SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft,
+    SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft,
+    SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, TextInputRedo,
+    TextInputUndo, TrashSelected, UndoFileOperation,
 };
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
@@ -943,9 +944,20 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBindingProfile::Mac => push_mac_key_bindings(&mut bindings),
         KeyBindingProfile::WindowsLike => push_windows_like_key_bindings(&mut bindings),
     }
+    push_split_pane_key_bindings(&mut bindings);
     push_large_icon_key_bindings(&mut bindings);
 
     bindings
+}
+
+fn push_split_pane_key_bindings(bindings: &mut Vec<KeyBinding>) {
+    let context = Some(EXPLORER_SPLIT_PANE_BINDING_CONTEXT);
+    bindings.extend([
+        KeyBinding::new("alt-left", FocusPaneLeft, context),
+        KeyBinding::new("alt-right", FocusPaneRight, context),
+        KeyBinding::new("alt-up", FocusPaneUp, context),
+        KeyBinding::new("alt-down", FocusPaneDown, context),
+    ]);
 }
 
 fn push_large_icon_key_bindings(bindings: &mut Vec<KeyBinding>) {
@@ -1470,6 +1482,73 @@ mod tests {
 
         let windows_like_bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
         assert!(has_binding(&windows_like_bindings, GoUp, "left", None));
+    }
+
+    #[test]
+    fn split_pane_alt_arrow_bindings_override_navigation_only_in_file_panes() {
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+            let split_file_pane = [
+                KeyContext::parse("ExplorerTabs split = true")
+                    .expect("valid split workspace context"),
+                KeyContext::parse("Explorer").expect("valid explorer context"),
+            ];
+
+            assert!(resolves_to(
+                &bindings,
+                FocusPaneLeft,
+                "alt-left",
+                &split_file_pane
+            ));
+            assert!(resolves_to(
+                &bindings,
+                FocusPaneRight,
+                "alt-right",
+                &split_file_pane
+            ));
+            assert!(resolves_to(
+                &bindings,
+                FocusPaneUp,
+                "alt-up",
+                &split_file_pane
+            ));
+            assert!(resolves_to(
+                &bindings,
+                FocusPaneDown,
+                "alt-down",
+                &split_file_pane
+            ));
+
+            for input_context in [
+                "ExplorerRenameInput",
+                "ExplorerAddressInput",
+                "ExplorerSearchInput",
+            ] {
+                let input = [
+                    split_file_pane[0].clone(),
+                    split_file_pane[1].clone(),
+                    KeyContext::parse(input_context).expect("valid text input context"),
+                ];
+                assert!(!resolves_to(&bindings, FocusPaneLeft, "alt-left", &input));
+                assert!(!resolves_to(&bindings, FocusPaneDown, "alt-down", &input));
+            }
+        }
+
+        let ordinary = [KeyContext::parse("Explorer").expect("valid explorer context")];
+        let windows_like = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
+        assert!(resolves_to(&windows_like, GoBack, "alt-left", &ordinary));
+        assert!(resolves_to(
+            &windows_like,
+            GoForward,
+            "alt-right",
+            &ordinary
+        ));
+        assert!(resolves_to(&windows_like, GoUp, "alt-up", &ordinary));
+        assert!(has_no_resolved_binding(
+            &windows_like,
+            "alt-down",
+            &ordinary
+        ));
     }
 
     #[test]

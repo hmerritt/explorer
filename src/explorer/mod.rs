@@ -62,6 +62,7 @@ mod ytdlp_sites;
 
 pub(crate) const EXPLORER_LARGE_ICONS_KEY_CONTEXT: &str = "Explorer view = large_icons";
 pub(crate) const EXPLORER_LARGE_ICONS_BINDING_CONTEXT: &str = "Explorer && view == large_icons";
+pub(crate) const EXPLORER_SPLIT_PANE_BINDING_CONTEXT: &str = "((ExplorerTabs && split == true) > Explorer) && !ExplorerRenameInput && !ExplorerAddressInput && !ExplorerSearchInput";
 
 pub(crate) use actions::{
     MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
@@ -74,20 +75,20 @@ pub use actions::{
     AddressSelectLeft, AddressSelectRight, AddressSelectWordLeft, AddressSelectWordRight,
     AddressSuggestionDown, AddressSuggestionUp, AddressWordLeft, AddressWordRight, CancelDrag,
     CloseTab, CopySelected, CreateNewFolder, CutSelected, EnterSelected, EnterSelectedInNewTab,
-    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
-    MoveHome, MoveUp, NewTab, NewWindow, OpenProperties, OpenSelected, OpenSelectedInNewTab,
-    OpenSettings, PasteClipboard, PermanentlyDeleteSelected, PropertiesOpenNext,
-    PropertiesOpenPrevious, RecursiveSearchEdit, Refresh, RenameBackspace, RenameBackspaceWord,
-    RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete, RenameEnd, RenameHome,
-    RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectEnd,
-    RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
-    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
-    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
-    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
-    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, TextInputRedo, TextInputUndo, TrashSelected,
-    UndoFileOperation,
+    ExtendDown, ExtendEnd, ExtendHome, ExtendUp, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd, MoveHome, MoveUp, NewTab, NewWindow,
+    OpenProperties, OpenSelected, OpenSelectedInNewTab, OpenSettings, PasteClipboard,
+    PermanentlyDeleteSelected, PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit,
+    Refresh, RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy,
+    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
+    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
+    RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
+    RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy,
+    SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste,
+    SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft,
+    SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft,
+    SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, TextInputRedo,
+    TextInputUndo, TrashSelected, UndoFileOperation,
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;

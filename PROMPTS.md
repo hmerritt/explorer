@@ -13,7 +13,6 @@
 - Settings UI
     - context-menu
         - Detect installed programs, suggest adding into menu
-- Split-screen (see Zed)
 - Shell-extension system
 - Fix Chrome file drop not registering
 - UI refinement and improvements (tighten everything up, make it look nice)

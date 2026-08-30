@@ -698,6 +698,7 @@ pub struct SidebarSettings {
 #[serde(default)]
 pub struct TabSettings {
     pub focus_new: bool,
+    pub highlight_focused: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -847,7 +848,10 @@ impl Default for SidebarSettings {
 
 impl Default for TabSettings {
     fn default() -> Self {
-        Self { focus_new: false }
+        Self {
+            focus_new: false,
+            highlight_focused: false,
+        }
     }
 }
 
@@ -2606,6 +2610,7 @@ mod tests {
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
+        assert!(!settings.tabs.highlight_focused);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
@@ -2644,6 +2649,23 @@ mod tests {
             settings.sidebar.items.len(),
             if cfg!(target_os = "macos") { 6 } else { 4 }
         );
+    }
+
+    #[test]
+    fn tab_highlight_focused_defaults_false_and_round_trips() {
+        let missing: TabSettings =
+            serde_json::from_str(r#"{"focus_new":true}"#).expect("deserialize legacy tab settings");
+        assert!(missing.focus_new);
+        assert!(!missing.highlight_focused);
+
+        let explicit: TabSettings =
+            serde_json::from_str(r#"{"focus_new":false,"highlight_focused":true}"#)
+                .expect("deserialize explicit tab settings");
+        assert!(!explicit.focus_new);
+        assert!(explicit.highlight_focused);
+
+        let serialized = serde_json::to_value(&explicit).expect("serialize tab settings");
+        assert_eq!(serialized["highlight_focused"], true);
     }
 
     #[test]
@@ -2975,6 +2997,7 @@ mod tests {
         assert!(settings.view.show_extensions);
         assert!(!settings.view.show_folder_sizes);
         assert!(!settings.tabs.focus_new);
+        assert!(!settings.tabs.highlight_focused);
         assert_eq!(settings.view.mode, FileViewMode::Details);
         assert_eq!(settings.view.mode_media, FileViewMode::LargeIcons);
         assert_eq!(settings.view.remote_mode_media, FileViewMode::Details);
@@ -3771,7 +3794,9 @@ mod tests {
             document["sidebar"]["items"],
             Value::Array(expected_sidebar_items)
         );
-        assert!(json.contains("\n  \"tabs\": {\"focus_new\": false},"));
+        assert!(
+            json.contains("\n  \"tabs\": {\"focus_new\": false, \"highlight_focused\": false},")
+        );
         assert!(json.contains("\n      \"order\": [\"date_modified\", \"type\", \"size\"],"));
         assert!(json.contains(
             "\n      \"widths\": {\"date_modified\": 150, \"size\": 120, \"type\": 150}"

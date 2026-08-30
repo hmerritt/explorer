@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::window_chrome::TITLEBAR_HEIGHT;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
     CursorStyle, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths,
@@ -359,6 +360,15 @@ pub(super) struct ExplorerSharedChrome {
     pub(super) utility_bar: AnyElement,
     pub(super) sidebar: Option<AnyElement>,
     pub(super) overlays: Vec<AnyElement>,
+}
+
+fn address_suggestions_top(shared_chrome_hosted: bool) -> f32 {
+    let host_offset = if shared_chrome_hosted {
+        TITLEBAR_HEIGHT
+    } else {
+        0.0
+    };
+    host_offset + ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT
 }
 
 impl ExplorerView {
@@ -1336,7 +1346,7 @@ impl ExplorerView {
         let left = NAVBAR_HORIZONTAL_PADDING + (NAV_BUTTON_SIZE * 4.0) + (NAVBAR_ITEM_GAP * 4.0);
         let width =
             (f32::from(window.bounds().size.width) - left - NAVBAR_HORIZONTAL_PADDING).max(0.0);
-        let top = ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT;
+        let top = address_suggestions_top(self.shared_chrome_hosted);
 
         let mut dropdown = div()
             .w(px(width))
@@ -1480,7 +1490,7 @@ impl ExplorerView {
 
         let left = NAVBAR_HORIZONTAL_PADDING + (NAV_BUTTON_SIZE * 4.0) + (NAVBAR_ITEM_GAP * 4.0);
         let right = f32::from(window.bounds().size.width) - NAVBAR_HORIZONTAL_PADDING;
-        let top = ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT;
+        let top = address_suggestions_top(self.shared_chrome_hosted);
         let bottom = top
             + address.suggestions_viewport_height()
             + (ADDRESS_SUGGESTIONS_VERTICAL_PADDING * 2.0);
@@ -6084,6 +6094,7 @@ fn address_suggestion_row(
 ) -> AnyElement {
     div()
         .id(("address-suggestion", index))
+        .debug_selector(move || format!("address-suggestion-{index}"))
         .flex()
         .flex_row()
         .items_center()
@@ -8016,6 +8027,7 @@ mod tests {
     };
     use crate::explorer::{
         DirectoryKind,
+        address_bar::folder_suggestions_for_input,
         clipboard::{
             ClipboardMetric, ClipboardSummaryDetails, FileClipboard, FileClipboardOperation,
             clipboard_item_can_paste, clipboard_item_for_files, clipboard_summary,
@@ -8042,14 +8054,15 @@ mod tests {
         CLIPBOARD_STATUS_POPUP_SHOW_DELAY, CODEBASE_MAKEUP_BAR_WIDTH,
         CODEBASE_MAKEUP_SEPARATOR_WIDTH, CONTEXT_MENU_MAX_WIDTH, CONTEXT_MENU_MIN_WIDTH,
         CUT_ITEM_OPACITY, ClipboardStatusPopupLayout, CodebaseMakeupSegment,
-        DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE, DROP_INDICATOR_TARGET_MAX_WIDTH,
-        DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG, FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG,
-        FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE, IMAGE_HOVER_PREVIEW_OFFSET_X,
-        IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview, NAME_CELL_LEFT_PADDING,
-        NAME_ICON_TEXT_GAP, RECURSIVE_SEARCH_ROW_HEIGHT, ROW_HEIGHT,
-        RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP, SIDEBAR_GROUP_GAP,
-        SIDEBAR_ITEM_GAP, UTILITY_TEXT_BUTTON_ICON_SIZE, UTILITY_TEXT_BUTTON_WIDTH,
-        available_filename_text_width, clipboard_status_popup_layout, codebase_makeup_segments,
+        DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE, DIRECTORY_BAR_HEIGHT,
+        DROP_INDICATOR_TARGET_MAX_WIDTH, DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG,
+        FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
+        IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
+        NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, NAVBAR_HEIGHT, RECURSIVE_SEARCH_ROW_HEIGHT,
+        ROW_HEIGHT, RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP,
+        SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP, TITLEBAR_HEIGHT, UTILITY_TEXT_BUTTON_ICON_SIZE,
+        UTILITY_TEXT_BUTTON_WIDTH, address_suggestions_top, available_filename_text_width,
+        clipboard_status_popup_layout, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
@@ -8076,6 +8089,48 @@ mod tests {
             .iter()
             .map(|entry| entry.name.clone())
             .collect()
+    }
+
+    #[test]
+    fn hosted_address_suggestions_start_below_the_shared_address_bar() {
+        let standalone_top = address_suggestions_top(false);
+        let hosted_top = address_suggestions_top(true);
+
+        assert_eq!(hosted_top - standalone_top, TITLEBAR_HEIGHT);
+        assert_eq!(
+            standalone_top,
+            ((NAVBAR_HEIGHT - DIRECTORY_BAR_HEIGHT) / 2.0) + DIRECTORY_BAR_HEIGHT
+        );
+        assert!(hosted_top >= TITLEBAR_HEIGHT + DIRECTORY_BAR_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn standalone_address_suggestions_render_below_the_address_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("child")).expect("create suggested directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                view.active_address_bar
+                    .as_mut()
+                    .expect("active address edit")
+                    .suggestions = folder_suggestions_for_input("", temp.path(), true);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let input = cx
+            .debug_bounds("directory-bar-input")
+            .expect("address input bounds");
+        let suggestion = cx
+            .debug_bounds("address-suggestion-0")
+            .expect("address suggestion bounds");
+        assert!(suggestion.origin.y >= input.bottom());
     }
 
     fn hovered_entry_name(view: &ExplorerView) -> Option<String> {

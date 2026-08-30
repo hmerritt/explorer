@@ -12,7 +12,8 @@ use gpui::{
 };
 
 use crate::explorer::{
-    CloseTab, NewTab, NewWindow, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
+    CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, NewTab, NewWindow,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
     icons::{
@@ -69,6 +70,25 @@ enum SplitDirection {
     Down,
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NormalizedPaneRect {
+    pane: PaneId,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl NormalizedPaneRect {
+    fn horizontal_center(self) -> f32 {
+        (self.left + self.right) / 2.0
+    }
+
+    fn vertical_center(self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
 }
 
 impl SplitDirection {
@@ -219,6 +239,103 @@ impl PaneNode {
                 }
             }
         }
+    }
+
+    fn normalized_rects(&self) -> Vec<NormalizedPaneRect> {
+        let mut rects = Vec::with_capacity(self.pane_count());
+        self.collect_normalized_rects(0.0, 0.0, 1.0, 1.0, &mut rects);
+        rects
+    }
+
+    fn collect_normalized_rects(
+        &self,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        rects: &mut Vec<NormalizedPaneRect>,
+    ) {
+        match self {
+            Self::Leaf(pane) => rects.push(NormalizedPaneRect {
+                pane: *pane,
+                left,
+                top,
+                right,
+                bottom,
+            }),
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+                ..
+            } => match axis {
+                SplitAxis::Horizontal => {
+                    let split = left + ((right - left) * ratio);
+                    first.collect_normalized_rects(left, top, split, bottom, rects);
+                    second.collect_normalized_rects(split, top, right, bottom, rects);
+                }
+                SplitAxis::Vertical => {
+                    let split = top + ((bottom - top) * ratio);
+                    first.collect_normalized_rects(left, top, right, split, rects);
+                    second.collect_normalized_rects(left, split, right, bottom, rects);
+                }
+            },
+        }
+    }
+
+    fn adjacent_pane(&self, pane: PaneId, direction: SplitDirection) -> Option<PaneId> {
+        const EPSILON: f32 = 0.000_001;
+
+        let rects = self.normalized_rects();
+        let current = rects.iter().find(|rect| rect.pane == pane).copied()?;
+        rects
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.pane != pane)
+            .filter_map(|(order, candidate)| {
+                let perpendicular_overlap = match direction {
+                    SplitDirection::Left | SplitDirection::Right => {
+                        current.bottom.min(candidate.bottom) - current.top.max(candidate.top)
+                    }
+                    SplitDirection::Up | SplitDirection::Down => {
+                        current.right.min(candidate.right) - current.left.max(candidate.left)
+                    }
+                };
+                if perpendicular_overlap <= EPSILON {
+                    return None;
+                }
+
+                let (in_direction, boundary_gap, center_gap) = match direction {
+                    SplitDirection::Left => (
+                        candidate.right <= current.left + EPSILON,
+                        current.left - candidate.right,
+                        (current.vertical_center() - candidate.vertical_center()).abs(),
+                    ),
+                    SplitDirection::Right => (
+                        candidate.left + EPSILON >= current.right,
+                        candidate.left - current.right,
+                        (current.vertical_center() - candidate.vertical_center()).abs(),
+                    ),
+                    SplitDirection::Up => (
+                        candidate.bottom <= current.top + EPSILON,
+                        current.top - candidate.bottom,
+                        (current.horizontal_center() - candidate.horizontal_center()).abs(),
+                    ),
+                    SplitDirection::Down => (
+                        candidate.top + EPSILON >= current.bottom,
+                        candidate.top - current.bottom,
+                        (current.horizontal_center() - candidate.horizontal_center()).abs(),
+                    ),
+                };
+                in_direction.then_some((candidate.pane, boundary_gap.max(0.0), center_gap, order))
+            })
+            .min_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then_with(|| a.2.total_cmp(&b.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            })
+            .map(|(pane, _, _, _)| pane)
     }
 }
 
@@ -827,6 +944,28 @@ impl ExplorerTabs {
         true
     }
 
+    fn focus_adjacent_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((workspace_tab, next_pane)) = self
+            .active_tab()
+            .filter(|tab| tab.is_split())
+            .and_then(|tab| {
+                tab.layout
+                    .adjacent_pane(tab.active_pane, direction)
+                    .map(|pane| (tab.id, pane))
+            })
+        else {
+            return false;
+        };
+
+        self.activate_pane(workspace_tab, next_pane, window, cx);
+        true
+    }
+
     fn reorder_dragged_tab(&mut self, dragged_id: TabId, target_id: TabId, before: bool) -> bool {
         reorder_tabs(&mut self.tabs, dragged_id, target_id, before)
     }
@@ -956,6 +1095,50 @@ impl ExplorerTabs {
         cx: &mut Context<Self>,
     ) {
         if self.select_tab_by_index(action.index, window, cx) {
+            cx.notify();
+        }
+    }
+
+    fn handle_focus_pane_left(
+        &mut self,
+        _: &FocusPaneLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_adjacent_pane(SplitDirection::Left, window, cx) {
+            cx.notify();
+        }
+    }
+
+    fn handle_focus_pane_right(
+        &mut self,
+        _: &FocusPaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_adjacent_pane(SplitDirection::Right, window, cx) {
+            cx.notify();
+        }
+    }
+
+    fn handle_focus_pane_up(
+        &mut self,
+        _: &FocusPaneUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_adjacent_pane(SplitDirection::Up, window, cx) {
+            cx.notify();
+        }
+    }
+
+    fn handle_focus_pane_down(
+        &mut self,
+        _: &FocusPaneDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_adjacent_pane(SplitDirection::Down, window, cx) {
             cx.notify();
         }
     }
@@ -1339,7 +1522,12 @@ impl ExplorerTabs {
                 };
                 let pane_id = *pane_id;
                 let view = pane.view.clone();
-                let is_active = pane_id == active_pane && tab.is_split();
+                let is_active = pane_focus_outline_visible(
+                    pane_id == active_pane,
+                    tab.is_split(),
+                    cx.try_global::<SettingsState>()
+                        .is_some_and(|settings| settings.value.tabs.highlight_focused),
+                );
                 let dock_target = self
                     .dock_target
                     .filter(|_| self.dragging_tab.is_some())
@@ -1637,21 +1825,22 @@ fn split_direction_for_position(
     let height = f32::from(bounds.size.height);
     let x = f32::from(position.x - bounds.origin.x);
     let y = f32::from(position.y - bounds.origin.y);
-    let threshold = (width.min(height) * 0.25).clamp(32.0, 96.0);
+    let horizontal_threshold = width / 3.0;
+    let vertical_threshold = height / 3.0;
     let mut candidates = Vec::with_capacity(4);
     if width >= PANE_MIN_WIDTH * 2.0 + SPLIT_DIVIDER_SIZE {
-        if x <= threshold {
+        if x <= horizontal_threshold {
             candidates.push((x, SplitDirection::Left));
         }
-        if width - x <= threshold {
+        if width - x <= horizontal_threshold {
             candidates.push((width - x, SplitDirection::Right));
         }
     }
     if height >= PANE_MIN_HEIGHT * 2.0 + SPLIT_DIVIDER_SIZE {
-        if y <= threshold {
+        if y <= vertical_threshold {
             candidates.push((y, SplitDirection::Up));
         }
-        if height - y <= threshold {
+        if height - y <= vertical_threshold {
             candidates.push((height - y, SplitDirection::Down));
         }
     }
@@ -1659,6 +1848,14 @@ fn split_direction_for_position(
         .into_iter()
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, direction)| direction)
+}
+
+fn pane_focus_outline_visible(
+    pane_is_active: bool,
+    workspace_is_split: bool,
+    highlight_focused: bool,
+) -> bool {
+    pane_is_active && workspace_is_split && highlight_focused
 }
 
 fn render_split_drop_preview(direction: SplitDirection) -> AnyElement {
@@ -1710,6 +1907,11 @@ impl Render for ExplorerTabs {
         self.cleanup_completed_background_operations(cx);
         let app_font = crate::settings::current_app_font(cx);
         let active_workspace = self.active_tab().cloned();
+        let split_key_context = active_workspace
+            .as_ref()
+            .is_some_and(ExplorerTab::is_split)
+            .then_some("ExplorerTabs split = true")
+            .unwrap_or("ExplorerTabs");
         let active_view = active_workspace.as_ref().map(ExplorerTab::active_view);
         let drop_exit_view = active_view.clone();
         let input_mouse_down_view = active_view.clone();
@@ -1739,13 +1941,17 @@ impl Render for ExplorerTabs {
 
         let mut content = div()
             .font(app_font.clone())
-            .key_context("ExplorerTabs")
+            .key_context(split_key_context)
             .on_action(cx.listener(Self::handle_new_tab))
             .on_action(cx.listener(Self::handle_new_window))
             .on_action(cx.listener(Self::handle_close_tab))
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
             .on_action(cx.listener(Self::handle_select_tab_by_index))
+            .on_action(cx.listener(Self::handle_focus_pane_left))
+            .on_action(cx.listener(Self::handle_focus_pane_right))
+            .on_action(cx.listener(Self::handle_focus_pane_up))
+            .on_action(cx.listener(Self::handle_focus_pane_down))
             .capture_any_mouse_down(move |event, window, cx| {
                 if event.button == MouseButton::Left
                     && input_mouse_down_view
@@ -2221,6 +2427,7 @@ mod tests {
             PasteClipboard, RecursiveSearchEdit, RenameCancel, RenameCommit, RenameSelected,
             SearchCommit, SearchEdit,
         },
+        address_bar::folder_suggestions_for_input,
         clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
@@ -2495,8 +2702,18 @@ mod tests {
             state.value.view.show_folder_sizes = true;
             state.value.view.font = "Inter".to_owned();
             state.value.view.search_mode = crate::settings::SearchMode::Compact;
+            state.value.tabs.highlight_focused = true;
         });
         cx.run_until_parked();
+
+        cx.update(|_, app| {
+            assert!(app.global::<SettingsState>().value.tabs.highlight_focused);
+            assert!(pane_focus_outline_visible(
+                true,
+                true,
+                app.global::<SettingsState>().value.tabs.highlight_focused
+            ));
+        });
 
         let existing_views = cx.read_entity(&tabs, |tabs, _| {
             tabs.tabs
@@ -4664,6 +4881,64 @@ mod tests {
     }
 
     #[test]
+    fn directional_pane_navigation_follows_spatial_geometry_without_wrapping() {
+        let mut quarters = PaneNode::Leaf(PaneId(1));
+        assert!(quarters.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1));
+        assert!(quarters.insert_split(PaneId(1), PaneId(3), SplitDirection::Down, 2));
+        assert!(quarters.insert_split(PaneId(2), PaneId(4), SplitDirection::Down, 3));
+
+        assert_eq!(
+            quarters.adjacent_pane(PaneId(1), SplitDirection::Right),
+            Some(PaneId(2))
+        );
+        assert_eq!(
+            quarters.adjacent_pane(PaneId(1), SplitDirection::Down),
+            Some(PaneId(3))
+        );
+        assert_eq!(
+            quarters.adjacent_pane(PaneId(3), SplitDirection::Right),
+            Some(PaneId(4))
+        );
+        assert_eq!(
+            quarters.adjacent_pane(PaneId(4), SplitDirection::Up),
+            Some(PaneId(2))
+        );
+        assert_eq!(
+            quarters.adjacent_pane(PaneId(1), SplitDirection::Left),
+            None
+        );
+        assert_eq!(quarters.adjacent_pane(PaneId(2), SplitDirection::Up), None);
+    }
+
+    #[test]
+    fn directional_pane_navigation_prefers_nearest_perpendicular_center_then_visual_order() {
+        let mut uneven = PaneNode::Leaf(PaneId(1));
+        assert!(uneven.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1));
+        assert!(uneven.insert_split(PaneId(2), PaneId(3), SplitDirection::Down, 2));
+        assert!(uneven.set_ratio(1, 0.35));
+        assert!(uneven.set_ratio(2, 0.25));
+
+        assert_eq!(
+            uneven.adjacent_pane(PaneId(1), SplitDirection::Right),
+            Some(PaneId(3))
+        );
+
+        assert!(uneven.set_ratio(2, 0.5));
+        assert_eq!(
+            uneven.adjacent_pane(PaneId(1), SplitDirection::Right),
+            Some(PaneId(2))
+        );
+    }
+
+    #[test]
+    fn focused_pane_outline_requires_the_opt_in_setting() {
+        assert!(!pane_focus_outline_visible(true, true, false));
+        assert!(pane_focus_outline_visible(true, true, true));
+        assert!(!pane_focus_outline_visible(false, true, true));
+        assert!(!pane_focus_outline_visible(true, false, true));
+    }
+
+    #[test]
     fn split_drop_detection_is_edge_only_and_respects_minimum_size() {
         let bounds = Bounds {
             origin: gpui::point(px(100.0), px(50.0)),
@@ -4698,6 +4973,82 @@ mod tests {
         assert_eq!(
             split_direction_for_position(too_narrow, gpui::point(px(160.0), px(1.0))),
             Some(SplitDirection::Up)
+        );
+    }
+
+    #[test]
+    fn split_drop_detection_uses_one_third_axis_specific_bands_without_a_cap() {
+        let bounds = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(900.0), px(600.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(300.0), px(300.0))),
+            Some(SplitDirection::Left)
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(300.1), px(300.0))),
+            None
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(450.0), px(200.0))),
+            Some(SplitDirection::Up)
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(450.0), px(200.1))),
+            None
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(100.0), px(50.0))),
+            Some(SplitDirection::Up)
+        );
+
+        let wide = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(3000.0), px(600.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(wide, gpui::point(px(1000.0), px(300.0))),
+            Some(SplitDirection::Left)
+        );
+        assert_eq!(
+            split_direction_for_position(wide, gpui::point(px(1000.1), px(300.0))),
+            None
+        );
+
+        let tall = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(600.0), px(3000.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(tall, gpui::point(px(300.0), px(1000.0))),
+            Some(SplitDirection::Up)
+        );
+        assert_eq!(
+            split_direction_for_position(tall, gpui::point(px(300.0), px(1000.1))),
+            None
+        );
+
+        let exact_minimum = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(321.0), px(241.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(exact_minimum, gpui::point(px(107.0), px(120.5))),
+            Some(SplitDirection::Left)
+        );
+        assert_eq!(
+            split_direction_for_position(exact_minimum, gpui::point(px(160.5), px(80.0))),
+            Some(SplitDirection::Up)
+        );
+
+        let too_short = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(640.0), px(240.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(too_short, gpui::point(px(320.0), px(1.0))),
+            None
         );
     }
 
@@ -4745,6 +5096,77 @@ mod tests {
                 tabs.active_tab().unwrap().active_view().read(cx).path(),
                 temp.path()
             );
+        });
+    }
+
+    #[gpui::test]
+    fn hosted_address_suggestions_render_below_the_shared_address_input(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["child"]);
+        let view = active_test_view(&tabs, cx);
+
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                view.active_address_bar
+                    .as_mut()
+                    .expect("active address edit")
+                    .suggestions = folder_suggestions_for_input("", temp.path(), true);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let input = cx
+            .debug_bounds("directory-bar-input")
+            .expect("shared address input bounds");
+        let suggestion = cx
+            .debug_bounds("address-suggestion-0")
+            .expect("shared address suggestion bounds");
+        assert!(suggestion.origin.y >= input.bottom());
+    }
+
+    #[gpui::test]
+    fn pane_focus_actions_move_spatially_and_stop_at_outer_edges(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+
+        let (left_pane, right_pane) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let target = tabs.tabs[0].id;
+                let left_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                let right_pane = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    left_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                (left_pane, right_pane)
+            })
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(FocusPaneLeft);
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, left_pane);
+        });
+
+        cx.dispatch_action(FocusPaneLeft);
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, left_pane);
+        });
+
+        cx.dispatch_action(FocusPaneRight);
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, right_pane);
         });
     }
 

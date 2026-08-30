@@ -121,7 +121,11 @@ actions!(
         NewTab,
         CloseTab,
         SelectNextTab,
-        SelectPreviousTab
+        SelectPreviousTab,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown
     ]
 );
 
