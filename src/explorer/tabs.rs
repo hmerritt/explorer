@@ -1,9 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, DragMoveEvent, Entity, ExternalPaths, FileDropEvent,
-    FocusHandle, Focusable, IntoElement, Modifiers, MouseButton, MouseDownEvent, ParentElement,
-    Render, ScrollHandle, SharedString, Styled, Window, div, font, prelude::*, px, rgb,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity,
+    ExternalPaths, FileDropEvent, FocusHandle, Focusable, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
+    ScrollHandle, SharedString, Styled, Window, canvas, div, font, prelude::*, px, relative, rgb,
+    rgba,
 };
 
 use crate::explorer::{
@@ -36,16 +41,257 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
+const MAX_SPLIT_PANES: usize = 4;
+const PANE_MIN_WIDTH: f32 = 160.0;
+const PANE_MIN_HEIGHT: f32 = 120.0;
+const SPLIT_DIVIDER_SIZE: f32 = 1.0;
+const SPLIT_DIVIDER_HIT_SIZE: f32 = 7.0;
+const SPLIT_BORDER: u32 = 0xd9d9d9;
+const SPLIT_FOCUS_BLUE: u32 = 0x4b91d1;
 const CLOSE_GLYPH: &str = "\u{E711}";
 const NEW_TAB_GLYPH: &str = "\u{E710}";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TabId(u64);
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PaneId(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SplitDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl SplitDirection {
+    fn axis(self) -> SplitAxis {
+        match self {
+            Self::Left | Self::Right => SplitAxis::Horizontal,
+            Self::Up | Self::Down => SplitAxis::Vertical,
+        }
+    }
+
+    fn increasing(self) -> bool {
+        matches!(self, Self::Right | Self::Down)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PaneNode {
+    Leaf(PaneId),
+    Split {
+        id: u64,
+        axis: SplitAxis,
+        ratio: f32,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
+}
+
+impl PaneNode {
+    fn pane_ids(&self, ids: &mut Vec<PaneId>) {
+        match self {
+            Self::Leaf(id) => ids.push(*id),
+            Self::Split { first, second, .. } => {
+                first.pane_ids(ids);
+                second.pane_ids(ids);
+            }
+        }
+    }
+
+    fn pane_count(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    fn contains(&self, pane_id: PaneId) -> bool {
+        match self {
+            Self::Leaf(id) => *id == pane_id,
+            Self::Split { first, second, .. } => {
+                first.contains(pane_id) || second.contains(pane_id)
+            }
+        }
+    }
+
+    fn insert_split(
+        &mut self,
+        target: PaneId,
+        inserted: PaneId,
+        direction: SplitDirection,
+        split_id: u64,
+    ) -> bool {
+        match self {
+            Self::Leaf(id) if *id == target => {
+                let target_node = Self::Leaf(target);
+                let inserted_node = Self::Leaf(inserted);
+                let (first, second) = if direction.increasing() {
+                    (target_node, inserted_node)
+                } else {
+                    (inserted_node, target_node)
+                };
+                *self = Self::Split {
+                    id: split_id,
+                    axis: direction.axis(),
+                    ratio: 0.5,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                };
+                true
+            }
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
+                first.insert_split(target, inserted, direction, split_id)
+                    || second.insert_split(target, inserted, direction, split_id)
+            }
+        }
+    }
+
+    fn remove(&mut self, pane_id: PaneId) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
+                if matches!(first.as_ref(), Self::Leaf(id) if *id == pane_id) {
+                    *self = *std::mem::replace(second, Box::new(Self::Leaf(pane_id)));
+                    return true;
+                }
+                if matches!(second.as_ref(), Self::Leaf(id) if *id == pane_id) {
+                    *self = *std::mem::replace(first, Box::new(Self::Leaf(pane_id)));
+                    return true;
+                }
+                first.remove(pane_id) || second.remove(pane_id)
+            }
+        }
+    }
+
+    fn first_pane(&self) -> PaneId {
+        match self {
+            Self::Leaf(id) => *id,
+            Self::Split { first, .. } => first.first_pane(),
+        }
+    }
+
+    fn set_ratio(&mut self, split_id: u64, ratio: f32) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Split {
+                id,
+                ratio: current,
+                first,
+                second,
+                ..
+            } => {
+                if *id == split_id {
+                    *current = ratio;
+                    true
+                } else {
+                    first.set_ratio(split_id, ratio) || second.set_ratio(split_id, ratio)
+                }
+            }
+        }
+    }
+
+    fn split_ratio(&self, split_id: u64) -> Option<(SplitAxis, f32)> {
+        match self {
+            Self::Leaf(_) => None,
+            Self::Split {
+                id,
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                if *id == split_id {
+                    Some((*axis, *ratio))
+                } else {
+                    first
+                        .split_ratio(split_id)
+                        .or_else(|| second.split_ratio(split_id))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ExplorerPane {
+    id: PaneId,
+    view: Entity<ExplorerView>,
+}
+
 #[derive(Clone)]
 struct ExplorerTab {
     id: TabId,
+    // Kept as the focused view for existing integrations and test helpers.
     view: Entity<ExplorerView>,
+    panes: Vec<ExplorerPane>,
+    layout: PaneNode,
+    active_pane: PaneId,
+}
+
+impl ExplorerTab {
+    fn single(id: TabId, pane_id: PaneId, view: Entity<ExplorerView>) -> Self {
+        Self {
+            id,
+            view: view.clone(),
+            panes: vec![ExplorerPane { id: pane_id, view }],
+            layout: PaneNode::Leaf(pane_id),
+            active_pane: pane_id,
+        }
+    }
+
+    fn pane(&self, pane_id: PaneId) -> Option<&ExplorerPane> {
+        self.panes.iter().find(|pane| pane.id == pane_id)
+    }
+
+    fn active_view(&self) -> Entity<ExplorerView> {
+        self.view.clone()
+    }
+
+    fn activate_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some(view) = self.pane(pane_id).map(|pane| pane.view.clone()) else {
+            return false;
+        };
+        let changed = self.active_pane != pane_id;
+        self.active_pane = pane_id;
+        self.view = view;
+        changed
+    }
+
+    fn is_split(&self) -> bool {
+        self.panes.len() > 1
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DockTarget {
+    workspace_tab: TabId,
+    pane: PaneId,
+    direction: SplitDirection,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SplitResizeDrag {
+    workspace_tab: TabId,
+    split_id: u64,
+    axis: SplitAxis,
+    start_pointer: f32,
+    start_ratio: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TabContextMenu {
+    tab: TabId,
+    position: Point<Pixels>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,12 +300,14 @@ struct TabDrag {
     label: SharedString,
     path: PathBuf,
     is_active: bool,
+    dockable: bool,
 }
 
 struct TabDragPreview {
     label: SharedString,
     path: PathBuf,
     is_active: bool,
+    pane_count: usize,
     font: gpui::Font,
 }
 
@@ -67,8 +315,14 @@ pub struct ExplorerTabs {
     tabs: Vec<ExplorerTab>,
     active_tab: TabId,
     next_tab_id: u64,
+    next_pane_id: u64,
+    next_split_id: u64,
     background_operation_tabs: Vec<Entity<ExplorerView>>,
     dragging_tab: Option<TabId>,
+    dock_target: Option<DockTarget>,
+    split_bounds: HashMap<u64, Bounds<Pixels>>,
+    split_resize_drag: Option<SplitResizeDrag>,
+    tab_context_menu: Option<TabContextMenu>,
     tab_scroll_handle: ScrollHandle,
     should_move_window: bool,
 }
@@ -94,12 +348,14 @@ impl ExplorerTabs {
     ) -> Self {
         let first_id = TabId(1);
         let view = cx.new(|cx| {
-            ExplorerView::new_watched_with_focus_handle(
+            let mut view = ExplorerView::new_watched_with_focus_handle(
                 initial_path,
                 focus_handle,
                 Some(window),
                 cx,
-            )
+            );
+            view.set_shared_chrome_hosted(true);
+            view
         });
         observe_tab_view(&view, window, cx);
         observe_settings(cx);
@@ -107,11 +363,17 @@ impl ExplorerTabs {
         crate::explorer::clipboard::refresh_clipboard_summary(cx);
 
         Self {
-            tabs: vec![ExplorerTab { id: first_id, view }],
+            tabs: vec![ExplorerTab::single(first_id, PaneId(1), view)],
             active_tab: first_id,
             next_tab_id: 2,
+            next_pane_id: 2,
+            next_split_id: 1,
             background_operation_tabs: Vec::new(),
             dragging_tab: None,
+            dock_target: None,
+            split_bounds: HashMap::new(),
+            split_resize_drag: None,
+            tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
             should_move_window: false,
         }
@@ -124,15 +386,24 @@ impl ExplorerTabs {
         cx: &mut Context<Self>,
     ) -> Self {
         let first_id = TabId(1);
-        let view =
-            cx.new(|_| ExplorerView::new_with_focus_handle_for_test(initial_path, focus_handle));
+        let view = cx.new(|_| {
+            let mut view = ExplorerView::new_with_focus_handle_for_test(initial_path, focus_handle);
+            view.set_shared_chrome_hosted(true);
+            view
+        });
 
         Self {
-            tabs: vec![ExplorerTab { id: first_id, view }],
+            tabs: vec![ExplorerTab::single(first_id, PaneId(1), view)],
             active_tab: first_id,
             next_tab_id: 2,
+            next_pane_id: 2,
+            next_split_id: 1,
             background_operation_tabs: Vec::new(),
             dragging_tab: None,
+            dock_target: None,
+            split_bounds: HashMap::new(),
+            split_resize_drag: None,
+            tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
             should_move_window: false,
         }
@@ -148,14 +419,14 @@ impl ExplorerTabs {
 
     pub(crate) fn active_path(&self, cx: &App) -> Option<PathBuf> {
         self.active_tab()
-            .map(|tab| tab.view.read(cx).path().to_path_buf())
+            .map(|tab| tab.active_view().read(cx).path().to_path_buf())
     }
 
     fn tab_view(&self, id: TabId) -> Option<Entity<ExplorerView>> {
         self.tabs
             .iter()
             .find(|tab| tab.id == id)
-            .map(|tab| tab.view.clone())
+            .map(ExplorerTab::active_view)
     }
 
     fn add_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -166,15 +437,20 @@ impl ExplorerTabs {
     fn add_foreground_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        let pane_id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
 
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
         let view = cx.new(|cx| {
-            ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx)
+            let mut view =
+                ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx);
+            view.set_shared_chrome_hosted(true);
+            view
         });
         observe_tab_view(&view, window, cx);
 
-        self.tabs.push(ExplorerTab { id, view });
+        self.tabs.push(ExplorerTab::single(id, pane_id, view));
         self.cancel_active_tab_thumbnail_extraction(cx);
         self.active_tab = id;
         self.scroll_active_tab_into_view();
@@ -183,14 +459,19 @@ impl ExplorerTabs {
     fn add_background_tab(&mut self, path: PathBuf, window: &Window, cx: &mut Context<Self>) {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        let pane_id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
 
         let focus_handle = cx.focus_handle();
         let view = cx.new(|cx| {
-            ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx)
+            let mut view =
+                ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx);
+            view.set_shared_chrome_hosted(true);
+            view
         });
         observe_tab_view(&view, window, cx);
 
-        self.tabs.push(ExplorerTab { id, view });
+        self.tabs.push(ExplorerTab::single(id, pane_id, view));
     }
 
     fn add_configured_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -292,37 +573,72 @@ impl ExplorerTabs {
 
     fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab() {
-            let focus_handle = tab.view.read(cx).focus_handle(cx);
+            let focus_handle = tab.active_view().read(cx).focus_handle(cx);
             focus_handle.focus(window);
         }
     }
 
+    fn activate_pane(
+        &mut self,
+        workspace_tab: TabId,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == workspace_tab) else {
+            return;
+        };
+        if !self.tabs[tab_index].layout.contains(pane_id) {
+            return;
+        }
+
+        if self.active_tab == workspace_tab && self.tabs[tab_index].active_pane == pane_id {
+            return;
+        }
+
+        if let Some(previous) = self.active_tab().map(ExplorerTab::active_view) {
+            let _ = previous.update(cx, |view, cx| {
+                view.finish_search_edit();
+                view.cancel_address_bar_edit();
+                view.close_context_menu();
+                view.open_utility_menu = None;
+                cx.notify();
+            });
+        }
+
+        self.active_tab = workspace_tab;
+        self.tabs[tab_index].activate_pane(pane_id);
+        self.tab_context_menu = None;
+        self.focus_active_tab(window, cx);
+    }
+
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_tab = self.active_tab;
-        self.close_tab(active_tab, window, cx);
+        if self.active_tab().is_some_and(|tab| tab.panes.len() > 1) {
+            self.close_focused_pane(active_tab, window, cx);
+        } else {
+            self.close_tab(active_tab, window, cx);
+        }
     }
 
     fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        if !can_close_tab(self.tabs.len()) {
-            return;
-        }
-
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
-
-        let closing = self.tabs.remove(index);
-        let has_active_operation = closing.view.read(cx).has_background_operation();
-        let _ = closing.view.update(cx, |view, cx| {
-            view.prepare_for_tab_close(cx);
-            cx.notify();
-        });
-
-        if has_active_operation {
-            self.background_operation_tabs.push(closing.view);
+        let closes_only_split = self.tabs.len() == 1 && self.tabs[index].is_split();
+        if self.tabs.len() == 1 && !closes_only_split {
+            return;
         }
 
-        if self.active_tab == id {
+        let closing = self.tabs.remove(index);
+        for pane in closing.panes {
+            self.prepare_closed_view(pane.view, cx);
+        }
+
+        if closes_only_split {
+            let path = cx.global::<SettingsState>().startup_path();
+            self.add_foreground_tab(path, window, cx);
+        } else if self.active_tab == id {
             if let Some(next_active) = active_id_after_close_from_removed(&self.tabs, index) {
                 self.active_tab = next_active;
             }
@@ -331,6 +647,146 @@ impl ExplorerTabs {
         } else {
             self.scroll_active_tab_into_view();
         }
+        self.tab_context_menu = None;
+        self.dock_target = None;
+    }
+
+    fn prepare_closed_view(&mut self, view: Entity<ExplorerView>, cx: &mut Context<Self>) {
+        let has_active_operation = view.read(cx).has_background_operation();
+        let _ = view.update(cx, |view, cx| {
+            view.prepare_for_tab_close(cx);
+            cx.notify();
+        });
+        if has_active_operation {
+            self.background_operation_tabs.push(view);
+        }
+    }
+
+    fn close_focused_pane(
+        &mut self,
+        workspace_tab: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == workspace_tab) else {
+            return;
+        };
+        let pane_id = self.tabs[tab_index].active_pane;
+        if self.tabs[tab_index].panes.len() <= 1 {
+            self.close_tab(workspace_tab, window, cx);
+            return;
+        }
+
+        let removed = {
+            let tab = &mut self.tabs[tab_index];
+            if !tab.layout.remove(pane_id) {
+                return;
+            }
+            let Some(pane_index) = tab.panes.iter().position(|pane| pane.id == pane_id) else {
+                return;
+            };
+            let removed = tab.panes.remove(pane_index);
+            let next_pane = tab.layout.first_pane();
+            tab.activate_pane(next_pane);
+            removed
+        };
+        self.prepare_closed_view(removed.view, cx);
+        self.focus_active_tab(window, cx);
+        self.dock_target = None;
+    }
+
+    fn split_tab_into_pane(
+        &mut self,
+        source_tab: TabId,
+        target_tab: TabId,
+        target_pane: PaneId,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if source_tab == target_tab {
+            return false;
+        }
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == source_tab) else {
+            return false;
+        };
+        if self.tabs[source_index].panes.len() != 1 {
+            return false;
+        }
+        let Some(target_index_before) = self.tabs.iter().position(|tab| tab.id == target_tab)
+        else {
+            return false;
+        };
+        if self.tabs[target_index_before].panes.len() >= MAX_SPLIT_PANES
+            || !self.tabs[target_index_before].layout.contains(target_pane)
+        {
+            return false;
+        }
+
+        let source = self.tabs.remove(source_index);
+        let target_index = if source_index < target_index_before {
+            target_index_before - 1
+        } else {
+            target_index_before
+        };
+        let mut source_panes = source.panes;
+        let source_pane = source_panes.remove(0);
+        let split_id = self.next_split_id;
+        self.next_split_id += 1;
+        let target = &mut self.tabs[target_index];
+        let inserted = target
+            .layout
+            .insert_split(target_pane, source_pane.id, direction, split_id);
+        debug_assert!(inserted, "validated target pane must accept split");
+        if !inserted {
+            return false;
+        }
+        target.panes.push(source_pane);
+        let inserted_id = target.panes.last().expect("inserted pane").id;
+        target.activate_pane(inserted_id);
+        self.active_tab = target.id;
+        self.dock_target = None;
+        self.scroll_active_tab_into_view();
+        self.focus_active_tab(window, cx);
+        true
+    }
+
+    fn unsplit_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        if !self.tabs[index].is_split() {
+            return false;
+        }
+        let was_active = self.active_tab == id;
+        let split = self.tabs.remove(index);
+        let focused_pane = split.active_pane;
+        let mut order = Vec::new();
+        split.layout.pane_ids(&mut order);
+        let mut panes = split.panes;
+        let mut restored = Vec::with_capacity(order.len());
+        let mut focused_tab = None;
+        for pane_id in order {
+            let pane_index = panes
+                .iter()
+                .position(|pane| pane.id == pane_id)
+                .expect("split layout pane must exist");
+            let pane = panes.remove(pane_index);
+            let tab_id = TabId(self.next_tab_id);
+            self.next_tab_id += 1;
+            if pane.id == focused_pane {
+                focused_tab = Some(tab_id);
+            }
+            restored.push(ExplorerTab::single(tab_id, pane.id, pane.view));
+        }
+        self.tabs.splice(index..index, restored);
+        if was_active {
+            self.active_tab = focused_tab.expect("focused split pane must be restored");
+            self.scroll_active_tab_into_view();
+            self.focus_active_tab(window, cx);
+        }
+        self.tab_context_menu = None;
+        true
     }
 
     fn select_adjacent_tab(
@@ -391,7 +847,7 @@ impl ExplorerTabs {
 
     fn cancel_active_tab_thumbnail_extraction(&self, cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab() {
-            let _ = tab.view.update(cx, |view, cx| {
+            let _ = tab.active_view().update(cx, |view, cx| {
                 view.cancel_image_thumbnail_extraction(cx);
                 view.cancel_video_hover_preview(cx);
                 view.cancel_text_hover_preview();
@@ -402,13 +858,15 @@ impl ExplorerTabs {
     fn reload_tabs_except(&mut self, source_view: &Entity<ExplorerView>, cx: &mut Context<Self>) {
         let source_view_id = source_view.entity_id();
         for tab in &self.tabs {
-            if tab.view.entity_id() == source_view_id {
-                continue;
+            for pane in &tab.panes {
+                if pane.view.entity_id() == source_view_id {
+                    continue;
+                }
+                let _ = pane.view.update(cx, |view, cx| {
+                    view.reload_async_with_entry_metadata_resolution(cx);
+                    cx.notify();
+                });
             }
-            let _ = tab.view.update(cx, |view, cx| {
-                view.reload_async_with_entry_metadata_resolution(cx);
-                cx.notify();
-            });
         }
     }
 
@@ -419,12 +877,14 @@ impl ExplorerTabs {
     ) -> bool {
         let mut redirected = false;
         for tab in &self.tabs {
-            let _ = tab.view.update(cx, |view, cx| {
-                if view.redirect_after_mounted_volume_ejected_with_watcher(ejected_root, cx) {
-                    redirected = true;
-                    cx.notify();
-                }
-            });
+            for pane in &tab.panes {
+                let _ = pane.view.update(cx, |view, cx| {
+                    if view.redirect_after_mounted_volume_ejected_with_watcher(ejected_root, cx) {
+                        redirected = true;
+                        cx.notify();
+                    }
+                });
+            }
         }
         redirected
     }
@@ -432,9 +892,11 @@ impl ExplorerTabs {
     fn apply_settings_to_all_tabs(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<SettingsState>().value.clone();
         for tab in &self.tabs {
-            let _ = tab
-                .view
-                .update(cx, |view, cx| view.apply_settings(&settings, cx));
+            for pane in &tab.panes {
+                let _ = pane
+                    .view
+                    .update(cx, |view, cx| view.apply_settings(&settings, cx));
+            }
         }
         cx.notify();
     }
@@ -499,7 +961,6 @@ impl ExplorerTabs {
     }
 
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let can_close = self.tabs.len() > 1;
         let can_drag = can_drag_tab(self.tabs.len());
         let decorations = window.window_decorations();
         let tab_scroll_width = tab_strip_width(self.tabs.len());
@@ -507,7 +968,7 @@ impl ExplorerTabs {
             .tabs
             .iter()
             .map(|tab| {
-                self.render_tab(tab, can_close, can_drag, cx)
+                self.render_tab(tab, self.tabs.len() > 1 || tab.is_split(), can_drag, cx)
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -577,10 +1038,12 @@ impl ExplorerTabs {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_active = tab.id == self.active_tab;
-        let view = tab.view.read(cx);
+        let view = tab.active_view();
+        let view = view.read(cx);
         let label = SharedString::from(view.tab_label());
         let path = view.path().to_path_buf();
         let sidebar_group = view.active_sidebar_group();
+        let pane_count = tab.layout.pane_count();
         let tab_id = tab.id;
         let is_dragging = self.dragging_tab == Some(tab_id);
         let entity = cx.entity();
@@ -625,6 +1088,17 @@ impl ExplorerTabs {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.tab_context_menu = Some(TabContextMenu {
+                        tab: tab_id,
+                        position: event.position,
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
@@ -645,6 +1119,7 @@ impl ExplorerTabs {
                 label.clone(),
                 Some(&path),
                 sidebar_group,
+                pane_count,
                 can_close.then(|| close_tab_button(tab_id, cx)),
             ))
             .can_drop({
@@ -709,6 +1184,7 @@ impl ExplorerTabs {
                         label: drag_label,
                         path: drag_path,
                         is_active,
+                        dockable: pane_count == 1,
                     },
                     move |drag, _, _, cx| {
                         let font = crate::settings::current_app_font(cx);
@@ -720,6 +1196,7 @@ impl ExplorerTabs {
                             label: drag.label.clone(),
                             path: drag.path.clone(),
                             is_active: drag.is_active,
+                            pane_count,
                             font,
                         })
                     },
@@ -752,20 +1229,515 @@ impl ExplorerTabs {
 
         rendered_tab.into_any_element()
     }
+
+    fn update_dock_target(
+        &mut self,
+        workspace_tab: TabId,
+        pane: PaneId,
+        dragged: &TabDrag,
+        bounds: Bounds<Pixels>,
+        position: Point<Pixels>,
+    ) -> bool {
+        let eligible = dragged.dockable
+            && dragged.id != workspace_tab
+            && self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == workspace_tab)
+                .is_some_and(|tab| tab.layout.pane_count() < MAX_SPLIT_PANES);
+        let direction = eligible
+            .then(|| split_direction_for_position(bounds, position))
+            .flatten();
+        let next = direction.map(|direction| DockTarget {
+            workspace_tab,
+            pane,
+            direction,
+        });
+        if self.dock_target == next {
+            false
+        } else {
+            self.dock_target = next;
+            true
+        }
+    }
+
+    fn begin_split_resize(&mut self, workspace_tab: TabId, split_id: u64, pointer: Point<Pixels>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == workspace_tab) else {
+            return;
+        };
+        let Some((axis, ratio)) = tab.layout.split_ratio(split_id) else {
+            return;
+        };
+        let start_pointer = match axis {
+            SplitAxis::Horizontal => f32::from(pointer.x),
+            SplitAxis::Vertical => f32::from(pointer.y),
+        };
+        self.split_resize_drag = Some(SplitResizeDrag {
+            workspace_tab,
+            split_id,
+            axis,
+            start_pointer,
+            start_ratio: ratio,
+        });
+    }
+
+    fn update_split_resize(&mut self, pointer: Point<Pixels>) -> bool {
+        let Some(drag) = self.split_resize_drag else {
+            return false;
+        };
+        let Some(bounds) = self.split_bounds.get(&drag.split_id).copied() else {
+            return false;
+        };
+        let (current, total, min_size) = match drag.axis {
+            SplitAxis::Horizontal => (
+                f32::from(pointer.x),
+                f32::from(bounds.size.width),
+                PANE_MIN_WIDTH,
+            ),
+            SplitAxis::Vertical => (
+                f32::from(pointer.y),
+                f32::from(bounds.size.height),
+                PANE_MIN_HEIGHT,
+            ),
+        };
+        if total <= 0.0 {
+            return false;
+        }
+        let min_ratio = (min_size / total).min(0.49);
+        let ratio = (drag.start_ratio + (current - drag.start_pointer) / total)
+            .clamp(min_ratio, 1.0 - min_ratio);
+        self.tabs
+            .iter_mut()
+            .find(|tab| tab.id == drag.workspace_tab)
+            .is_some_and(|tab| tab.layout.set_ratio(drag.split_id, ratio))
+    }
+
+    fn render_active_layout(
+        &self,
+        tab: &ExplorerTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_pane_node(tab.id, tab.active_pane, &tab.layout, window, cx)
+    }
+
+    fn render_pane_node(
+        &self,
+        workspace_tab: TabId,
+        active_pane: PaneId,
+        node: &PaneNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match node {
+            PaneNode::Leaf(pane_id) => {
+                let Some(tab) = self.tabs.iter().find(|tab| tab.id == workspace_tab) else {
+                    return div().into_any_element();
+                };
+                let Some(pane) = tab.pane(*pane_id) else {
+                    return div().into_any_element();
+                };
+                let pane_id = *pane_id;
+                let view = pane.view.clone();
+                let is_active = pane_id == active_pane && tab.is_split();
+                let dock_target = self
+                    .dock_target
+                    .filter(|_| self.dragging_tab.is_some())
+                    .filter(|target| {
+                        target.workspace_tab == workspace_tab && target.pane == pane_id
+                    });
+                let entity = cx.entity();
+
+                div()
+                    .id(("explorer-pane", pane_id.0))
+                    .debug_selector(move || format!("explorer-pane-{}", pane_id.0))
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .size_full()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .bg(rgb(0xffffff))
+                    .capture_any_mouse_down({
+                        let entity = entity.clone();
+                        move |event, window, cx| {
+                            if matches!(event.button, MouseButton::Left | MouseButton::Right) {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.activate_pane(workspace_tab, pane_id, window, cx);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .on_drag_move::<TabDrag>({
+                        let entity = entity.clone();
+                        move |event: &DragMoveEvent<TabDrag>, _, cx| {
+                            let dragged = event.drag(cx).clone();
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.update_dock_target(
+                                    workspace_tab,
+                                    pane_id,
+                                    &dragged,
+                                    event.bounds,
+                                    event.event.position,
+                                ) {
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &TabDrag, window, cx| {
+                        let target = this.dock_target;
+                        if dragged.dockable
+                            && target.is_some_and(|target| {
+                                target.workspace_tab == workspace_tab && target.pane == pane_id
+                            })
+                        {
+                            let target = target.expect("checked dock target");
+                            this.split_tab_into_pane(
+                                dragged.id,
+                                workspace_tab,
+                                pane_id,
+                                target.direction,
+                                window,
+                                cx,
+                            );
+                        }
+                        this.clear_tab_drag();
+                        this.dock_target = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .when(is_active, |this| {
+                        this.border_1().border_color(rgb(SPLIT_FOCUS_BLUE))
+                    })
+                    .child(view)
+                    .when_some(dock_target, |this, target| {
+                        this.child(render_split_drop_preview(target.direction))
+                    })
+                    .into_any_element()
+            }
+            PaneNode::Split {
+                id,
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let split_id = *id;
+                let axis = *axis;
+                let ratio = *ratio;
+                let entity = cx.entity();
+                let first = self.render_pane_node(workspace_tab, active_pane, first, window, cx);
+                let second = self.render_pane_node(workspace_tab, active_pane, second, window, cx);
+                let divider = self.render_split_divider(workspace_tab, split_id, axis, cx);
+
+                div()
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        let Some(first) = bounds.first().copied() else {
+                            return;
+                        };
+                        let combined = bounds
+                            .iter()
+                            .copied()
+                            .skip(1)
+                            .fold(first, |combined, bounds| combined.union(&bounds));
+                        let _ = entity.update(cx, |this, _| {
+                            this.split_bounds.insert(split_id, combined);
+                        });
+                    })
+                    .id(("explorer-split", split_id))
+                    .relative()
+                    .flex()
+                    .when(axis == SplitAxis::Horizontal, |this| this.flex_row())
+                    .when(axis == SplitAxis::Vertical, |this| this.flex_col())
+                    .size_full()
+                    .min_w(px(0.0))
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .flex_shrink_0()
+                            .when(axis == SplitAxis::Horizontal, |this| {
+                                this.w(relative(ratio)).h_full()
+                            })
+                            .when(axis == SplitAxis::Vertical, |this| {
+                                this.h(relative(ratio)).w_full()
+                            })
+                            .child(first),
+                    )
+                    .child(divider)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .child(second),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_split_divider(
+        &self,
+        workspace_tab: TabId,
+        split_id: u64,
+        axis: SplitAxis,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let hit_offset = -(SPLIT_DIVIDER_HIT_SIZE - SPLIT_DIVIDER_SIZE) / 2.0;
+        div()
+            .id(("explorer-split-divider", split_id))
+            .relative()
+            .flex_none()
+            .bg(rgb(SPLIT_BORDER))
+            .when(axis == SplitAxis::Horizontal, |this| {
+                this.w(px(SPLIT_DIVIDER_SIZE)).h_full()
+            })
+            .when(axis == SplitAxis::Vertical, |this| {
+                this.h(px(SPLIT_DIVIDER_SIZE)).w_full()
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseDownEvent, _, _, cx| {
+                                if event.button != MouseButton::Left
+                                    || !bounds.contains(&event.position)
+                                {
+                                    return;
+                                }
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.begin_split_resize(
+                                        workspace_tab,
+                                        split_id,
+                                        event.position,
+                                    );
+                                    cx.stop_propagation();
+                                });
+                            }
+                        });
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseMoveEvent, _, _, cx| {
+                                if event.pressed_button != Some(MouseButton::Left) {
+                                    return;
+                                }
+                                let _ = entity.update(cx, |this, cx| {
+                                    if this.update_split_resize(event.position) {
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        });
+                        window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                            if event.button == MouseButton::Left {
+                                let _ = entity.update(cx, |this, _| {
+                                    this.split_resize_drag = None;
+                                });
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .when(axis == SplitAxis::Horizontal, |this| {
+                    this.left(px(hit_offset))
+                        .top_0()
+                        .w(px(SPLIT_DIVIDER_HIT_SIZE))
+                        .h_full()
+                        .cursor(CursorStyle::ResizeColumn)
+                })
+                .when(axis == SplitAxis::Vertical, |this| {
+                    this.top(px(hit_offset))
+                        .left_0()
+                        .h(px(SPLIT_DIVIDER_HIT_SIZE))
+                        .w_full()
+                        .cursor(CursorStyle::ResizeRow)
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_tab_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.tab_context_menu?;
+        let tab = self.tabs.iter().find(|tab| tab.id == menu.tab)?;
+        let is_split = tab.is_split();
+        let close_enabled = self.tabs.len() > 1 || is_split;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .child(div().absolute().inset_0().on_any_mouse_down(cx.listener(
+                    |this, _, _, cx| {
+                        this.tab_context_menu = None;
+                        cx.notify();
+                    },
+                )))
+                .child(
+                    div()
+                        .id("explorer-tab-context-menu")
+                        .absolute()
+                        .left(menu.position.x)
+                        .top(menu.position.y)
+                        .w(px(168.0))
+                        .p(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0xd8d8d8))
+                        .shadow_md()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .children(is_split.then(|| {
+                            tab_context_menu_row(
+                                "tab-context-unsplit",
+                                "Unsplit",
+                                true,
+                                cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.unsplit_tab(menu.tab, window, cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
+                        }))
+                        .child(tab_context_menu_row(
+                            "tab-context-close",
+                            "Close",
+                            close_enabled,
+                            cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                if close_enabled {
+                                    this.close_tab(menu.tab, window, cx);
+                                }
+                                this.tab_context_menu = None;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        )),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+fn split_direction_for_position(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+) -> Option<SplitDirection> {
+    if !bounds.contains(&position) {
+        return None;
+    }
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let x = f32::from(position.x - bounds.origin.x);
+    let y = f32::from(position.y - bounds.origin.y);
+    let threshold = (width.min(height) * 0.25).clamp(32.0, 96.0);
+    let mut candidates = Vec::with_capacity(4);
+    if width >= PANE_MIN_WIDTH * 2.0 + SPLIT_DIVIDER_SIZE {
+        if x <= threshold {
+            candidates.push((x, SplitDirection::Left));
+        }
+        if width - x <= threshold {
+            candidates.push((width - x, SplitDirection::Right));
+        }
+    }
+    if height >= PANE_MIN_HEIGHT * 2.0 + SPLIT_DIVIDER_SIZE {
+        if y <= threshold {
+            candidates.push((y, SplitDirection::Up));
+        }
+        if height - y <= threshold {
+            candidates.push((height - y, SplitDirection::Down));
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, direction)| direction)
+}
+
+fn render_split_drop_preview(direction: SplitDirection) -> AnyElement {
+    div()
+        .absolute()
+        .when(direction == SplitDirection::Left, |this| {
+            this.left_0().top_0().bottom_0().w(relative(0.5))
+        })
+        .when(direction == SplitDirection::Right, |this| {
+            this.right_0().top_0().bottom_0().w(relative(0.5))
+        })
+        .when(direction == SplitDirection::Up, |this| {
+            this.left_0().right_0().top_0().h(relative(0.5))
+        })
+        .when(direction == SplitDirection::Down, |this| {
+            this.left_0().right_0().bottom_0().h(relative(0.5))
+        })
+        .bg(rgba(0x0078d429))
+        .border_1()
+        .border_color(rgba(0x0078d4b8))
+        .into_any_element()
+}
+
+fn tab_context_menu_row(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(30.0))
+        .px(px(10.0))
+        .rounded(px(3.0))
+        .text_size(px(12.0))
+        .text_color(rgb(if enabled { 0x1f1f1f } else { 0x9a9a9a }))
+        .when(enabled, |this| {
+            this.hover(|style| style.bg(rgb(0xf0f0f0)))
+                .on_click(on_click)
+        })
+        .child(label)
+        .into_any_element()
 }
 
 impl Render for ExplorerTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.cleanup_completed_background_operations(cx);
         let app_font = crate::settings::current_app_font(cx);
-        let active_view = self.active_tab().map(|tab| tab.view.clone());
+        let active_workspace = self.active_tab().cloned();
+        let active_view = active_workspace.as_ref().map(ExplorerTab::active_view);
         let drop_exit_view = active_view.clone();
         let input_mouse_down_view = active_view.clone();
-        let active_drop_indicator = active_view
+        let active_drop_indicator = active_workspace.as_ref().and_then(|tab| {
+            tab.panes
+                .iter()
+                .find_map(|pane| pane.view.read(cx).active_drop_indicator())
+        });
+        let shared_chrome = active_view.as_ref().map(|view| {
+            view.update(cx, |view, view_cx| {
+                view.render_shared_chrome(window, view_cx)
+            })
+        });
+        let (navbar, utility_bar, sidebar, chrome_overlays) = match shared_chrome {
+            Some(chrome) => (
+                Some(chrome.navbar),
+                Some(chrome.utility_bar),
+                chrome.sidebar,
+                chrome.overlays,
+            ),
+            None => (None, None, None, Vec::new()),
+        };
+        let active_layout = active_workspace
             .as_ref()
-            .and_then(|view| view.read(cx).active_drop_indicator());
+            .map(|tab| self.render_active_layout(tab, window, cx));
+        let tab_context_menu = self.render_tab_context_menu(cx);
 
-        let content = div()
+        let mut content = div()
             .font(app_font.clone())
             .key_context("ExplorerTabs")
             .on_action(cx.listener(Self::handle_new_tab))
@@ -800,14 +1772,32 @@ impl Render for ExplorerTabs {
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .child(self.render_tab_bar(window, cx))
+            .when_some(navbar, |this, navbar| this.child(navbar))
+            .when_some(utility_bar, |this, utility_bar| this.child(utility_bar))
             .child(
                 div()
+                    .flex()
+                    .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
                     .w_full()
                     .overflow_hidden()
-                    .when_some(active_view, |this, view| this.child(view)),
-            )
+                    .when_some(sidebar, |this, sidebar| this.child(sidebar))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_hidden()
+                            .when_some(active_layout, |this, layout| this.child(layout)),
+                    ),
+            );
+
+        content = content.children(chrome_overlays);
+
+        let content = content
+            .when_some(tab_context_menu, |this, menu| this.child(menu))
             .when_some(active_drop_indicator, |this, indicator| {
                 this.child(render_drop_indicator(indicator, &app_font, window))
             })
@@ -823,6 +1813,7 @@ impl Render for TabDragPreview {
             self.label.clone(),
             &self.path,
             self.is_active,
+            self.pane_count,
             self.font.clone(),
         )
     }
@@ -832,6 +1823,7 @@ fn tab_preview_visual(
     label: SharedString,
     path: &Path,
     is_active: bool,
+    pane_count: usize,
     font: gpui::Font,
 ) -> impl IntoElement {
     div()
@@ -857,6 +1849,7 @@ fn tab_preview_visual(
             label,
             Some(path),
             None,
+            pane_count,
             Some(close_tab_glyph_visual().into_any_element()),
         ))
 }
@@ -865,6 +1858,7 @@ fn tab_inner_contents(
     label: SharedString,
     path: Option<&Path>,
     sidebar_group: Option<SidebarGroupKind>,
+    pane_count: usize,
     close_glyph: Option<AnyElement>,
 ) -> AnyElement {
     div()
@@ -885,6 +1879,23 @@ fn tab_inner_contents(
                 .text_color(rgb(TAB_TEXT_COLOR))
                 .child(label),
         )
+        .when(pane_count > 1, |this| {
+            this.child(
+                div()
+                    .debug_selector(move || format!("explorer-tab-split-count-{pane_count}"))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(20.0))
+                    .h(px(18.0))
+                    .px(px(5.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(0xe5f3ff))
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x005a9e))
+                    .child(format!("{pane_count}")),
+            )
+        })
         .when_some(close_glyph, |this, close_glyph| this.child(close_glyph))
         .into_any_element()
 }
@@ -1075,6 +2086,7 @@ fn selectable_tab_id_by_index_from_ids(
     (target_id != active_tab).then_some(target_id)
 }
 
+#[cfg(test)]
 fn can_close_tab(tab_count: usize) -> bool {
     tab_count > 1
 }
@@ -1632,15 +2644,12 @@ mod tests {
                     view.forward_stack = vec![ejected_root.join("forward-two").into()];
                 });
 
-                tabs.tabs.push(ExplorerTab {
-                    id: TabId(2),
-                    view: view_one.clone(),
-                });
-                tabs.tabs.push(ExplorerTab {
-                    id: TabId(3),
-                    view: view_two.clone(),
-                });
+                tabs.tabs
+                    .push(ExplorerTab::single(TabId(2), PaneId(2), view_one.clone()));
+                tabs.tabs
+                    .push(ExplorerTab::single(TabId(3), PaneId(3), view_two.clone()));
                 tabs.next_tab_id = 4;
+                tabs.next_pane_id = 4;
                 affected_views.push(view_one);
                 affected_views.push(view_two);
             });
@@ -3590,6 +4599,400 @@ mod tests {
                     .map(|notice| notice.text.as_str()),
                 Some("The file name cannot be empty.")
             );
+        });
+    }
+
+    #[test]
+    fn pane_tree_inserts_on_each_requested_edge() {
+        let cases = [
+            (
+                SplitDirection::Left,
+                SplitAxis::Horizontal,
+                vec![PaneId(2), PaneId(1)],
+            ),
+            (
+                SplitDirection::Right,
+                SplitAxis::Horizontal,
+                vec![PaneId(1), PaneId(2)],
+            ),
+            (
+                SplitDirection::Up,
+                SplitAxis::Vertical,
+                vec![PaneId(2), PaneId(1)],
+            ),
+            (
+                SplitDirection::Down,
+                SplitAxis::Vertical,
+                vec![PaneId(1), PaneId(2)],
+            ),
+        ];
+
+        for (direction, expected_axis, expected_order) in cases {
+            let mut tree = PaneNode::Leaf(PaneId(1));
+            assert!(tree.insert_split(PaneId(1), PaneId(2), direction, 11));
+            assert_eq!(tree.split_ratio(11), Some((expected_axis, 0.5)));
+            let mut order = Vec::new();
+            tree.pane_ids(&mut order);
+            assert_eq!(order, expected_order);
+        }
+    }
+
+    #[test]
+    fn nested_pane_tree_preserves_spatial_order_ratios_and_collapses() {
+        let mut tree = PaneNode::Leaf(PaneId(1));
+        assert!(tree.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1));
+        assert!(tree.insert_split(PaneId(1), PaneId(3), SplitDirection::Down, 2));
+        assert!(tree.insert_split(PaneId(2), PaneId(4), SplitDirection::Down, 3));
+        assert_eq!(tree.pane_count(), 4);
+
+        let mut order = Vec::new();
+        tree.pane_ids(&mut order);
+        assert_eq!(order, vec![PaneId(1), PaneId(3), PaneId(2), PaneId(4)]);
+
+        assert!(tree.set_ratio(2, 0.35));
+        assert_eq!(tree.split_ratio(2), Some((SplitAxis::Vertical, 0.35)));
+        assert!(!tree.set_ratio(99, 0.7));
+
+        assert!(tree.remove(PaneId(3)));
+        assert_eq!(tree.pane_count(), 3);
+        assert!(!tree.contains(PaneId(3)));
+        assert!(tree.remove(PaneId(1)));
+        assert_eq!(tree.pane_count(), 2);
+        let mut collapsed_order = Vec::new();
+        tree.pane_ids(&mut collapsed_order);
+        assert_eq!(collapsed_order, vec![PaneId(2), PaneId(4)]);
+    }
+
+    #[test]
+    fn split_drop_detection_is_edge_only_and_respects_minimum_size() {
+        let bounds = Bounds {
+            origin: gpui::point(px(100.0), px(50.0)),
+            size: gpui::size(px(640.0), px(480.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(105.0), px(250.0))),
+            Some(SplitDirection::Left)
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(735.0), px(250.0))),
+            Some(SplitDirection::Right)
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(400.0), px(55.0))),
+            Some(SplitDirection::Up)
+        );
+        assert_eq!(
+            split_direction_for_position(bounds, gpui::point(px(400.0), px(525.0))),
+            Some(SplitDirection::Down)
+        );
+        assert_eq!(split_direction_for_position(bounds, bounds.center()), None);
+
+        let too_narrow = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(319.0), px(480.0)),
+        };
+        assert_eq!(
+            split_direction_for_position(too_narrow, gpui::point(px(1.0), px(240.0))),
+            None
+        );
+        assert_eq!(
+            split_direction_for_position(too_narrow, gpui::point(px(160.0), px(1.0))),
+            Some(SplitDirection::Up)
+        );
+    }
+
+    #[gpui::test]
+    fn standalone_tabs_combine_and_focus_the_dropped_pane(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let dropped_path = temp.path().join("a");
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(dropped_path.clone(), window, cx);
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    target_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.tabs.len(), 1);
+            let tab = &tabs.tabs[0];
+            assert_eq!(tab.layout.pane_count(), 2);
+            assert_eq!(tab.active_view().read(cx).path(), dropped_path.as_path());
+            assert!(tab.is_split());
+        });
+        assert!(cx.debug_bounds("explorer-tab-split-count-2").is_some());
+
+        let target_position = cx
+            .debug_bounds("explorer-pane-1")
+            .expect("target pane bounds")
+            .center();
+        cx.simulate_click(target_position, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(
+                tabs.active_tab().unwrap().active_view().read(cx).path(),
+                temp.path()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn split_workspace_accepts_four_unique_panes_and_rejects_a_fifth(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b", "c", "d"]);
+        let paths = ["a", "b", "c", "d"].map(|name| temp.path().join(name));
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                for path in &paths {
+                    tabs.add_background_tab(path.clone(), window, cx);
+                }
+                let target = tabs.tabs[0].id;
+                let root_pane = tabs.tabs[0].active_pane;
+                let sources = tabs.tabs[1..]
+                    .iter()
+                    .map(|tab| (tab.id, tab.active_pane))
+                    .collect::<Vec<_>>();
+
+                assert!(tabs.split_tab_into_pane(
+                    sources[0].0,
+                    target,
+                    root_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                assert!(tabs.split_tab_into_pane(
+                    sources[1].0,
+                    target,
+                    root_pane,
+                    SplitDirection::Down,
+                    window,
+                    cx,
+                ));
+                assert!(tabs.split_tab_into_pane(
+                    sources[2].0,
+                    target,
+                    sources[0].1,
+                    SplitDirection::Down,
+                    window,
+                    cx,
+                ));
+                assert!(!tabs.split_tab_into_pane(
+                    sources[3].0,
+                    target,
+                    root_pane,
+                    SplitDirection::Left,
+                    window,
+                    cx,
+                ));
+
+                let split = tabs.tabs.iter().find(|tab| tab.id == target).unwrap();
+                assert_eq!(split.layout.pane_count(), MAX_SPLIT_PANES);
+                let mut ids = Vec::new();
+                split.layout.pane_ids(&mut ids);
+                ids.sort_by_key(|id| id.0);
+                ids.dedup();
+                assert_eq!(ids.len(), MAX_SPLIT_PANES);
+                assert_eq!(tabs.tabs.len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn divider_resize_clamps_to_minimum_pane_dimensions(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    target_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                tabs.split_bounds.insert(
+                    1,
+                    Bounds {
+                        origin: gpui::point(px(0.0), px(0.0)),
+                        size: gpui::size(px(640.0), px(480.0)),
+                    },
+                );
+                tabs.begin_split_resize(target, 1, gpui::point(px(320.0), px(0.0)));
+                assert!(tabs.update_split_resize(gpui::point(px(0.0), px(0.0))));
+                assert_eq!(tabs.tabs[0].layout.split_ratio(1).unwrap().1, 0.25);
+                assert!(tabs.update_split_resize(gpui::point(px(640.0), px(0.0))));
+                assert_eq!(tabs.tabs[0].layout.split_ratio(1).unwrap().1, 0.75);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn unsplit_restores_visual_order_and_the_focused_pane(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let root_path = temp.path().to_path_buf();
+        let a_path = temp.path().join("a");
+        let b_path = temp.path().join("b");
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(a_path.clone(), window, cx);
+                tabs.add_background_tab(b_path.clone(), window, cx);
+                let target = tabs.tabs[0].id;
+                let root_pane = tabs.tabs[0].active_pane;
+                let a_tab = tabs.tabs[1].id;
+                let a_pane = tabs.tabs[1].active_pane;
+                let b_tab = tabs.tabs[2].id;
+                assert!(tabs.split_tab_into_pane(
+                    a_tab,
+                    target,
+                    root_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                assert!(tabs.split_tab_into_pane(
+                    b_tab,
+                    target,
+                    a_pane,
+                    SplitDirection::Down,
+                    window,
+                    cx,
+                ));
+                assert!(tabs.unsplit_tab(target, window, cx));
+            });
+        });
+
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.tabs.len(), 3);
+            let paths = tabs
+                .tabs
+                .iter()
+                .map(|tab| tab.active_view().read(cx).path().to_path_buf())
+                .collect::<Vec<_>>();
+            assert_eq!(paths, vec![root_path, a_path, b_path.clone()]);
+            assert_eq!(
+                tabs.active_tab().unwrap().active_view().read(cx).path(),
+                b_path
+            );
+            assert!(tabs.tabs.iter().all(|tab| !tab.is_split()));
+        });
+    }
+
+    #[gpui::test]
+    fn focused_pane_close_collapses_a_two_pane_split_to_an_ordinary_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+        let remaining_path = temp.path().to_path_buf();
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    target_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                tabs.close_focused_pane(target, window, cx);
+            });
+        });
+
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.tabs.len(), 1);
+            assert!(!tabs.tabs[0].is_split());
+            assert_eq!(tabs.tabs[0].active_view().read(cx).path(), remaining_path);
+        });
+    }
+
+    #[gpui::test]
+    fn tab_switching_restores_split_ratio_and_focused_pane(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let focused_path = temp.path().join("a");
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(focused_path.clone(), window, cx);
+                tabs.add_background_tab(temp.path().join("b"), window, cx);
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                let other = tabs.tabs[2].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    target_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                assert!(tabs.tabs[0].layout.set_ratio(1, 0.37));
+                let focused_pane = tabs.tabs[0].active_pane;
+
+                tabs.activate_tab(other, window, cx);
+                tabs.activate_tab(target, window, cx);
+
+                let restored = tabs.active_tab().unwrap();
+                assert_eq!(restored.active_pane, focused_pane);
+                assert_eq!(restored.layout.split_ratio(1).unwrap().1, 0.37);
+                assert_eq!(restored.active_view().read(cx).path(), focused_path);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn closing_the_only_composite_creates_one_fresh_ordinary_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    target,
+                    target_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                assert_eq!(tabs.tabs.len(), 1);
+
+                tabs.close_tab(target, window, cx);
+
+                assert_eq!(tabs.tabs.len(), 1);
+                assert!(!tabs.tabs[0].is_split());
+                assert_ne!(tabs.tabs[0].id, target);
+            });
         });
     }
 

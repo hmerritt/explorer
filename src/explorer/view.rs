@@ -17,8 +17,8 @@ use futures::FutureExt;
 #[cfg(not(test))]
 use futures::StreamExt;
 use gpui::{
-    AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Subscription, Task,
-    UniformListScrollHandle, Window, point, px,
+    AnyWindowHandle, Context, EventEmitter, FocusHandle, Font, Pixels, Point, Size, Subscription,
+    Task, UniformListScrollHandle, Window, point, px, size,
 };
 
 use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
@@ -197,7 +197,9 @@ pub struct ExplorerView {
     pub(super) thumbnail_source_policy: ThumbnailSourcePolicy,
     pub(super) open_utility_menu: Option<UtilityMenu>,
     pub(super) context_menu: Option<ContextMenuState>,
+    pub(super) shared_chrome_hosted: bool,
     pub(super) view_origin: Point<Pixels>,
+    pub(super) view_size: Size<Pixels>,
     pub(super) directory_watcher: Option<DirectoryWatcher>,
     #[allow(dead_code)]
     pub(super) device_catalog_poll_task: Option<Task<()>>,
@@ -616,7 +618,9 @@ impl ExplorerView {
             thumbnail_source_policy,
             open_utility_menu: None,
             context_menu: None,
+            shared_chrome_hosted: false,
             view_origin: point(px(0.0), px(0.0)),
+            view_size: size(px(0.0), px(0.0)),
             directory_watcher: None,
             device_catalog_poll_task: None,
             portable_hotplug_task: None,
@@ -1840,6 +1844,10 @@ impl ExplorerView {
 
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(super) fn set_shared_chrome_hosted(&mut self, hosted: bool) {
+        self.shared_chrome_hosted = hosted;
     }
 
     pub(super) fn restart_directory_watcher(&mut self, cx: &mut Context<Self>) -> bool {

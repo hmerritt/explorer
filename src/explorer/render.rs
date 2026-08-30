@@ -354,7 +354,42 @@ fn effective_sidebar_layout_width(
     }
 }
 
+pub(super) struct ExplorerSharedChrome {
+    pub(super) navbar: AnyElement,
+    pub(super) utility_bar: AnyElement,
+    pub(super) sidebar: Option<AnyElement>,
+    pub(super) overlays: Vec<AnyElement>,
+}
+
 impl ExplorerView {
+    fn context_menu_uses_shared_chrome(&self) -> bool {
+        self.shared_chrome_hosted
+            && self.context_menu.as_ref().is_some_and(|menu| {
+                matches!(menu.source, Some(ContextMenuSource::SidebarItem { .. }))
+            })
+    }
+
+    fn overlay_view_size(&self, window: &Window) -> (f32, f32) {
+        if self.context_menu_uses_shared_chrome() {
+            return (
+                f32::from(window.bounds().size.width),
+                f32::from(window.bounds().size.height),
+            );
+        }
+        let measured = (
+            f32::from(self.view_size.width),
+            f32::from(self.view_size.height),
+        );
+        if self.shared_chrome_hosted && measured.0 > 0.0 && measured.1 > 0.0 {
+            measured
+        } else {
+            (
+                f32::from(window.bounds().size.width),
+                f32::from(window.bounds().size.height),
+            )
+        }
+    }
+
     fn recursive_search_uses_detailed_rows(&self) -> bool {
         self.recursive_search_results_active() && self.search_mode == SearchMode::Detailed
     }
@@ -372,13 +407,18 @@ impl ExplorerView {
     }
 
     fn list_viewport_width(&self, window: &Window) -> f32 {
-        let window_width = f32::from(window.bounds().size.width);
-        let sidebar_width = effective_sidebar_layout_width(
-            normalized_sidebar_width_f32(self.sidebar_width),
-            window_width,
-            self.sidebar_auto_hide_expanded,
-        );
-        (window_width - sidebar_width).max(0.0)
+        let measured_width = f32::from(self.view_size.width);
+        if self.shared_chrome_hosted && measured_width > 0.0 {
+            measured_width
+        } else {
+            let window_width = f32::from(window.bounds().size.width);
+            let sidebar_width = effective_sidebar_layout_width(
+                normalized_sidebar_width_f32(self.sidebar_width),
+                window_width,
+                self.sidebar_auto_hide_expanded,
+            );
+            (window_width - sidebar_width).max(0.0)
+        }
     }
 
     fn name_column_width(&self, window: &Window) -> f32 {
@@ -482,6 +522,31 @@ impl ExplorerView {
             .id("search-bar")
             .debug_selector(|| "search-bar".to_owned())
             .key_context("ExplorerSearchInput")
+            .on_action(cx.listener(Self::handle_move_up))
+            .on_action(cx.listener(Self::handle_move_down))
+            .on_action(cx.listener(Self::handle_search_edit))
+            .on_action(cx.listener(Self::handle_recursive_search_edit))
+            .on_action(cx.listener(Self::handle_search_commit))
+            .on_action(cx.listener(Self::handle_search_cancel))
+            .on_action(cx.listener(Self::handle_search_backspace))
+            .on_action(cx.listener(Self::handle_search_backspace_word))
+            .on_action(cx.listener(Self::handle_search_delete))
+            .on_action(cx.listener(Self::handle_search_left))
+            .on_action(cx.listener(Self::handle_search_right))
+            .on_action(cx.listener(Self::handle_search_select_left))
+            .on_action(cx.listener(Self::handle_search_select_right))
+            .on_action(cx.listener(Self::handle_search_word_left))
+            .on_action(cx.listener(Self::handle_search_word_right))
+            .on_action(cx.listener(Self::handle_search_select_word_left))
+            .on_action(cx.listener(Self::handle_search_select_word_right))
+            .on_action(cx.listener(Self::handle_search_home))
+            .on_action(cx.listener(Self::handle_search_end))
+            .on_action(cx.listener(Self::handle_search_select_home))
+            .on_action(cx.listener(Self::handle_search_select_end))
+            .on_action(cx.listener(Self::handle_search_select_all))
+            .on_action(cx.listener(Self::handle_search_copy))
+            .on_action(cx.listener(Self::handle_search_cut))
+            .on_action(cx.listener(Self::handle_search_paste))
             .flex()
             .flex_row()
             .items_center()
@@ -798,6 +863,46 @@ impl ExplorerView {
             })
     }
 
+    pub(super) fn render_shared_chrome(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ExplorerSharedChrome {
+        let window_width = f32::from(window.bounds().size.width);
+        let sidebar_width = normalized_sidebar_width_f32(self.sidebar_width);
+        let sidebar_auto_hide_active = sidebar_auto_hide_is_active(sidebar_width, window_width);
+        if !sidebar_auto_hide_active {
+            self.sidebar_auto_hide_expanded = false;
+        }
+        let sidebar_visible = effective_sidebar_is_visible(
+            sidebar_width,
+            window_width,
+            self.sidebar_auto_hide_expanded,
+        );
+
+        let mut overlays = Vec::new();
+        if let Some(menu) = self.render_utility_menu_overlay(sidebar_auto_hide_active, cx) {
+            overlays.push(menu);
+        }
+        if let Some(suggestions) = self.render_address_suggestions_overlay(window, cx) {
+            overlays.push(suggestions);
+        }
+        if self.context_menu_uses_shared_chrome()
+            && let Some(menu) = self.render_context_menu_overlay(window, cx)
+        {
+            overlays.push(menu);
+        }
+
+        ExplorerSharedChrome {
+            navbar: self.render_navbar(window, cx).into_any_element(),
+            utility_bar: self
+                .render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx)
+                .into_any_element(),
+            sidebar: sidebar_visible.then(|| self.render_sidebar(cx)),
+            overlays,
+        }
+    }
+
     fn render_utility_menu_overlay(
         &self,
         sidebar_auto_hide_active: bool,
@@ -979,8 +1084,7 @@ impl ExplorerView {
                 .collect::<HashMap<_, _>>()
         };
         let menu = self.context_menu.as_ref()?;
-        let window_width = f32::from(window.bounds().size.width);
-        let window_height = f32::from(window.bounds().size.height);
+        let (window_width, window_height) = self.overlay_view_size(window);
         let root_height = context_menu_height(
             &menu.items,
             CONTEXT_MENU_ROW_HEIGHT,
@@ -1037,11 +1141,7 @@ impl ExplorerView {
         }
 
         let state = self.image_hover_preview.clone()?;
-        let viewport_size = window.viewport_size();
-        let window_size = (
-            f32::from(viewport_size.width),
-            f32::from(viewport_size.height),
-        );
+        let window_size = self.overlay_view_size(window);
         let (width, height, content) = match hover_preview_kind(&state.entry)? {
             HoverPreviewKind::Video => {
                 self.cancel_text_hover_preview();
@@ -3453,6 +3553,78 @@ fn search_bar_icon_button(
         .into_any_element()
 }
 
+impl ExplorerView {
+    fn render_pane_body(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .w_full()
+            .overflow_hidden()
+            .when(
+                !self.is_sidebar_group_view() && self.view_mode == FileViewMode::Details,
+                |this| this.child(self.render_header(window, cx)),
+            )
+            .child(
+                if self.is_sidebar_group_view() {
+                    div().child(self.render_sidebar_group_view(window, cx))
+                } else {
+                    match self.content_branch() {
+                        ExplorerContentBranch::Error => div().child(
+                            div()
+                                .p_4()
+                                .text_size(px(14.0))
+                                .text_color(rgb(0x6f1d1d))
+                                .child(self.read_error.clone().unwrap_or_default()),
+                        ),
+                        ExplorerContentBranch::Loading => {
+                            div().child(self.render_empty_folder(FOLDER_LOADING_MESSAGE, cx))
+                        }
+                        ExplorerContentBranch::Empty => {
+                            div().child(self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx))
+                        }
+                        ExplorerContentBranch::SearchWorking => {
+                            div().child(self.render_empty_folder_with_detail(
+                                None,
+                                Some(search_working_detail(self.recursive_search_progress())),
+                                cx,
+                            ))
+                        }
+                        ExplorerContentBranch::NoSearchMatches => {
+                            div().child(self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx))
+                        }
+                        ExplorerContentBranch::List => {
+                            if self.view_mode == FileViewMode::LargeIcons {
+                                div().child(self.render_large_icons(window, cx))
+                            } else {
+                                div().child(self.render_list(cx))
+                            }
+                        }
+                    }
+                }
+                .id("explorer-scroll")
+                .flex_1()
+                .w_full()
+                .overflow_hidden(),
+            )
+            .when_some(self.operation_notice.as_ref(), |this, notice| {
+                this.child(render_operation_notice(notice))
+            })
+            .when(!self.download_notice_rows.is_empty(), |this| {
+                this.child(render_download_notices(&self.download_notice_rows, cx))
+            })
+            .when(self.recursive_search_is_working(), |this| {
+                this.child(linear_indeterminate(
+                    "recursive-search-linear-progress",
+                    LinearProgressStyle::explorer_copy_green(),
+                ))
+            })
+            .child(self.render_status_bar(cx))
+    }
+}
+
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
@@ -3482,6 +3654,11 @@ impl Render for ExplorerView {
             self.clipboard_status_hovered = false;
             self.clipboard_status_popup_visible = false;
         }
+        let context_menu_overlay = if self.context_menu_uses_shared_chrome() {
+            None
+        } else {
+            self.render_context_menu_overlay(window, cx)
+        };
 
         div()
             .key_context(key_context)
@@ -3641,9 +3818,13 @@ impl Render for ExplorerView {
             .bg(rgb(0xffffff))
             .text_color(rgb(0x000000))
             .overflow_hidden()
-            .child(self.render_navbar(window, cx))
-            .child(self.render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx))
-            .child(
+            .when(!self.shared_chrome_hosted, |this| {
+                this.child(self.render_navbar(window, cx))
+                    .child(self.render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx))
+            })
+            .child(if self.shared_chrome_hosted {
+                self.render_pane_body(window, cx)
+            } else {
                 div()
                     .flex()
                     .flex_row()
@@ -3651,98 +3832,27 @@ impl Render for ExplorerView {
                     .w_full()
                     .overflow_hidden()
                     .when(sidebar_visible, |this| this.child(self.render_sidebar(cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .h_full()
-                            .overflow_hidden()
-                            .when(
-                                !self.is_sidebar_group_view()
-                                    && self.view_mode == FileViewMode::Details,
-                                |this| this.child(self.render_header(window, cx)),
-                            )
-                            .child(
-                                if self.is_sidebar_group_view() {
-                                    div().child(self.render_sidebar_group_view(window, cx))
-                                } else {
-                                    match self.content_branch() {
-                                        ExplorerContentBranch::Error => div().child(
-                                            div()
-                                                .p_4()
-                                                .text_size(px(14.0))
-                                                .text_color(rgb(0x6f1d1d))
-                                                .child(self.read_error.clone().unwrap_or_default()),
-                                        ),
-                                        ExplorerContentBranch::Loading => div().child(
-                                            self.render_empty_folder(FOLDER_LOADING_MESSAGE, cx),
-                                        ),
-                                        ExplorerContentBranch::Empty => div().child(
-                                            self.render_empty_folder(EMPTY_FOLDER_MESSAGE, cx),
-                                        ),
-                                        ExplorerContentBranch::SearchWorking => {
-                                            div().child(self.render_empty_folder_with_detail(
-                                                None,
-                                                Some(search_working_detail(
-                                                    self.recursive_search_progress(),
-                                                )),
-                                                cx,
-                                            ))
-                                        }
-                                        ExplorerContentBranch::NoSearchMatches => div().child(
-                                            self.render_empty_folder(SEARCH_NO_MATCHES_MESSAGE, cx),
-                                        ),
-                                        ExplorerContentBranch::List => {
-                                            if self.view_mode == FileViewMode::LargeIcons {
-                                                div().child(self.render_large_icons(window, cx))
-                                            } else {
-                                                div().child(self.render_list(cx))
-                                            }
-                                        }
-                                    }
-                                }
-                                .id("explorer-scroll")
-                                .flex_1()
-                                .w_full()
-                                .overflow_hidden(),
-                            )
-                            .when_some(self.operation_notice.as_ref(), |this, notice| {
-                                this.child(render_operation_notice(notice))
-                            })
-                            .when(!self.download_notice_rows.is_empty(), |this| {
-                                this.child(render_download_notices(&self.download_notice_rows, cx))
-                            })
-                            .when(self.recursive_search_is_working(), |this| {
-                                this.child(linear_indeterminate(
-                                    "recursive-search-linear-progress",
-                                    LinearProgressStyle::explorer_copy_green(),
-                                ))
-                            })
-                            .child(self.render_status_bar(cx)),
-                    ),
-            )
+                    .child(self.render_pane_body(window, cx))
+            })
             .when_some(
                 self.render_clipboard_status_popup_overlay(window, cx),
                 |this, popup| this.child(popup),
             )
-            .when_some(
-                self.render_utility_menu_overlay(sidebar_auto_hide_active, cx),
-                |this, menu| this.child(menu),
-            )
-            .when_some(
-                self.render_address_suggestions_overlay(window, cx),
-                |this, menu| this.child(menu),
-            )
-            .when_some(
-                self.render_context_menu_overlay(window, cx),
-                |this, menu| this.child(menu),
-            )
+            .when_some(context_menu_overlay, |this, menu| this.child(menu))
             .when_some(
                 self.render_image_hover_preview_overlay(window, cx),
                 |this, preview| this.child(preview),
             )
+            .when(!self.shared_chrome_hosted, |this| {
+                this.when_some(
+                    self.render_utility_menu_overlay(sidebar_auto_hide_active, cx),
+                    |this, menu| this.child(menu),
+                )
+                .when_some(
+                    self.render_address_suggestions_overlay(window, cx),
+                    |this, menu| this.child(menu),
+                )
+            })
     }
 }
 
@@ -4514,10 +4624,7 @@ fn context_menu_contains_window_position(
         return false;
     };
 
-    let window_size = (
-        f32::from(window.bounds().size.width),
-        f32::from(window.bounds().size.height),
-    );
+    let window_size = this.overlay_view_size(window);
     let root_width = context_menu_width(&menu.items, window);
     let root_height = context_menu_height(
         &menu.items,
@@ -4530,7 +4637,11 @@ fn context_menu_contains_window_position(
         (root_width, root_height),
         window_size,
     );
-    let position = local_context_menu_origin(window_position, this.view_origin);
+    let position = if this.context_menu_uses_shared_chrome() {
+        window_position
+    } else {
+        local_context_menu_origin(window_position, this.view_origin)
+    };
 
     context_menu_level_contains_position(
         &menu.items,
@@ -4626,6 +4737,7 @@ impl ExplorerView {
 
         if let Some(first_child) = child_bounds.first() {
             self.view_origin = first_child.origin;
+            self.view_size = first_child.size;
         }
     }
 }
@@ -4685,7 +4797,11 @@ fn open_sidebar_context_menu_from_event(
     window: &mut Window,
     cx: &mut Context<ExplorerView>,
 ) {
-    let origin = local_context_menu_origin(event.position, this.view_origin);
+    let origin = if this.shared_chrome_hosted {
+        event.position
+    } else {
+        local_context_menu_origin(event.position, this.view_origin)
+    };
     if this.open_sidebar_context_menu(
         origin,
         path,
@@ -6202,6 +6318,31 @@ fn editable_directory_bar(
         .id("directory-bar-input")
         .debug_selector(|| "directory-bar-input".to_owned())
         .key_context("ExplorerAddressInput")
+        .on_action(cx.listener(ExplorerView::handle_address_edit))
+        .on_action(cx.listener(ExplorerView::handle_address_commit))
+        .on_action(cx.listener(ExplorerView::handle_address_cancel))
+        .on_action(cx.listener(ExplorerView::handle_address_backspace))
+        .on_action(cx.listener(ExplorerView::handle_address_backspace_word))
+        .on_action(cx.listener(ExplorerView::handle_address_delete))
+        .on_action(cx.listener(ExplorerView::handle_address_left))
+        .on_action(cx.listener(ExplorerView::handle_address_right))
+        .on_action(cx.listener(ExplorerView::handle_address_select_left))
+        .on_action(cx.listener(ExplorerView::handle_address_select_right))
+        .on_action(cx.listener(ExplorerView::handle_address_word_left))
+        .on_action(cx.listener(ExplorerView::handle_address_word_right))
+        .on_action(cx.listener(ExplorerView::handle_address_select_word_left))
+        .on_action(cx.listener(ExplorerView::handle_address_select_word_right))
+        .on_action(cx.listener(ExplorerView::handle_address_home))
+        .on_action(cx.listener(ExplorerView::handle_address_end))
+        .on_action(cx.listener(ExplorerView::handle_address_select_home))
+        .on_action(cx.listener(ExplorerView::handle_address_select_end))
+        .on_action(cx.listener(ExplorerView::handle_address_select_all))
+        .on_action(cx.listener(ExplorerView::handle_address_copy))
+        .on_action(cx.listener(ExplorerView::handle_address_cut))
+        .on_action(cx.listener(ExplorerView::handle_address_paste))
+        .on_action(cx.listener(ExplorerView::handle_address_suggestion_up))
+        .on_action(cx.listener(ExplorerView::handle_address_suggestion_down))
+        .on_action(cx.listener(ExplorerView::handle_address_accept_suggestion))
         .flex()
         .flex_row()
         .items_center()

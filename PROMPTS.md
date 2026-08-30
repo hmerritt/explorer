@@ -2,9 +2,11 @@
 
 ## 2
 
-- Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).
-- UI refinement and improvements (tighten everything up, make it look nice)
-- Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
+- Use upx again for windows
+- Windows installer, see aura. Squirrel installer and auto-updater
+- Research what Winscp does, how it works. Take another stab at implementing it within explorer
+- Cache remote drive directory views,even if only for 1 minute. Clicking refresh icon forces a refresh and clears cache
+- Windows taskbar icon. On window close keep running, context menu to: show version, check for updates, open new window. Multiple windows can be opened, re-attach to latest one
 
 ## 3
 
@@ -14,7 +16,10 @@
 - Split-screen (see Zed)
 - Shell-extension system
 - Fix Chrome file drop not registering
+- UI refinement and improvements (tighten everything up, make it look nice)
+- Refactor the conflict dialog for copy to include rsync-like settings (delete/keep differences, etc...)
 - (maybe?) Implement a new settings item "search_recursive_max_items" for recursive search to limit the number of items returned in the view (to improve render performance)
+- Image thumbnail generation is not as fast as it used to be. TIFs take a long long time to generate (especially larger ones). All image thumbnail generation flows and pipelines need benchmarking and aggressively refactoring to improve speed (aim to reduce code in this area too as I think it is bloated).
 
 ## Left to implement
 
