@@ -42,7 +42,6 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
-const MAX_SPLIT_PANES: usize = 4;
 const PANE_MIN_WIDTH: f32 = 160.0;
 const PANE_MIN_HEIGHT: f32 = 120.0;
 const SPLIT_DIVIDER_SIZE: f32 = 1.0;
@@ -844,9 +843,7 @@ impl ExplorerTabs {
         else {
             return false;
         };
-        if self.tabs[target_index_before].panes.len() >= MAX_SPLIT_PANES
-            || !self.tabs[target_index_before].layout.contains(target_pane)
-        {
+        if !self.tabs[target_index_before].layout.contains(target_pane) {
             return false;
         }
 
@@ -1483,9 +1480,19 @@ impl ExplorerTabs {
         bounds: Bounds<Pixels>,
         position: Point<Pixels>,
     ) -> bool {
+        if !bounds.contains(&position) {
+            let owns_target = self
+                .dock_target
+                .is_some_and(|target| target.workspace_tab == workspace_tab && target.pane == pane);
+            if owns_target {
+                self.dock_target = None;
+                return true;
+            }
+            return false;
+        }
+
         let target = self.tabs.iter().find(|tab| tab.id == workspace_tab);
-        let ordinary_drop = dragged.id != workspace_tab
-            && target.is_some_and(|tab| tab.layout.pane_count() < MAX_SPLIT_PANES);
+        let ordinary_drop = dragged.id != workspace_tab && target.is_some();
         let self_drop = dragged.id == workspace_tab
             && self.active_tab == workspace_tab
             && target.is_some_and(|tab| {
@@ -4990,6 +4997,33 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_pane_tree_has_no_fixed_count_limit_and_collapses() {
+        const PANE_COUNT: u64 = 16;
+        let mut tree = PaneNode::Leaf(PaneId(1));
+        for id in 2..=PANE_COUNT {
+            assert!(tree.insert_split(PaneId(1), PaneId(id), SplitDirection::Right, id - 1,));
+        }
+
+        assert_eq!(tree.pane_count(), PANE_COUNT as usize);
+        let mut order = Vec::new();
+        tree.pane_ids(&mut order);
+        let expected = std::iter::once(PaneId(1))
+            .chain((2..=PANE_COUNT).rev().map(PaneId))
+            .collect::<Vec<_>>();
+        assert_eq!(order, expected);
+        assert_eq!(tree.normalized_rects().len(), PANE_COUNT as usize);
+        assert_eq!(
+            tree.adjacent_pane(PaneId(1), SplitDirection::Right),
+            Some(PaneId(PANE_COUNT))
+        );
+
+        for id in 2..=PANE_COUNT {
+            assert!(tree.remove(PaneId(id)));
+        }
+        assert_eq!(tree, PaneNode::Leaf(PaneId(1)));
+    }
+
+    #[test]
     fn directional_pane_navigation_follows_spatial_geometry_without_wrapping() {
         let mut quarters = PaneNode::Leaf(PaneId(1));
         assert!(quarters.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1));
@@ -5159,6 +5193,280 @@ mod tests {
             split_direction_for_position(too_short, gpui::point(px(320.0), px(1.0))),
             None
         );
+    }
+
+    #[gpui::test]
+    fn split_dock_target_survives_later_out_of_bounds_capture_listeners(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        let dragged_path = temp.path().join("b");
+
+        let (workspace_tab, first_pane, second_pane, dragged_tab) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                tabs.add_background_tab(dragged_path.clone(), window, cx);
+                let workspace_tab = tabs.tabs[0].id;
+                let first_pane = tabs.tabs[0].active_pane;
+                let second_pane = tabs.tabs[1].active_pane;
+                let split_source = tabs.tabs[1].id;
+                let dragged_tab = tabs.tabs[2].id;
+                assert!(tabs.split_tab_into_pane(
+                    split_source,
+                    workspace_tab,
+                    first_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                (workspace_tab, first_pane, second_pane, dragged_tab)
+            })
+        });
+        let drag = TabDrag {
+            id: dragged_tab,
+            label: "Dragged".into(),
+            path: dragged_path,
+            is_active: false,
+            dockable: true,
+        };
+        let left = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(400.0), px(600.0)),
+        };
+        let right = Bounds {
+            origin: gpui::point(px(401.0), px(0.0)),
+            size: gpui::size(px(400.0), px(600.0)),
+        };
+        let upper = Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: gpui::size(px(800.0), px(300.0)),
+        };
+        let lower = Bounds {
+            origin: gpui::point(px(0.0), px(301.0)),
+            size: gpui::size(px(800.0), px(300.0)),
+        };
+
+        cx.update(|_, app| {
+            tabs.update(app, |tabs, _| {
+                let left_edge = gpui::point(px(1.0), px(300.0));
+                assert!(
+                    tabs.update_dock_target(workspace_tab, first_pane, &drag, left, left_edge,)
+                );
+                assert!(!tabs.update_dock_target(
+                    workspace_tab,
+                    second_pane,
+                    &drag,
+                    right,
+                    left_edge,
+                ));
+                assert_eq!(
+                    tabs.dock_target,
+                    Some(DockTarget {
+                        workspace_tab,
+                        pane: first_pane,
+                        direction: SplitDirection::Left,
+                    })
+                );
+
+                let right_edge = gpui::point(px(800.0), px(300.0));
+                assert!(tabs.update_dock_target(
+                    workspace_tab,
+                    first_pane,
+                    &drag,
+                    left,
+                    right_edge,
+                ));
+                assert!(tabs.update_dock_target(
+                    workspace_tab,
+                    second_pane,
+                    &drag,
+                    right,
+                    right_edge,
+                ));
+                assert_eq!(
+                    tabs.dock_target,
+                    Some(DockTarget {
+                        workspace_tab,
+                        pane: second_pane,
+                        direction: SplitDirection::Right,
+                    })
+                );
+
+                let upper_edge = gpui::point(px(400.0), px(1.0));
+                assert!(tabs.update_dock_target(
+                    workspace_tab,
+                    first_pane,
+                    &drag,
+                    upper,
+                    upper_edge,
+                ));
+                assert!(!tabs.update_dock_target(
+                    workspace_tab,
+                    second_pane,
+                    &drag,
+                    lower,
+                    upper_edge,
+                ));
+                assert_eq!(
+                    tabs.dock_target,
+                    Some(DockTarget {
+                        workspace_tab,
+                        pane: first_pane,
+                        direction: SplitDirection::Up,
+                    })
+                );
+
+                let lower_edge = gpui::point(px(400.0), px(600.0));
+                assert!(tabs.update_dock_target(
+                    workspace_tab,
+                    first_pane,
+                    &drag,
+                    upper,
+                    lower_edge,
+                ));
+                assert!(tabs.update_dock_target(
+                    workspace_tab,
+                    second_pane,
+                    &drag,
+                    lower,
+                    lower_edge,
+                ));
+                assert_eq!(
+                    tabs.dock_target,
+                    Some(DockTarget {
+                        workspace_tab,
+                        pane: second_pane,
+                        direction: SplitDirection::Down,
+                    })
+                );
+
+                let center = upper.center();
+                assert!(tabs.update_dock_target(workspace_tab, first_pane, &drag, upper, center,));
+                assert!(
+                    !tabs.update_dock_target(workspace_tab, second_pane, &drag, lower, center,)
+                );
+                assert!(tabs.dock_target.is_none());
+
+                let outside = gpui::point(px(900.0), px(700.0));
+                tabs.dock_target = Some(DockTarget {
+                    workspace_tab,
+                    pane: first_pane,
+                    direction: SplitDirection::Left,
+                });
+                assert!(tabs.update_dock_target(workspace_tab, first_pane, &drag, left, outside,));
+                assert!(!tabs.update_dock_target(
+                    workspace_tab,
+                    second_pane,
+                    &drag,
+                    right,
+                    outside,
+                ));
+                assert!(tabs.dock_target.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn nested_split_dock_target_is_owned_by_the_containing_leaf(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b", "c"]);
+        let dragged_path = temp.path().join("c");
+
+        let (workspace_tab, top_left, bottom_left, right, dragged_tab) =
+            cx.update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    for name in ["a", "b", "c"] {
+                        tabs.add_background_tab(temp.path().join(name), window, cx);
+                    }
+                    let workspace_tab = tabs.tabs[0].id;
+                    let top_left = tabs.tabs[0].active_pane;
+                    let right = tabs.tabs[1].active_pane;
+                    let bottom_left = tabs.tabs[2].active_pane;
+                    let right_source = tabs.tabs[1].id;
+                    let bottom_source = tabs.tabs[2].id;
+                    let dragged_tab = tabs.tabs[3].id;
+                    assert!(tabs.split_tab_into_pane(
+                        right_source,
+                        workspace_tab,
+                        top_left,
+                        SplitDirection::Right,
+                        window,
+                        cx,
+                    ));
+                    assert!(tabs.split_tab_into_pane(
+                        bottom_source,
+                        workspace_tab,
+                        top_left,
+                        SplitDirection::Down,
+                        window,
+                        cx,
+                    ));
+                    (workspace_tab, top_left, bottom_left, right, dragged_tab)
+                })
+            });
+        let drag = TabDrag {
+            id: dragged_tab,
+            label: "Dragged".into(),
+            path: dragged_path,
+            is_active: false,
+            dockable: true,
+        };
+        let leaves = [
+            (
+                top_left,
+                Bounds {
+                    origin: gpui::point(px(0.0), px(0.0)),
+                    size: gpui::size(px(400.0), px(300.0)),
+                },
+            ),
+            (
+                bottom_left,
+                Bounds {
+                    origin: gpui::point(px(0.0), px(301.0)),
+                    size: gpui::size(px(400.0), px(300.0)),
+                },
+            ),
+            (
+                right,
+                Bounds {
+                    origin: gpui::point(px(401.0), px(0.0)),
+                    size: gpui::size(px(400.0), px(601.0)),
+                },
+            ),
+        ];
+
+        cx.update(|_, app| {
+            tabs.update(app, |tabs, _| {
+                for (expected_pane, position, expected_direction) in [
+                    (
+                        top_left,
+                        gpui::point(px(1.0), px(150.0)),
+                        SplitDirection::Left,
+                    ),
+                    (
+                        bottom_left,
+                        gpui::point(px(200.0), px(600.0)),
+                        SplitDirection::Down,
+                    ),
+                    (
+                        right,
+                        gpui::point(px(800.0), px(300.0)),
+                        SplitDirection::Right,
+                    ),
+                ] {
+                    for (pane, bounds) in leaves {
+                        tabs.update_dock_target(workspace_tab, pane, &drag, bounds, position);
+                    }
+                    assert_eq!(
+                        tabs.dock_target,
+                        Some(DockTarget {
+                            workspace_tab,
+                            pane: expected_pane,
+                            direction: expected_direction,
+                        })
+                    );
+                }
+            });
+        });
     }
 
     #[gpui::test]
@@ -5610,12 +5918,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn split_workspace_accepts_four_unique_panes_and_rejects_a_fifth(cx: &mut TestAppContext) {
+    fn split_workspace_accepts_many_unique_panes_and_unsplits_in_visual_order(
+        cx: &mut TestAppContext,
+    ) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
-        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b", "c", "d"]);
-        let paths = ["a", "b", "c", "d"].map(|name| temp.path().join(name));
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &names);
+        let paths = names.map(|name| temp.path().join(name));
 
-        cx.update(|window, app| {
+        let (target, expected_paths, focused_path) = cx.update(|window, app| {
             tabs.update(app, |tabs, cx| {
                 for path in &paths {
                     tabs.add_background_tab(path.clone(), window, cx);
@@ -5624,50 +5935,184 @@ mod tests {
                 let root_pane = tabs.tabs[0].active_pane;
                 let sources = tabs.tabs[1..]
                     .iter()
-                    .map(|tab| (tab.id, tab.active_pane))
+                    .map(|tab| {
+                        (
+                            tab.id,
+                            tab.active_pane,
+                            tab.active_view().read(cx).path().to_path_buf(),
+                        )
+                    })
                     .collect::<Vec<_>>();
+                let directions = [
+                    SplitDirection::Right,
+                    SplitDirection::Down,
+                    SplitDirection::Left,
+                    SplitDirection::Up,
+                ];
 
+                for (index, source) in sources.iter().enumerate() {
+                    if index == 3 {
+                        let drag = TabDrag {
+                            id: source.0,
+                            label: "Fifth pane".into(),
+                            path: source.2.clone(),
+                            is_active: false,
+                            dockable: true,
+                        };
+                        let bounds = Bounds {
+                            origin: gpui::point(px(0.0), px(0.0)),
+                            size: gpui::size(px(640.0), px(480.0)),
+                        };
+                        assert!(tabs.update_dock_target(
+                            target,
+                            root_pane,
+                            &drag,
+                            bounds,
+                            gpui::point(px(1.0), px(240.0)),
+                        ));
+                        assert_eq!(
+                            tabs.dock_target,
+                            Some(DockTarget {
+                                workspace_tab: target,
+                                pane: root_pane,
+                                direction: SplitDirection::Left,
+                            })
+                        );
+                    }
+
+                    assert!(tabs.split_tab_into_pane(
+                        source.0,
+                        target,
+                        root_pane,
+                        directions[index % directions.len()],
+                        window,
+                        cx,
+                    ));
+                }
+
+                let split = tabs.tabs.iter().find(|tab| tab.id == target).unwrap();
+                assert_eq!(split.layout.pane_count(), paths.len() + 1);
+                let mut order = Vec::new();
+                split.layout.pane_ids(&mut order);
+                assert_eq!(
+                    order,
+                    vec![
+                        sources[2].1,
+                        sources[3].1,
+                        sources[6].1,
+                        sources[7].1,
+                        root_pane,
+                        sources[5].1,
+                        sources[4].1,
+                        sources[1].1,
+                        sources[0].1,
+                    ]
+                );
+                let mut unique = order.clone();
+                unique.sort_by_key(|id| id.0);
+                unique.dedup();
+                assert_eq!(unique.len(), paths.len() + 1);
+                for split_id in 1..=paths.len() as u64 {
+                    assert_eq!(split.layout.split_ratio(split_id).unwrap().1, 0.5);
+                }
+                assert_eq!(tabs.tabs.len(), 1);
+
+                let expected_paths = order
+                    .iter()
+                    .map(|pane_id| {
+                        split
+                            .pane(*pane_id)
+                            .unwrap()
+                            .view
+                            .read(cx)
+                            .path()
+                            .to_path_buf()
+                    })
+                    .collect::<Vec<_>>();
+                let focused_path = split.active_view().read(cx).path().to_path_buf();
+                cx.notify();
+                (target, expected_paths, focused_path)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("explorer-tab-split-count-9").is_some());
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                assert!(tabs.unsplit_tab(target, window, cx));
+            });
+        });
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.tabs.len(), expected_paths.len());
+            let restored_paths = tabs
+                .tabs
+                .iter()
+                .map(|tab| tab.active_view().read(cx).path().to_path_buf())
+                .collect::<Vec<_>>();
+            assert_eq!(restored_paths, expected_paths);
+            assert_eq!(
+                tabs.active_tab().unwrap().active_view().read(cx).path(),
+                focused_path
+            );
+            assert!(tabs.tabs.iter().all(|tab| !tab.is_split()));
+        });
+    }
+
+    #[gpui::test]
+    fn composite_source_cannot_merge_into_another_split_workspace(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b", "c"]);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                for name in ["a", "b", "c"] {
+                    tabs.add_background_tab(temp.path().join(name), window, cx);
+                }
+
+                let target = tabs.tabs[0].id;
+                let target_pane = tabs.tabs[0].active_pane;
+                let target_source = tabs.tabs[1].id;
                 assert!(tabs.split_tab_into_pane(
-                    sources[0].0,
+                    target_source,
                     target,
-                    root_pane,
+                    target_pane,
                     SplitDirection::Right,
                     window,
                     cx,
                 ));
+
+                let composite_source = tabs.tabs[1].id;
+                let composite_source_pane = tabs.tabs[1].active_pane;
+                let source_helper = tabs.tabs[2].id;
                 assert!(tabs.split_tab_into_pane(
-                    sources[1].0,
-                    target,
-                    root_pane,
+                    source_helper,
+                    composite_source,
+                    composite_source_pane,
                     SplitDirection::Down,
                     window,
                     cx,
                 ));
-                assert!(tabs.split_tab_into_pane(
-                    sources[2].0,
-                    target,
-                    sources[0].1,
-                    SplitDirection::Down,
-                    window,
-                    cx,
-                ));
+
+                let tab_ids = tabs.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+                let target_layout = tabs.tabs[0].layout.clone();
+                let source_layout = tabs.tabs[1].layout.clone();
                 assert!(!tabs.split_tab_into_pane(
-                    sources[3].0,
+                    composite_source,
                     target,
-                    root_pane,
+                    target_pane,
                     SplitDirection::Left,
                     window,
                     cx,
                 ));
 
-                let split = tabs.tabs.iter().find(|tab| tab.id == target).unwrap();
-                assert_eq!(split.layout.pane_count(), MAX_SPLIT_PANES);
-                let mut ids = Vec::new();
-                split.layout.pane_ids(&mut ids);
-                ids.sort_by_key(|id| id.0);
-                ids.dedup();
-                assert_eq!(ids.len(), MAX_SPLIT_PANES);
-                assert_eq!(tabs.tabs.len(), 2);
+                assert_eq!(
+                    tabs.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                    tab_ids
+                );
+                assert_eq!(tabs.tabs[0].layout, target_layout);
+                assert_eq!(tabs.tabs[1].layout, source_layout);
+                assert_eq!(tabs.tabs[0].layout.pane_count(), 2);
+                assert_eq!(tabs.tabs[1].layout.pane_count(), 2);
             });
         });
     }
