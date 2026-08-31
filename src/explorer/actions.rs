@@ -122,10 +122,18 @@ actions!(
         CloseTab,
         SelectNextTab,
         SelectPreviousTab,
+        SplitPaneLeft,
+        SplitPaneRight,
+        SplitPaneUp,
+        SplitPaneDown,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,
-        FocusPaneDown
+        FocusPaneDown,
+        MovePaneLeft,
+        MovePaneRight,
+        MovePaneUp,
+        MovePaneDown
     ]
 );
 
