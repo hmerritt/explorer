@@ -13,6 +13,33 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 
 static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
+fn remote_test_roots() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(Default::default)
+}
+
+pub(super) fn path_is_remote_for_test(path: &Path) -> bool {
+    remote_test_roots().lock().unwrap().iter().any(|root| path.starts_with(root))
+}
+
+/// Exercise remote navigation with a real temporary filesystem and no server.
+pub(super) struct RemoteDriveForTest(PathBuf);
+
+impl RemoteDriveForTest {
+    pub(super) fn new(root: &Path) -> Self {
+        assert!(remote_test_roots().lock().unwrap().insert(root.to_path_buf()));
+        Self(root.to_path_buf())
+    }
+}
+
+impl Drop for RemoteDriveForTest {
+    fn drop(&mut self) {
+        remote_test_roots().lock().unwrap().remove(&self.0);
+        let _invalidation = super::remote_directory_cache::DirectoryMutation::new([self.0.clone()]);
+    }
+}
+
 pub(super) fn assert_approx_eq(actual: f32, expected: f32) {
     assert!(
         (actual - expected).abs() < 0.000_1,

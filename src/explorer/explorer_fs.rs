@@ -92,6 +92,7 @@ impl ExplorerFs {
     }
 
     pub(super) fn create_dir(&self, path: &Path) -> Result<(), String> {
+        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
         if !self.can_mutate(path) {
             return Err(self.read_only_error());
         }
@@ -118,6 +119,7 @@ impl ExplorerFs {
     }
 
     pub(super) fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
         if !self.can_mutate(path) {
             return Err(self.read_only_error());
         }

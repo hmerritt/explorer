@@ -198,6 +198,7 @@ impl ExplorerView {
                 if let Some(cx) = cx.as_deref_mut() {
                     self.reload_async_with_options_preserving_live_selection(
                         ReloadMode {
+                            cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Cached,
                             preserve_selection: true,
                             rebuild_sidebar: true,
                             preserve_context_menu: false,
@@ -220,6 +221,7 @@ impl ExplorerView {
                 if let Some(cx) = cx.as_deref_mut() {
                     self.reload_async_with_options(
                         ReloadMode {
+                            cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Cached,
                             preserve_selection: false,
                             rebuild_sidebar: true,
                             preserve_context_menu: false,
@@ -290,6 +292,7 @@ impl ExplorerView {
             if rebuild_sidebar {
                 self.reload_async_with_options(
                     ReloadMode {
+                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Cached,
                         preserve_selection: false,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,

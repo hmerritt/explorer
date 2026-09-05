@@ -462,6 +462,10 @@ fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
 }
 
 pub(super) fn path_is_remote_drive(path: &Path) -> bool {
+    #[cfg(test)]
+    if crate::explorer::test_support::path_is_remote_for_test(path) {
+        return true;
+    }
     platform_path_is_remote_drive(path)
 }
 
@@ -1705,7 +1709,7 @@ fn linux_disc_source_is_physical_optical(source: &str) -> bool {
             .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct EntryVisibility {
     pub(super) show_dotfiles: bool,
     pub(super) show_hidden_attributes: bool,
@@ -2618,6 +2622,7 @@ pub(super) fn extract_archive_entries_to_directory(
     entries: &[PathBuf],
     destination: &Path,
 ) -> Result<(), String> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([destination.to_path_buf()]);
     if entries.is_empty() {
         return Ok(());
     }
@@ -3311,6 +3316,7 @@ fn prepare_file_operation(
 }
 
 pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(paths.iter().cloned());
     if paths.is_empty() {
         return Err("No items were selected to delete.".to_owned());
     }
@@ -3320,6 +3326,7 @@ pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
 }
 
 pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(paths.iter().cloned());
     if paths.is_empty() {
         return Err("No items were selected to delete.".to_owned());
     }
@@ -3347,6 +3354,7 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
 }
 
 pub(super) fn remove_existing_paths_permanently(paths: &[PathBuf]) -> Result<bool, String> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(paths.iter().cloned());
     let mut removed_any = false;
 
     for path in paths {
@@ -4657,6 +4665,19 @@ pub(super) fn execute_file_operation_with_progress(
     terminate: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
+    let mut changed_paths = Vec::new();
+    for root in &job.roots {
+        changed_paths.push(root.destination.clone());
+        if job.kind == FileOperationKind::Move {
+            changed_paths.push(root.source.clone());
+        }
+    }
+    for step in &job.steps {
+        if let FileOperationStep::CompressArchive(plan) = step {
+            changed_paths.push(plan.destination_base.clone());
+        }
+    }
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(changed_paths);
     if job.kind == FileOperationKind::Compress {
         return execute_compress_operation_with_progress(job, cancel, on_progress);
     }

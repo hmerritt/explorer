@@ -313,6 +313,7 @@ impl WindowsJob {
 
 impl PendingDownload {
     fn persist(mut self) -> Result<DownloadResult, String> {
+        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([self.destination.join(&self.file_name)]);
         let mut index = 1usize;
         loop {
             let file_name = download_file_name(&self.file_name, index);
@@ -984,6 +985,9 @@ fn run_ytdlp_download(
     on_progress: impl Fn(YtDlpProgressEvent) + Send + 'static,
 ) -> Result<DownloadResult, String> {
     let mut command = Command::new(&command_spec.executable);
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([
+        command_spec.current_dir.clone(),
+    ]);
     command
         .args(&command_spec.args)
         .current_dir(&command_spec.current_dir)

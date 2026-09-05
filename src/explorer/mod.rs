@@ -35,6 +35,7 @@ mod portable_devices;
 mod properties;
 mod recursive_search;
 mod remote_dialog;
+mod remote_directory_cache;
 mod remote_download;
 mod rename;
 mod render;

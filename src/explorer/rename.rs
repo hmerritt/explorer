@@ -931,6 +931,7 @@ impl ExplorerView {
                     if select_target_after_reload {
                         self.reload_async_with_options(
                             crate::explorer::view::ReloadMode {
+                                cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                                 preserve_selection: true,
                                 rebuild_sidebar: true,
                                 preserve_context_menu: false,
@@ -944,6 +945,7 @@ impl ExplorerView {
                     } else {
                         self.reload_async_with_options_preserving_live_selection(
                             crate::explorer::view::ReloadMode {
+                                cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                                 preserve_selection: true,
                                 rebuild_sidebar: true,
                                 preserve_context_menu: false,
@@ -1447,6 +1449,7 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
 }
 
 fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([original_path.to_path_buf(), target_path.to_path_buf()]);
     if crate::explorer::portable_devices::is_portable_path(original_path) {
         let name = target_path
             .file_name()

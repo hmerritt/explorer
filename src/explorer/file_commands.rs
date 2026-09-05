@@ -111,6 +111,7 @@ impl ExplorerView {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
+                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -349,6 +350,7 @@ impl ExplorerView {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
+                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -381,6 +383,7 @@ impl ExplorerView {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
+                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -895,6 +898,7 @@ impl ExplorerView {
         self.remove_cut_paths(&summary.moved_source_paths);
         self.reload_async_with_options_preserving_live_selection(
             crate::explorer::view::ReloadMode {
+                cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                 preserve_selection: true,
                 rebuild_sidebar: true,
                 preserve_context_menu: false,
@@ -1010,6 +1014,10 @@ fn cleanup_file_operation_undo(undo: FileOperationUndo) {
 }
 
 fn undo_copied_paths(undo: &FileOperationCopyUndo) -> Result<(), String> {
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(
+        undo.created_files.iter().chain(&undo.created_directories).cloned()
+            .chain(undo.replaced_files.iter().map(|file| file.destination.clone()))
+    );
     preflight_copy_undo(undo)?;
 
     for path in undo.created_files.iter().rev() {
@@ -1210,6 +1218,7 @@ fn undo_trash_paths(trash: TrashUndo) -> Result<Vec<PathBuf>, String> {
             items,
             original_paths,
         } => {
+            let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(original_paths.iter().cloned());
             restore_trash_items(items)?;
             Ok(original_paths)
         }
