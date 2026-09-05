@@ -17,6 +17,9 @@ use explorer::benchmark_support::{
     resize_rgba_for_benchmark, write_cached_thumbnail_batch_for_benchmark,
 };
 
+#[path = "support/thumbnail_fixtures.rs"]
+mod thumbnail_fixtures;
+
 const FIXTURE_VERSION: &str = "image-thumbnails-benchmark-v6";
 const THUMBNAIL_SIZE: u32 = 128;
 const LARGE_WIDTH: u32 = 1600;
@@ -396,7 +399,75 @@ fn load_batch(paths: &[PathBuf], parallelism: usize, encode_cache: bool) -> usiz
 }
 
 fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
+    if let Ok(path) = std::env::var("EXPLORER_THUMBNAIL_PROFILE") {
+        let size: u32 = std::env::var("EXPLORER_THUMBNAIL_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+        let samples: Vec<_> = (0..30).map(|_| explorer::benchmark_support::profile_image_thumbnail_for_benchmark(Path::new(&path), size)).collect();
+        let mut elapsed: Vec<_> = samples.iter().map(|v| v["source_and_resize_ms"].as_f64().unwrap() + v["render_prepare_ms"].as_f64().unwrap()).collect();
+        elapsed.sort_by(f64::total_cmp);
+        println!("{}", serde_json::json!({"path":path,"size":size,"median_ms":elapsed[15],"p95_ms":elapsed[28],
+            "filesystem_cache":"uncontrolled; repeated reads generally warm", "samples":samples}));
+        return;
+    }
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("example-large.tif");
+    if sample.exists() {
+        let mut group = criterion.benchmark_group("image_thumbnails/example_source");
+        group.sample_size(10);
+        for size in [1, 128, 256, 400, 4096] {
+            group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, size| {
+                b.iter(|| black_box(load_ready_thumbnail(black_box(&sample), *size)));
+            });
+        }
+        group.finish();
+    }
     let fixture = Fixture::get();
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/image-thumbnails-layout-v1");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let preview = thumbnail_fixtures::photoshop_resource(1036, &thumbnail_fixtures::jpeg(160, 150, [180, 90, 30]), 160, 150);
+    let layout_paths: Vec<_> = [("embedded.tif", Some(preview.as_slice())), ("source.tif", None)].into_iter().map(|(name, preview)| {
+        let path = fixture_dir.join(name);
+        if !path.exists() { fs::write(&path, thumbnail_fixtures::deflate_rgb16(2048, 1920, preview)).unwrap(); }
+        path
+    }).collect();
+    let mut layout = criterion.benchmark_group("image_thumbnails/big_endian_rgb16");
+    layout.sample_size(10);
+    for path in &layout_paths {
+        for size in [1, 128, 400, 4096] {
+            layout.bench_function(BenchmarkId::new(path.file_stem().unwrap().to_str().unwrap(), size), |b| {
+                b.iter(|| black_box(load_ready_thumbnail(path, size)));
+            });
+        }
+    }
+    layout.finish();
+    let mut extra_formats = Vec::new();
+    for format in [image::ImageFormat::Gif, image::ImageFormat::Bmp, image::ImageFormat::Ico,
+        image::ImageFormat::Pnm, image::ImageFormat::Tga, image::ImageFormat::Qoi,
+        image::ImageFormat::Farbfeld, image::ImageFormat::Hdr, image::ImageFormat::OpenExr] {
+        let extension = format.extensions_str()[0];
+        let path = fixture_dir.join(format!("codec.{extension}"));
+        if !path.exists() {
+            let source = image::DynamicImage::ImageRgba8(gradient_rgba(256, 192, 3));
+            let source = match format {
+                image::ImageFormat::Hdr | image::ImageFormat::OpenExr => image::DynamicImage::ImageRgb32F(source.to_rgb32f()),
+                image::ImageFormat::Farbfeld => image::DynamicImage::ImageRgba16(source.to_rgba16()),
+                image::ImageFormat::Pnm => image::DynamicImage::ImageRgb8(source.to_rgb8()),
+                _ => source,
+            };
+            source.save_with_format(&path, format).expect("encode codec fixture");
+        }
+        extra_formats.push(path);
+    }
+    let mut codecs = criterion.benchmark_group("image_thumbnails/other_codecs");
+    codecs.sample_size(10);
+    for path in &extra_formats {
+        codecs.bench_function(path.extension().unwrap().to_str().unwrap(), |b| b.iter(|| black_box(load_ready_thumbnail(path, 128))));
+    }
+    codecs.finish();
+    let mut queued_paths = layout_paths.clone();
+    queued_paths.extend([fixture.large_png.clone(), fixture.large_jpeg.clone(), fixture.large_svg.clone(), fixture.large_webp.clone()]);
+    let mut queued = criterion.benchmark_group("image_thumbnails/production_queue");
+    queued.sample_size(10);
+    queued.bench_function("mixed_source", |b| b.iter(|| black_box(explorer::benchmark_support::queued_thumbnail_batch_for_benchmark(&queued_paths, 128, None, false))));
+    queued.finish();
     let opaque_rgba = gradient_rgba(LARGE_WIDTH, LARGE_HEIGHT, 0);
     let transparent_rgba = transparent_gradient_rgba(LARGE_WIDTH, LARGE_HEIGHT);
     let mut resize = criterion.benchmark_group("image_thumbnails/rgba_resize");
@@ -539,7 +610,7 @@ fn image_thumbnail_benchmarks(criterion: &mut Criterion) {
         fixture.large_webp.clone(),
         fixture.large_svg.clone(),
     ];
-    let mut mixed = criterion.benchmark_group("image_thumbnails/cold_mixed_folder");
+    let mut mixed = criterion.benchmark_group("image_thumbnails/uncached_mixed_folder");
     mixed.sample_size(10);
     mixed.measurement_time(Duration::from_secs(5));
     for parallelism in [2, 4] {

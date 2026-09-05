@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
 
 use gpui::{
@@ -196,13 +196,17 @@ fn observe_image_window_bounds(_: &mut Window, _: &mut Context<ImageViewerWindow
 pub(crate) fn new_embedded_image_viewer(
     path: PathBuf,
     focus_handle: FocusHandle,
+    thumbnail_enabled: bool,
     cx: &mut Context<impl Sized>,
 ) -> Entity<ImageViewerSurface> {
     let title = SharedString::from(image_title(&path));
     cx.new(|cx| {
         cx.on_release(|viewer: &mut ImageViewer, cx| viewer.release(cx))
             .detach();
-        ImageViewer::new(path, title, focus_handle, cx)
+        let mut viewer = ImageViewer::new(path, title, focus_handle, cx);
+        viewer.initial_thumbnail.enabled = thumbnail_enabled;
+        if thumbnail_enabled { viewer.start_initial_thumbnail(cx); }
+        viewer
     })
 }
 
@@ -225,6 +229,7 @@ pub(crate) struct ImageViewer {
     focus_handle: FocusHandle,
     state: ImageViewerState,
     decode_generation: u64,
+    initial_thumbnail: InitialThumbnail,
     decode_task: Option<Task<()>>,
     icc_correction_task: Option<Task<()>>,
     svg_render_generation: u64,
@@ -246,6 +251,14 @@ pub(crate) struct ImageViewer {
 }
 
 impl EventEmitter<ImageViewerEvent> for ImageViewer {}
+
+#[derive(Default)]
+struct InitialThumbnail {
+    enabled: bool,
+    image: Option<Arc<RenderImage>>,
+    task: Option<Task<()>>,
+    cancel: Option<Arc<AtomicBool>>,
+}
 
 enum ImageViewerState {
     Loading,
@@ -324,7 +337,7 @@ impl ImageViewerWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let surface = new_embedded_image_viewer(path, focus_handle, cx);
+        let surface = new_embedded_image_viewer(path, focus_handle, false, cx);
         observe_image_window_bounds(window, cx);
         cx.subscribe_in(
             &surface,
@@ -456,6 +469,7 @@ impl ImageViewer {
             focus_handle,
             state: ImageViewerState::Loading,
             decode_generation: 0,
+            initial_thumbnail: InitialThumbnail::default(),
             decode_task: None,
             icc_correction_task: None,
             svg_render_generation: 0,
@@ -489,6 +503,8 @@ impl ImageViewer {
 
     fn start_decode(&mut self, cx: &mut Context<Self>) {
         self.decode_generation = self.decode_generation.wrapping_add(1);
+        self.clear_initial_thumbnail(cx);
+        if self.initial_thumbnail.enabled { self.start_initial_thumbnail(cx); }
         let generation = self.decode_generation;
         let path = self.path.clone();
         self.decode_task = Some(cx.spawn(async move |viewer, cx| {
@@ -501,6 +517,7 @@ impl ImageViewer {
                     return;
                 }
 
+                viewer.clear_initial_thumbnail(cx);
                 viewer.decode_task = None;
                 viewer.icc_correction_task = None;
                 viewer.drop_decoded_image(cx);
@@ -526,7 +543,37 @@ impl ImageViewer {
         }));
     }
 
+    fn clear_initial_thumbnail(&mut self, cx: &mut App) {
+        if let Some(cancel) = self.initial_thumbnail.cancel.take() { cancel.store(true, Ordering::Relaxed); }
+        self.initial_thumbnail.task = None;
+        if let Some(image) = self.initial_thumbnail.image.take() { cx.drop_image(image, None); }
+    }
+
+    fn accept_initial_thumbnail(&mut self, generation: u64, image: Option<Arc<RenderImage>>, cx: &mut Context<Self>) {
+        if self.decode_generation == generation && matches!(self.state, ImageViewerState::Loading) {
+            self.initial_thumbnail.image = image;
+            self.initial_thumbnail.task = None;
+            cx.notify();
+        }
+    }
+
+    fn start_initial_thumbnail(&mut self, cx: &mut Context<Self>) {
+        let generation = self.decode_generation;
+        let path = self.path.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.initial_thumbnail.cancel = Some(cancel.clone());
+        self.initial_thumbnail.task = Some(cx.spawn(async move |viewer, cx| {
+            let image = cx.background_executor().spawn(async move {
+                crate::explorer::load_properties_thumbnail(&path, crate::settings::DEFAULT_MEDIA_PREVIEW_SIZE, &cancel)
+            }).await;
+            let _ = viewer.update(cx, |viewer, cx| {
+                viewer.accept_initial_thumbnail(generation, image, cx);
+            });
+        }));
+    }
+
     fn release(&mut self, cx: &mut App) {
+        self.clear_initial_thumbnail(cx);
         self.decode_generation = self.decode_generation.wrapping_add(1);
         self.decode_task = None;
         self.icc_correction_task = None;
@@ -1399,7 +1446,11 @@ impl ImageViewer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content = match &self.state {
-            ImageViewerState::Loading => image_viewer_empty_body(),
+            ImageViewerState::Loading => self.initial_thumbnail.image.as_ref().map(|image| {
+                img(image.clone()).debug_selector(|| "properties-loading-thumbnail".to_owned())
+                    .w(px(available_width.max(1.0))).h(px(available_height.max(1.0)))
+                    .object_fit(ObjectFit::Contain).into_any_element()
+            }).unwrap_or_else(image_viewer_empty_body),
             ImageViewerState::Failed(error) => {
                 image_viewer_status(format!("Cannot display {}: {error}", self.title))
             }
@@ -3377,6 +3428,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn properties_thumbnail_is_a_loading_placeholder_and_rejects_stale_completion(cx: &mut TestAppContext) {
+        let (viewer, cx) = cx.add_window_view(|_, cx| {
+            let mut viewer = image_viewer_for_test(cx.focus_handle(), ImageViewerState::Loading);
+            viewer.initial_thumbnail.enabled = true;
+            viewer.initial_thumbnail.image = Some(render_image_from_rgba(image::RgbaImage::new(160, 150)));
+            viewer
+        });
+        assert!(cx.debug_bounds("properties-loading-thumbnail").is_some());
+        viewer.update(cx, |viewer, cx| {
+            assert!(viewer.ready_render_source().is_none());
+            assert!(viewer.ready_dimensions_for_test().is_none());
+            let cancel = Arc::new(AtomicBool::new(false));
+            viewer.initial_thumbnail.cancel = Some(cancel.clone());
+            viewer.clear_initial_thumbnail(cx);
+            assert!(cancel.load(Ordering::Relaxed));
+            viewer.decode_generation += 1;
+            viewer.accept_initial_thumbnail(0, Some(render_image_from_rgba(image::RgbaImage::new(1, 1))), cx);
+            assert!(viewer.initial_thumbnail.image.is_none());
+            viewer.state = ImageViewerState::Ready(raster_decoded_image(640, 600, None));
+            viewer.accept_initial_thumbnail(viewer.decode_generation, Some(render_image_from_rgba(image::RgbaImage::new(1, 1))), cx);
+            assert!(viewer.initial_thumbnail.image.is_none());
+            assert_eq!(viewer.ready_dimensions_for_test(), Some((640, 600)));
+        });
+    }
+
+    #[gpui::test]
     fn actual_size_toggle_at_actual_size_resets_to_initial_fit_state(cx: &mut TestAppContext) {
         let viewer = cx.new(|cx| ImageViewer {
             path: PathBuf::new(),
@@ -3385,6 +3462,7 @@ mod tests {
             focus_handle: cx.focus_handle(),
             state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
             decode_generation: 0,
+            initial_thumbnail: InitialThumbnail::default(),
             decode_task: None,
             icc_correction_task: None,
             svg_render_generation: 0,
@@ -3431,6 +3509,7 @@ mod tests {
             focus_handle: cx.focus_handle(),
             state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, None)),
             decode_generation: 0,
+            initial_thumbnail: InitialThumbnail::default(),
             decode_task: None,
             icc_correction_task: None,
             svg_render_generation: 0,
@@ -3703,6 +3782,7 @@ mod tests {
                 focus_handle,
                 state: ImageViewerState::Ready(raster_decoded_image(2000, 1000, Some(8_000_000))),
                 decode_generation: 0,
+            initial_thumbnail: InitialThumbnail::default(),
                 decode_task: None,
                 icc_correction_task: None,
                 svg_render_generation: 0,
@@ -4054,6 +4134,7 @@ mod tests {
             focus_handle,
             state,
             decode_generation: 0,
+            initial_thumbnail: InitialThumbnail::default(),
             decode_task: None,
             icc_correction_task: None,
             svg_render_generation: 0,

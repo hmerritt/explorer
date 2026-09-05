@@ -1375,7 +1375,7 @@ impl PropertiesDialog {
         let path = single_file_image_path(&snapshot.target, snapshot.item_kind)?;
         if self.image_viewer_path.as_deref() != Some(path) {
             let path = path.to_path_buf();
-            let viewer = new_embedded_image_viewer(path.clone(), self.focus_handle.clone(), cx);
+            let viewer = new_embedded_image_viewer(path.clone(), self.focus_handle.clone(), true, cx);
             cx.subscribe_in(
                 &viewer,
                 window,
