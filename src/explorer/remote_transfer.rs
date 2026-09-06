@@ -1,5 +1,7 @@
 //! Durable native SFTP jobs, independent of views and navigation.
 use super::remote_fs::{self, RemoteLocation, Session, sftp_error};
+use crate::settings::SftpSettings;
+use futures::{StreamExt, stream::FuturesUnordered};
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -136,6 +138,8 @@ struct Item {
     partial: Option<Location>,
     committing: bool,
     skipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload_safe_prefix: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Manifest {
@@ -184,6 +188,7 @@ struct Job {
     data: Mutex<Manifest>,
     control: AtomicU8,
     running: AtomicBool,
+    pipeline: Mutex<SftpSettings>,
 }
 
 #[derive(Default)]
@@ -288,7 +293,7 @@ fn manager() -> &'static Manager {
                         if !valid_manifest(&data) { continue; }
                         if clean_completion(&data) && fs::remove_file(entry.path()).is_ok() { continue; }
                         if !matches!(data.state, State::Completed | State::Cancelled) { data.state = State::Paused; data.message = "Interrupted transfer recovered. Resume to revalidate and continue.".into(); }
-                        manager.jobs.lock().unwrap().insert(data.id, Arc::new(Job { progress: Mutex::default(), store: entry.path(), data: Mutex::new(data), control: AtomicU8::new(1), running: AtomicBool::new(false) }));
+                        manager.jobs.lock().unwrap().insert(data.id, Arc::new(Job { progress: Mutex::default(), store: entry.path(), data: Mutex::new(data), control: AtomicU8::new(1), running: AtomicBool::new(false), pipeline: Mutex::new(SftpSettings::default()) }));
                     }
                 }
             }
@@ -441,12 +446,15 @@ fn valid_manifest(m: &Manifest) -> bool {
                         .and_then(|p| p.child(&format!(".explorer-{}-{index}.filepart", m.id)))
                         .is_ok_and(|expected| expected == *partial)
                 })
+                && i.upload_safe_prefix
+                    .is_none_or(|prefix| prefix <= i.metadata.size)
         })
 }
 pub(super) fn enqueue(
     sources: Vec<PathBuf>,
     destination: PathBuf,
     move_sources: bool,
+    pipeline: SftpSettings,
 ) -> Result<u64, String> {
     static IDS: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now()
@@ -538,13 +546,14 @@ pub(super) fn enqueue(
         }),
         control: AtomicU8::new(0),
         running: AtomicBool::new(false),
+        pipeline: Mutex::new(pipeline),
     });
     save(&job).map_err(|e| e.to_string())?;
     manager().jobs.lock().unwrap().insert(id, job.clone());
     start(job);
     Ok(id)
 }
-pub(super) fn control(id: u64, action: &str) {
+pub(super) fn control(id: u64, action: &str, pipeline: SftpSettings) {
     let Some(job) = manager().jobs.lock().unwrap().get(&id).cloned() else {
         return;
     };
@@ -583,6 +592,7 @@ pub(super) fn control(id: u64, action: &str) {
             if job.running.load(Ordering::Acquire) {
                 return;
             }
+            *job.pipeline.lock().unwrap() = pipeline;
             let mut m = job.data.lock().unwrap();
             let index = m.current;
             if index >= m.items.len() {
@@ -626,6 +636,7 @@ pub(super) fn control(id: u64, action: &str) {
                 return;
             }
             {
+                *job.pipeline.lock().unwrap() = pipeline;
                 let mut m = job.data.lock().unwrap();
                 m.conflict = match action {
                     "replace" => Conflict::Replace,
@@ -1006,6 +1017,7 @@ async fn plan(job: &Job, session: &Session) -> io::Result<()> {
             partial: None,
             committing: false,
             skipped: false,
+            upload_safe_prefix: None,
         });
     }
     let mut m = job.data.lock().unwrap();
@@ -1166,12 +1178,12 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
                 job.data.lock().unwrap().items[data.current] = item.clone();
                 save(job)?;
             }
-            let partial = item.partial.as_ref().unwrap();
+            let partial = item.partial.as_ref().unwrap().clone();
             match &item.metadata.kind {
-                Kind::File => transfer_file(job, session, &item).await?,
+                Kind::File => transfer_file(job, session, &mut item).await?,
                 Kind::Link(target) => {
-                    if maybe_metadata(session, partial).await?.is_none() {
-                        create_link(session, partial, target).await?;
+                    if maybe_metadata(session, &partial).await?.is_none() {
+                        create_link(session, &partial, target).await?;
                     }
                 }
                 Kind::Directory => unreachable!(),
@@ -1190,7 +1202,7 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
             item.committing = true;
             job.data.lock().unwrap().items[data.current] = item.clone();
             save(job)?;
-            replace(session, partial, &item.destination, current.is_some()).await?;
+            replace(session, &partial, &item.destination, current.is_some()).await?;
         }
         finish_item(job, item)?;
     }
@@ -1465,9 +1477,214 @@ async fn close(session: &Session, handle: Handle, sync: bool) -> io::Result<()> 
         }
     }
 }
-async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<()> {
-    let partial = item.partial.as_ref().unwrap();
-    let meta = maybe_metadata(session, partial).await?;
+async fn truncate(session: &Session, handle: &mut Handle, size: u64) -> io::Result<()> {
+    match handle {
+        Handle::Local(file) => file.set_len(size),
+        Handle::Remote(handle) => {
+            let mut attrs = FileAttributes::empty();
+            attrs.size = Some(size);
+            session
+                .raw
+                .fsetstat(&*handle, attrs)
+                .await
+                .map_err(sftp_error)?;
+            Ok(())
+        }
+    }
+}
+
+fn save_upload_safe_prefix(job: &Job, item: &mut Item, prefix: u64) -> io::Result<()> {
+    item.upload_safe_prefix = Some(prefix);
+    let mut data = job.data.lock().unwrap();
+    let index = data.current;
+    data.items[index].upload_safe_prefix = Some(prefix);
+    drop(data);
+    save(job)
+}
+
+async fn remote_read_block(
+    session: &Session,
+    handle: String,
+    offset: u64,
+    length: usize,
+) -> io::Result<(u64, Vec<u8>)> {
+    let mut handle = Handle::Remote(handle);
+    read(session, &mut handle, offset, length)
+        .await
+        .map(|bytes| (offset, bytes))
+}
+
+async fn remote_write_block(
+    session: &Session,
+    handle: String,
+    offset: u64,
+    bytes: Vec<u8>,
+) -> io::Result<(u64, u64)> {
+    let length = bytes.len() as u64;
+    let mut handle = Handle::Remote(handle);
+    write(session, &mut handle, offset, bytes).await?;
+    Ok((offset, length))
+}
+
+fn next_block(next: &mut u64, size: u64, chunk_size: u64) -> Option<(u64, usize)> {
+    if *next >= size {
+        return None;
+    }
+    let offset = *next;
+    let length = (size - offset).min(chunk_size) as usize;
+    *next += length as u64;
+    Some((offset, length))
+}
+
+fn advance_acknowledged(acknowledged: &mut BTreeMap<u64, u64>, committed: &mut u64) {
+    while let Some(length) = acknowledged.remove(committed) {
+        *committed += length;
+    }
+}
+
+fn take_contiguous_download_blocks(
+    ready: &mut BTreeMap<u64, Vec<u8>>,
+    mut committed: u64,
+) -> Vec<(u64, Vec<u8>)> {
+    let mut blocks = Vec::new();
+    while let Some(bytes) = ready.remove(&committed) {
+        let offset = committed;
+        committed += bytes.len() as u64;
+        blocks.push((offset, bytes));
+    }
+    blocks
+}
+
+async fn download_pipeline(
+    job: &Job,
+    session: &Session,
+    source_handle: &str,
+    output: &mut Handle,
+    offset: u64,
+    size: u64,
+    depth: usize,
+) -> io::Result<()> {
+    let mut pending = FuturesUnordered::new();
+    let mut ready = BTreeMap::<u64, Vec<u8>>::new();
+    let mut scheduled = offset;
+    let mut committed = offset;
+    let chunk_size = session.chunk_size as u64;
+
+    while pending.len() + ready.len() < depth {
+        let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
+            break;
+        };
+        pending.push(remote_read_block(
+            session,
+            source_handle.to_owned(),
+            position,
+            length,
+        ));
+    }
+
+    while committed < size {
+        let (position, bytes) = pending
+            .next()
+            .await
+            .ok_or_else(|| io::Error::other("SFTP download pipeline ended early"))??;
+        let payload = bytes.len() as u64;
+        ready.insert(position, bytes);
+
+        for (offset, bytes) in take_contiguous_download_blocks(&mut ready, committed) {
+            let length = bytes.len() as u64;
+            write(session, output, offset, bytes).await?;
+            committed += length;
+        }
+        record_progress(job, committed, payload);
+
+        while pending.len() + ready.len() < depth {
+            let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
+                break;
+            };
+            pending.push(remote_read_block(
+                session,
+                source_handle.to_owned(),
+                position,
+                length,
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn upload_pipeline(
+    job: &Job,
+    session: &Session,
+    source: &mut Handle,
+    output_handle: &str,
+    item: &mut Item,
+    offset: u64,
+    size: u64,
+    depth: usize,
+) -> io::Result<()> {
+    let mut pending = FuturesUnordered::new();
+    let mut acknowledged = BTreeMap::<u64, u64>::new();
+    let mut scheduled = offset;
+    let mut committed = offset;
+    let chunk_size = session.chunk_size as u64;
+
+    while pending.len() < depth {
+        let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
+            break;
+        };
+        let bytes = read(session, source, position, length).await?;
+        pending.push(remote_write_block(
+            session,
+            output_handle.to_owned(),
+            position,
+            bytes,
+        ));
+    }
+
+    while let Some(result) = pending.next().await {
+        let (position, payload) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                save_upload_safe_prefix(job, item, committed)?;
+                return Err(error);
+            }
+        };
+        acknowledged.insert(position, payload);
+        advance_acknowledged(&mut acknowledged, &mut committed);
+        record_progress(job, committed, payload);
+
+        while pending.len() < depth {
+            let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
+                break;
+            };
+            let bytes = match read(session, source, position, length).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    save_upload_safe_prefix(job, item, committed)?;
+                    return Err(error);
+                }
+            };
+            pending.push(remote_write_block(
+                session,
+                output_handle.to_owned(),
+                position,
+                bytes,
+            ));
+        }
+    }
+
+    if committed != size {
+        save_upload_safe_prefix(job, item, committed)?;
+        return Err(io::Error::other(
+            "SFTP upload pipeline did not acknowledge every block",
+        ));
+    }
+    Ok(())
+}
+
+async fn transfer_file(job: &Job, session: &Session, item: &mut Item) -> io::Result<()> {
+    let partial = item.partial.as_ref().unwrap().clone();
+    let meta = maybe_metadata(session, &partial).await?;
     if meta
         .as_ref()
         .is_some_and(|m| m.kind != Kind::File || m.size > item.metadata.size)
@@ -1476,9 +1693,9 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
             "Partial file is invalid; it will not be appended to.",
         ));
     }
-    let offset = meta.as_ref().map_or(0, |m| m.size);
+    let mut offset = meta.as_ref().map_or(0, |m| m.size);
     let mut source = open(session, &item.source, false, false).await?;
-    let output = open(session, partial, true, meta.is_none()).await;
+    let output = open(session, &partial, true, meta.is_none()).await;
     let mut output = match output {
         Ok(h) => h,
         Err(e) => {
@@ -1487,7 +1704,49 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
         }
     };
     let result = async {
-        if offset > 0 {
+        let upload = matches!(source, Handle::Local(_)) && matches!(output, Handle::Remote(_));
+        if upload && metadata(session, &item.source).await? != item.metadata {
+            return Err(io::Error::other(
+                "Source changed before the upload resumed; destination was not replaced.",
+            ));
+        }
+        if upload {
+            let trusted = item.upload_safe_prefix.unwrap_or(offset);
+            if trusted > offset {
+                return Err(io::Error::other(
+                    "Partial content is shorter than its saved safe prefix.",
+                ));
+            }
+            set_state(job, State::Verifying, "Validating retained partial data");
+            let mut at = 0;
+            while at < trusted {
+                let length = (trusted - at).min(session.chunk_size as u64) as usize;
+                if read(session, &mut source, at, length).await?
+                    != read(session, &mut output, at, length).await?
+                {
+                    return Err(io::Error::other(
+                        "Partial content differs inside its saved safe prefix. Cancel and start a new transfer.",
+                    ));
+                }
+                at += length as u64;
+            }
+            while at < offset {
+                let length = (offset - at).min(session.chunk_size as u64) as usize;
+                if read(session, &mut source, at, length).await?
+                    != read(session, &mut output, at, length).await?
+                {
+                    truncate(session, &mut output, at).await.map_err(|error| {
+                        io::Error::other(format!(
+                            "Cannot repair the retained upload at byte {at}: {error}"
+                        ))
+                    })?;
+                    offset = at;
+                    break;
+                }
+                at += length as u64;
+            }
+            save_upload_safe_prefix(job, item, offset)?;
+        } else if offset > 0 {
             set_state(job, State::Verifying, "Validating retained partial data");
             let mut at = 0;
             while at < offset {
@@ -1504,55 +1763,34 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
         }
         set_state(job, State::Transferring, "Transferring");
         record_progress(job, offset, 0);
-        let mut at = offset;
-        while at < item.metadata.size {
-            // Keep memory and outstanding protocol requests bounded. Explicit
-            // offsets permit multiple reads/writes without sharing a seek cursor.
-            let mut ranges = Vec::new();
-            let mut next = at;
-            for _ in 0..8 {
-                if next >= item.metadata.size {
-                    break;
-                }
-                let length = (item.metadata.size - next).min(session.chunk_size as u64) as usize;
-                ranges.push((next, length));
-                next += length as u64;
-            }
-            if let Handle::Remote(handle) = &source {
-                let reads = ranges.iter().map(|&(position, length)| {
-                    let mut handle = Handle::Remote(handle.clone());
-                    async move { read(session, &mut handle, position, length).await }
-                });
-                let results = futures::future::join_all(reads).await;
-                for ((position, _), result) in ranges.iter().zip(results) {
-                    write(session, &mut output, *position, result?).await?;
-                }
-            } else {
-                let mut blocks = Vec::new();
-                for &(position, length) in &ranges {
-                    blocks.push((
-                        position,
-                        read(session, &mut source, position, length).await?,
-                    ));
-                }
-                if let Handle::Remote(handle) = &output {
-                    let results =
-                        futures::future::join_all(blocks.into_iter().map(|(position, bytes)| {
-                            let mut handle = Handle::Remote(handle.clone());
-                            async move { write(session, &mut handle, position, bytes).await }
-                        }))
-                        .await;
-                    for result in results {
-                        result?;
-                    }
-                } else {
-                    return Err(io::Error::other(
-                        "A native transfer must have a remote endpoint",
-                    ));
-                }
-            }
-            record_progress(job, next, next - at);
-            at = next;
+        let pipeline = *job.pipeline.lock().unwrap();
+        if let Handle::Remote(handle) = &source {
+            download_pipeline(
+                job,
+                session,
+                handle,
+                &mut output,
+                offset,
+                item.metadata.size,
+                pipeline.download_queue as usize,
+            )
+            .await?;
+        } else if let Handle::Remote(handle) = &output {
+            upload_pipeline(
+                job,
+                session,
+                &mut source,
+                handle,
+                item,
+                offset,
+                item.metadata.size,
+                pipeline.upload_queue as usize,
+            )
+            .await?;
+        } else {
+            return Err(io::Error::other(
+                "A native transfer must have a remote endpoint",
+            ));
         }
         Ok(())
     }
@@ -1563,11 +1801,14 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
     result?;
     closed_source?;
     closed_output?;
-    if metadata(session, partial).await?.size != item.metadata.size {
+    if matches!(item.source, Location::Local(_)) {
+        save_upload_safe_prefix(job, item, item.metadata.size)?;
+    }
+    if metadata(session, &partial).await?.size != item.metadata.size {
         return Err(io::Error::other("Transferred file size does not match"));
     }
     let existing = maybe_metadata(session, &item.destination).await?;
-    if let Err(error) = set_attributes(session, partial, &item.metadata, existing.as_ref()).await {
+    if let Err(error) = set_attributes(session, &partial, &item.metadata, existing.as_ref()).await {
         if existing.is_some() {
             return Err(io::Error::other(format!(
                 "Cannot preserve destination attributes; original retained: {error}"
@@ -1814,6 +2055,7 @@ mod tests {
             skipped,
             partial: None,
             committing: false,
+            upload_safe_prefix: None,
         }
     }
     #[test]
@@ -1927,6 +2169,35 @@ mod tests {
         set_state(&job, State::Reconnecting, "Reconnecting");
         set_state(&job, State::Transferring, "Transferring");
         assert_eq!(job.progress.lock().unwrap().payload, 0);
+    }
+    #[test]
+    fn pipeline_blocks_are_bounded_and_include_the_final_remainder() {
+        let mut next = 5;
+        assert_eq!(next_block(&mut next, 15, 4), Some((5, 4)));
+        assert_eq!(next_block(&mut next, 15, 4), Some((9, 4)));
+        assert_eq!(next_block(&mut next, 15, 4), Some((13, 2)));
+        assert_eq!(next_block(&mut next, 15, 4), None);
+    }
+    #[test]
+    fn upload_progress_advances_only_through_contiguous_acknowledgements() {
+        let mut acknowledged = BTreeMap::new();
+        let mut committed = 0;
+        acknowledged.insert(4, 4);
+        advance_acknowledged(&mut acknowledged, &mut committed);
+        assert_eq!(committed, 0);
+        acknowledged.insert(0, 4);
+        advance_acknowledged(&mut acknowledged, &mut committed);
+        assert_eq!(committed, 8);
+        assert!(acknowledged.is_empty());
+    }
+    #[test]
+    fn download_blocks_wait_for_and_then_flush_the_contiguous_frontier() {
+        let mut ready = BTreeMap::from([(4, vec![2; 4])]);
+        assert!(take_contiguous_download_blocks(&mut ready, 0).is_empty());
+        ready.insert(0, vec![1; 4]);
+        let blocks = take_contiguous_download_blocks(&mut ready, 0);
+        assert_eq!(blocks.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [0, 4]);
+        assert!(ready.is_empty());
     }
     #[test]
     fn remote_legacy_verification_flag_is_ignored_and_not_written() {

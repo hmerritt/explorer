@@ -218,6 +218,21 @@ impl russh_sftp::server::Handler for Server {
         }
         Ok(status(id))
     }
+    async fn fsetstat(
+        &mut self,
+        id: u32,
+        handle: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, StatusCode> {
+        if let Some(size) = attrs.size {
+            self.handles
+                .get_mut(&handle)
+                .ok_or(StatusCode::Failure)?
+                .set_len(size)
+                .map_err(code)?;
+        }
+        Ok(status(id))
+    }
     async fn rename(&mut self, id: u32, old: String, new: String) -> Result<Status, StatusCode> {
         let old = self.path(&old)?;
         let new = self.path(&new)?;
@@ -318,6 +333,7 @@ pub(super) fn job(root: &Path, source: Location, destination: Location) -> Job {
         }),
         control: AtomicU8::new(0),
         running: AtomicBool::new(false),
+        pipeline: Mutex::new(SftpSettings::default()),
     }
 }
 fn remote(path: &str) -> Location {
@@ -369,6 +385,39 @@ fn recursive_upload_download_roundtrip_and_empty_files() {
     });
 }
 #[test]
+fn queue_depth_one_upload_download_roundtrip() {
+    remote_fs::runtime().block_on(async {
+        let local = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let contents = vec![5; 4097];
+        fs::write(local.path().join("file.bin"), &contents).unwrap();
+        let session = server(remote_dir.path(), faults()).await;
+        let upload = job(
+            output.path(),
+            Location::Local(local.path().join("file.bin")),
+            remote("/"),
+        );
+        *upload.pipeline.lock().unwrap() = SftpSettings {
+            download_queue: 32,
+            upload_queue: 1,
+        };
+        run(&upload, &session).await.unwrap();
+
+        let download = job(
+            output.path(),
+            remote("/file.bin"),
+            Location::Local(output.path().into()),
+        );
+        *download.pipeline.lock().unwrap() = SftpSettings {
+            download_queue: 1,
+            upload_queue: 32,
+        };
+        run(&download, &session).await.unwrap();
+        assert_eq!(fs::read(output.path().join("file.bin")).unwrap(), contents);
+    });
+}
+#[test]
 fn interrupted_upload_resumes_only_validated_prefix() {
     remote_fs::runtime().block_on(async {
         let local = tempfile::tempdir().unwrap();
@@ -386,6 +435,9 @@ fn interrupted_upload_resumes_only_validated_prefix() {
         assert!(!destination.path().join("file").exists());
         let partial = destination.path().join(".explorer-42-0.filepart");
         assert_eq!(fs::metadata(&partial).unwrap().len(), 2048);
+        let sparse = OpenOptions::new().write(true).open(&partial).unwrap();
+        sparse.set_len(4096).unwrap();
+        drop(sparse);
         f.fail_writes_after.store(0, Ordering::Relaxed);
         run(&job, &session).await.unwrap();
         assert_eq!(f.written.load(Ordering::Relaxed), 8192);
@@ -412,11 +464,10 @@ fn corrupted_partial_is_rejected_without_replacing_destination() {
         );
         job.data.lock().unwrap().conflict = Conflict::Replace;
         assert!(run(&job, &session).await.is_err());
-        fs::write(
-            destination.path().join(".explorer-42-0.filepart"),
-            b"corrupt",
-        )
-        .unwrap();
+        let partial = destination.path().join(".explorer-42-0.filepart");
+        let mut bytes = fs::read(&partial).unwrap();
+        bytes[0] ^= 0xff;
+        fs::write(&partial, bytes).unwrap();
         f.fail_writes_after.store(0, Ordering::Relaxed);
         assert!(
             run(&job, &session)

@@ -250,6 +250,17 @@ when `sidebar.remote` is absent; an explicit empty array disables that import.
 
 Transfers use temporary destination files, checked close/flush operations, size
 checks, source/destination change checks, and atomic publication where available.
+SFTP file transfers keep 32 requests in flight by default. Advanced users can
+tune the independently bounded global queues in `settings.json`:
+
+```json
+{
+    "sftp": { "download_queue": 32, "upload_queue": 32 }
+}
+```
+
+Queue depths must be between 1 and 512. Updated values apply when a transfer is
+started or resumed; an already-running pipeline keeps its captured values.
 Replacing remote files requires the server's OpenSSH atomic-rename extension and
 preserves reported ownership and permissions; otherwise Explorer retains the
 original and asks you to choose another action. Resume validates retained partial

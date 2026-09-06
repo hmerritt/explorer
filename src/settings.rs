@@ -21,6 +21,8 @@ pub(crate) const DEFAULT_FONT: &str = "default";
 pub(crate) const DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS: u32 = 30;
 pub(crate) const DEFAULT_MEDIA_PREVIEW_SIZE: u32 = 400;
 pub(crate) const MAX_MEDIA_PREVIEW_SIZE: u32 = 4096;
+pub(crate) const DEFAULT_SFTP_QUEUE_DEPTH: u32 = 32;
+pub(crate) const MAX_SFTP_QUEUE_DEPTH: u32 = 512;
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -110,6 +112,7 @@ pub struct ExplorerSettings {
     pub app: AppSettings,
     pub contextmenu: ContextMenuSettings,
     pub sidebar: SidebarSettings,
+    pub sftp: SftpSettings,
     pub tabs: TabSettings,
     pub view: ViewSettings,
 }
@@ -119,10 +122,11 @@ impl Serialize for ExplorerSettings {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(5))?;
+        let mut map = serializer.serialize_map(Some(6))?;
         map.serialize_entry("app", &SerializableAppSettings::new(self))?;
         map.serialize_entry("contextmenu", &self.contextmenu)?;
         map.serialize_entry("sidebar", &SerializableSidebarSettings::new(self))?;
+        map.serialize_entry("sftp", &self.sftp)?;
         map.serialize_entry("tabs", &self.tabs)?;
         map.serialize_entry("view", &self.view)?;
         map.end()
@@ -697,6 +701,21 @@ pub struct SidebarSettings {
     pub width: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct SftpSettings {
+    #[serde(
+        default = "default_sftp_queue_depth",
+        deserialize_with = "deserialize_sftp_queue_depth"
+    )]
+    pub download_queue: u32,
+    #[serde(
+        default = "default_sftp_queue_depth",
+        deserialize_with = "deserialize_sftp_queue_depth"
+    )]
+    pub upload_queue: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RemoteSidebarItem {
     pub address: String,
@@ -908,6 +927,7 @@ impl Default for ExplorerSettings {
             app: AppSettings::default(),
             contextmenu: ContextMenuSettings::default(),
             sidebar: SidebarSettings::default(),
+            sftp: SftpSettings::default(),
             tabs: TabSettings::default(),
             view: ViewSettings::default(),
         }
@@ -935,6 +955,15 @@ impl Default for SidebarSettings {
             hide_items: Vec::new(),
             items: default_sidebar_items(),
             width: SIDEBAR_DEFAULT_WIDTH,
+        }
+    }
+}
+
+impl Default for SftpSettings {
+    fn default() -> Self {
+        Self {
+            download_queue: DEFAULT_SFTP_QUEUE_DEPTH,
+            upload_queue: DEFAULT_SFTP_QUEUE_DEPTH,
         }
     }
 }
@@ -1695,6 +1724,17 @@ fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: Conf
 }
 
 fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
+    for (name, depth) in [
+        ("download_queue", settings.sftp.download_queue),
+        ("upload_queue", settings.sftp.upload_queue),
+    ] {
+        if !(1..=MAX_SFTP_QUEUE_DEPTH).contains(&depth) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sftp.{name} must be between 1 and {MAX_SFTP_QUEUE_DEPTH}"),
+            ));
+        }
+    }
     if settings.view.font.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2704,6 +2744,24 @@ where
     u32::deserialize(deserializer).map(normalized_cache_cleanup_interval_days)
 }
 
+fn default_sftp_queue_depth() -> u32 {
+    DEFAULT_SFTP_QUEUE_DEPTH
+}
+
+fn deserialize_sftp_queue_depth<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let depth = u32::deserialize(deserializer)?;
+    if (1..=MAX_SFTP_QUEUE_DEPTH).contains(&depth) {
+        Ok(depth)
+    } else {
+        Err(de::Error::custom(format!(
+            "SFTP queue depth must be between 1 and {MAX_SFTP_QUEUE_DEPTH}"
+        )))
+    }
+}
+
 fn deserialize_app_start_path<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where
     D: Deserializer<'de>,
@@ -2772,6 +2830,46 @@ pub(crate) fn config_dir_for(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn sftp_queue_depths_default_round_trip_and_validate() {
+        let defaults: ExplorerSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.sftp, SftpSettings::default());
+        assert_eq!(defaults.sftp.download_queue, 32);
+        assert_eq!(defaults.sftp.upload_queue, 32);
+
+        for depth in [1, 512] {
+            let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+                "sftp": { "download_queue": depth, "upload_queue": depth }
+            }))
+            .unwrap();
+            assert!(validate_settings(&settings).is_ok());
+            let value = serde_json::to_value(settings).unwrap();
+            assert_eq!(value["sftp"]["download_queue"], depth);
+            assert_eq!(value["sftp"]["upload_queue"], depth);
+        }
+        let independent: ExplorerSettings = serde_json::from_value(serde_json::json!({
+            "sftp": { "download_queue": 1, "upload_queue": 512 }
+        }))
+        .unwrap();
+        assert_eq!(independent.sftp.download_queue, 1);
+        assert_eq!(independent.sftp.upload_queue, 512);
+
+        for depth in [0, 513] {
+            assert!(
+                serde_json::from_value::<ExplorerSettings>(serde_json::json!({
+                    "sftp": { "download_queue": depth }
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ExplorerSettings>(serde_json::json!({
+                    "sftp": { "upload_queue": depth }
+                }))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn remote_sidebar_defaults_order_and_posix_paths_round_trip() {

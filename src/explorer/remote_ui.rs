@@ -4,6 +4,7 @@ use super::{
     remote_fs,
     view::ExplorerView,
 };
+use crate::settings::SettingsState;
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use std::time::Duration;
 
@@ -107,7 +108,8 @@ impl ExplorerView {
         move_sources: bool,
         cx: &mut Context<Self>,
     ) {
-        match super::remote_transfer::enqueue(paths, destination, move_sources) {
+        let sftp = cx.global::<SettingsState>().value.sftp;
+        match super::remote_transfer::enqueue(paths, destination, move_sources, sftp) {
             Ok(_) => self.clear_operation_notice(),
             Err(error) => self.set_error_notice(error),
         }
@@ -127,6 +129,10 @@ fn render_transfer_panel<V: 'static>(
     if jobs.is_empty() {
         return div().into_any_element();
     }
+    let sftp = cx
+        .try_global::<SettingsState>()
+        .map(|settings| settings.value.sftp)
+        .unwrap_or_default();
     div()
         .id("sftp-transfers")
         .debug_selector(|| "sftp-transfers".to_owned())
@@ -201,7 +207,7 @@ fn render_transfer_panel<V: 'static>(
                                 .text_color(rgb(0x0067c0))
                                 .child(label)
                                 .on_click(cx.listener(move |_, _, _, cx| {
-                                    remote_transfer::control(id, action);
+                                    remote_transfer::control(id, action, sftp);
                                     cx.notify();
                                 }))
                         })),
