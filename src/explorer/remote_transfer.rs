@@ -108,6 +108,7 @@ pub(super) enum State {
     Transferring,
     Verifying,
     Reconnecting,
+    Finalizing,
     Paused,
     Attention,
     Completed,
@@ -148,45 +149,125 @@ pub(super) struct Manifest {
     pub message: String,
     pub bytes: u64,
     pub total: u64,
+
     pub current: usize,
     items: Vec<Item>,
     planned: bool,
     move_sources: bool,
-    pub verify: bool,
     conflict: Conflict,
     pub warnings: Vec<String>,
 }
 impl Manifest {
     pub fn title(&self) -> String {
-        format!(
-            "{} → {}",
-            self.sources
-                .first()
-                .map(Location::label)
-                .unwrap_or_default(),
-            self.destination.label()
-        )
+        if let Some(item) = self.items.get(self.current) {
+            return item.source.name().unwrap_or_else(|_| "Transfer".into());
+        }
+        let first = self
+            .sources
+            .first()
+            .and_then(|s| s.name().ok())
+            .unwrap_or_else(|| "Transfer".into());
+        if self.sources.len() > 1 {
+            format!("{first} (+{} items)", self.sources.len() - 1)
+        } else {
+            first
+        }
     }
+
     pub fn files(&self) -> usize {
         self.items.len()
     }
 }
 struct Job {
+    progress: Mutex<TransferProgress>,
     store: PathBuf,
     data: Mutex<Manifest>,
     control: AtomicU8,
     running: AtomicBool,
 }
+
+#[derive(Default)]
+struct TransferProgress {
+    item: Option<usize>,
+    bytes: u64,
+    payload: u64,
+    samples: std::collections::VecDeque<(std::time::Instant, u64)>,
+}
+impl TransferProgress {
+    fn reset_rate(&mut self, now: std::time::Instant) {
+        self.payload = 0;
+        self.samples.clear();
+        self.samples.push_back((now, 0));
+    }
+    fn record(&mut self, now: std::time::Instant, item: usize, bytes: u64, payload: u64) {
+        self.item = Some(item);
+        self.bytes = bytes;
+        self.payload = self.payload.saturating_add(payload);
+        if self.samples.len() > 1
+            && now.duration_since(self.samples.back().unwrap().0) < Duration::from_millis(100)
+        {
+            *self.samples.back_mut().unwrap() = (now, self.payload);
+        } else {
+            self.samples.push_back((now, self.payload));
+        }
+        while self.samples.len() > 1
+            && now.duration_since(self.samples[0].0) > Duration::from_secs(5)
+        {
+            self.samples.pop_front();
+        }
+    }
+    fn speed(&self, now: std::time::Instant) -> Option<f64> {
+        let (start, bytes) = self
+            .samples
+            .iter()
+            .find(|(t, _)| now.duration_since(*t) <= Duration::from_secs(5))?;
+        let elapsed = now.duration_since(*start).as_secs_f64();
+        (elapsed >= 0.5).then(|| (self.payload - bytes) as f64 / elapsed)
+    }
+}
+fn record_progress(job: &Job, bytes: u64, payload: u64) {
+    let index = job.data.lock().unwrap().current;
+    job.progress
+        .lock()
+        .unwrap()
+        .record(std::time::Instant::now(), index, bytes, payload);
+}
+fn complete_job(job: &Job) {
+    set_state(job, State::Completed, "Transfer completed");
+    COMPLETION_REVISION.fetch_add(1, Ordering::Release);
+}
+fn clean_completion(m: &Manifest) -> bool {
+    m.state == State::Completed
+        && m.warnings.is_empty()
+        && m.items.iter().all(|i| i.completed && !i.skipped)
+}
+fn transfer_percentage(m: &Manifest, bytes: u64, total: u64) -> Option<u8> {
+    if !m.planned {
+        return None;
+    }
+    if m.state == State::Completed {
+        return Some(100);
+    }
+    let ratio = if total > 0 {
+        bytes as f64 / total as f64
+    } else {
+        let items = m.items.iter().filter(|i| !i.skipped).count();
+        let completed = m.items.iter().filter(|i| !i.skipped && i.completed).count();
+        if items == 0 {
+            0.0
+        } else {
+            completed as f64 / items as f64
+        }
+    };
+    Some((ratio * 100.0).clamp(0.0, 99.0) as u8)
+}
 #[derive(Default)]
 struct Manager {
     jobs: Mutex<BTreeMap<u64, Arc<Job>>>,
 }
-static FULL_VERIFY: AtomicBool = AtomicBool::new(false);
-pub(super) fn full_verify() -> bool {
-    FULL_VERIFY.load(Ordering::Relaxed)
-}
-pub(super) fn toggle_full_verify() {
-    FULL_VERIFY.fetch_xor(true, Ordering::Relaxed);
+static COMPLETION_REVISION: AtomicU64 = AtomicU64::new(0);
+pub(super) fn completion_revision() -> u64 {
+    COMPLETION_REVISION.load(Ordering::Acquire)
 }
 fn state_dir() -> io::Result<PathBuf> {
     crate::settings::config_dir()
@@ -205,8 +286,9 @@ fn manager() -> &'static Manager {
                 if let Ok(bytes) = fs::read(entry.path()) {
                     if let Ok(mut data) = serde_json::from_slice::<Manifest>(&bytes) {
                         if !valid_manifest(&data) { continue; }
+                        if clean_completion(&data) && fs::remove_file(entry.path()).is_ok() { continue; }
                         if !matches!(data.state, State::Completed | State::Cancelled) { data.state = State::Paused; data.message = "Interrupted transfer recovered. Resume to revalidate and continue.".into(); }
-                        manager.jobs.lock().unwrap().insert(data.id, Arc::new(Job { store: entry.path(), data: Mutex::new(data), control: AtomicU8::new(1), running: AtomicBool::new(false) }));
+                        manager.jobs.lock().unwrap().insert(data.id, Arc::new(Job { progress: Mutex::default(), store: entry.path(), data: Mutex::new(data), control: AtomicU8::new(1), running: AtomicBool::new(false) }));
                     }
                 }
             }
@@ -214,6 +296,7 @@ fn manager() -> &'static Manager {
         manager
     })
 }
+#[derive(Clone)]
 pub(super) struct JobSnapshot {
     pub id: u64,
     pub state: State,
@@ -221,12 +304,37 @@ pub(super) struct JobSnapshot {
     pub current: usize,
     pub bytes: u64,
     pub total: u64,
+    pub current_file_bytes: u64,
+    pub current_file_total: u64,
     pub warnings: Vec<String>,
     title: String,
     files: usize,
     pub retained_partials: bool,
+    pub percentage: Option<u8>,
+    pub speed: Option<f64>,
+    pub remaining: Option<Duration>,
 }
 impl JobSnapshot {
+    #[cfg(test)]
+    pub(super) fn for_test(state: State) -> Self {
+        Self {
+            id: 123,
+            state,
+            message: "Transferring".into(),
+            current: 0,
+            bytes: 512,
+            total: 1024,
+            current_file_bytes: 512,
+            current_file_total: 1024,
+            warnings: vec![],
+            title: "file.txt".into(),
+            files: 1,
+            retained_partials: false,
+            percentage: Some(50),
+            speed: Some(512.0),
+            remaining: Some(Duration::from_secs(1)),
+        }
+    }
     pub fn title(&self) -> String {
         self.title.clone()
     }
@@ -240,25 +348,55 @@ pub(super) fn snapshots() -> Vec<JobSnapshot> {
         .lock()
         .unwrap()
         .values()
-        .map(|j| {
-            let m = j.data.lock().unwrap();
-            JobSnapshot {
-                id: m.id,
-                state: m.state,
-                message: m.message.clone(),
-                current: m.current,
-                bytes: m.bytes,
-                total: m.total,
-                warnings: m.warnings.clone(),
-                title: m.title(),
-                files: m.files(),
-                retained_partials: m
-                    .items
-                    .iter()
-                    .any(|i| i.partial.is_some() && (!i.completed || i.skipped)),
-            }
-        })
+        .filter_map(|job| job_snapshot(job, std::time::Instant::now()))
         .collect()
+}
+fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
+    if clean_completion(&job.data.lock().unwrap()) {
+        return None;
+    }
+    let m = job.data.lock().unwrap();
+    let progress = job.progress.lock().unwrap();
+    let current_bytes = if progress.item == Some(m.current) {
+        progress
+            .bytes
+            .min(m.items.get(m.current).map_or(0, |i| i.metadata.size))
+    } else {
+        0
+    };
+    let total = m
+        .items
+        .iter()
+        .filter(|i| !i.skipped && i.metadata.kind == Kind::File)
+        .map(|i| i.metadata.size)
+        .sum::<u64>();
+    let bytes = m.bytes.saturating_add(current_bytes).min(total);
+    let speed = (m.state == State::Transferring)
+        .then(|| progress.speed(now))
+        .flatten();
+    let remaining = speed
+        .filter(|s| *s > 0.0)
+        .and_then(|s| Duration::try_from_secs_f64((total.saturating_sub(bytes)) as f64 / s).ok());
+    Some(JobSnapshot {
+        id: m.id,
+        state: m.state,
+        message: m.message.clone(),
+        current: m.current,
+        bytes,
+        total,
+        current_file_bytes: current_bytes,
+        current_file_total: m.items.get(m.current).map_or(0, |i| i.metadata.size),
+        percentage: transfer_percentage(&m, bytes, total),
+        speed,
+        remaining,
+        warnings: m.warnings.clone(),
+        title: m.title(),
+        files: m.files(),
+        retained_partials: m
+            .items
+            .iter()
+            .any(|i| i.partial.is_some() && (!i.completed || i.skipped)),
+    })
 }
 fn save(job: &Job) -> io::Result<()> {
     let data = job.data.lock().unwrap().clone();
@@ -266,6 +404,15 @@ fn save(job: &Job) -> io::Result<()> {
 }
 fn set_state(job: &Job, state: State, message: impl Into<String>) {
     let mut m = job.data.lock().unwrap();
+    if m.state != state
+        && !(matches!(m.state, State::Transferring | State::Finalizing)
+            && matches!(state, State::Transferring | State::Finalizing))
+    {
+        job.progress
+            .lock()
+            .unwrap()
+            .reset_rate(std::time::Instant::now());
+    }
     m.state = state;
     m.message = message.into();
 }
@@ -368,6 +515,7 @@ pub(super) fn enqueue(
     })
     .ok_or("Could not resolve the SSH site configuration")?;
     let job = Arc::new(Job {
+        progress: Mutex::default(),
         store: state_dir()
             .map_err(|e| e.to_string())?
             .join(format!("{id}.json")),
@@ -385,7 +533,6 @@ pub(super) fn enqueue(
             items: vec![],
             planned: false,
             move_sources,
-            verify: full_verify(),
             conflict: Conflict::Ask,
             warnings: vec![],
         }),
@@ -448,7 +595,7 @@ pub(super) fn control(id: u64, action: &str) {
                 let index = m.current;
                 m.items[index].skipped = true;
                 m.items[index].completed = true;
-                let label = m.items[index].source.label();
+                let label = m.items[index].source.name().unwrap_or_default();
                 m.warnings.push(format!("Skipped {label}"));
                 m.current += 1;
             }
@@ -538,7 +685,7 @@ fn start_action(job: Arc<Job>, discard: bool) {
                     Err(e) => set_state(&job, State::Attention, format!("Partials removed, but could not remove saved transfer: {e}")),
                 }
             },
-            Ok(()) => set_state(&job, State::Completed, "Transfer completed"),
+            Ok(()) => { complete_job(&job); },
             Err(e) if job.control.load(Ordering::Acquire) != 0 => {
                 let state = if job.control.load(Ordering::Acquire) == 2 { State::Cancelled } else { State::Paused };
                 set_state(&job, state, "Partial data retained. Resume validates it before continuing.");
@@ -547,6 +694,12 @@ fn start_action(job: Arc<Job>, discard: bool) {
             Err(e) => set_state(&job, State::Attention, e.to_string()),
         }
         if let Err(e) = save(&job) { set_state(&job, State::Attention, format!("Could not save transfer state: {e}")); }
+        if clean_completion(&job.data.lock().unwrap()) {
+            match fs::remove_file(&job.store) {
+                Ok(()) => { manager().jobs.lock().unwrap().remove(&data.id); },
+                Err(error) => set_state(&job, State::Attention, format!("Transfer completed, but saved state could not be removed: {error}")),
+            }
+        }
         job.running.store(false, Ordering::Release);
     });
 }
@@ -889,7 +1042,7 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
             job.data.lock().unwrap().current += 1;
             continue;
         }
-        set_state(job, State::Transferring, item.source.label());
+        set_state(job, State::Transferring, "Transferring");
         if metadata(session, &item.source).await? != item.metadata {
             return Err(io::Error::other(
                 "Source changed since this transfer was planned. Cancel and start a new transfer.",
@@ -947,7 +1100,7 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
                             io::ErrorKind::AlreadyExists,
                             format!(
                                 "{} already exists. Choose Replace all, Skip all, or Keep both.",
-                                item.destination.label()
+                                item.destination.name().unwrap_or_default()
                             ),
                         ));
                     }
@@ -1041,6 +1194,7 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
         }
         finish_item(job, item)?;
     }
+    set_state(job, State::Finalizing, "Finishing folders and move cleanup");
     let data = job.data.lock().unwrap().clone();
     // Apply directory times after descendants have been created.
     for item in data
@@ -1050,11 +1204,10 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
         .filter(|i| i.metadata.kind == Kind::Directory && !i.skipped)
     {
         if let Err(e) = set_attributes(session, &item.destination, &item.metadata, None).await {
-            job.data
-                .lock()
-                .unwrap()
-                .warnings
-                .push(format!("{}: {e}", item.destination.label()));
+            job.data.lock().unwrap().warnings.push(format!(
+                "{}: {e}",
+                item.destination.name().unwrap_or_default()
+            ));
         }
     }
     if data.move_sources {
@@ -1130,11 +1283,7 @@ async fn run_remote_moves(job: &Job, session: &Session) -> io::Result<()> {
         if item.source == item.destination {
             return Err(io::Error::other("Source and destination are the same."));
         }
-        set_state(
-            job,
-            State::Transferring,
-            format!("Moving {}", item.source.label()),
-        );
+        set_state(job, State::Transferring, "Moving");
         let source = maybe_metadata(session, &item.source).await?;
         let mut existing = maybe_metadata(session, &item.destination).await?;
         if item.committing && source.is_none() {
@@ -1353,7 +1502,8 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
                 at += length as u64;
             }
         }
-        set_state(job, State::Transferring, item.source.label());
+        set_state(job, State::Transferring, "Transferring");
+        record_progress(job, offset, 0);
         let mut at = offset;
         while at < item.metadata.size {
             // Keep memory and outstanding protocol requests bounded. Explicit
@@ -1401,16 +1551,13 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
                     ));
                 }
             }
+            record_progress(job, next, next - at);
             at = next;
-            job.data.lock().unwrap().message = format!(
-                "{} — {at}/{} bytes",
-                item.source.label(),
-                item.metadata.size
-            );
         }
         Ok(())
     }
     .await;
+    set_state(job, State::Finalizing, "Finalizing");
     let closed_source = close(session, source, false).await;
     let closed_output = close(session, output, true).await;
     result?;
@@ -1419,12 +1566,6 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
     if metadata(session, partial).await?.size != item.metadata.size {
         return Err(io::Error::other("Transferred file size does not match"));
     }
-    if job.data.lock().unwrap().verify {
-        set_state(job, State::Verifying, "Verifying complete file content");
-        if !equal_content(session, &item.source, partial, item.metadata.size).await? {
-            return Err(io::Error::other("Content verification failed"));
-        }
-    }
     let existing = maybe_metadata(session, &item.destination).await?;
     if let Err(error) = set_attributes(session, partial, &item.metadata, existing.as_ref()).await {
         if existing.is_some() {
@@ -1432,11 +1573,10 @@ async fn transfer_file(job: &Job, session: &Session, item: &Item) -> io::Result<
                 "Cannot preserve destination attributes; original retained: {error}"
             )));
         }
-        job.data
-            .lock()
-            .unwrap()
-            .warnings
-            .push(format!("{}: {error}", item.destination.label()));
+        job.data.lock().unwrap().warnings.push(format!(
+            "{}: {error}",
+            item.destination.name().unwrap_or_default()
+        ));
     }
     Ok(())
 }
@@ -1646,6 +1786,161 @@ fn validate_local_name(name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_job() -> Job {
+        protocol_tests::job(
+            Path::new("unused-test-state"),
+            Location::Remote(RemoteLocation::parse("sftp://server/folder/file.txt").unwrap()),
+            Location::Local(PathBuf::from("destination")),
+        )
+    }
+    fn item(size: u64, completed: bool, skipped: bool) -> Item {
+        Item {
+            target_seen: false,
+            target_before: None,
+            source_removed: false,
+            source: Location::Remote(
+                RemoteLocation::parse("sftp://server/folder/file.txt").unwrap(),
+            ),
+            destination: Location::Local(PathBuf::from("destination/file.txt")),
+            metadata: Metadata {
+                size,
+                modified: None,
+                nanos: None,
+                owner: None,
+                mode: None,
+                kind: Kind::File,
+            },
+            completed,
+            skipped,
+            partial: None,
+            committing: false,
+        }
+    }
+    #[test]
+    fn remote_progress_uses_validated_prefix_without_counting_it_as_speed() {
+        let job = test_job();
+        let now = std::time::Instant::now();
+        {
+            let mut m = job.data.lock().unwrap();
+            m.planned = true;
+            m.state = State::Transferring;
+            m.items = vec![
+                item(1000, true, false),
+                item(4000, false, false),
+                item(8000, true, true),
+            ];
+            m.current = 1;
+            m.bytes = 1000;
+        }
+        {
+            let mut p = job.progress.lock().unwrap();
+            p.reset_rate(now);
+            p.record(now, 1, 2000, 0);
+            p.record(now + Duration::from_secs(1), 1, 2500, 500);
+        }
+        let snapshot = job_snapshot(&job, now + Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            (snapshot.bytes, snapshot.total, snapshot.percentage),
+            (3500, 5000, Some(70))
+        );
+        assert_eq!(snapshot.speed, Some(500.0));
+        assert_eq!(snapshot.remaining, Some(Duration::from_secs(3)));
+        assert_eq!(snapshot.title(), "file.txt");
+        for state in [
+            State::Paused,
+            State::Reconnecting,
+            State::Finalizing,
+            State::Verifying,
+        ] {
+            set_state(&job, state, "Waiting");
+            let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+            assert!(snapshot.speed.is_none());
+            assert!(snapshot.remaining.is_none());
+        }
+    }
+    #[test]
+    fn remote_speed_window_expires_and_reconnect_resets_sampling() {
+        let now = std::time::Instant::now();
+        let mut p = TransferProgress::default();
+        p.reset_rate(now);
+        for second in 1..=10 {
+            p.record(now + Duration::from_secs(second), 0, second * 100, 100);
+        }
+        assert_eq!(p.speed(now + Duration::from_secs(10)), Some(100.0));
+        assert_eq!(p.speed(now + Duration::from_secs(16)), None);
+        p.reset_rate(now + Duration::from_secs(20));
+        p.record(now + Duration::from_secs(21), 0, 1500, 500);
+        assert_eq!(p.speed(now + Duration::from_secs(21)), Some(500.0));
+    }
+    #[test]
+    fn remote_empty_jobs_use_items_and_unplanned_jobs_have_unknown_progress() {
+        let job = test_job();
+        let now = std::time::Instant::now();
+        assert_eq!(job_snapshot(&job, now).unwrap().percentage, None);
+        {
+            let mut m = job.data.lock().unwrap();
+            m.planned = true;
+            m.items = vec![item(0, true, false), item(0, false, false)];
+            m.current = 1;
+        }
+        assert_eq!(job_snapshot(&job, now).unwrap().percentage, Some(50));
+    }
+    #[test]
+    fn remote_completion_is_hidden_but_notifies_and_retains_unresolved_jobs() {
+        let job = test_job();
+        {
+            let mut m = job.data.lock().unwrap();
+            m.items = vec![item(10, true, false)];
+            m.planned = true;
+            m.bytes = 10;
+            m.current = 1;
+        }
+        let before = completion_revision();
+        complete_job(&job);
+        assert!(completion_revision() > before);
+        assert!(job_snapshot(&job, std::time::Instant::now()).is_none());
+        job.data
+            .lock()
+            .unwrap()
+            .warnings
+            .push("Timestamp could not be preserved".into());
+        assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+        {
+            let mut m = job.data.lock().unwrap();
+            m.warnings.clear();
+            m.items[0].skipped = true;
+        }
+        assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+        for state in [State::Paused, State::Attention, State::Cancelled] {
+            set_state(&job, state, "Review required");
+            assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+        }
+    }
+    #[test]
+    fn remote_speed_window_survives_file_finalization_but_resets_on_reconnect() {
+        let job = test_job();
+        set_state(&job, State::Transferring, "Transferring");
+        record_progress(&job, 100, 100);
+        set_state(&job, State::Finalizing, "Finalizing");
+        set_state(&job, State::Transferring, "Transferring");
+        assert_eq!(job.progress.lock().unwrap().payload, 100);
+        set_state(&job, State::Reconnecting, "Reconnecting");
+        set_state(&job, State::Transferring, "Transferring");
+        assert_eq!(job.progress.lock().unwrap().payload, 0);
+    }
+    #[test]
+    fn remote_legacy_verification_flag_is_ignored_and_not_written() {
+        let job = test_job();
+        let mut value = serde_json::to_value(&*job.data.lock().unwrap()).unwrap();
+        value["verify"] = true.into();
+        let manifest: Manifest = serde_json::from_value(value).unwrap();
+        assert!(
+            serde_json::to_value(manifest)
+                .unwrap()
+                .get("verify")
+                .is_none()
+        );
+    }
     #[test]
     fn local_children_cannot_escape_destination() {
         let root = Location::Local(PathBuf::from("destination"));

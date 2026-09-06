@@ -217,6 +217,11 @@ impl NavIcon {
 
 impl FileIconKind {
     fn for_path(path: &Path) -> Self {
+        if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) {
+            return Self::for_path(Path::new(
+                location.path.rsplit('/').next().unwrap_or_default(),
+            ));
+        }
         if archive_path_is_supported(path) {
             return Self::Archive;
         }
@@ -588,6 +593,26 @@ pub(super) fn image_sidebar_icon(image: Arc<Image>) -> AnyElement {
 mod tests {
 
     use super::*;
+    #[test]
+    fn remote_icons_use_decoded_names_and_always_have_a_fallback() {
+        let root = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder").unwrap();
+        for name in [
+            "image.PNG",
+            "file.zip",
+            "日本語.txt",
+            "100%.pdf",
+            "data.unknown",
+            "LICENSE",
+            ".hidden",
+        ] {
+            let remote = root.child(name).unwrap().provider_path();
+            assert_eq!(
+                FileIconKind::for_path(&remote),
+                FileIconKind::for_path(Path::new(name)),
+                "{name}"
+            );
+        }
+    }
     use crate::explorer::constants::{
         FILE_ICON_SLOT_HEIGHT, FILE_ICON_SLOT_WIDTH, NAV_ICON_TEXT_SIZE,
     };

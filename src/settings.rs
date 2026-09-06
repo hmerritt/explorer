@@ -244,7 +244,7 @@ impl Serialize for SerializableSidebarSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(5))?;
+        let mut map = serializer.serialize_map(Some(6))?;
         map.serialize_entry("expanded_groups", &self.settings.expanded_groups)?;
         map.serialize_entry("hide_groups", &self.settings.hide_groups)?;
         map.serialize_entry(
@@ -262,6 +262,7 @@ impl Serialize for SerializableSidebarSettings<'_> {
             },
         )?;
         map.serialize_entry("width", &self.settings.width)?;
+        map.serialize_entry("remote", &self.settings.remote)?;
         map.end()
     }
 }
@@ -673,6 +674,8 @@ impl Serialize for AppSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SidebarSettings {
+    #[serde(default, deserialize_with = "deserialize_remote_sidebar_items")]
+    pub remote: Vec<RemoteSidebarItem>,
     #[serde(
         default = "default_sidebar_expanded_groups",
         deserialize_with = "deserialize_sidebar_expanded_groups"
@@ -692,6 +695,95 @@ pub struct SidebarSettings {
         deserialize_with = "deserialize_sidebar_width"
     )]
     pub width: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoteSidebarItem {
+    pub address: String,
+    #[serde(default = "remote_root_path")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+fn remote_root_path() -> String {
+    "/".into()
+}
+impl RemoteSidebarItem {
+    pub(crate) fn endpoint(&self) -> Result<String, String> {
+        let address = self.address.trim();
+        if address.is_empty() {
+            return Err("address is required".into());
+        }
+        let address = if address.contains("://") {
+            address.to_owned()
+        } else {
+            format!("sftp://{address}")
+        };
+        let mut url = gpui::http_client::Url::parse(&address)
+            .map_err(|_| "address must be an SFTP endpoint or SSH alias")?;
+        if url.scheme() != "sftp"
+            || url.host_str().is_none()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "use sftp://[user@]host[:port] without passwords, queries, or fragments".into(),
+            );
+        }
+        if !matches!(url.path(), "" | "/") {
+            return Err("put the default folder in path, not address".into());
+        }
+        if !self.path.starts_with('/')
+            || self.path.contains('\0')
+            || self.path.split('/').any(|p| matches!(p, "." | ".."))
+        {
+            return Err(
+                "path must be an absolute POSIX folder path without . or .. components".into(),
+            );
+        }
+        url.set_path("/");
+        Ok(url.to_string())
+    }
+    pub(crate) fn display_label(&self) -> String {
+        self.label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.address.trim_end_matches('/').to_owned())
+    }
+}
+fn deserialize_remote_sidebar_items<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<RemoteSidebarItem>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let Some(items) = value.as_array() else {
+        eprintln!(
+            "sidebar.remote must be an array of objects with address, path, and optional label"
+        );
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            match serde_json::from_value::<RemoteSidebarItem>(value.clone())
+                .map_err(|_| {
+                    "expected address, optional path, and optional label strings".to_owned()
+                })
+                .and_then(|item| {
+                    item.endpoint()?;
+                    Ok(item)
+                }) {
+                Ok(item) => Some(item),
+                Err(error) => {
+                    eprintln!("sidebar.remote[{index}]: {error}");
+                    None
+                }
+            }
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -837,6 +929,7 @@ impl Default for AppSettings {
 impl Default for SidebarSettings {
     fn default() -> Self {
         Self {
+            remote: Vec::new(),
             expanded_groups: default_sidebar_expanded_groups(),
             hide_groups: Vec::new(),
             hide_items: Vec::new(),
@@ -1388,7 +1481,7 @@ fn load_settings_after_change(path: &Path) -> io::Result<LoadedSettings> {
         return load_settings_document_from_path(path);
     }
 
-    let defaults = ExplorerSettings::default();
+    let defaults = defaults_with_remote_sites(path);
     let mut document = settings_document(&defaults);
     save_document_to_path(path, &mut document)?;
     Ok(LoadedSettings {
@@ -1399,7 +1492,7 @@ fn load_settings_after_change(path: &Path) -> io::Result<LoadedSettings> {
 
 fn load_or_create_settings(path: &Path) -> LoadedSettings {
     if !path.exists() {
-        let defaults = ExplorerSettings::default();
+        let defaults = defaults_with_remote_sites(path);
         let mut document = settings_document(&defaults);
         if let Err(error) = save_document_to_path(path, &mut document) {
             eprintln!("Unable to create Explorer settings: {error}");
@@ -1435,13 +1528,14 @@ fn load_settings_document_from_path_for(
 ) -> io::Result<LoadedSettings> {
     let source = fs::read_to_string(path)?;
     if source.trim().is_empty() {
-        let value = ExplorerSettings::default();
+        let value = defaults_with_remote_sites(path);
         let mut document = settings_document(&value);
         save_document_to_path(path, &mut document)?;
         return Ok(LoadedSettings { value, document });
     }
 
     let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
+    migrate_remote_sidebar(&mut document, path);
     let mut value =
         serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
     migrate_legacy_google_drive_setting(&document, &mut value);
@@ -1484,6 +1578,92 @@ fn migrate_legacy_google_drive_setting(document: &Value, settings: &mut Explorer
     {
         hide_sidebar_item_in_settings(SidebarHiddenItem::GoogleDrive, settings);
     }
+}
+
+fn migrate_remote_sidebar(document: &mut Value, path: &Path) {
+    if document
+        .get("sidebar")
+        .and_then(|s| s.get("remote"))
+        .is_some()
+    {
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(bytes) = fs::read(parent.join("sftp-sites.json")) else {
+        return;
+    };
+    let Ok(legacy) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
+        eprintln!("Could not migrate sftp-sites.json: expected an array of saved sites");
+        return;
+    };
+    let remote: Vec<_> = legacy
+        .into_iter()
+        .filter_map(|site| {
+            let location = site.get("location")?;
+            let item = RemoteSidebarItem {
+                address: location.get("site")?.as_str()?.into(),
+                path: location.get("path")?.as_str()?.into(),
+                label: site.get("name").and_then(Value::as_str).map(str::to_owned),
+            };
+            match item.endpoint() {
+                Ok(_) => Some(item),
+                Err(error) => {
+                    eprintln!("Could not migrate a remote site: {error}");
+                    None
+                }
+            }
+        })
+        .collect();
+    if !document.is_object() {
+        return;
+    }
+    let sidebar = document
+        .as_object_mut()
+        .unwrap()
+        .entry("sidebar")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(sidebar) = sidebar.as_object_mut() {
+        sidebar.insert("remote".into(), serde_json::to_value(remote).unwrap());
+    }
+}
+fn defaults_with_remote_sites(path: &Path) -> ExplorerSettings {
+    let mut document = serde_json::json!({});
+    migrate_remote_sidebar(&mut document, path);
+    serde_json::from_value(document).unwrap_or_default()
+}
+
+pub(crate) fn update_remote_sidebar_item(
+    original: Option<&RemoteSidebarItem>,
+    replacement: Option<RemoteSidebarItem>,
+    cx: &mut impl BorrowAppContext,
+) -> Result<(), String> {
+    if let Some(item) = &replacement {
+        item.endpoint()?;
+    }
+    cx.update_global::<SettingsState, _>(|state, _| {
+        let mut value = state.value.clone();
+        let index =
+            original.and_then(|old| value.sidebar.remote.iter().position(|item| item == old));
+        match (index, replacement) {
+            (Some(index), Some(item)) => value.sidebar.remote[index] = item,
+            (Some(index), None) => {
+                value.sidebar.remote.remove(index);
+            }
+            (None, Some(item)) => value.sidebar.remote.push(item),
+            (None, None) => return Err("This bookmark is no longer in sidebar.remote.".into()),
+        }
+        let mut document = state.document.clone();
+        sync_settings_document(&mut document, &value);
+        if !state.path.as_os_str().is_empty() {
+            save_document_to_path(&state.path, &mut document)
+                .map_err(|e| format!("Could not save sidebar.remote: {e}"))?;
+        }
+        state.value = value;
+        state.document = document;
+        Ok(())
+    })
 }
 
 fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: ConfigPlatform) {
@@ -2592,6 +2772,100 @@ pub(crate) fn config_dir_for(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn remote_sidebar_defaults_order_and_posix_paths_round_trip() {
+        let settings: ExplorerSettings =
+            serde_json::from_value(serde_json::json!({"sidebar":{"remote":[
+                {"address":"production"},
+                {"address":"sftp://alice@host:2200", "path":"/var/www/日本語", "label":"Website"},
+                {"address":"production", "path":"/backups"}
+            ]}}))
+            .unwrap();
+        assert_eq!(settings.sidebar.remote[0].path, "/");
+        assert_eq!(
+            settings.sidebar.remote[0].endpoint().unwrap(),
+            "sftp://production/"
+        );
+        assert_eq!(settings.sidebar.remote[1].display_label(), "Website");
+        let value = serde_json::to_value(&settings).unwrap();
+        assert!(value["sidebar"]["remote"][0].get("label").is_none());
+        let reloaded: ExplorerSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(reloaded.sidebar.remote, settings.sidebar.remote);
+        assert!(ExplorerSettings::default().sidebar.remote.is_empty());
+    }
+    #[test]
+    fn remote_sidebar_invalid_entries_do_not_break_other_settings() {
+        let settings: ExplorerSettings =
+            serde_json::from_value(serde_json::json!({"sidebar":{"width":245,"remote":[
+                {"address":"ftp://host"}, {"address":"sftp://user:secret@host"},
+                {"address":"host", "path":"relative"}, {"address":"sftp://host/folder"},
+                {"path":"/"}, 42, {"address":"good", "path":"/data"}
+            ]}}))
+            .unwrap();
+        assert_eq!(settings.sidebar.width, 245);
+        assert_eq!(settings.sidebar.remote.len(), 1);
+        assert_eq!(settings.sidebar.remote[0].address, "good");
+    }
+    #[test]
+    fn remote_sidebar_migration_only_runs_when_field_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            dir.path().join("sftp-sites.json"),
+            r#"[{"name":"Old server","location":{"site":"sftp://host/","path":"/data"}}]"#,
+        )
+        .unwrap();
+        fs::write(&path, "{}").unwrap();
+        let settings = load_settings_from_path(&path).unwrap();
+        assert_eq!(settings.sidebar.remote.len(), 1);
+        assert_eq!(settings.sidebar.remote[0].path, "/data");
+        let json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["sidebar"]["remote"][0]["label"], "Old server");
+        fs::write(dir.path().join("sftp-sites.json"), "invalid legacy JSON").unwrap();
+        assert_eq!(
+            load_settings_from_path(&path).unwrap().sidebar.remote,
+            settings.sidebar.remote
+        );
+        fs::write(&path, r#"{"sidebar":{"remote":[]}}"#).unwrap();
+        assert!(
+            load_settings_from_path(&path)
+                .unwrap()
+                .sidebar
+                .remote
+                .is_empty()
+        );
+    }
+    #[gpui::test]
+    fn remote_sidebar_edit_and_forget_preserve_other_bookmarks(cx: &mut gpui::TestAppContext) {
+        let first = RemoteSidebarItem {
+            address: "host".into(),
+            path: "/first".into(),
+            label: None,
+        };
+        let second = RemoteSidebarItem {
+            address: "host".into(),
+            path: "/second".into(),
+            label: None,
+        };
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        cx.update(|cx| {
+            update_remote_sidebar_item(None, Some(first.clone()), cx).unwrap();
+            update_remote_sidebar_item(None, Some(second.clone()), cx).unwrap();
+            let mut renamed = first.clone();
+            renamed.label = Some("Renamed".into());
+            update_remote_sidebar_item(Some(&first), Some(renamed.clone()), cx).unwrap();
+            assert_eq!(
+                cx.global::<SettingsState>().value.sidebar.remote,
+                vec![renamed.clone(), second.clone()]
+            );
+            update_remote_sidebar_item(Some(&renamed), None, cx).unwrap();
+            assert_eq!(
+                cx.global::<SettingsState>().value.sidebar.remote,
+                vec![second]
+            );
+        });
+    }
 
     #[test]
     fn defaults_match_generated_settings_contract() {

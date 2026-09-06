@@ -295,8 +295,9 @@ async fn server(root: &Path, faults: Arc<Faults>) -> Session {
         _ssh: None,
     }
 }
-fn job(root: &Path, source: Location, destination: Location) -> Job {
+pub(super) fn job(root: &Path, source: Location, destination: Location) -> Job {
     Job {
+        progress: Mutex::default(),
         store: root.join("job.json"),
         data: Mutex::new(Manifest {
             endpoint: None,
@@ -312,7 +313,6 @@ fn job(root: &Path, source: Location, destination: Location) -> Job {
             items: vec![],
             planned: false,
             move_sources: false,
-            verify: true,
             conflict: Conflict::Ask,
             warnings: vec![],
         }),

@@ -716,7 +716,12 @@ impl ExplorerView {
                 ))
                 .child(utility_separator())
             })
-            .child(utility_text_button("utility-connect-sftp", None, "Connect", false, true,
+            .child(utility_text_button(
+                "utility-connect-sftp",
+                None,
+                "Connect",
+                false,
+                true,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     let _ = window;
                     if this.active_dialog_window.is_none() {
@@ -7308,6 +7313,15 @@ fn rename_name_cell(
 }
 
 fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
+    if super::remote_fs::is_remote(&entry.path) {
+        if entry.uses_directory_shortcut_icon() {
+            return directory_shortcut_icon().into_any_element();
+        }
+        if entry.is_directory_like() {
+            return folder_icon().into_any_element();
+        }
+        return file_icon_for_path(Path::new(&entry.name)).into_any_element();
+    }
     if entry.uses_directory_shortcut_icon() {
         return directory_shortcut_icon().into_any_element();
     }
@@ -7345,6 +7359,16 @@ fn large_entry_icon(
     image_thumbnail: Option<Arc<gpui::RenderImage>>,
     app_icon: Option<Arc<Image>>,
 ) -> AnyElement {
+    if super::remote_fs::is_remote(&entry.path) {
+        if entry.uses_directory_shortcut_icon() {
+            return directory_shortcut_icon_sized(LARGE_ICON_SIZE).into_any_element();
+        }
+        if entry.is_directory_like() {
+            return folder_icon_sized(LARGE_ICON_SIZE).into_any_element();
+        }
+        return large_file_icon_for_path_sized(Path::new(&entry.name), LARGE_ICON_SIZE)
+            .into_any_element();
+    }
     if let Some(image_thumbnail) = image_thumbnail {
         return gpui::img(image_thumbnail)
             .w(px(LARGE_ICON_SIZE))
@@ -13337,5 +13361,29 @@ mod tests {
             entries.push(FileEntry::test(&format!("folder-{ix}"), true, None, None));
         }
         entries
+    }
+}
+
+#[cfg(test)]
+mod remote_icon_tests {
+    use super::*;
+    struct Icons;
+    impl gpui::Render for Icons {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let location = super::super::remote_fs::RemoteLocation::parse("sftp://server/résumé.PDF").unwrap();
+            let entry = FileEntry::from_provider(location.provider_path(), "résumé.PDF".into(), false, Some(12), None);
+            div().flex().flex_col()
+                .child(div().flex().debug_selector(|| "remote-details-icon".into()).child(entry_icon(&entry, None)))
+                .child(div().flex().debug_selector(|| "remote-large-icon".into()).child(large_entry_icon(&entry, None, None)))
+        }
+    }
+    #[gpui::test]
+    fn remote_file_icons_have_visible_layout_in_both_views(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Icons);
+        cx.run_until_parked();
+        let details = cx.debug_bounds("remote-details-icon").unwrap();
+        let large = cx.debug_bounds("remote-large-icon").unwrap();
+        assert!(details.size.height > px(0.0));
+        assert!(large.size.height > details.size.height);
     }
 }

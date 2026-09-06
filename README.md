@@ -201,8 +201,6 @@ no-dialog ZIP action is configured as:
 }
 ```
 
-## Development
-
 ## SFTP servers
 
 Click **Connect** to name a site and enter `sftp://user@host:22/folder/`, or use
@@ -220,20 +218,42 @@ navigate elsewhere. Pause and Cancel retain partial data; Resume validates that
 data before continuing. Interrupted jobs reopen paused after an application
 restart. Conflict controls provide replacement, skipping, and keeping both names.
 **Discard partials** removes retained temporary files and the saved job, while
-leaving completed destination files in place. Dismiss removes a finished job.
+leaving completed destination files in place. Successful jobs disappear automatically;
+the panel closes when none remain. Paused, failed, cancelled, warning-bearing, and
+retained-partial jobs remain available for review. Each row shows the filename,
+human-readable sizes, percentage, rolling transfer speed, and estimated time remaining.
 
 SSH authentication supports ordinary direct aliases, identity files, encrypted-key
 passphrases, password prompts, and SSH agents (including Windows OpenSSH/Pageant).
 Explorer checks server keys against known-host files, prompts for unknown keys,
 and rejects changed keys. Passwords and key passphrases are kept only in memory.
-Site and transfer JSON files are stored beside Explorer's settings.
+Remote bookmarks are stored in `sidebar.remote` in `settings.json`; transfer state
+is stored beside the settings file. Bookmarks appear in array order and support
+multiple folders on the same server:
+
+```json
+{
+    "sidebar": {
+        "remote": [
+            { "address": "sftp://alice@files.example.com:22", "path": "/var/www", "label": "Web server" },
+            { "address": "my-server", "path": "/backups" }
+        ]
+    }
+}
+```
+
+`address` accepts an SFTP endpoint or SSH alias. `path` defaults to `/` and uses
+POSIX syntax on every platform. `label` is optional and defaults to the address.
+Keep folder paths in `path`, and credentials out of this configuration. Connect,
+editing, and Forget update this array. Existing `sftp-sites.json` entries migrate
+when `sidebar.remote` is absent; an explicit empty array disables that import.
 
 Transfers use temporary destination files, checked close/flush operations, size
 checks, source/destination change checks, and atomic publication where available.
 Replacing remote files requires the server's OpenSSH atomic-rename extension and
 preserves reported ownership and permissions; otherwise Explorer retains the
-original and asks you to choose another action. Enable **Verify content for new
-transfers** for a full SHA-256 comparison, which rereads both files. These checks
+original and asks you to choose another action. Resume validates retained partial
+content, and an uncertain final rename is reconciled before retrying. These checks
 do not provide a snapshot of a file being edited concurrently; transfer stable
 source files.
 
@@ -246,7 +266,7 @@ are preserved without recursively following them; downloading links to Windows
 requires skipping them or using a Unix filesystem. Server deletes are permanent
 and use Explorer's permanent-delete confirmation.
 
-### Development
+## Development
 
 Explorer is a Rust 2024 project using GPUI.
 

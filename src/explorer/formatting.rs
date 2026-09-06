@@ -35,6 +35,19 @@ pub(crate) fn format_size(size: Option<u64>) -> String {
     format!("{} {unit}", format_decimal_with_commas(value, precision))
 }
 
+pub(super) fn format_transfer_remaining(duration: std::time::Duration) -> String {
+    let seconds = duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0));
+    if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 pub(super) fn format_transfer_rate(bytes_per_second: f64) -> String {
     let bytes_per_second = if bytes_per_second.is_finite() && bytes_per_second > 0.0 {
         bytes_per_second
@@ -87,6 +100,27 @@ fn format_integer_string_with_commas(value: &str) -> String {
 mod tests {
 
     use super::*;
+    #[test]
+    fn remote_remaining_time_uses_largest_two_units() {
+        for (seconds, expected) in [
+            (0, "0s"),
+            (20, "20s"),
+            (59, "59s"),
+            (60, "1m 0s"),
+            (1219, "20m 19s"),
+            (5400, "1h 30m"),
+            (90000, "25h 0m"),
+        ] {
+            assert_eq!(
+                format_transfer_remaining(std::time::Duration::from_secs(seconds)),
+                expected
+            );
+        }
+        assert_eq!(
+            format_transfer_remaining(std::time::Duration::from_millis(100)),
+            "1s"
+        );
+    }
     use crate::explorer::constants::{GB_BYTES, KB_BYTES, MB_BYTES, TB_BYTES};
     use chrono::{Local, TimeZone};
 

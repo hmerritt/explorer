@@ -892,6 +892,9 @@ fn native_icon_request_for_entry(
     entry: &FileEntry,
     size: NativeIconSize,
 ) -> Option<NativeIconRequest> {
+    if super::remote_fs::is_remote(&entry.path) {
+        return None;
+    }
     #[cfg(target_os = "macos")]
     {
         return mac_icon_request_for_entry(entry, size);
@@ -907,6 +910,9 @@ fn native_icon_request_for_entry(
 }
 
 fn native_icon_request_for_path(path: &Path, size: NativeIconSize) -> Option<NativeIconRequest> {
+    if super::remote_fs::is_remote(path) {
+        return None;
+    }
     #[cfg(target_os = "macos")]
     {
         return Some(mac_native_icon_request(
@@ -2313,6 +2319,18 @@ impl StableHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_files_never_request_native_filesystem_icons() {
+        let path = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder/program.exe")
+            .unwrap()
+            .provider_path();
+        let entry =
+            FileEntry::from_provider(path.clone(), "program.exe".into(), false, Some(12), None);
+        for size in [NativeIconSize::Details, NativeIconSize::LargeIcons] {
+            assert!(native_icon_request_for_entry(&entry, size).is_none());
+            assert!(native_icon_request_for_path(&path, size).is_none());
+        }
+    }
     use crate::explorer::{
         entry::{DirectoryLinkKind, ShellShortcutTargetKind},
         test_support::TempDir,

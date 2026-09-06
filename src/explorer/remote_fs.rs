@@ -59,6 +59,13 @@ pub(super) fn is_remote(path: &Path) -> bool {
 }
 
 impl RemoteLocation {
+    pub(super) fn from_bookmark(item: &crate::settings::RemoteSidebarItem) -> Result<Self, String> {
+        Ok(Self {
+            site: item.endpoint()?,
+            path: item.path.clone(),
+        })
+    }
+
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut url = Url::parse(input).map_err(|e| e.to_string())?;
         if url.scheme() != "sftp"
@@ -121,7 +128,10 @@ impl RemoteLocation {
     }
     pub fn address(&self) -> String {
         let mut url = Url::parse(&self.site).expect("validated site");
-        url.set_path(&self.path);
+        url.path_segments_mut()
+            .expect("SFTP hierarchical URL")
+            .clear()
+            .extend(self.path.trim_start_matches('/').split('/'));
         url.to_string()
     }
 }
@@ -154,50 +164,6 @@ pub(super) fn breadcrumb_segments(path: &Path) -> Option<Vec<(String, PathBuf)>>
     Some(segments)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct SavedSite {
-    pub name: String,
-    pub location: RemoteLocation,
-}
-pub(super) fn saved_sites() -> Vec<SavedSite> {
-    sites_path()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice::<Vec<SavedSite>>(&b).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|s| {
-            RemoteLocation::parse(&s.location.site).is_ok_and(|base| base.site == s.location.site)
-                && s.location.path.starts_with('/')
-                && !s.location.path.contains('\0')
-                && !s
-                    .location
-                    .path
-                    .split('/')
-                    .any(|part| matches!(part, "." | ".."))
-        })
-        .collect()
-}
-fn sites_path() -> Option<PathBuf> {
-    crate::settings::config_dir().map(|p| p.join("sftp-sites.json"))
-}
-pub(super) fn update_site(location: RemoteLocation, name: String) -> Result<(), String> {
-    let path = sites_path().ok_or("Configuration directory unavailable.")?;
-    let mut sites = saved_sites();
-    sites.retain(|site| site.location.site != location.site);
-    let name = if name.trim().is_empty() {
-        location.site.trim_end_matches('/').to_owned()
-    } else {
-        name.trim().to_owned()
-    };
-    sites.push(SavedSite { name, location });
-    atomic_json(&path, &sites)
-}
-pub(super) fn forget_site(site: &str) -> Result<(), String> {
-    let path = sites_path().ok_or("Configuration directory unavailable.")?;
-    let mut sites = saved_sites();
-    sites.retain(|saved| saved.location.site != site);
-    atomic_json(&path, &sites)
-}
 pub(super) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     use std::io::Write;
     let parent = path.parent().ok_or("Missing state directory")?;
@@ -683,6 +649,24 @@ pub(super) fn delete(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_bookmark_address_round_trips_literal_percent_and_unicode() {
+        for path in [
+            "/reports/a%20b.txt",
+            "/résumé/大.PDF",
+            "/",
+            "/folder/back\\slash",
+        ] {
+            let location = RemoteLocation {
+                site: "sftp://server/".into(),
+                path: path.into(),
+            };
+            assert_eq!(
+                RemoteLocation::parse(&location.address()).unwrap(),
+                location
+            );
+        }
+    }
     #[test]
     fn location_round_trips_platform_sensitive_names() {
         let root = RemoteLocation::parse("sftp://alice@example.com:2222/").unwrap();

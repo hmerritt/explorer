@@ -55,9 +55,21 @@ pub(super) fn sidebar_sections(
         wsl_drive_roots(),
         portable_device_roots(),
     );
-    sections.network_drives.extend(super::remote_fs::saved_sites().into_iter()
-        .map(|site| SidebarItem { label: site.name, path: site.location.provider_path(), kind: SidebarItemKind::CustomDirectory, configured_index: None })
-        .filter(|item| !sidebar_item_is_hidden(item, settings)));
+    sections.network_drives.extend(
+        settings
+            .remote
+            .iter()
+            .filter_map(|item| {
+                let location = super::remote_fs::RemoteLocation::from_bookmark(item).ok()?;
+                Some(SidebarItem {
+                    label: item.display_label(),
+                    path: location.provider_path(),
+                    kind: SidebarItemKind::CustomDirectory,
+                    configured_index: None,
+                })
+            })
+            .filter(|item| !sidebar_item_is_hidden(item, settings)),
+    );
     sections
 }
 

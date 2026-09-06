@@ -27,6 +27,7 @@ const HOST_KEY_HEIGHT: f32 = 240.0;
 
 enum RemoteDialogKind {
     Site {
+        original: Option<crate::settings::RemoteSidebarItem>,
         name: Entity<RemoteCredentialInput>,
         address: Entity<RemoteCredentialInput>,
         error: Option<String>,
@@ -65,14 +66,21 @@ pub(super) fn open_site_dialog(
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let location = super::remote_fs::RemoteLocation::from_provider(&explorer.read(cx).path);
-    let name = location
+    let original = location.as_ref().and_then(|location| {
+        explorer
+            .read(cx)
+            .sidebar_settings
+            .remote
+            .iter()
+            .find(|item| {
+                item.endpoint().is_ok_and(|site| site == location.site)
+                    && item.path.trim_end_matches('/') == location.path.trim_end_matches('/')
+            })
+            .cloned()
+    });
+    let name = original
         .as_ref()
-        .and_then(|loc| {
-            super::remote_fs::saved_sites()
-                .into_iter()
-                .find(|site| site.location.site == loc.site)
-        })
-        .map(|site| site.name)
+        .and_then(|item| item.label.clone())
         .unwrap_or_default();
     let address = location
         .map(|loc| loc.address())
@@ -91,6 +99,7 @@ pub(super) fn open_site_dialog(
                 .detach();
             RemoteDownloadDialog::new(
                 RemoteDialogKind::Site {
+                    original,
                     name,
                     address,
                     error: None,
@@ -226,16 +235,28 @@ impl RemoteDownloadDialog {
 
     fn submit(&mut self, _: &RenameCommit, window: &mut Window, cx: &mut Context<Self>) {
         match &self.kind {
-            RemoteDialogKind::Site { name, address, .. } => {
-                let result =
-                    super::remote_fs::RemoteLocation::parse(address.read(cx).text.content.trim())
-                        .and_then(|location| {
-                            super::remote_fs::update_site(
-                                location.clone(),
-                                name.read(cx).text.content.clone(),
-                            )?;
-                            Ok(location)
-                        });
+            RemoteDialogKind::Site {
+                name,
+                address,
+                original,
+                ..
+            } => {
+                let input = address.read(cx).text.content.trim().to_owned();
+                let input = if input.contains("://") {
+                    input
+                } else {
+                    format!("sftp://{input}")
+                };
+                let result = super::remote_fs::RemoteLocation::parse(&input).and_then(|location| {
+                    let label = name.read(cx).text.content.trim().to_owned();
+                    let item = crate::settings::RemoteSidebarItem {
+                        address: location.site.trim_end_matches('/').into(),
+                        path: location.path.clone(),
+                        label: (!label.is_empty()).then_some(label),
+                    };
+                    crate::settings::update_remote_sidebar_item(original.as_ref(), Some(item), cx)?;
+                    Ok(location)
+                });
                 let location = match result {
                     Ok(location) => location,
                     Err(message) => {
@@ -392,14 +413,17 @@ impl RemoteDownloadDialog {
                     .child(
                         remote_button("site-forget", "Forget site").on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
-                                if let RemoteDialogKind::Site { address, error, .. } =
-                                    &mut this.kind
+                                if let RemoteDialogKind::Site {
+                                    original, error, ..
+                                } = &mut this.kind
                                 {
-                                    let result = super::remote_fs::RemoteLocation::parse(
-                                        address.read(cx).text.content.trim(),
-                                    )
-                                    .and_then(|loc| super::remote_fs::forget_site(&loc.site));
-                                    if let Err(message) = result {
+                                    if let Err(message) =
+                                        crate::settings::update_remote_sidebar_item(
+                                            original.as_ref(),
+                                            None,
+                                            cx,
+                                        )
+                                    {
                                         *error = Some(message);
                                         cx.notify();
                                         return;
@@ -532,6 +556,7 @@ impl Render for RemoteDownloadDialog {
                 name,
                 address,
                 error,
+                ..
             } => self.render_site(name.clone(), address.clone(), error.clone(), cx),
             RemoteDialogKind::Credentials {
                 host,
