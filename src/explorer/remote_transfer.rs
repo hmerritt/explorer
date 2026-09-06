@@ -296,7 +296,7 @@ fn manager() -> &'static Manager {
         manager
     })
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct JobSnapshot {
     pub id: u64,
     pub state: State,

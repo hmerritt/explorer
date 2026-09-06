@@ -6916,6 +6916,16 @@ mod tests {
     }
 
     #[test]
+    fn tab_label_decodes_remote_provider_components() {
+        let location = crate::explorer::remote_fs::RemoteLocation::parse(
+            "sftp://music-seed/library/100%25%20mixes",
+        )
+        .unwrap();
+
+        assert_eq!(tab_label_for_path(&location.provider_path()), "100% mixes");
+    }
+
+    #[test]
     fn adjacent_tab_selection_wraps() {
         assert_eq!(adjacent_tab_index(2, 3, TabDirection::Next), 0);
         assert_eq!(adjacent_tab_index(0, 3, TabDirection::Previous), 2);

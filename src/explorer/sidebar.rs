@@ -27,6 +27,7 @@ pub(super) enum SidebarItemKind {
     Drive,
     DriveWindows,
     DriveNetwork(NetworkDriveState),
+    Remote(NetworkDriveState),
     GoogleDrive,
     OneDrive,
     PortableDevice,
@@ -55,22 +56,35 @@ pub(super) fn sidebar_sections(
         wsl_drive_roots(),
         portable_device_roots(),
     );
+    append_remote_items(&mut sections, settings, super::remote_fs::site_is_connected);
+    sections
+}
+
+fn append_remote_items(
+    sections: &mut SidebarSections,
+    settings: &SidebarSettings,
+    is_connected: impl Fn(&str) -> bool,
+) {
     sections.network_drives.extend(
         settings
             .remote
             .iter()
             .filter_map(|item| {
                 let location = super::remote_fs::RemoteLocation::from_bookmark(item).ok()?;
+                let state = if is_connected(&location.site) {
+                    NetworkDriveState::Connected
+                } else {
+                    NetworkDriveState::Disconnected
+                };
                 Some(SidebarItem {
                     label: item.display_label(),
                     path: location.provider_path(),
-                    kind: SidebarItemKind::CustomDirectory,
+                    kind: SidebarItemKind::Remote(state),
                     configured_index: None,
                 })
             })
             .filter(|item| !sidebar_item_is_hidden(item, settings)),
     );
-    sections
 }
 
 fn sidebar_sections_from_roots_internal(
@@ -250,6 +264,7 @@ fn sidebar_item_label_for_path(
             sidebar_drive_label(path, filesystem_name)
         }
         SidebarItemKind::DriveNetwork(_) => home_sidebar_label(path),
+        SidebarItemKind::Remote(_) => home_sidebar_label(path),
         SidebarItemKind::GoogleDrive => "Google Drive".to_owned(),
         SidebarItemKind::OneDrive => "OneDrive".to_owned(),
         SidebarItemKind::PortableDevice => home_sidebar_label(path),
@@ -468,7 +483,7 @@ fn sidebar_wsl_drive_label(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
-    use crate::settings::{SidebarGroupKind, SidebarSettings};
+    use crate::settings::{RemoteSidebarItem, SidebarGroupKind, SidebarSettings};
     use std::fs;
 
     #[test]
@@ -569,6 +584,32 @@ mod tests {
                     configured_index: Some(2),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn configured_remote_items_track_connection_state() {
+        let settings = SidebarSettings {
+            remote: vec![RemoteSidebarItem {
+                address: "music-seed".to_owned(),
+                path: "/library".to_owned(),
+                label: Some("Music".to_owned()),
+            }],
+            ..SidebarSettings::default()
+        };
+        let mut disconnected = SidebarSections::default();
+        append_remote_items(&mut disconnected, &settings, |_| false);
+        assert_eq!(disconnected.network_drives.len(), 1);
+        assert_eq!(
+            disconnected.network_drives[0].kind,
+            SidebarItemKind::Remote(NetworkDriveState::Disconnected)
+        );
+
+        let mut connected = SidebarSections::default();
+        append_remote_items(&mut connected, &settings, |_| true);
+        assert_eq!(
+            connected.network_drives[0].kind,
+            SidebarItemKind::Remote(NetworkDriveState::Connected)
         );
     }
 

@@ -7,10 +7,31 @@ use super::{
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use std::time::Duration;
 
+const TRANSFER_UI_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+
 impl ExplorerView {
     pub(super) fn start_remote_events(&mut self, cx: &mut Context<Self>) {
+        self.remote_transfer_snapshots = super::remote_transfer::snapshots();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(TRANSFER_UI_UPDATE_INTERVAL)
+                .await;
+            if this
+                .update(cx, |view, cx| {
+                    let snapshots = super::remote_transfer::snapshots();
+                    if snapshots != view.remote_transfer_snapshots {
+                        view.remote_transfer_snapshots = snapshots;
+                        cx.notify();
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
         cx.spawn(async move |this, cx| {
-            let mut previous = Vec::new();
             let mut completion = super::remote_transfer::completion_revision();
             loop {
                 cx.background_executor()
@@ -18,31 +39,11 @@ impl ExplorerView {
                     .await;
                 if this
                     .update(cx, |view, cx| {
-                        let snapshots = super::remote_transfer::snapshots();
-                        let current: Vec<_> = snapshots
-                            .iter()
-                            .map(|m| {
-                                (
-                                    m.id,
-                                    m.state,
-                                    m.message.clone(),
-                                    m.current,
-                                    m.bytes,
-                                    m.percentage,
-                                    m.speed.map(f64::to_bits),
-                                    m.remaining.map(|d| d.as_secs()),
-                                )
-                            })
-                            .collect();
                         let revision = super::remote_transfer::completion_revision();
                         if revision != completion {
                             completion = revision;
                             view.reload_with_entry_metadata_resolution(cx);
                             view.emit_filesystem_changed(cx);
-                        }
-                        if current != previous {
-                            previous = current;
-                            cx.notify();
                         }
                         if view.active_dialog_window.is_some() {
                             return;
@@ -114,7 +115,7 @@ impl ExplorerView {
     }
 
     pub(super) fn render_native_transfers(&self, cx: &mut Context<Self>) -> AnyElement {
-        render_transfer_panel(super::remote_transfer::snapshots(), cx)
+        render_transfer_panel(self.remote_transfer_snapshots.clone(), cx)
     }
 }
 
@@ -246,6 +247,11 @@ fn transfer_statistics(job: &super::remote_transfer::JobSnapshot) -> String {
 mod tests {
     use super::super::remote_transfer::{JobSnapshot, State};
     use super::*;
+
+    #[test]
+    fn transfer_ui_updates_are_limited_to_twice_per_second() {
+        assert_eq!(TRANSFER_UI_UPDATE_INTERVAL, Duration::from_millis(500));
+    }
     struct Panel {
         jobs: Vec<JobSnapshot>,
     }

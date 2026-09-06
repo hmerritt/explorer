@@ -104,6 +104,7 @@ pub struct ExplorerView {
     pub(super) ytdlp_process_controls: Vec<(u64, YtDlpProcessControl)>,
     pub(super) pending_remote_downloads: VecDeque<(ClipboardDownload, PathBuf)>,
     pub(super) active_remote_download: Option<ActiveRemoteDownload>,
+    pub(super) remote_transfer_snapshots: Vec<super::remote_transfer::JobSnapshot>,
     pub(super) remote_credentials: HashMap<
         crate::explorer::remote_download::RemoteEndpointKey,
         crate::explorer::remote_download::RemoteCredentials,
@@ -528,6 +529,7 @@ impl ExplorerView {
             ytdlp_process_controls: Vec::new(),
             pending_remote_downloads: VecDeque::new(),
             active_remote_download: None,
+            remote_transfer_snapshots: Vec::new(),
             remote_credentials: HashMap::new(),
             next_download_id: 0,
             download_batch_succeeded: 0,
@@ -2313,6 +2315,9 @@ pub(super) struct ReloadMode {
 }
 
 pub(super) fn tab_label_for_path(path: &Path) -> String {
+    if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) {
+        return location.tab_label();
+    }
     path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())

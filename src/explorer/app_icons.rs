@@ -893,7 +893,7 @@ fn native_icon_request_for_entry(
     size: NativeIconSize,
 ) -> Option<NativeIconRequest> {
     if super::remote_fs::is_remote(&entry.path) {
-        return None;
+        return remote_file_type_icon_request(entry, size);
     }
     #[cfg(target_os = "macos")]
     {
@@ -907,6 +907,38 @@ fn native_icon_request_for_entry(
 
     #[allow(unreachable_code)]
     None
+}
+
+fn remote_file_type_icon_request(
+    entry: &FileEntry,
+    size: NativeIconSize,
+) -> Option<NativeIconRequest> {
+    if entry.is_directory_like() {
+        return None;
+    }
+
+    let extension = lowercase_extension(Path::new(&entry.name)).unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    {
+        return Some(mac_native_icon_request(
+            MacIconRequest::FileType { extension },
+            size,
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Some(windows_native_icon_request(
+            WindowsIconRequest::Extension { extension },
+            size,
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (extension, size);
+        None
+    }
 }
 
 fn native_icon_request_for_path(path: &Path, size: NativeIconSize) -> Option<NativeIconRequest> {
@@ -2320,14 +2352,61 @@ impl StableHash {
 mod tests {
     use super::*;
     #[test]
-    fn remote_files_never_request_native_filesystem_icons() {
-        let path = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder/program.exe")
-            .unwrap()
-            .provider_path();
-        let entry =
-            FileEntry::from_provider(path.clone(), "program.exe".into(), false, Some(12), None);
+    fn remote_files_share_local_file_type_icon_requests() {
         for size in [NativeIconSize::Details, NativeIconSize::LargeIcons] {
-            assert!(native_icon_request_for_entry(&entry, size).is_none());
+            for name in [
+                "notes.txt",
+                "track.mp3",
+                "report.docx",
+                "item.unknown-extension",
+                "PHOTO.JPEG",
+                "README",
+            ] {
+                let location = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder")
+                    .unwrap()
+                    .child(name)
+                    .unwrap();
+                let remote = FileEntry::from_provider(
+                    location.provider_path(),
+                    name.into(),
+                    false,
+                    Some(12),
+                    None,
+                );
+                let local = FileEntry::test(name, false, Some(12), None);
+                assert_eq!(
+                    native_icon_request_for_entry(&remote, size),
+                    native_icon_request_for_entry(&local, size),
+                    "file-type request for {name} at {size:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_directories_skip_native_icons_and_remote_paths_stay_non_native() {
+        let location = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder")
+            .unwrap();
+        let path = location.provider_path();
+        let directory = FileEntry::from_provider(
+            path.clone(),
+            "folder".into(),
+            true,
+            None,
+            None,
+        );
+        let directory_link = FileEntry {
+            path: path.clone(),
+            name: "folder".into(),
+            kind: crate::explorer::entry::EntryKind::DirectoryLink(
+                crate::explorer::entry::DirectoryLinkKind::FilesystemLink,
+            ),
+            modified: None,
+            size: None,
+        };
+        for size in [NativeIconSize::Details, NativeIconSize::LargeIcons] {
+            assert!(native_icon_request_for_entry(&directory, size).is_none());
+            assert!(native_icon_request_for_entry(&directory_link, size).is_none());
             assert!(native_icon_request_for_path(&path, size).is_none());
         }
     }

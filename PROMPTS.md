@@ -1,9 +1,6 @@
 ## 1
 
 - Research what Winscp does, how it works. Take another stab at implementing it within explorer
-    - Change the sidebar icon of the remote items to "assets/icons/devices/drives/network.png" and "assets/icons/devices/drives/networkdelete.png" when not connected
-    - Tab title for remote items are not correct. "music-seed" turns into "music%2Dseed". Tab title should be the original chars
-    - De-bounce the UI updates for server transfers, currently it updates too often and is hard to read. limit to 500ms
     - Download speeds are currently slower than using WinSCP directly, why might this be?
 - Windows taskbar icon. On window close keep running, context menu to: show version, check for updates, open new window. re-attach to an existing window
 - Windows installer, see aura for an existing implmentation: https://github.com/hmerritt/aura. Squirrel installer and auto-updater

@@ -2165,6 +2165,7 @@ impl ExplorerView {
                 | SidebarItemKind::Drive
                 | SidebarItemKind::DriveWindows
                 | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
+                | SidebarItemKind::Remote(NetworkDriveState::Connected)
                 | SidebarItemKind::GoogleDrive
                 | SidebarItemKind::OneDrive
                 | SidebarItemKind::DriveWsl
@@ -4089,6 +4090,7 @@ fn sidebar_context_menu_target(
         SidebarItemKind::Drive => Some(DirectoryKind::Drive),
         SidebarItemKind::DriveWindows => Some(DirectoryKind::DriveWindows),
         SidebarItemKind::DriveNetwork(_) => Some(DirectoryKind::Drive),
+        SidebarItemKind::Remote(_) => None,
         SidebarItemKind::GoogleDrive => None,
         SidebarItemKind::OneDrive => None,
         SidebarItemKind::PortableDevice => Some(DirectoryKind::Drive),
@@ -4171,6 +4173,7 @@ fn sidebar_group_item_icon_sized(item: &SidebarItem, size: f32) -> AnyElement {
             directory_kind_icon_sized(DirectoryKind::DriveWindows, size)
         }
         SidebarItemKind::DriveNetwork(state) => network_drive_icon_sized(state, size),
+        SidebarItemKind::Remote(state) => network_drive_icon_sized(state, size),
         SidebarItemKind::GoogleDrive => google_drive_icon_sized(size),
         SidebarItemKind::OneDrive => onedrive_icon_sized(size),
         SidebarItemKind::PortableDevice => portable_device_icon_sized(size).into_any_element(),
@@ -4186,6 +4189,7 @@ fn sidebar_item_kind_icon_for_path(kind: SidebarItemKind, path: &Path) -> AnyEle
         SidebarItemKind::Drive => drive_icon().into_any_element(),
         SidebarItemKind::DriveWindows => drive_windows_icon().into_any_element(),
         SidebarItemKind::DriveNetwork(state) => network_drive_icon(state).into_any_element(),
+        SidebarItemKind::Remote(state) => network_drive_icon(state).into_any_element(),
         SidebarItemKind::GoogleDrive => google_drive_icon(),
         SidebarItemKind::OneDrive => onedrive_icon(),
         SidebarItemKind::PortableDevice => portable_device_icon().into_any_element(),
@@ -7320,6 +7324,9 @@ fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
         if entry.is_directory_like() {
             return folder_icon().into_any_element();
         }
+        if let Some(app_icon) = app_icon {
+            return image_icon(app_icon, FILE_ICON_SLOT_WIDTH, FILE_ICON_SLOT_HEIGHT);
+        }
         return file_icon_for_path(Path::new(&entry.name)).into_any_element();
     }
     if entry.uses_directory_shortcut_icon() {
@@ -7359,6 +7366,15 @@ fn large_entry_icon(
     image_thumbnail: Option<Arc<gpui::RenderImage>>,
     app_icon: Option<Arc<Image>>,
 ) -> AnyElement {
+    if let Some(image_thumbnail) = image_thumbnail {
+        return gpui::img(image_thumbnail)
+            .w(px(LARGE_ICON_SIZE))
+            .h(px(LARGE_ICON_SIZE))
+            .flex_shrink_0()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element();
+    }
+
     if super::remote_fs::is_remote(&entry.path) {
         if entry.uses_directory_shortcut_icon() {
             return directory_shortcut_icon_sized(LARGE_ICON_SIZE).into_any_element();
@@ -7366,15 +7382,10 @@ fn large_entry_icon(
         if entry.is_directory_like() {
             return folder_icon_sized(LARGE_ICON_SIZE).into_any_element();
         }
+        if let Some(app_icon) = app_icon {
+            return image_icon(app_icon, LARGE_ICON_SIZE, LARGE_ICON_SIZE);
+        }
         return large_file_icon_for_path_sized(Path::new(&entry.name), LARGE_ICON_SIZE)
-            .into_any_element();
-    }
-    if let Some(image_thumbnail) = image_thumbnail {
-        return gpui::img(image_thumbnail)
-            .w(px(LARGE_ICON_SIZE))
-            .h(px(LARGE_ICON_SIZE))
-            .flex_shrink_0()
-            .object_fit(ObjectFit::Contain)
             .into_any_element();
     }
 

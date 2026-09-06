@@ -58,6 +58,20 @@ pub(super) fn is_remote(path: &Path) -> bool {
     path.starts_with(virtual_root())
 }
 
+pub(super) fn site_is_connected(site: &str) -> bool {
+    service()
+        .slots
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|((candidate, _), slot)| {
+            candidate == site
+                && slot
+                    .try_lock()
+                    .is_ok_and(|session| session.as_ref().is_some())
+        })
+}
+
 impl RemoteLocation {
     pub(super) fn from_bookmark(item: &crate::settings::RemoteSidebarItem) -> Result<Self, String> {
         Ok(Self {
@@ -133,6 +147,21 @@ impl RemoteLocation {
             .clear()
             .extend(self.path.trim_start_matches('/').split('/'));
         url.to_string()
+    }
+
+    pub(super) fn tab_label(&self) -> String {
+        self.path
+            .split('/')
+            .rfind(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let site = self
+                    .site
+                    .strip_prefix("sftp://")
+                    .unwrap_or(&self.site)
+                    .trim_end_matches('/');
+                decode(site).unwrap_or_else(|| site.to_owned())
+            })
     }
 }
 
@@ -687,5 +716,18 @@ mod tests {
             assert!(root.child(name).is_err());
         }
         assert!(parent(&root.provider_path()).is_none());
+    }
+
+    #[test]
+    fn tab_labels_preserve_decoded_remote_names_and_readable_roots() {
+        let root = RemoteLocation::parse("sftp://alice@music-seed:2222/").unwrap();
+        assert_eq!(root.tab_label(), "alice@music-seed:2222");
+
+        for name in ["music-seed", "100% mixes", "日本語"] {
+            let child = root.child(name).unwrap();
+            let provider = child.provider_path();
+            assert_ne!(provider.file_name().unwrap().to_string_lossy(), name);
+            assert_eq!(RemoteLocation::from_provider(&provider).unwrap().tab_label(), name);
+        }
     }
 }
