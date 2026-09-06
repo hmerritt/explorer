@@ -716,6 +716,18 @@ impl ExplorerView {
                 ))
                 .child(utility_separator())
             })
+            .child(utility_text_button("utility-connect-sftp", None, "Connect", false, true,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    let _ = window;
+                    if this.active_dialog_window.is_none() {
+                        match super::remote_dialog::open_site_dialog(cx.entity(), cx) {
+                            Ok(handle) => this.active_dialog_window = Some(handle),
+                            Err(error) => this.set_error_notice(error),
+                        }
+                    }
+                    cx.notify();
+                }),
+            ))
             .child(utility_text_button(
                 "utility-new",
                 Some(utility_new_icon().into_any_element()),
@@ -3631,6 +3643,7 @@ impl ExplorerView {
                     LinearProgressStyle::explorer_copy_green(),
                 ))
             })
+            .child(self.render_native_transfers(cx))
             .child(self.render_status_bar(cx))
     }
 }

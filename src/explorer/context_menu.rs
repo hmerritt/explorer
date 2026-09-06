@@ -1548,7 +1548,7 @@ fn entry_context_menu_items_with_custom_in_directory(
         && let Some(entry) = selected_entries.first()
     {
         let is_folder = directory_new_tab_target(entry).is_some();
-        if !crate::explorer::portable_devices::is_portable_path(&entry.path)
+        if !super::remote_fs::is_remote(&entry.path) && !crate::explorer::portable_devices::is_portable_path(&entry.path)
             && !crate::explorer::archive_fs::is_archive_path(&entry.path)
         {
             items.push(copy_path_context_menu_item(
@@ -1640,7 +1640,7 @@ fn path_is_windows_open_with_context_menu_excluded(path: &Path) -> bool {
 fn selected_entries_are_supported_archives(selected_entries: &[FileEntry]) -> bool {
     !selected_entries.is_empty()
         && selected_entries.iter().all(|entry| {
-            !crate::explorer::portable_devices::is_portable_path(&entry.path)
+            !super::remote_fs::is_remote(&entry.path) && !crate::explorer::portable_devices::is_portable_path(&entry.path)
                 && !crate::explorer::archive_fs::is_archive_path(&entry.path)
                 && entry.is_open_with_target()
                 && archive_path_is_supported(&entry.path)
@@ -1651,7 +1651,7 @@ fn selected_entries_are_supported_mountable_images(selected_entries: &[FileEntry
     let [entry] = selected_entries else {
         return false;
     };
-    !crate::explorer::portable_devices::is_portable_path(&entry.path)
+    !super::remote_fs::is_remote(&entry.path) && !crate::explorer::portable_devices::is_portable_path(&entry.path)
         && entry.is_open_with_target()
         && mountable_image_path_is_supported(&entry.path)
 }
@@ -1661,7 +1661,7 @@ fn selected_entries_are_run_elevated_targets(selected_entries: &[FileEntry]) -> 
 }
 
 fn entry_is_run_elevated_target(entry: &FileEntry) -> bool {
-    !crate::explorer::portable_devices::is_portable_path(&entry.path)
+    !super::remote_fs::is_remote(&entry.path) && !crate::explorer::portable_devices::is_portable_path(&entry.path)
         && entry.is_open_with_target()
         && path_is_run_elevated_target(&entry.path)
 }

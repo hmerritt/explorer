@@ -26,10 +26,16 @@ const CREDENTIALS_HEIGHT: f32 = 260.0;
 const HOST_KEY_HEIGHT: f32 = 240.0;
 
 enum RemoteDialogKind {
+    Site {
+        name: Entity<RemoteCredentialInput>,
+        address: Entity<RemoteCredentialInput>,
+        error: Option<String>,
+    },
     Credentials {
         id: u64,
         host: String,
         message: Option<String>,
+        passphrase: bool,
         username: Entity<RemoteCredentialInput>,
         password: Entity<RemoteCredentialInput>,
     },
@@ -54,12 +60,58 @@ struct RemoteCredentialInput {
     password: bool,
 }
 
+pub(super) fn open_site_dialog(
+    explorer: Entity<ExplorerView>,
+    cx: &mut Context<ExplorerView>,
+) -> Result<AnyWindowHandle, String> {
+    let location = super::remote_fs::RemoteLocation::from_provider(&explorer.read(cx).path);
+    let name = location
+        .as_ref()
+        .and_then(|loc| {
+            super::remote_fs::saved_sites()
+                .into_iter()
+                .find(|site| site.location.site == loc.site)
+        })
+        .map(|site| site.name)
+        .unwrap_or_default();
+    let address = location
+        .map(|loc| loc.address())
+        .unwrap_or_else(|| "sftp://".into());
+    let options = remote_window_options("Connect to SFTP server", 310.0, cx);
+    cx.open_window(options, move |window, cx| {
+        let name = cx.new(|cx| {
+            RemoteCredentialInput::new(name, "Site name (optional)", false, cx.focus_handle())
+        });
+        let address = cx.new(|cx| {
+            RemoteCredentialInput::new(address, "sftp://user@host/folder", false, cx.focus_handle())
+        });
+        address.read(cx).focus_handle.focus(window);
+        cx.new(|cx| {
+            cx.on_release(|dialog: &mut RemoteDownloadDialog, cx| dialog.release(cx))
+                .detach();
+            RemoteDownloadDialog::new(
+                RemoteDialogKind::Site {
+                    name,
+                    address,
+                    error: None,
+                },
+                explorer.downgrade(),
+                cx.focus_handle(),
+                cx,
+            )
+        })
+    })
+    .map(Into::into)
+    .map_err(|e| e.to_string())
+}
+
 pub(super) fn open_remote_credentials_dialog(
     explorer: Entity<ExplorerView>,
     id: u64,
     host: String,
     username: String,
     message: Option<String>,
+    passphrase: bool,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let options = remote_window_options("Sign in", CREDENTIALS_HEIGHT, cx);
@@ -69,7 +121,12 @@ pub(super) fn open_remote_credentials_dialog(
                 RemoteCredentialInput::new(username, "Username", false, cx.focus_handle())
             });
             let password_input = cx.new(|cx| {
-                RemoteCredentialInput::new(String::new(), "Password", true, cx.focus_handle())
+                RemoteCredentialInput::new(
+                    String::new(),
+                    if passphrase { "Passphrase" } else { "Password" },
+                    true,
+                    cx.focus_handle(),
+                )
             });
             if username_input.read(cx).text.content.is_empty() {
                 username_input.read(cx).focus_handle.focus(window);
@@ -85,6 +142,7 @@ pub(super) fn open_remote_credentials_dialog(
                         id,
                         host,
                         message,
+                        passphrase,
                         username: username_input,
                         password: password_input,
                     },
@@ -168,10 +226,42 @@ impl RemoteDownloadDialog {
 
     fn submit(&mut self, _: &RenameCommit, window: &mut Window, cx: &mut Context<Self>) {
         match &self.kind {
+            RemoteDialogKind::Site { name, address, .. } => {
+                let result =
+                    super::remote_fs::RemoteLocation::parse(address.read(cx).text.content.trim())
+                        .and_then(|location| {
+                            super::remote_fs::update_site(
+                                location.clone(),
+                                name.read(cx).text.content.clone(),
+                            )?;
+                            Ok(location)
+                        });
+                let location = match result {
+                    Ok(location) => location,
+                    Err(message) => {
+                        if let RemoteDialogKind::Site { error, .. } = &mut self.kind {
+                            *error = Some(message);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+                self.completed = true;
+                let _ = self.explorer.update(cx, |explorer, cx| {
+                    explorer.active_dialog_window = None;
+                    explorer.navigate_to_directory_with_watcher(
+                        location.provider_path(),
+                        super::navigation::HistoryMode::Record,
+                        cx,
+                    );
+                    cx.notify();
+                });
+            }
             RemoteDialogKind::Credentials {
                 id,
                 username,
                 password,
+                passphrase,
                 ..
             } => {
                 let username_input = username.clone();
@@ -185,7 +275,11 @@ impl RemoteDownloadDialog {
                 let _ = self.explorer.update(cx, |explorer, cx| {
                     explorer.submit_remote_credentials(
                         *id,
-                        RemoteCredentials { username, password },
+                        RemoteCredentials {
+                            username,
+                            password,
+                            passphrase: *passphrase,
+                        },
                         cx,
                     );
                     cx.notify();
@@ -212,6 +306,11 @@ impl RemoteDownloadDialog {
     fn cancel_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.completed = true;
         let id = match &self.kind {
+            RemoteDialogKind::Site { .. } => {
+                self.clear_site_dialog(cx);
+                window.remove_window();
+                return;
+            }
             RemoteDialogKind::Credentials { id, .. } | RemoteDialogKind::HostKey { id, .. } => *id,
         };
         let _ = self.explorer.update(cx, |explorer, cx| {
@@ -225,11 +324,12 @@ impl RemoteDownloadDialog {
         if event.keystroke.key != "tab" {
             return;
         }
-        let RemoteDialogKind::Credentials {
-            username, password, ..
-        } = &self.kind
-        else {
-            return;
+        let (username, password) = match &self.kind {
+            RemoteDialogKind::Credentials {
+                username, password, ..
+            } => (username, password),
+            RemoteDialogKind::Site { name, address, .. } => (name, address),
+            _ => return,
         };
         if username.read(cx).focus_handle.is_focused(window) {
             password.read(cx).focus_handle.focus(window);
@@ -244,12 +344,86 @@ impl RemoteDownloadDialog {
             return;
         }
         let id = match &self.kind {
+            RemoteDialogKind::Site { .. } => {
+                self.clear_site_dialog(cx);
+                return;
+            }
             RemoteDialogKind::Credentials { id, .. } | RemoteDialogKind::HostKey { id, .. } => *id,
         };
         let _ = self.explorer.update(cx, |explorer, cx| {
             explorer.cancel_remote_prompt(id, cx);
             cx.notify();
         });
+    }
+
+    fn clear_site_dialog(&self, cx: &mut App) {
+        let _ = self.explorer.update(cx, |explorer, cx| {
+            explorer.active_dialog_window = None;
+            cx.notify();
+        });
+    }
+
+    fn render_site(
+        &self,
+        name: Entity<RemoteCredentialInput>,
+        address: Entity<RemoteCredentialInput>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(div().text_size(px(16.0)).child("Connect to SFTP server"))
+            .child("Use a server address or an alias from your SSH config.")
+            .child("Site name")
+            .child(name)
+            .child("Address")
+            .child(address)
+            .when_some(error, |this, error| {
+                this.child(div().text_color(rgb(0x9b1c1c)).child(error))
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .mt(px(10.0))
+                    .child(
+                        remote_button("site-forget", "Forget site").on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                if let RemoteDialogKind::Site { address, error, .. } =
+                                    &mut this.kind
+                                {
+                                    let result = super::remote_fs::RemoteLocation::parse(
+                                        address.read(cx).text.content.trim(),
+                                    )
+                                    .and_then(|loc| super::remote_fs::forget_site(&loc.site));
+                                    if let Err(message) = result {
+                                        *error = Some(message);
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                                let _ = this.explorer.update(cx, |view, cx| {
+                                    view.reload_with_entry_metadata_resolution(cx);
+                                });
+                                this.cancel_inner(window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        remote_button("site-connect", "Connect").on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.submit(&RenameCommit, window, cx)
+                            },
+                        )),
+                    )
+                    .child(remote_button("site-cancel", "Cancel").on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| this.cancel_inner(window, cx),
+                    ))),
+            )
+            .into_any_element()
     }
 
     fn render_credentials(
@@ -275,7 +449,19 @@ impl RemoteDownloadDialog {
             })
             .child(div().mt(px(4.0)).child("Username"))
             .child(username)
-            .child("Password")
+            .child(
+                if matches!(
+                    self.kind,
+                    RemoteDialogKind::Credentials {
+                        passphrase: true,
+                        ..
+                    }
+                ) {
+                    "Key passphrase"
+                } else {
+                    "Password"
+                },
+            )
             .child(password)
             .child(
                 div()
@@ -342,6 +528,11 @@ impl RemoteDownloadDialog {
 impl Render for RemoteDownloadDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.kind {
+            RemoteDialogKind::Site {
+                name,
+                address,
+                error,
+            } => self.render_site(name.clone(), address.clone(), error.clone(), cx),
             RemoteDialogKind::Credentials {
                 host,
                 message,

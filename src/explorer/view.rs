@@ -102,7 +102,7 @@ pub struct ExplorerView {
     pub(super) download_notice_rows: Vec<DownloadNoticeRow>,
     pub(super) download_tasks: Vec<(u64, Task<()>)>,
     pub(super) ytdlp_process_controls: Vec<(u64, YtDlpProcessControl)>,
-    pub(super) pending_remote_downloads: VecDeque<ClipboardDownload>,
+    pub(super) pending_remote_downloads: VecDeque<(ClipboardDownload, PathBuf)>,
     pub(super) active_remote_download: Option<ActiveRemoteDownload>,
     pub(super) remote_credentials: HashMap<
         crate::explorer::remote_download::RemoteEndpointKey,
@@ -1511,7 +1511,7 @@ impl ExplorerView {
         self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
         let generation = self.codebase_summary_generation;
         let path = self.path.clone();
-        if crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
         {
             let changed = self.codebase_summary.take().is_some();
             self.codebase_summary_task = None;
@@ -1556,7 +1556,7 @@ impl ExplorerView {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         let path = self.path.clone();
-        if crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
         {
             let changed = self.git_status.take().is_some();
             self.git_status_task = None;
@@ -1602,7 +1602,7 @@ impl ExplorerView {
             self.shell_shortcut_resolution_generation.wrapping_add(1);
         let generation = self.shell_shortcut_resolution_generation;
         let path = self.path.clone();
-        if crate::explorer::portable_devices::is_portable_path(&path) {
+        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) {
             self.shell_shortcut_resolution_task = None;
             return;
         }
@@ -1639,7 +1639,7 @@ impl ExplorerView {
         if !self.show_folder_size {
             return false;
         }
-        if crate::explorer::portable_devices::is_portable_path(&self.path)
+        if super::remote_fs::is_remote(&self.path) || crate::explorer::portable_devices::is_portable_path(&self.path)
             || path_is_filesystem_root(&self.path)
             || path_is_wsl_unc_root(&self.path)
         {
@@ -1884,6 +1884,7 @@ impl ExplorerView {
     }
 
     fn start_device_catalog_tasks(&mut self, cx: &mut Context<Self>) {
+        self.start_remote_events(cx);
         #[cfg(test)]
         let _ = cx;
         #[cfg(not(test))]

@@ -238,6 +238,11 @@ impl ExplorerView {
         if paths.is_empty() || self.open_with_task.is_some() {
             return;
         }
+        if paths.iter().any(|path| super::remote_fs::is_remote(path)) {
+            self.set_error_notice("Download the remote file to a local folder before opening it. Changes to that copy are not uploaded automatically.".to_owned());
+            cx.notify();
+            return;
+        }
 
         let paths = match paths
             .into_iter()

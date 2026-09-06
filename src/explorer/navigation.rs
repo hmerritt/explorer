@@ -40,6 +40,7 @@ pub(super) enum DirectoryOpenMode {
 }
 
 fn navigation_parent(path: &Path) -> Option<PathBuf> {
+    if super::remote_fs::is_remote(path) { return super::remote_fs::parent(path); }
     if crate::explorer::archive_fs::is_archive_path(path) {
         crate::explorer::archive_fs::parent(path)
     } else if crate::explorer::portable_devices::is_portable_path(path) {
@@ -424,6 +425,7 @@ impl ExplorerView {
         initial_load: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        if super::remote_fs::is_remote(&path) { return false; }
         let Some(target) = crate::explorer::filesystem::network_connection_target_for_path(&path)
         else {
             return false;

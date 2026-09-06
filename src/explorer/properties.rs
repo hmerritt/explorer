@@ -4720,6 +4720,7 @@ fn collect_property_item(
     date_format: &str,
     tree_mode: PropertyTreeMode<'_>,
 ) -> Result<PropertyItem, String> {
+    if super::remote_fs::is_remote(path) { return collect_remote_property_item(path); }
     if crate::explorer::portable_devices::is_portable_path(path) {
         return collect_portable_property_item(path);
     }
@@ -4881,6 +4882,21 @@ fn collect_portable_property_item(path: &Path) -> Result<PropertyItem, String> {
     })
 }
 
+fn collect_remote_property_item(path: &Path) -> Result<PropertyItem, String> {
+    let attrs = super::remote_fs::metadata(path)?;
+    let location = super::remote_fs::RemoteLocation::from_provider(path).ok_or("Invalid SFTP location")?;
+    let entry = FileEntry::from_provider(path.to_owned(), location.path.rsplit('/').next().unwrap_or("/").into(), attrs.is_dir(), attrs.size, attrs.modified().ok());
+    Ok(PropertyItem {
+        path: path.to_owned(), exists: true, is_dir: attrs.is_dir(), type_label: Some(entry.type_label()),
+        location: super::remote_fs::parent(path).and_then(|p| super::remote_fs::display_address(&p)),
+        size: attrs.size.map(PropertyValue::ready), size_on_disk: None, contains: None, selection_counts: None,
+        created: None, modified: attrs.modified().ok(), accessed: attrs.accessed().ok(), readonly: None, hidden: None,
+        owner: attrs.user.or_else(|| attrs.uid.map(|v| v.to_string())), group: attrs.group.or_else(|| attrs.gid.map(|v| v.to_string())),
+        unix_mode: attrs.permissions, permission_summary: attrs.permissions.map(|m| format!("{:04o}", m & 0o7777)),
+        run_as_admin: None, shortcut: None, details: Vec::new(),
+    })
+}
+
 fn property_title(paths: &[PathBuf]) -> String {
     if paths.len() == 1 {
         if let Some(label) = crate::explorer::portable_devices::labels(&paths[0])
@@ -4966,6 +4982,7 @@ fn single_file_default_app(items: &[PropertyItem]) -> Option<PropertyDefaultApp>
     };
     if !item.exists
         || item.is_dir
+        || super::remote_fs::is_remote(&item.path)
         || crate::explorer::portable_devices::is_portable_path(&item.path)
     {
         return None;
@@ -9116,6 +9133,9 @@ fn apply_property_draft_to_path(
     path: &Path,
     draft: &EditablePropertyDraft,
 ) -> Result<bool, String> {
+    if super::remote_fs::is_remote(path) {
+        return Err("Remote properties are currently read-only.".to_owned());
+    }
     let mut changed = false;
     if draft.modified.is_some() || draft.accessed.is_some() {
         let metadata = fs::metadata(path).map_err(|error| error.to_string())?;

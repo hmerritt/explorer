@@ -462,6 +462,7 @@ fn path_components_match(left: Component<'_>, right: Component<'_>) -> bool {
 }
 
 pub(super) fn path_is_remote_drive(path: &Path) -> bool {
+    if super::remote_fs::is_remote(path) { return true; }
     #[cfg(test)]
     if crate::explorer::test_support::path_is_remote_for_test(path) {
         return true;
@@ -1736,6 +1737,7 @@ pub(super) fn load_entries(
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
     let visibility = visibility.into();
+    if super::remote_fs::is_remote(path) { return super::remote_fs::list_dir(path, visibility); }
     if crate::explorer::portable_devices::is_portable_path(path)
         || crate::explorer::archive_fs::is_archive_path(path)
     {
@@ -3332,7 +3334,7 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     }
 
     for path in paths {
-        let exists = if crate::explorer::portable_devices::is_portable_path(path) {
+        let exists = if super::remote_fs::is_remote(path) { super::remote_fs::exists(path)? } else if crate::explorer::portable_devices::is_portable_path(path) {
             crate::explorer::portable_devices::exists(path)
         } else {
             path.exists()
@@ -3343,7 +3345,7 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     }
 
     for path in paths {
-        if crate::explorer::portable_devices::is_portable_path(path) {
+        if super::remote_fs::is_remote(path) { super::remote_fs::delete(path)?; } else if crate::explorer::portable_devices::is_portable_path(path) {
             crate::explorer::portable_devices::delete(path)?;
         } else {
             remove_source(path).map_err(|error| format_path_error("delete", path, error))?;
@@ -3358,6 +3360,7 @@ pub(super) fn remove_existing_paths_permanently(paths: &[PathBuf]) -> Result<boo
     let mut removed_any = false;
 
     for path in paths {
+        if super::remote_fs::is_remote(path) { if super::remote_fs::exists(path)? { super::remote_fs::delete(path)?; removed_any = true; } continue; }
         if crate::explorer::portable_devices::is_portable_path(path) {
             if crate::explorer::portable_devices::exists(path) {
                 crate::explorer::portable_devices::delete(path)?;

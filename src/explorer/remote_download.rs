@@ -3,7 +3,10 @@ use std::{
     env,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -33,6 +36,7 @@ const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) struct RemoteCredentials {
     pub(super) username: String,
     pub(super) password: String,
+    pub(super) passphrase: bool,
 }
 
 #[derive(Clone)]
@@ -42,9 +46,15 @@ pub(super) struct RemoteHostKey {
     pub(super) algorithm: String,
     pub(super) fingerprint: String,
     public_key: PublicKey,
+    known_hosts_path: Option<PathBuf>,
 }
 
 pub(super) enum RemoteDownloadError {
+    PassphraseRequired {
+        host: String,
+        username: String,
+        key_path: PathBuf,
+    },
     CredentialsRequired {
         host: String,
         username: String,
@@ -54,7 +64,7 @@ pub(super) enum RemoteDownloadError {
     Fatal(String),
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct RemoteEndpointKey {
     scheme: String,
     host: String,
@@ -62,7 +72,7 @@ pub(super) struct RemoteEndpointKey {
     username: String,
 }
 
-struct RemoteTarget {
+pub(super) struct RemoteTarget {
     scheme: String,
     host: String,
     port: u16,
@@ -70,6 +80,24 @@ struct RemoteTarget {
     path: String,
     identity_files: Vec<PathBuf>,
     embedded_password: Option<String>,
+    known_hosts: Vec<PathBuf>,
+    identity_agent: Option<String>,
+    identities_only: bool,
+    connect_timeout: Duration,
+    keepalive: Duration,
+}
+impl RemoteTarget {
+    pub(super) fn endpoint(&self) -> RemoteEndpointKey {
+        RemoteEndpointKey {
+            scheme: self.scheme.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+        }
+    }
+    pub(super) fn username(&self) -> &str {
+        &self.username
+    }
 }
 
 #[derive(Clone)]
@@ -79,10 +107,11 @@ enum HostKeyCheck {
     Changed(String),
 }
 
-struct SftpHandler {
+pub(super) struct SftpHandler {
     host: String,
     port: u16,
     check: Arc<Mutex<HostKeyCheck>>,
+    known_hosts: Vec<PathBuf>,
 }
 
 impl client::Handler for SftpHandler {
@@ -93,7 +122,24 @@ impl client::Handler for SftpHandler {
         server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         let public_key = server_public_key.public_key();
-        match russh::keys::check_known_hosts(&self.host, self.port, &public_key) {
+        let verified = if self.known_hosts.is_empty() {
+            russh::keys::check_known_hosts(&self.host, self.port, &public_key)
+        } else {
+            let mut result = Ok(false);
+            for path in &self.known_hosts {
+                match russh::keys::check_known_hosts_path(&self.host, self.port, &public_key, path)
+                {
+                    Ok(true) => {
+                        result = Ok(true);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(error) => result = Err(error),
+                }
+            }
+            result
+        };
+        match verified {
             Ok(true) => Ok(true),
             Ok(false) => {
                 let key = RemoteHostKey {
@@ -102,6 +148,7 @@ impl client::Handler for SftpHandler {
                     algorithm: public_key.algorithm().to_string(),
                     fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
                     public_key,
+                    known_hosts_path: self.known_hosts.first().cloned(),
                 };
                 *self.check.lock().expect("host-key check lock") =
                     HostKeyCheck::Unknown(Box::new(key));
@@ -142,12 +189,22 @@ pub(super) fn endpoint_key(download: &ClipboardDownload) -> Option<RemoteEndpoin
 pub(super) fn embedded_credentials(download: &ClipboardDownload) -> Option<RemoteCredentials> {
     let target = remote_target(download).ok()?;
     target.embedded_password.map(|password| RemoteCredentials {
+        passphrase: false,
         username: target.username,
         password,
     })
 }
 
 pub(super) fn remember_host_key(key: &RemoteHostKey) -> Result<(), String> {
+    if let Some(path) = &key.known_hosts_path {
+        return russh::keys::known_hosts::learn_known_hosts_path(
+            &key.host,
+            key.port,
+            &key.public_key,
+            path,
+        )
+        .map_err(|e| format!("Could not remember SSH host key: {e}"));
+    }
     russh::keys::known_hosts::learn_known_hosts(key.host.as_str(), key.port, &key.public_key)
         .map_err(|error| format!("Could not remember the SSH host key: {error}"))
 }
@@ -156,17 +213,25 @@ pub(super) fn download_remote_to_temporary_file(
     download: ClipboardDownload,
     credentials: Option<RemoteCredentials>,
     destination: &Path,
+    cancel: Arc<AtomicBool>,
     on_progress: impl FnMut(DownloadProgress) + Send,
 ) -> Result<PendingDownload, RemoteDownloadError> {
-    remote_runtime().block_on(download_remote_async(
-        download,
-        credentials,
-        destination,
-        on_progress,
-    ))
+    remote_runtime().block_on(async {
+        tokio::select! {
+            biased;
+            _ = wait_cancelled(&cancel) => Err(RemoteDownloadError::Fatal("Download cancelled.".to_owned())),
+            result = download_remote_async(download, credentials, destination, on_progress) => result,
+        }
+    })
 }
 
-fn remote_runtime() -> &'static tokio::runtime::Runtime {
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+pub(super) fn remote_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -264,6 +329,7 @@ async fn download_ftp(
             .embedded_password
             .as_ref()
             .map(|password| RemoteCredentials {
+                passphrase: false,
                 username: target.username.clone(),
                 password: password.clone(),
             })
@@ -317,72 +383,7 @@ async fn download_sftp(
     output: &mut std::fs::File,
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<Option<u64>, RemoteDownloadError> {
-    let check = Arc::new(Mutex::new(HostKeyCheck::Clear));
-    let handler = SftpHandler {
-        host: target.host.clone(),
-        port: target.port,
-        check: check.clone(),
-    };
-    let config = Arc::new(client::Config::default());
-    let connected = tokio::time::timeout(
-        REMOTE_CONNECT_TIMEOUT,
-        client::connect(config, (target.host.as_str(), target.port), handler),
-    )
-    .await;
-    let mut session = match connected {
-        Ok(Ok(session)) => session,
-        Ok(Err(error)) => {
-            return match check.lock().expect("host-key check lock").clone() {
-                HostKeyCheck::Unknown(key) => Err(RemoteDownloadError::UnknownHost(key)),
-                HostKeyCheck::Changed(error) => Err(RemoteDownloadError::Fatal(error)),
-                HostKeyCheck::Clear => Err(RemoteDownloadError::Fatal(format!(
-                    "Could not connect to {}: {error}",
-                    target.host
-                ))),
-            };
-        }
-        Err(_) => {
-            return Err(RemoteDownloadError::Fatal(format!(
-                "Could not connect to {}: timed out",
-                target.host
-            )));
-        }
-    };
-
-    let attempted_password = credentials.is_some() || target.embedded_password.is_some();
-    let attempted_username = credentials
-        .as_ref()
-        .map(|credentials| credentials.username.clone())
-        .unwrap_or_else(|| target.username.clone());
-    let authenticated = if let Some(credentials) = credentials.or_else(|| {
-        target
-            .embedded_password
-            .as_ref()
-            .map(|password| RemoteCredentials {
-                username: target.username.clone(),
-                password: password.clone(),
-            })
-    }) {
-        session
-            .authenticate_password(&credentials.username, &credentials.password)
-            .await
-            .map_err(|error| {
-                RemoteDownloadError::Fatal(format!("SSH authentication failed: {error}"))
-            })?
-            .success()
-    } else {
-        try_agent_authentication(&mut session, &target.username).await
-            || try_key_files(&mut session, &target.username, &target.identity_files).await
-    };
-    if !authenticated {
-        return Err(RemoteDownloadError::CredentialsRequired {
-            host: target.host.clone(),
-            username: attempted_username,
-            message: attempted_password
-                .then(|| "The username or password was not accepted.".to_owned()),
-        });
-    }
-
+    let session = connect_sftp(target, credentials).await?;
     let channel = session.channel_open_session().await.map_err(|error| {
         RemoteDownloadError::Fatal(format!("Could not open the SFTP session: {error}"))
     })?;
@@ -411,6 +412,95 @@ async fn download_sftp(
     });
     copy_async_stream(&mut file, output, total_bytes, on_progress).await?;
     Ok(total_bytes)
+}
+
+pub(super) async fn connect_sftp(
+    target: &RemoteTarget,
+    credentials: Option<RemoteCredentials>,
+) -> Result<client::Handle<SftpHandler>, RemoteDownloadError> {
+    let check = Arc::new(Mutex::new(HostKeyCheck::Clear));
+    let handler = SftpHandler {
+        host: target.host.clone(),
+        port: target.port,
+        check: check.clone(),
+        known_hosts: target.known_hosts.clone(),
+    };
+    let config = Arc::new(client::Config {
+        keepalive_interval: Some(target.keepalive),
+        keepalive_max: 3,
+        ..Default::default()
+    });
+    let connected = tokio::time::timeout(
+        target.connect_timeout,
+        client::connect(config, (target.host.as_str(), target.port), handler),
+    )
+    .await;
+    let mut session = match connected {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            return match check.lock().expect("host-key check lock").clone() {
+                HostKeyCheck::Unknown(key) => Err(RemoteDownloadError::UnknownHost(key)),
+                HostKeyCheck::Changed(error) => Err(RemoteDownloadError::Fatal(error)),
+                HostKeyCheck::Clear => Err(RemoteDownloadError::Fatal(format!(
+                    "Could not connect to {}: {error}",
+                    target.host
+                ))),
+            };
+        }
+        Err(_) => {
+            return Err(RemoteDownloadError::Fatal(format!(
+                "Could not connect to {}: timed out",
+                target.host
+            )));
+        }
+    };
+
+    let attempted_password = credentials.is_some() || target.embedded_password.is_some();
+    let attempted_username = credentials
+        .as_ref()
+        .map(|credentials| credentials.username.clone())
+        .unwrap_or_else(|| target.username.clone());
+    let passphrase = credentials
+        .as_ref()
+        .filter(|c| c.passphrase)
+        .map(|c| c.password.as_str());
+    let authenticated = if let Some(credentials) = credentials.as_ref().filter(|c| !c.passphrase) {
+        session
+            .authenticate_password(&credentials.username, &credentials.password)
+            .await
+            .map_err(|e| RemoteDownloadError::Fatal(format!("SSH authentication failed: {e}")))?
+            .success()
+    } else {
+        try_agent_authentication(&mut session, &target.username, target).await
+            || try_key_files(
+                &mut session,
+                &target.username,
+                &target.identity_files,
+                passphrase,
+            )
+            .await
+    };
+    if !authenticated {
+        if credentials.as_ref().is_none_or(|c| c.passphrase) {
+            if let Some(key_path) = target.identity_files.iter().find(|p| {
+                russh::keys::PrivateKey::read_openssh_file(p).is_ok_and(|key| key.is_encrypted())
+            }) {
+                return Err(RemoteDownloadError::PassphraseRequired {
+                    host: target.host.clone(),
+                    username: target.username.clone(),
+                    key_path: key_path.clone(),
+                });
+            }
+        }
+        return Err(RemoteDownloadError::CredentialsRequired {
+            host: target.host.clone(),
+            username: attempted_username,
+            message: attempted_password
+                .then(|| "The username or password was not accepted.".to_owned()),
+        });
+    }
+
+    Ok(session)
 }
 
 async fn copy_async_stream(
@@ -443,8 +533,9 @@ async fn copy_async_stream(
 async fn try_agent_authentication(
     session: &mut client::Handle<SftpHandler>,
     username: &str,
+    target: &RemoteTarget,
 ) -> bool {
-    let Some(mut agent) = connect_agent().await else {
+    let Some(mut agent) = selected_agent(target.identity_agent.as_deref()).await else {
         return false;
     };
     let Ok(identities) = agent.request_identities().await else {
@@ -452,6 +543,18 @@ async fn try_agent_authentication(
     };
     for identity in identities {
         let public_key = identity.public_key().into_owned();
+        if target.identities_only
+            && !target.identity_files.iter().any(|path| {
+                russh::keys::PrivateKey::read_openssh_file(path)
+                    .is_ok_and(|key| *key.public_key() == public_key)
+                    || std::fs::read_to_string(format!("{}.pub", path.display()))
+                        .ok()
+                        .and_then(|s| PublicKey::from_openssh(&s).ok())
+                        .is_some_and(|key| key == public_key)
+            })
+        {
+            continue;
+        }
         let hash = session
             .best_supported_rsa_hash()
             .await
@@ -467,6 +570,36 @@ async fn try_agent_authentication(
         }
     }
     false
+}
+
+async fn selected_agent(
+    path: Option<&str>,
+) -> Option<AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>>> {
+    match path {
+        Some("none") => None,
+        None | Some("SSH_AUTH_SOCK") => connect_agent().await,
+        Some(path) => {
+            #[cfg(unix)]
+            {
+                AgentClient::connect_uds(path)
+                    .await
+                    .ok()
+                    .map(AgentClient::dynamic)
+            }
+            #[cfg(windows)]
+            {
+                AgentClient::connect_named_pipe(path)
+                    .await
+                    .ok()
+                    .map(AgentClient::dynamic)
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = path;
+                None
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -505,9 +638,10 @@ async fn try_key_files(
     session: &mut client::Handle<SftpHandler>,
     username: &str,
     identity_files: &[PathBuf],
+    passphrase: Option<&str>,
 ) -> bool {
     for path in identity_files {
-        let Ok(private_key) = load_secret_key(path, None) else {
+        let Ok(private_key) = load_secret_key(path, passphrase) else {
             continue;
         };
         let hash = session
@@ -527,20 +661,23 @@ async fn try_key_files(
     false
 }
 
-fn remote_target(download: &ClipboardDownload) -> Result<RemoteTarget, String> {
+pub(super) fn remote_target(download: &ClipboardDownload) -> Result<RemoteTarget, String> {
     let url = &download.url;
     let scheme = url.scheme().to_owned();
     let original_host = url
         .host_str()
         .ok_or_else(|| "Remote URL has no host.".to_owned())?;
-    let config = (scheme == "sftp")
-        .then(|| {
-            SshConfig::parse_default_file(
-                ParseRule::ALLOW_UNKNOWN_FIELDS | ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+    let config =
+        if scheme == "sftp" && user_home_dir().is_some_and(|p| p.join(".ssh/config").exists()) {
+            Some(
+                SshConfig::parse_default_file(
+                    ParseRule::ALLOW_UNKNOWN_FIELDS | ParseRule::ALLOW_UNSUPPORTED_FIELDS,
+                )
+                .map_err(|e| format!("Could not read SSH config: {e}"))?,
             )
-            .ok()
-        })
-        .flatten();
+        } else {
+            None
+        };
     let params = config.as_ref().map(|config| config.query(original_host));
     let host = params
         .as_ref()
@@ -565,11 +702,56 @@ fn remote_target(download: &ClipboardDownload) -> Result<RemoteTarget, String> {
         .map_err(|_| "Remote URL path is not valid UTF-8.".to_owned())?
         .into_owned();
     let embedded_password = url.password().map(decode_url_component).transpose()?;
-    let identity_files = ssh_identity_files(
-        params.and_then(|params| params.identity_file),
-        &host,
-        &username,
-    );
+    let field = |key: &str| -> Option<String> {
+        params
+            .as_ref()
+            .and_then(|p| {
+                p.unsupported_fields
+                    .get(key)
+                    .or_else(|| p.ignored_fields.get(key))
+            })
+            .and_then(|v| v.first())
+            .cloned()
+    };
+    if params
+        .as_ref()
+        .is_some_and(|p| p.proxy_jump.is_some() || p.certificate_file.is_some())
+        || field("proxycommand").is_some()
+        || field("hostkeyalias").is_some()
+    {
+        return Err("This SSH alias requires a proxy, certificate, or host-key alias that Explorer does not yet support. Use an ordinary direct SSH alias.".into());
+    }
+    let identities_only = field("identitiesonly").is_some_and(|s| s.eq_ignore_ascii_case("yes"));
+    let identity_agent = field("identityagent").map(|s| {
+        expand_identity_path(s.into(), user_home_dir().as_deref(), &host, &username)
+            .to_string_lossy()
+            .into_owned()
+    });
+    let known_hosts = params
+        .as_ref()
+        .and_then(|p| {
+            p.unsupported_fields
+                .get("userknownhostsfile")
+                .or_else(|| p.ignored_fields.get("userknownhostsfile"))
+        })
+        .map(|v| {
+            v.iter()
+                .map(|p| {
+                    expand_identity_path(p.into(), user_home_dir().as_deref(), &host, &username)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let connect_timeout = params
+        .as_ref()
+        .and_then(|p| p.connect_timeout)
+        .unwrap_or(REMOTE_CONNECT_TIMEOUT);
+    let keepalive = params
+        .as_ref()
+        .and_then(|p| p.server_alive_interval)
+        .unwrap_or(Duration::from_secs(15));
+    let configured = params.as_ref().and_then(|p| p.identity_file.clone());
+    let identity_files = ssh_identity_files(configured, &host, &username);
     Ok(RemoteTarget {
         scheme,
         host,
@@ -578,6 +760,11 @@ fn remote_target(download: &ClipboardDownload) -> Result<RemoteTarget, String> {
         path,
         identity_files,
         embedded_password,
+        known_hosts,
+        identity_agent,
+        identities_only,
+        connect_timeout,
+        keepalive,
     })
 }
 
@@ -587,13 +774,14 @@ fn ssh_identity_files(
     username: &str,
 ) -> Vec<PathBuf> {
     let home = user_home_dir();
+    let has_configured = configured.as_ref().is_some_and(|v| !v.is_empty());
     let mut files = configured
         .unwrap_or_default()
         .into_iter()
         .filter(|path| path.as_os_str() != "none")
         .map(|path| expand_identity_path(path, home.as_deref(), host, username))
         .collect::<Vec<_>>();
-    if let Some(home) = home {
+    if !has_configured && let Some(home) = home {
         let ssh = home.join(".ssh");
         files.extend([
             ssh.join("id_ed25519"),

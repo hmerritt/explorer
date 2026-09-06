@@ -809,7 +809,7 @@ pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<Clip
     if clipboard
         .paths
         .iter()
-        .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+        .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
     {
         // Synthetic portable locations are meaningful only inside Explorer. Keep
         // them in our metadata without advertising them as native filesystem paths.
@@ -1294,7 +1294,7 @@ fn is_markdown_list_or_quote(line: &str) -> bool {
 fn clipboard_text(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| path.to_string_lossy())
+        .map(|path| super::remote_fs::display_address(path).unwrap_or_else(|| path.to_string_lossy().into_owned()))
         .collect::<Vec<_>>()
         .join("\n")
 }

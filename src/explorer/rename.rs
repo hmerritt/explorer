@@ -921,6 +921,22 @@ impl ExplorerView {
         let original_path = rename.original_path.clone();
         let target_path = original_path.with_file_name(&target_name);
 
+        if super::remote_fs::is_remote(&original_path) {
+            let Some(cx) = cx else { return false; };
+            self.rename_focus_out = None;
+            self.active_rename = None;
+            cx.spawn(async move |this, cx| {
+                let result = cx.background_executor().spawn(async move { super::remote_fs::rename(&original_path, &target_name) }).await;
+                let _ = this.update(cx, |view, cx| {
+                    match result {
+                        Ok(path) => { view.reload_async_with_options(super::view::ReloadMode { cache_policy: super::remote_directory_cache::DirectoryLoadPolicy::Fresh, preserve_selection: true, rebuild_sidebar: false, preserve_context_menu: false }, vec![path], true, false, false, cx); view.emit_filesystem_changed(cx); },
+                        Err(error) => view.set_error_notice(error),
+                    }
+                    cx.notify();
+                });
+            }).detach();
+            return true;
+        }
         match rename_path(&original_path, &target_path) {
             Ok(()) => {
                 self.rename_focus_out = None;

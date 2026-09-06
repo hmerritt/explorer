@@ -203,6 +203,51 @@ no-dialog ZIP action is configured as:
 
 ## Development
 
+## SFTP servers
+
+Click **Connect** to name a site and enter `sftp://user@host:22/folder/`, or use
+an alias from `~/.ssh/config`, such as `sftp://my-server/`. Saved sites appear
+under Network. To update or forget a saved site, open it and click Connect again.
+You can also enter an SFTP address directly in the address bar without saving it.
+
+Browse servers in ordinary tabs or split panes. Copy and paste between local
+and remote folders, or drag files between panes, to upload or download recursively.
+Cut and paste moves files; source deletion follows successful transfer. Moves
+within the same saved server use SFTP rename. Pasted SFTP URLs use the same queue.
+
+The Server transfers panel shows application-wide jobs that continue when you
+navigate elsewhere. Pause and Cancel retain partial data; Resume validates that
+data before continuing. Interrupted jobs reopen paused after an application
+restart. Conflict controls provide replacement, skipping, and keeping both names.
+**Discard partials** removes retained temporary files and the saved job, while
+leaving completed destination files in place. Dismiss removes a finished job.
+
+SSH authentication supports ordinary direct aliases, identity files, encrypted-key
+passphrases, password prompts, and SSH agents (including Windows OpenSSH/Pageant).
+Explorer checks server keys against known-host files, prompts for unknown keys,
+and rejects changed keys. Passwords and key passphrases are kept only in memory.
+Site and transfer JSON files are stored beside Explorer's settings.
+
+Transfers use temporary destination files, checked close/flush operations, size
+checks, source/destination change checks, and atomic publication where available.
+Replacing remote files requires the server's OpenSSH atomic-rename extension and
+preserves reported ownership and permissions; otherwise Explorer retains the
+original and asks you to choose another action. Enable **Verify content for new
+transfers** for a full SHA-256 comparison, which rereads both files. These checks
+do not provide a snapshot of a file being edited concurrently; transfer stable
+source files.
+
+This is the first native SFTP implementation, not complete WinSCP parity. Remote
+editing with automatic upload, synchronization, SCP/FTP/FTPS/WebDAV/S3 browsing,
+jump hosts, keyboard-interactive/MFA, and SSH certificates are not implemented.
+Remote properties are read-only. To open a remote file, download it first.
+Remote-to-remote copying currently goes through a local folder. Symbolic links
+are preserved without recursively following them; downloading links to Windows
+requires skipping them or using a Unix filesystem. Server deletes are permanent
+and use Explorer's permanent-delete confirmation.
+
+### Development
+
 Explorer is a Rust 2024 project using GPUI.
 
 ```sh

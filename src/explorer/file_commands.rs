@@ -106,6 +106,17 @@ impl ExplorerView {
         {
             return;
         }
+        if super::remote_fs::is_remote(&self.path) {
+            let path = self.path.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx.background_executor().spawn(async move { create_new_item_in_directory(&path, kind) }).await;
+                let _ = this.update(cx, |view, cx| {
+                    match result { Ok(path) => { view.reload_async_with_options(super::view::ReloadMode { cache_policy: super::remote_directory_cache::DirectoryLoadPolicy::Fresh, preserve_selection: true, rebuild_sidebar: false, preserve_context_menu: false }, vec![path], true, false, false, cx); }, Err(error) => view.set_error_notice(error) }
+                    cx.notify();
+                });
+            }).detach();
+            return;
+        }
         match create_new_item_in_directory(&self.path, kind) {
             Ok(path) => {
                 self.clear_operation_notice();
@@ -265,11 +276,15 @@ impl ExplorerView {
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
+        if super::remote_fs::is_remote(&self.path) || clipboard.paths.iter().any(|p| super::remote_fs::is_remote(p)) {
+            self.start_native_transfer(clipboard.paths, self.path.clone(), clipboard.operation == FileClipboardOperation::Cut, cx);
+            return;
+        }
         if crate::explorer::portable_devices::is_portable_path(&self.path)
             || clipboard
                 .paths
                 .iter()
-                .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+                .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
         {
             self.start_portable_transfer(
                 clipboard.paths,
@@ -345,6 +360,10 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if super::remote_fs::is_remote(&self.path) {
+            self.set_error_notice("Paste the image into a local folder, then copy that file to the server.".to_owned());
+            cx.notify(); return;
+        }
         match create_clipboard_image_file_in_directory(&self.path, image) {
             Ok(path) => {
                 self.clear_operation_notice();
@@ -378,6 +397,10 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if super::remote_fs::is_remote(&self.path) {
+            self.set_error_notice("Paste this content into a local file, then copy that file to the server.".to_owned());
+            cx.notify(); return;
+        }
         match create_clipboard_materialization_in_directory(&self.path, &materialization) {
             Ok(path) => {
                 self.clear_operation_notice();
@@ -442,7 +465,7 @@ impl ExplorerView {
         }
         if paths
             .iter()
-            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
         {
             self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
             self.clear_operation_notice();
@@ -464,7 +487,7 @@ impl ExplorerView {
 
         if paths
             .iter()
-            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
         {
             self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
             self.clear_operation_notice();
@@ -1383,7 +1406,9 @@ fn create_new_item_in_directory_with_cancel(
         }
 
         let name = new_item_name(kind.base_name(), index);
-        let path = parent.join(&name);
+        let path = if let Some(location) = super::remote_fs::RemoteLocation::from_provider(parent) {
+            location.child(&name)?.provider_path()
+        } else { parent.join(&name) };
 
         if explorer_fs.exists(&path)? {
             index = next_new_item_index(index, &name)?;

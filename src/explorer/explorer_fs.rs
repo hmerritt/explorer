@@ -12,6 +12,7 @@ use crate::explorer::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerLocation {
+    Remote(super::remote_fs::RemoteLocation),
     Local(PathBuf),
     Portable(PathBuf),
     Archive(PathBuf),
@@ -34,6 +35,7 @@ impl ExplorerFs {
     }
 
     pub(super) fn classify(&self, path: &Path) -> ExplorerLocation {
+        if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) { return ExplorerLocation::Remote(location); }
         if archive_fs::is_archive_path(path) {
             ExplorerLocation::Archive(path.to_path_buf())
         } else if portable_devices::is_portable_path(path) {
@@ -45,6 +47,7 @@ impl ExplorerFs {
 
     pub(super) fn can_mutate(&self, path: &Path) -> bool {
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => true,
             ExplorerLocation::Local(_) => true,
             ExplorerLocation::Portable(_) => {
                 portable_devices::capabilities(path).can_mutate()
@@ -62,6 +65,7 @@ impl ExplorerFs {
 
     pub(super) fn exists(&self, path: &Path) -> Result<bool, String> {
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => super::remote_fs::exists(path),
             ExplorerLocation::Local(_) => Ok(path.exists()),
             ExplorerLocation::Portable(_) => Ok(portable_devices::exists(path)),
             ExplorerLocation::Archive(_) => {
@@ -72,6 +76,7 @@ impl ExplorerFs {
 
     pub(super) fn is_dir(&self, path: &Path) -> Result<bool, String> {
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => super::remote_fs::cached_is_dir(path),
             ExplorerLocation::Local(_) => Ok(path.is_dir()),
             ExplorerLocation::Portable(_) => Ok(portable_devices::is_dir(path)),
             ExplorerLocation::Archive(_) => Ok(archive_fs::is_dir(path)),
@@ -85,6 +90,7 @@ impl ExplorerFs {
         visibility: EntryVisibility,
     ) -> io::Result<Vec<FileEntry>> {
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => super::remote_fs::list_dir(path, visibility),
             ExplorerLocation::Local(_) => list_local_dir(path, visibility),
             ExplorerLocation::Portable(_) => portable_devices::list_dir(path),
             ExplorerLocation::Archive(_) => archive_fs::list_dir(path),
@@ -97,6 +103,7 @@ impl ExplorerFs {
             return Err(self.read_only_error());
         }
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => super::remote_fs::create_dir(path),
             ExplorerLocation::Local(_) => {
                 fs::create_dir(path).map_err(|error| format!("Could not create folder: {error}"))
             }
@@ -124,6 +131,7 @@ impl ExplorerFs {
             return Err(self.read_only_error());
         }
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => super::remote_fs::write_new_file(path, bytes),
             ExplorerLocation::Local(_) => write_new_file(path, bytes)
                 .map_err(|error| format!("Could not create {}: {error}", display_name(path))),
             ExplorerLocation::Portable(_) => {
@@ -142,6 +150,7 @@ impl ExplorerFs {
 
     pub(super) fn refresh_driver(&self, path: &Path) -> ExplorerRefreshDriver {
         match self.classify(path) {
+            ExplorerLocation::Remote(_) => ExplorerRefreshDriver::Poll,
             ExplorerLocation::Local(_) => ExplorerRefreshDriver::Notify,
             ExplorerLocation::Portable(_) => {
                 if portable_devices::capabilities(path).supports_events {

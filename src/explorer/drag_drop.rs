@@ -502,7 +502,7 @@ impl DraggedEntries {
         if self
             .paths
             .iter()
-            .any(|path| crate::explorer::portable_devices::is_portable_path(path))
+            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
         {
             return gpui::ExternalPaths::new(Vec::new());
         }
@@ -974,6 +974,11 @@ impl ExplorerView {
         }
 
         let resolved_destination = destination.resolve(&self.path);
+        if super::remote_fs::is_remote(&resolved_destination) || dragged.paths.iter().any(|p| super::remote_fs::is_remote(p)) {
+            if modifiers.alt { self.set_error_notice("Remote shortcut drops are not supported.".to_owned()); return; }
+            self.start_native_transfer(dragged.paths.clone(), resolved_destination, modifiers.shift && !modifiers.control, cx);
+            return;
+        }
         if crate::explorer::portable_devices::is_portable_path(&resolved_destination)
             || dragged
                 .paths
@@ -1071,6 +1076,10 @@ impl ExplorerView {
         }
 
         let resolved_destination = destination.resolve(&self.path);
+        if super::remote_fs::is_remote(&resolved_destination) {
+            self.start_native_transfer(paths, resolved_destination, modifiers.shift && !modifiers.control, cx);
+            return;
+        }
         let validity = external_drop_target_validity(
             &destination,
             &self.path,

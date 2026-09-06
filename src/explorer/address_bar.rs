@@ -894,6 +894,7 @@ impl ExplorerView {
 }
 
 pub(super) fn format_address_path(path: &Path, slash: AddressSlash) -> String {
+    if let Some(address) = super::remote_fs::display_address(path) { return address; }
     if let Some(address) = crate::explorer::portable_devices::display_address(path) {
         return address;
     }
@@ -924,6 +925,16 @@ fn resolve_address_input_with_env(
     env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Result<PathBuf, String> {
     let cleaned = cleaned_address_input(input);
+    if cleaned.starts_with("sftp://") {
+        return super::remote_fs::RemoteLocation::parse(&cleaned).map(|l| l.provider_path());
+    }
+    if let Some(current) = super::remote_fs::RemoteLocation::from_provider(current_path) {
+        if !cleaned.is_empty() && !cleaned.contains("://") && !(cfg!(windows) && Path::new(&cleaned).is_absolute()) {
+            let address = current.address();
+            let base = gpui::http_client::Url::parse(&(address.trim_end_matches('/').to_owned() + "/")).map_err(|e| e.to_string())?;
+            return super::remote_fs::RemoteLocation::parse(base.join(&cleaned).map_err(|e| e.to_string())?.as_str()).map(|l| l.provider_path());
+        }
+    }
     if cleaned.is_empty() {
         return Err("The address is empty.".to_owned());
     }
@@ -1059,6 +1070,7 @@ fn folder_suggestions_for_input_with_env(
     visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
     env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Vec<AddressBarSuggestion> {
+    if input.starts_with("sftp://") || super::remote_fs::is_remote(current_path) { return Vec::new(); }
     if crate::explorer::portable_devices::is_portable_path(current_path) {
         return Vec::new();
     }

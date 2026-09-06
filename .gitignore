@@ -9,3 +9,9 @@
 *.swo
 .DS_Store
 Thumbs.db
+
+sftp-build.log
+
+sftp-targeted-validation.log
+
+sftp-validation.log

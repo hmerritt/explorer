@@ -44,7 +44,7 @@ pub(super) fn sidebar_sections(
         .hide_items
         .contains(&SidebarHiddenItem::GoogleDrive);
     let onedrive_visible = !settings.hide_items.contains(&SidebarHiddenItem::OneDrive);
-    sidebar_sections_from_roots_internal(
+    let mut sections = sidebar_sections_from_roots_internal(
         settings,
         filesystem_name,
         drive_roots,
@@ -54,7 +54,11 @@ pub(super) fn sidebar_sections(
         onedrive_item(onedrive_visible),
         wsl_drive_roots(),
         portable_device_roots(),
-    )
+    );
+    sections.network_drives.extend(super::remote_fs::saved_sites().into_iter()
+        .map(|site| SidebarItem { label: site.name, path: site.location.provider_path(), kind: SidebarItemKind::CustomDirectory, configured_index: None })
+        .filter(|item| !sidebar_item_is_hidden(item, settings)));
+    sections
 }
 
 fn sidebar_sections_from_roots_internal(

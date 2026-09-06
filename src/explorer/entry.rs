@@ -252,7 +252,8 @@ impl FileEntry {
             }
         }
 
-        let Some(extension) = self.path.extension().and_then(OsStr::to_str) else {
+        let type_path = if super::remote_fs::is_remote(&self.path) { Path::new(&self.name) } else { &self.path };
+        let Some(extension) = type_path.extension().and_then(OsStr::to_str) else {
             return "File".to_owned();
         };
 
