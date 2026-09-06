@@ -18,8 +18,13 @@ pub(crate) fn format_size(size: Option<u64>) -> String {
         return String::new();
     };
 
+    let (value, unit) = format_size_parts(size);
+    format!("{value} {unit}")
+}
+
+pub(crate) fn format_size_parts(size: u64) -> (String, &'static str) {
     if size < KB_BYTES {
-        return format!("{} bytes", format_u64_with_commas(size));
+        return (format_u64_with_commas(size), "bytes");
     }
 
     let (value, precision, unit) = if size < MB_BYTES {
@@ -32,7 +37,7 @@ pub(crate) fn format_size(size: Option<u64>) -> String {
         (size as f64 / TB_BYTES as f64, 2, "TB")
     };
 
-    format!("{} {unit}", format_decimal_with_commas(value, precision))
+    (format_decimal_with_commas(value, precision), unit)
 }
 
 pub(super) fn format_transfer_remaining(duration: std::time::Duration) -> String {

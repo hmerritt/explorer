@@ -133,14 +133,6 @@ Minimal example:
 }
 ```
 
-`app.copy_verify` controls the final read-back verification for newly copied files. It defaults
-to `true`; set it to `false` to skip that verification while retaining checks needed for existing
-destinations, resumable copies, and safe fallback behavior.
-
-`view.search_mode` controls recursive search result density. It accepts `"detailed"`
-(the default, with the full path beneath each filename) or `"compact"` (single-line
-rows with the full path available on hover).
-
 Example with sidebar and contextmenu items:
 
 ```json
@@ -174,22 +166,6 @@ Example with sidebar and contextmenu items:
 }
 ```
 
-`app.ytdlp_options` is an array of command-line arguments passed to `yt-dlp`
-when a supported video URL is pasted into a folder. For example,
-`["--cookies-from-browser", "firefox"]`. Explorer invokes `yt-dlp` directly,
-so each array entry is passed as one argument without shell parsing. The default
-is `["-S", "ext:mp4"]`, which prefers MP4 output.
-
-`sidebar.hide_groups` removes matching groups from the sidebar. It accepts
-`"pinned"`, `"drives"`, `"network"`, and `"wsl"`; the default is an empty array.
-
-`sidebar.hide_items` removes individual non-Pinned sidebar items. It accepts the reserved
-provider IDs `"google_drive"` and `"onedrive"`, plus absolute filesystem or Explorer virtual
-paths for drives, mapped shares, portable devices, and WSL distributions. Its default is an
-empty array. The sidebar Hide context-menu action appends the corresponding value; remove it
-from this array to restore the item. On Windows, visible Google Drive and OneDrive roots are
-discovered from their default sync locations and appear in the Network group.
-
 Context-menu entries can launch an external executable or invoke a built-in action. The native
 no-dialog ZIP action is configured as:
 
@@ -200,82 +176,6 @@ no-dialog ZIP action is configured as:
     "only": ["*file", "*folder"]
 }
 ```
-
-## SFTP servers
-
-Click **Connect** to name a site and enter `sftp://user@host:22/folder/`, or use
-an alias from `~/.ssh/config`, such as `sftp://my-server/`. Saved sites appear
-under Network. To update or forget a saved site, open it and click Connect again.
-You can also enter an SFTP address directly in the address bar without saving it.
-
-Browse servers in ordinary tabs or split panes. Copy and paste between local
-and remote folders, or drag files between panes, to upload or download recursively.
-Cut and paste moves files; source deletion follows successful transfer. Moves
-within the same saved server use SFTP rename. Pasted SFTP URLs use the same queue.
-
-The Server transfers panel shows application-wide jobs that continue when you
-navigate elsewhere. Pause and Cancel retain partial data; Resume validates that
-data before continuing. Interrupted jobs reopen paused after an application
-restart. Conflict controls provide replacement, skipping, and keeping both names.
-**Discard partials** removes retained temporary files and the saved job, while
-leaving completed destination files in place. Successful jobs disappear automatically;
-the panel closes when none remain. Paused, failed, cancelled, warning-bearing, and
-retained-partial jobs remain available for review. Each row shows the filename,
-human-readable sizes, percentage, rolling transfer speed, and estimated time remaining.
-
-SSH authentication supports ordinary direct aliases, identity files, encrypted-key
-passphrases, password prompts, and SSH agents (including Windows OpenSSH/Pageant).
-Explorer checks server keys against known-host files, prompts for unknown keys,
-and rejects changed keys. Passwords and key passphrases are kept only in memory.
-Remote bookmarks are stored in `sidebar.remote` in `settings.json`; transfer state
-is stored beside the settings file. Bookmarks appear in array order and support
-multiple folders on the same server:
-
-```json
-{
-    "sidebar": {
-        "remote": [
-            { "address": "sftp://alice@files.example.com:22", "path": "/var/www", "label": "Web server" },
-            { "address": "my-server", "path": "/backups" }
-        ]
-    }
-}
-```
-
-`address` accepts an SFTP endpoint or SSH alias. `path` defaults to `/` and uses
-POSIX syntax on every platform. `label` is optional and defaults to the address.
-Keep folder paths in `path`, and credentials out of this configuration. Connect,
-editing, and Forget update this array. Existing `sftp-sites.json` entries migrate
-when `sidebar.remote` is absent; an explicit empty array disables that import.
-
-Transfers use temporary destination files, checked close/flush operations, size
-checks, source/destination change checks, and atomic publication where available.
-SFTP file transfers keep 32 requests in flight by default. Advanced users can
-tune the independently bounded global queues in `settings.json`:
-
-```json
-{
-    "sftp": { "download_queue": 32, "upload_queue": 32 }
-}
-```
-
-Queue depths must be between 1 and 512. Updated values apply when a transfer is
-started or resumed; an already-running pipeline keeps its captured values.
-Replacing remote files requires the server's OpenSSH atomic-rename extension and
-preserves reported ownership and permissions; otherwise Explorer retains the
-original and asks you to choose another action. Resume validates retained partial
-content, and an uncertain final rename is reconciled before retrying. These checks
-do not provide a snapshot of a file being edited concurrently; transfer stable
-source files.
-
-This is the first native SFTP implementation, not complete WinSCP parity. Remote
-editing with automatic upload, synchronization, SCP/FTP/FTPS/WebDAV/S3 browsing,
-jump hosts, keyboard-interactive/MFA, and SSH certificates are not implemented.
-Remote properties are read-only. To open a remote file, download it first.
-Remote-to-remote copying currently goes through a local folder. Symbolic links
-are preserved without recursively following them; downloading links to Windows
-requires skipping them or using a Unix filesystem. Server deletes are permanent
-and use Explorer's permanent-delete confirmation.
 
 ## Development
 

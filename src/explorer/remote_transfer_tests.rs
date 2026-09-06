@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 struct Faults {
+    fail_reads_after: AtomicU64,
+    read: AtomicU64,
     fail_writes_after: AtomicU64,
     written: AtomicU64,
     fail_close: AtomicBool,
@@ -131,6 +133,10 @@ impl russh_sftp::server::Handler for Server {
         offset: u64,
         len: u32,
     ) -> Result<Data, StatusCode> {
+        let limit = self.faults.fail_reads_after.load(Ordering::Relaxed);
+        if limit > 0 && self.faults.read.load(Ordering::Relaxed) >= limit {
+            return Err(StatusCode::ConnectionLost);
+        }
         let f = self.handles.get_mut(&handle).ok_or(StatusCode::Failure)?;
         f.seek(SeekFrom::Start(offset)).map_err(code)?;
         let mut data = vec![0; len as usize];
@@ -139,6 +145,9 @@ impl russh_sftp::server::Handler for Server {
         if read == 0 {
             Err(StatusCode::Eof)
         } else {
+            self.faults
+                .read
+                .fetch_add(read as u64, Ordering::Relaxed);
             Ok(Data { id, data })
         }
     }
@@ -418,7 +427,7 @@ fn queue_depth_one_upload_download_roundtrip() {
     });
 }
 #[test]
-fn interrupted_upload_resumes_only_validated_prefix() {
+fn interrupted_upload_resumes_from_saved_prefix_without_rereading() {
     remote_fs::runtime().block_on(async {
         let local = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
@@ -435,11 +444,17 @@ fn interrupted_upload_resumes_only_validated_prefix() {
         assert!(!destination.path().join("file").exists());
         let partial = destination.path().join(".explorer-42-0.filepart");
         assert_eq!(fs::metadata(&partial).unwrap().len(), 2048);
+        assert_eq!(
+            job.data.lock().unwrap().items[0].resume_prefix,
+            Some(2048)
+        );
         let sparse = OpenOptions::new().write(true).open(&partial).unwrap();
         sparse.set_len(4096).unwrap();
         drop(sparse);
         f.fail_writes_after.store(0, Ordering::Relaxed);
         run(&job, &session).await.unwrap();
+        assert_ne!(job.data.lock().unwrap().state, State::Verifying);
+        assert_eq!(f.read.load(Ordering::Relaxed), 0);
         assert_eq!(f.written.load(Ordering::Relaxed), 8192);
         assert_eq!(
             fs::read(destination.path().join("file")).unwrap(),
@@ -448,7 +463,7 @@ fn interrupted_upload_resumes_only_validated_prefix() {
     });
 }
 #[test]
-fn corrupted_partial_is_rejected_without_replacing_destination() {
+fn partial_shorter_than_saved_prefix_is_rejected_without_replacing_destination() {
     remote_fs::runtime().block_on(async {
         let local = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
@@ -465,21 +480,60 @@ fn corrupted_partial_is_rejected_without_replacing_destination() {
         job.data.lock().unwrap().conflict = Conflict::Replace;
         assert!(run(&job, &session).await.is_err());
         let partial = destination.path().join(".explorer-42-0.filepart");
-        let mut bytes = fs::read(&partial).unwrap();
-        bytes[0] ^= 0xff;
-        fs::write(&partial, bytes).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&partial)
+            .unwrap()
+            .set_len(1024)
+            .unwrap();
         f.fail_writes_after.store(0, Ordering::Relaxed);
         assert!(
             run(&job, &session)
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("Partial content")
+                .contains("shorter than its saved resume position")
         );
         assert_eq!(
             fs::read(destination.path().join("file")).unwrap(),
             b"original"
         );
+    });
+}
+
+#[test]
+fn interrupted_download_resumes_at_saved_prefix_without_rereading() {
+    remote_fs::runtime().block_on(async {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let contents = vec![9; 8192];
+        fs::write(remote_dir.path().join("file"), &contents).unwrap();
+        let f = faults();
+        f.fail_reads_after.store(2048, Ordering::Relaxed);
+        let session = server(remote_dir.path(), f.clone()).await;
+        let job = job(
+            destination.path(),
+            remote("/file"),
+            Location::Local(destination.path().into()),
+        );
+
+        assert!(run(&job, &session).await.is_err());
+        let prefix = job.data.lock().unwrap().items[0]
+            .resume_prefix
+            .expect("download checkpoint");
+        assert!(prefix > 0);
+        assert_eq!(
+            fs::metadata(destination.path().join(".explorer-42-0.filepart"))
+                .unwrap()
+                .len(),
+            prefix
+        );
+
+        f.fail_reads_after.store(0, Ordering::Relaxed);
+        run(&job, &session).await.unwrap();
+        assert_ne!(job.data.lock().unwrap().state, State::Verifying);
+        assert_eq!(f.read.load(Ordering::Relaxed), contents.len() as u64);
+        assert_eq!(fs::read(destination.path().join("file")).unwrap(), contents);
     });
 }
 #[test]

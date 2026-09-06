@@ -105,6 +105,7 @@ pub struct ExplorerView {
     pub(super) pending_remote_downloads: VecDeque<(ClipboardDownload, PathBuf)>,
     pub(super) active_remote_download: Option<ActiveRemoteDownload>,
     pub(super) remote_transfer_snapshots: Vec<super::remote_transfer::JobSnapshot>,
+    pub(super) remote_transfer_panel_collapsed: bool,
     pub(super) remote_credentials: HashMap<
         crate::explorer::remote_download::RemoteEndpointKey,
         crate::explorer::remote_download::RemoteCredentials,
@@ -530,6 +531,7 @@ impl ExplorerView {
             pending_remote_downloads: VecDeque::new(),
             active_remote_download: None,
             remote_transfer_snapshots: Vec::new(),
+            remote_transfer_panel_collapsed: false,
             remote_credentials: HashMap::new(),
             next_download_id: 0,
             download_batch_succeeded: 0,

@@ -65,25 +65,39 @@ fn append_remote_items(
     settings: &SidebarSettings,
     is_connected: impl Fn(&str) -> bool,
 ) {
-    sections.network_drives.extend(
-        settings
-            .remote
-            .iter()
-            .filter_map(|item| {
-                let location = super::remote_fs::RemoteLocation::from_bookmark(item).ok()?;
-                let state = if is_connected(&location.site) {
-                    NetworkDriveState::Connected
-                } else {
-                    NetworkDriveState::Disconnected
-                };
-                Some(SidebarItem {
-                    label: item.display_label(),
-                    path: location.provider_path(),
-                    kind: SidebarItemKind::Remote(state),
-                    configured_index: None,
-                })
+    let remote_items = settings
+        .remote
+        .iter()
+        .filter_map(|item| {
+            let location = super::remote_fs::RemoteLocation::from_bookmark(item).ok()?;
+            let state = if is_connected(&location.site) {
+                NetworkDriveState::Connected
+            } else {
+                NetworkDriveState::Disconnected
+            };
+            Some(SidebarItem {
+                label: item.display_label(),
+                path: location.provider_path(),
+                kind: SidebarItemKind::Remote(state),
+                configured_index: None,
             })
-            .filter(|item| !sidebar_item_is_hidden(item, settings)),
+        })
+        .filter(|item| !sidebar_item_is_hidden(item, settings))
+        .collect::<Vec<_>>();
+    let cloud_start = sections
+        .network_drives
+        .iter()
+        .position(|item| {
+            matches!(
+                item.kind,
+                SidebarItemKind::GoogleDrive | SidebarItemKind::OneDrive
+            )
+        })
+        .unwrap_or(sections.network_drives.len());
+    drop(
+        sections
+            .network_drives
+            .splice(cloud_start..cloud_start, remote_items),
     );
 }
 
@@ -840,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_drives_are_appended_to_the_network_group_in_provider_order() {
+    fn remote_items_precede_cloud_drives_at_the_end_of_the_network_group() {
         let mapped_path = PathBuf::from(r"S:\");
         let google_path = PathBuf::from("google-drive");
         let google_drive = SidebarItem {
@@ -855,11 +869,24 @@ mod tests {
             kind: SidebarItemKind::OneDrive,
             configured_index: None,
         };
-        let sections = sidebar_sections_from_sources(
-            &SidebarSettings {
-                items: Vec::new(),
-                ..SidebarSettings::default()
-            },
+        let settings = SidebarSettings {
+            items: Vec::new(),
+            remote: vec![
+                RemoteSidebarItem {
+                    address: "alpha.example".to_owned(),
+                    path: "/shared".to_owned(),
+                    label: Some("Alpha remote".to_owned()),
+                },
+                RemoteSidebarItem {
+                    address: "beta.example".to_owned(),
+                    path: "/archive".to_owned(),
+                    label: Some("Beta remote".to_owned()),
+                },
+            ],
+            ..SidebarSettings::default()
+        };
+        let mut sections = sidebar_sections_from_sources(
+            &settings,
             "Filesystem",
             Vec::new(),
             Vec::new(),
@@ -874,13 +901,26 @@ mod tests {
             Some(onedrive.clone()),
             Vec::new(),
         );
+        append_remote_items(&mut sections, &settings, |site| {
+            site == "sftp://alpha.example/"
+        });
 
         assert!(sections.drives.is_empty());
         assert!(sections.wsl_drives.is_empty());
-        assert_eq!(sections.network_drives.len(), 3);
+        assert_eq!(sections.network_drives.len(), 5);
         assert_eq!(sections.network_drives[0].path, mapped_path);
-        assert_eq!(sections.network_drives[1], google_drive);
-        assert_eq!(sections.network_drives[2], onedrive);
+        assert_eq!(sections.network_drives[1].label, "Alpha remote");
+        assert_eq!(
+            sections.network_drives[1].kind,
+            SidebarItemKind::Remote(NetworkDriveState::Connected)
+        );
+        assert_eq!(sections.network_drives[2].label, "Beta remote");
+        assert_eq!(
+            sections.network_drives[2].kind,
+            SidebarItemKind::Remote(NetworkDriveState::Disconnected)
+        );
+        assert_eq!(sections.network_drives[3], google_drive);
+        assert_eq!(sections.network_drives[4], onedrive);
     }
 
     #[cfg(target_os = "windows")]

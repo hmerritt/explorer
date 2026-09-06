@@ -17,6 +17,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+const RESUME_CHECKPOINT_INTERVAL: u64 = 8 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) enum Location {
     Local(PathBuf),
@@ -138,8 +140,12 @@ struct Item {
     partial: Option<Location>,
     committing: bool,
     skipped: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    upload_safe_prefix: Option<u64>,
+    #[serde(
+        default,
+        alias = "upload_safe_prefix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    resume_prefix: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Manifest {
@@ -292,7 +298,7 @@ fn manager() -> &'static Manager {
                     if let Ok(mut data) = serde_json::from_slice::<Manifest>(&bytes) {
                         if !valid_manifest(&data) { continue; }
                         if clean_completion(&data) && fs::remove_file(entry.path()).is_ok() { continue; }
-                        if !matches!(data.state, State::Completed | State::Cancelled) { data.state = State::Paused; data.message = "Interrupted transfer recovered. Resume to revalidate and continue.".into(); }
+                        if !matches!(data.state, State::Completed | State::Cancelled) { data.state = State::Paused; data.message = "Interrupted transfer recovered. Resume continues from the saved position.".into(); }
                         manager.jobs.lock().unwrap().insert(data.id, Arc::new(Job { progress: Mutex::default(), store: entry.path(), data: Mutex::new(data), control: AtomicU8::new(1), running: AtomicBool::new(false), pipeline: Mutex::new(SftpSettings::default()) }));
                     }
                 }
@@ -311,6 +317,7 @@ pub(super) struct JobSnapshot {
     pub total: u64,
     pub current_file_bytes: u64,
     pub current_file_total: u64,
+    pub current_is_directory: bool,
     pub warnings: Vec<String>,
     title: String,
     files: usize,
@@ -331,6 +338,7 @@ impl JobSnapshot {
             total: 1024,
             current_file_bytes: 512,
             current_file_total: 1024,
+            current_is_directory: false,
             warnings: vec![],
             title: "file.txt".into(),
             files: 1,
@@ -391,6 +399,10 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
         total,
         current_file_bytes: current_bytes,
         current_file_total: m.items.get(m.current).map_or(0, |i| i.metadata.size),
+        current_is_directory: m
+            .items
+            .get(m.current)
+            .is_some_and(|item| item.metadata.kind == Kind::Directory),
         percentage: transfer_percentage(&m, bytes, total),
         speed,
         remaining,
@@ -406,6 +418,35 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
 fn save(job: &Job) -> io::Result<()> {
     let data = job.data.lock().unwrap().clone();
     remote_fs::atomic_json(&job.store, &data).map_err(io::Error::other)
+}
+fn checkpoint_current_progress(job: &Job) -> io::Result<()> {
+    let (item_index, prefix) = {
+        let progress = job.progress.lock().unwrap();
+        let Some(item_index) = progress.item else {
+            return Ok(());
+        };
+        (item_index, progress.bytes)
+    };
+    let changed = {
+        let mut data = job.data.lock().unwrap();
+        if item_index != data.current {
+            return Ok(());
+        }
+        let Some(item) = data.items.get_mut(item_index) else {
+            return Ok(());
+        };
+        if item.metadata.kind != Kind::File {
+            return Ok(());
+        }
+        let prefix = prefix.min(item.metadata.size);
+        if item.resume_prefix == Some(prefix) {
+            false
+        } else {
+            item.resume_prefix = Some(prefix);
+            true
+        }
+    };
+    if changed { save(job) } else { Ok(()) }
 }
 fn set_state(job: &Job, state: State, message: impl Into<String>) {
     let mut m = job.data.lock().unwrap();
@@ -446,8 +487,7 @@ fn valid_manifest(m: &Manifest) -> bool {
                         .and_then(|p| p.child(&format!(".explorer-{}-{index}.filepart", m.id)))
                         .is_ok_and(|expected| expected == *partial)
                 })
-                && i.upload_safe_prefix
-                    .is_none_or(|prefix| prefix <= i.metadata.size)
+                && i.resume_prefix.is_none_or(|prefix| prefix <= i.metadata.size)
         })
 }
 pub(super) fn enqueue(
@@ -685,6 +725,9 @@ fn start_action(job: Arc<Job>, discard: bool) {
                 result = run_with_retries(&job, &site, lane, discard) => result,
             };
             if result.is_err() { remote_fs::disconnect(&site, lane).await; }
+            if !discard {
+                let _ = checkpoint_current_progress(&job);
+            }
             pool.lanes.lock().unwrap().push(lane);
             drop(permit);
             result
@@ -699,7 +742,7 @@ fn start_action(job: Arc<Job>, discard: bool) {
             Ok(()) => { complete_job(&job); },
             Err(e) if job.control.load(Ordering::Acquire) != 0 => {
                 let state = if job.control.load(Ordering::Acquire) == 2 { State::Cancelled } else { State::Paused };
-                set_state(&job, state, "Partial data retained. Resume validates it before continuing.");
+                set_state(&job, state, "Partial data retained. Resume continues from the saved position.");
                 let _ = e;
             },
             Err(e) => set_state(&job, State::Attention, e.to_string()),
@@ -806,6 +849,7 @@ async fn run_with_retries(job: &Job, site: &str, lane: usize, discard: bool) -> 
                         | io::ErrorKind::ConnectionRefused
                 ) && retries < 5 =>
             {
+                checkpoint_current_progress(job)?;
                 remote_fs::disconnect(site, lane).await;
                 retries += 1;
                 set_state(
@@ -1017,7 +1061,7 @@ async fn plan(job: &Job, session: &Session) -> io::Result<()> {
             partial: None,
             committing: false,
             skipped: false,
-            upload_safe_prefix: None,
+            resume_prefix: None,
         });
     }
     let mut m = job.data.lock().unwrap();
@@ -1493,13 +1537,28 @@ async fn truncate(session: &Session, handle: &mut Handle, size: u64) -> io::Resu
     }
 }
 
-fn save_upload_safe_prefix(job: &Job, item: &mut Item, prefix: u64) -> io::Result<()> {
-    item.upload_safe_prefix = Some(prefix);
+fn save_resume_prefix(job: &Job, item: &mut Item, prefix: u64) -> io::Result<()> {
+    item.resume_prefix = Some(prefix);
     let mut data = job.data.lock().unwrap();
     let index = data.current;
-    data.items[index].upload_safe_prefix = Some(prefix);
+    data.items[index].resume_prefix = Some(prefix);
     drop(data);
     save(job)
+}
+
+fn checkpoint_resume_prefix(
+    job: &Job,
+    item: &mut Item,
+    prefix: u64,
+    force: bool,
+) -> io::Result<()> {
+    let persisted = item.resume_prefix.unwrap_or(0);
+    if item.resume_prefix == Some(prefix)
+        || (!force && prefix.saturating_sub(persisted) < RESUME_CHECKPOINT_INTERVAL)
+    {
+        return Ok(());
+    }
+    save_resume_prefix(job, item, prefix)
 }
 
 async fn remote_read_block(
@@ -1560,6 +1619,7 @@ async fn download_pipeline(
     session: &Session,
     source_handle: &str,
     output: &mut Handle,
+    item: &mut Item,
     offset: u64,
     size: u64,
     depth: usize,
@@ -1583,19 +1643,30 @@ async fn download_pipeline(
     }
 
     while committed < size {
-        let (position, bytes) = pending
-            .next()
-            .await
-            .ok_or_else(|| io::Error::other("SFTP download pipeline ended early"))??;
+        let (position, bytes) = match pending.next().await {
+            Some(Ok(block)) => block,
+            Some(Err(error)) => {
+                checkpoint_resume_prefix(job, item, committed, true)?;
+                return Err(error);
+            }
+            None => {
+                checkpoint_resume_prefix(job, item, committed, true)?;
+                return Err(io::Error::other("SFTP download pipeline ended early"));
+            }
+        };
         let payload = bytes.len() as u64;
         ready.insert(position, bytes);
 
         for (offset, bytes) in take_contiguous_download_blocks(&mut ready, committed) {
             let length = bytes.len() as u64;
-            write(session, output, offset, bytes).await?;
+            if let Err(error) = write(session, output, offset, bytes).await {
+                checkpoint_resume_prefix(job, item, committed, true)?;
+                return Err(error);
+            }
             committed += length;
         }
         record_progress(job, committed, payload);
+        checkpoint_resume_prefix(job, item, committed, false)?;
 
         while pending.len() + ready.len() < depth {
             let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
@@ -1632,7 +1703,13 @@ async fn upload_pipeline(
         let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
             break;
         };
-        let bytes = read(session, source, position, length).await?;
+        let bytes = match read(session, source, position, length).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                checkpoint_resume_prefix(job, item, committed, true)?;
+                return Err(error);
+            }
+        };
         pending.push(remote_write_block(
             session,
             output_handle.to_owned(),
@@ -1645,13 +1722,14 @@ async fn upload_pipeline(
         let (position, payload) = match result {
             Ok(result) => result,
             Err(error) => {
-                save_upload_safe_prefix(job, item, committed)?;
+                checkpoint_resume_prefix(job, item, committed, true)?;
                 return Err(error);
             }
         };
         acknowledged.insert(position, payload);
         advance_acknowledged(&mut acknowledged, &mut committed);
         record_progress(job, committed, payload);
+        checkpoint_resume_prefix(job, item, committed, false)?;
 
         while pending.len() < depth {
             let Some((position, length)) = next_block(&mut scheduled, size, chunk_size) else {
@@ -1660,7 +1738,7 @@ async fn upload_pipeline(
             let bytes = match read(session, source, position, length).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    save_upload_safe_prefix(job, item, committed)?;
+                    checkpoint_resume_prefix(job, item, committed, true)?;
                     return Err(error);
                 }
             };
@@ -1674,7 +1752,7 @@ async fn upload_pipeline(
     }
 
     if committed != size {
-        save_upload_safe_prefix(job, item, committed)?;
+        checkpoint_resume_prefix(job, item, committed, true)?;
         return Err(io::Error::other(
             "SFTP upload pipeline did not acknowledge every block",
         ));
@@ -1710,57 +1788,23 @@ async fn transfer_file(job: &Job, session: &Session, item: &mut Item) -> io::Res
                 "Source changed before the upload resumed; destination was not replaced.",
             ));
         }
-        if upload {
-            let trusted = item.upload_safe_prefix.unwrap_or(offset);
-            if trusted > offset {
-                return Err(io::Error::other(
-                    "Partial content is shorter than its saved safe prefix.",
-                ));
-            }
-            set_state(job, State::Verifying, "Validating retained partial data");
-            let mut at = 0;
-            while at < trusted {
-                let length = (trusted - at).min(session.chunk_size as u64) as usize;
-                if read(session, &mut source, at, length).await?
-                    != read(session, &mut output, at, length).await?
-                {
-                    return Err(io::Error::other(
-                        "Partial content differs inside its saved safe prefix. Cancel and start a new transfer.",
-                    ));
-                }
-                at += length as u64;
-            }
-            while at < offset {
-                let length = (offset - at).min(session.chunk_size as u64) as usize;
-                if read(session, &mut source, at, length).await?
-                    != read(session, &mut output, at, length).await?
-                {
-                    truncate(session, &mut output, at).await.map_err(|error| {
-                        io::Error::other(format!(
-                            "Cannot repair the retained upload at byte {at}: {error}"
-                        ))
-                    })?;
-                    offset = at;
-                    break;
-                }
-                at += length as u64;
-            }
-            save_upload_safe_prefix(job, item, offset)?;
-        } else if offset > 0 {
-            set_state(job, State::Verifying, "Validating retained partial data");
-            let mut at = 0;
-            while at < offset {
-                let length = (offset - at).min(session.chunk_size as u64) as usize;
-                if read(session, &mut source, at, length).await?
-                    != read(session, &mut output, at, length).await?
-                {
-                    return Err(io::Error::other(
-                        "Partial content differs from the source. Cancel and start a new transfer.",
-                    ));
-                }
-                at += length as u64;
-            }
+        let trusted = item.resume_prefix.unwrap_or(offset);
+        if trusted > offset {
+            return Err(io::Error::other(
+                "Partial content is shorter than its saved resume position.",
+            ));
         }
+        if offset > trusted {
+            truncate(session, &mut output, trusted)
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "Cannot trim the retained transfer to byte {trusted}: {error}"
+                    ))
+                })?;
+            offset = trusted;
+        }
+        save_resume_prefix(job, item, offset)?;
         set_state(job, State::Transferring, "Transferring");
         record_progress(job, offset, 0);
         let pipeline = *job.pipeline.lock().unwrap();
@@ -1770,6 +1814,7 @@ async fn transfer_file(job: &Job, session: &Session, item: &mut Item) -> io::Res
                 session,
                 handle,
                 &mut output,
+                item,
                 offset,
                 item.metadata.size,
                 pipeline.download_queue as usize,
@@ -1801,9 +1846,7 @@ async fn transfer_file(job: &Job, session: &Session, item: &mut Item) -> io::Res
     result?;
     closed_source?;
     closed_output?;
-    if matches!(item.source, Location::Local(_)) {
-        save_upload_safe_prefix(job, item, item.metadata.size)?;
-    }
+    save_resume_prefix(job, item, item.metadata.size)?;
     if metadata(session, &partial).await?.size != item.metadata.size {
         return Err(io::Error::other("Transferred file size does not match"));
     }
@@ -2055,11 +2098,11 @@ mod tests {
             skipped,
             partial: None,
             committing: false,
-            upload_safe_prefix: None,
+            resume_prefix: None,
         }
     }
     #[test]
-    fn remote_progress_uses_validated_prefix_without_counting_it_as_speed() {
+    fn remote_progress_uses_resume_prefix_without_counting_it_as_speed() {
         let job = test_job();
         let now = std::time::Instant::now();
         {
@@ -2211,6 +2254,67 @@ mod tests {
                 .get("verify")
                 .is_none()
         );
+    }
+    #[test]
+    fn legacy_upload_prefix_deserializes_as_the_general_resume_prefix() {
+        let job = test_job();
+        let mut value = serde_json::to_value(&*job.data.lock().unwrap()).unwrap();
+        value["items"] = serde_json::to_value(vec![item(1024, false, false)]).unwrap();
+        value["items"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("resume_prefix");
+        value["items"][0]["upload_safe_prefix"] = 512.into();
+
+        let manifest: Manifest = serde_json::from_value(value).unwrap();
+        assert_eq!(manifest.items[0].resume_prefix, Some(512));
+        let stored = serde_json::to_value(manifest).unwrap();
+        assert_eq!(stored["items"][0]["resume_prefix"], 512);
+        assert!(stored["items"][0].get("upload_safe_prefix").is_none());
+    }
+    #[test]
+    fn checkpoint_interval_limits_manifest_writes_but_force_saves_the_frontier() {
+        let state = tempfile::tempdir().unwrap();
+        let mut job = test_job();
+        job.store = state.path().join("job.json");
+        let mut current = item(RESUME_CHECKPOINT_INTERVAL * 2, false, false);
+        job.data.lock().unwrap().items = vec![current.clone()];
+
+        checkpoint_resume_prefix(&job, &mut current, RESUME_CHECKPOINT_INTERVAL - 1, false)
+            .unwrap();
+        assert_eq!(current.resume_prefix, None);
+        checkpoint_resume_prefix(&job, &mut current, RESUME_CHECKPOINT_INTERVAL, false).unwrap();
+        assert_eq!(current.resume_prefix, Some(RESUME_CHECKPOINT_INTERVAL));
+        checkpoint_resume_prefix(
+            &job,
+            &mut current,
+            RESUME_CHECKPOINT_INTERVAL + 1,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            job.data.lock().unwrap().items[0].resume_prefix,
+            Some(RESUME_CHECKPOINT_INTERVAL + 1)
+        );
+    }
+    #[test]
+    fn interrupted_transfer_checkpoints_the_in_memory_contiguous_frontier() {
+        let state = tempfile::tempdir().unwrap();
+        let mut job = test_job();
+        job.store = state.path().join("job.json");
+        job.data.lock().unwrap().items = vec![item(4096, false, false)];
+        job.progress.lock().unwrap().record(
+            std::time::Instant::now(),
+            0,
+            3072,
+            3072,
+        );
+
+        checkpoint_current_progress(&job).unwrap();
+
+        assert_eq!(job.data.lock().unwrap().items[0].resume_prefix, Some(3072));
+        let stored: Manifest = serde_json::from_slice(&fs::read(&job.store).unwrap()).unwrap();
+        assert_eq!(stored.items[0].resume_prefix, Some(3072));
     }
     #[test]
     fn local_children_cannot_escape_destination() {
