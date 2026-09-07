@@ -106,6 +106,7 @@ pub struct ExplorerView {
     pub(super) active_remote_download: Option<ActiveRemoteDownload>,
     pub(super) remote_transfer_snapshots: Vec<super::remote_transfer::JobSnapshot>,
     pub(super) remote_transfer_panel_collapsed: bool,
+    pub(super) pending_remote_transfer_reveal: Option<PendingRemoteTransferReveal>,
     pub(super) remote_credentials: HashMap<
         crate::explorer::remote_download::RemoteEndpointKey,
         crate::explorer::remote_download::RemoteCredentials,
@@ -353,6 +354,12 @@ pub(super) struct PendingTrash {
     pub(super) paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingRemoteTransferReveal {
+    pub(super) job_id: u64,
+    pub(super) target: super::remote_transfer::RevealTarget,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerContentBranch {
     Error,
@@ -532,6 +539,7 @@ impl ExplorerView {
             active_remote_download: None,
             remote_transfer_snapshots: Vec::new(),
             remote_transfer_panel_collapsed: false,
+            pending_remote_transfer_reveal: None,
             remote_credentials: HashMap::new(),
             next_download_id: 0,
             download_batch_succeeded: 0,
@@ -1448,6 +1456,27 @@ impl ExplorerView {
             false,
             cx,
         );
+    }
+
+    pub(super) fn reload_with_entry_metadata_resolution_selecting(
+        &mut self,
+        select_after_load: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload_async_with_options_preserving_live_selection(
+            ReloadMode {
+                cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                preserve_selection: false,
+                rebuild_sidebar: true,
+                preserve_context_menu: false,
+            },
+            select_after_load,
+            true,
+            false,
+            false,
+            cx,
+        );
+        self.clear_selection();
     }
 
     pub(super) fn reload_after_successful_delete(

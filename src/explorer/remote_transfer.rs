@@ -1,5 +1,8 @@
 //! Durable native SFTP jobs, independent of views and navigation.
-use super::remote_fs::{self, RemoteLocation, Session, sftp_error};
+use super::{
+    entry::FileEntry,
+    remote_fs::{self, RemoteLocation, Session, sftp_error},
+};
 use crate::settings::SftpSettings;
 use futures::{StreamExt, stream::FuturesUnordered};
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
@@ -83,6 +86,13 @@ impl Location {
         match self {
             Self::Local(p) => p.display().to_string(),
             Self::Remote(l) => l.address(),
+        }
+    }
+
+    fn provider_path(&self) -> PathBuf {
+        match self {
+            Self::Local(path) => path.clone(),
+            Self::Remote(location) => location.provider_path(),
         }
     }
 }
@@ -245,6 +255,20 @@ fn record_progress(job: &Job, bytes: u64, payload: u64) {
 }
 fn complete_job(job: &Job) {
     set_state(job, State::Completed, "Transfer completed");
+    let completed_reveal = {
+        let manifest = job.data.lock().unwrap();
+        destination_reveal_target(&manifest).map(|target| (manifest.id, target))
+    };
+    if let Some((id, target)) = completed_reveal {
+        let mut reveals = manager().completed_reveals.lock().unwrap();
+        reveals.insert(id, target);
+        while reveals.len() > 64 {
+            let Some(oldest) = reveals.first_key_value().map(|(&id, _)| id) else {
+                break;
+            };
+            reveals.remove(&oldest);
+        }
+    }
     COMPLETION_REVISION.fetch_add(1, Ordering::Release);
 }
 fn clean_completion(m: &Manifest) -> bool {
@@ -275,10 +299,14 @@ fn transfer_percentage(m: &Manifest, bytes: u64, total: u64) -> Option<u8> {
 #[derive(Default)]
 struct Manager {
     jobs: Mutex<BTreeMap<u64, Arc<Job>>>,
+    completed_reveals: Mutex<BTreeMap<u64, RevealTarget>>,
 }
 static COMPLETION_REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn completion_revision() -> u64 {
     COMPLETION_REVISION.load(Ordering::Acquire)
+}
+pub(super) fn take_completed_destination_reveal(id: u64) -> Option<RevealTarget> {
+    manager().completed_reveals.lock().unwrap().remove(&id)
 }
 fn state_dir() -> io::Result<PathBuf> {
     crate::settings::config_dir()
@@ -307,6 +335,12 @@ fn manager() -> &'static Manager {
         manager
     })
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RevealTarget {
+    pub(super) directory: PathBuf,
+    pub(super) paths: Vec<PathBuf>,
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) struct JobSnapshot {
     pub id: u64,
@@ -317,7 +351,6 @@ pub(super) struct JobSnapshot {
     pub total: u64,
     pub current_file_bytes: u64,
     pub current_file_total: u64,
-    pub current_is_directory: bool,
     pub warnings: Vec<String>,
     title: String,
     files: usize,
@@ -325,6 +358,9 @@ pub(super) struct JobSnapshot {
     pub percentage: Option<u8>,
     pub speed: Option<f64>,
     pub remaining: Option<Duration>,
+    pub(super) source_reveal: RevealTarget,
+    pub(super) destination_reveal: RevealTarget,
+    pub(super) icon_entry: FileEntry,
 }
 impl JobSnapshot {
     #[cfg(test)]
@@ -338,7 +374,6 @@ impl JobSnapshot {
             total: 1024,
             current_file_bytes: 512,
             current_file_total: 1024,
-            current_is_directory: false,
             warnings: vec![],
             title: "file.txt".into(),
             files: 1,
@@ -346,6 +381,23 @@ impl JobSnapshot {
             percentage: Some(50),
             speed: Some(512.0),
             remaining: Some(Duration::from_secs(1)),
+            source_reveal: RevealTarget {
+                directory: PathBuf::from("source"),
+                paths: vec![PathBuf::from("source/file.txt")],
+            },
+            destination_reveal: RevealTarget {
+                directory: PathBuf::from("destination"),
+                paths: vec![PathBuf::from("destination/file.txt")],
+            },
+            icon_entry: FileEntry::from_provider(
+                RemoteLocation::parse("sftp://server/source/file.txt")
+                    .unwrap()
+                    .provider_path(),
+                "file.txt".into(),
+                false,
+                Some(1024),
+                None,
+            ),
         }
     }
     pub fn title(&self) -> String {
@@ -390,6 +442,9 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
     let remaining = speed
         .filter(|s| *s > 0.0)
         .and_then(|s| Duration::try_from_secs_f64((total.saturating_sub(bytes)) as f64 / s).ok());
+    let source_reveal = source_reveal_target(&m)?;
+    let destination_reveal = destination_reveal_target(&m)?;
+    let icon_entry = transfer_icon_entry(&m)?;
     Some(JobSnapshot {
         id: m.id,
         state: m.state,
@@ -399,10 +454,6 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
         total,
         current_file_bytes: current_bytes,
         current_file_total: m.items.get(m.current).map_or(0, |i| i.metadata.size),
-        current_is_directory: m
-            .items
-            .get(m.current)
-            .is_some_and(|item| item.metadata.kind == Kind::Directory),
         percentage: transfer_percentage(&m, bytes, total),
         speed,
         remaining,
@@ -413,7 +464,93 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
             .items
             .iter()
             .any(|i| i.partial.is_some() && (!i.completed || i.skipped)),
+        source_reveal,
+        destination_reveal,
+        icon_entry,
     })
+}
+
+fn source_reveal_target(manifest: &Manifest) -> Option<RevealTarget> {
+    let first_parent = manifest.sources.first()?.parent().ok()?;
+    let paths = manifest
+        .sources
+        .iter()
+        .filter(|source| source.parent().ok().as_ref() == Some(&first_parent))
+        .map(Location::provider_path)
+        .collect();
+    Some(RevealTarget {
+        directory: first_parent.provider_path(),
+        paths,
+    })
+}
+
+fn destination_reveal_target(manifest: &Manifest) -> Option<RevealTarget> {
+    let paths = manifest
+        .sources
+        .iter()
+        .filter_map(|source| {
+            manifest
+                .items
+                .iter()
+                .find(|item| &item.source == source)
+                .map(|item| item.destination.clone())
+                .or_else(|| {
+                    source
+                        .name()
+                        .ok()
+                        .and_then(|name| manifest.destination.child(&name).ok())
+                })
+        })
+        .map(|destination| destination.provider_path())
+        .collect();
+    Some(RevealTarget {
+        directory: manifest.destination.provider_path(),
+        paths,
+    })
+}
+
+fn transfer_icon_entry(manifest: &Manifest) -> Option<FileEntry> {
+    let item = manifest.items.get(manifest.current).or_else(|| {
+        manifest
+            .sources
+            .first()
+            .and_then(|source| manifest.items.iter().find(|item| &item.source == source))
+    });
+
+    let (location, name, is_directory, size, modified) = if let Some(item) = item {
+        let location = match (&item.source, &item.destination) {
+            (Location::Remote(location), _) | (_, Location::Remote(location)) => location.clone(),
+            _ => return None,
+        };
+        (
+            location,
+            item.source.name().ok()?,
+            item.metadata.kind == Kind::Directory,
+            Some(item.metadata.size),
+            item.metadata
+                .modified
+                .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds)),
+        )
+    } else {
+        let source = manifest.sources.first()?;
+        let name = source.name().ok()?;
+        let location = match source {
+            Location::Remote(location) => location.clone(),
+            Location::Local(_) => match manifest.destination.child(&name).ok()? {
+                Location::Remote(location) => location,
+                Location::Local(_) => return None,
+            },
+        };
+        (location, name, false, None, None)
+    };
+
+    Some(FileEntry::from_provider(
+        location.provider_path(),
+        name,
+        is_directory,
+        size,
+        modified,
+    ))
 }
 fn save(job: &Job) -> io::Result<()> {
     let data = job.data.lock().unwrap().clone();
@@ -2100,6 +2237,162 @@ mod tests {
             committing: false,
             resume_prefix: None,
         }
+    }
+
+    #[test]
+    fn snapshot_reveal_targets_use_top_level_sources_and_resolved_destinations() {
+        let job = test_job();
+        let renamed_destination = PathBuf::from("destination/file (2).txt");
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.planned = true;
+            let mut planned_item = item(100, false, false);
+            planned_item.destination = Location::Local(renamed_destination.clone());
+            manifest.items = vec![planned_item];
+        }
+
+        let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+        let source = RemoteLocation::parse("sftp://server/folder/file.txt").unwrap();
+        assert_eq!(
+            snapshot.source_reveal,
+            RevealTarget {
+                directory: source
+                    .provider_path()
+                    .parent()
+                    .expect("remote parent")
+                    .to_path_buf(),
+                paths: vec![source.provider_path()],
+            }
+        );
+        assert_eq!(
+            snapshot.destination_reveal,
+            RevealTarget {
+                directory: PathBuf::from("destination"),
+                paths: vec![renamed_destination],
+            }
+        );
+    }
+
+    #[test]
+    fn upload_snapshot_uses_provider_encoded_destination_batch_paths() {
+        let job = test_job();
+        let first = Location::Local(PathBuf::from("local/a.PDF"));
+        let second = Location::Local(PathBuf::from("local/b.unknown"));
+        let destination = Location::Remote(
+            RemoteLocation::parse("sftp://server/uploads").unwrap(),
+        );
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.sources = vec![first.clone(), second.clone()];
+            manifest.destination = destination.clone();
+            manifest.planned = true;
+            manifest.items = vec![
+                Item {
+                    source: first.clone(),
+                    destination: destination.child("a.PDF").unwrap(),
+                    ..item(100, false, false)
+                },
+                Item {
+                    source: second.clone(),
+                    destination: destination.child("b.unknown").unwrap(),
+                    ..item(200, false, false)
+                },
+            ];
+        }
+
+        let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+        assert_eq!(
+            snapshot.source_reveal,
+            RevealTarget {
+                directory: PathBuf::from("local"),
+                paths: vec![PathBuf::from("local/a.PDF"), PathBuf::from("local/b.unknown")],
+            }
+        );
+        assert_eq!(snapshot.destination_reveal.directory, destination.provider_path());
+        assert_eq!(
+            snapshot.destination_reveal.paths,
+            vec![
+                destination.child("a.PDF").unwrap().provider_path(),
+                destination.child("b.unknown").unwrap().provider_path(),
+            ]
+        );
+        assert_eq!(snapshot.icon_entry.name, "a.PDF");
+        assert!(remote_fs::is_remote(&snapshot.icon_entry.path));
+    }
+
+    #[test]
+    fn completed_reveal_retains_the_final_conflict_renamed_destination() {
+        let job = test_job();
+        let id = u64::MAX - 1;
+        let renamed_destination = PathBuf::from("destination/file (3).txt");
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.id = id;
+            manifest.planned = true;
+            let mut planned_item = item(100, true, false);
+            planned_item.destination = Location::Local(renamed_destination.clone());
+            manifest.items = vec![planned_item];
+        }
+
+        complete_job(&job);
+
+        assert_eq!(
+            take_completed_destination_reveal(id),
+            Some(RevealTarget {
+                directory: PathBuf::from("destination"),
+                paths: vec![renamed_destination],
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_parent_source_reveal_selects_the_first_parent_group() {
+        let job = test_job();
+        let first = Location::Remote(
+            RemoteLocation::parse("sftp://server/first/a.txt").unwrap(),
+        );
+        let same_parent = Location::Remote(
+            RemoteLocation::parse("sftp://server/first/b.txt").unwrap(),
+        );
+        let other_parent = Location::Remote(
+            RemoteLocation::parse("sftp://server/other/c.txt").unwrap(),
+        );
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.sources = vec![first.clone(), same_parent.clone(), other_parent];
+        }
+
+        let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+        assert_eq!(
+            snapshot.source_reveal,
+            RevealTarget {
+                directory: first.parent().unwrap().provider_path(),
+                paths: vec![first.provider_path(), same_parent.provider_path()],
+            }
+        );
+        assert_eq!(snapshot.destination_reveal.paths.len(), 3);
+    }
+
+    #[test]
+    fn snapshot_icon_entry_represents_the_current_server_item() {
+        let job = test_job();
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.planned = true;
+            let mut directory = item(0, false, false);
+            directory.source = Location::Remote(
+                RemoteLocation::parse("sftp://server/folder/Photos").unwrap(),
+            );
+            directory.destination = Location::Local(PathBuf::from("destination/Photos"));
+            directory.metadata.kind = Kind::Directory;
+            manifest.sources = vec![directory.source.clone()];
+            manifest.items = vec![directory];
+        }
+
+        let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+        assert!(remote_fs::is_remote(&snapshot.icon_entry.path));
+        assert_eq!(snapshot.icon_entry.name, "Photos");
+        assert!(snapshot.icon_entry.is_directory_like());
     }
     #[test]
     fn remote_progress_uses_resume_prefix_without_counting_it_as_speed() {

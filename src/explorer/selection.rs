@@ -237,6 +237,7 @@ impl ExplorerView {
     }
 
     pub(super) fn select_all_entries(&mut self) {
+        self.cancel_pending_remote_transfer_reveal();
         self.cancel_pending_click_rename();
 
         if self.entries.is_empty() {
@@ -349,6 +350,7 @@ impl ExplorerView {
     }
 
     pub(super) fn move_selection(&mut self, direction: SelectionDirection) {
+        self.cancel_pending_remote_transfer_reveal();
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
             return;
@@ -365,6 +367,7 @@ impl ExplorerView {
     }
 
     pub(super) fn move_large_icon_selection(&mut self, direction: LargeIconSelectionDirection) {
+        self.cancel_pending_remote_transfer_reveal();
         if self.entries.is_empty() {
             self.clear_selection();
             return;
@@ -401,6 +404,7 @@ impl ExplorerView {
     }
 
     pub(super) fn extend_selection(&mut self, direction: SelectionDirection) {
+        self.cancel_pending_remote_transfer_reveal();
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
             return;
@@ -421,6 +425,7 @@ impl ExplorerView {
     }
 
     pub(super) fn select_edge(&mut self, edge: SelectionEdge) {
+        self.cancel_pending_remote_transfer_reveal();
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
             return;
@@ -434,6 +439,7 @@ impl ExplorerView {
     }
 
     pub(super) fn extend_selection_to_edge(&mut self, edge: SelectionEdge) {
+        self.cancel_pending_remote_transfer_reveal();
         let Some(last) = self.entries.len().checked_sub(1) else {
             self.clear_selection();
             return;

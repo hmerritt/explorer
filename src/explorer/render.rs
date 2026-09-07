@@ -5212,6 +5212,7 @@ fn add_current_folder_drop_handlers(
 
         match target {
             CurrentFolderClickTarget::Background => {
+                this.cancel_pending_remote_transfer_reveal();
                 this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
@@ -5231,6 +5232,7 @@ fn add_current_folder_drop_handlers(
                 this.close_context_menu();
             }
             CurrentFolderClickTarget::EmptyFolder => {
+                this.cancel_pending_remote_transfer_reveal();
                 this.close_context_menu();
                 if this.commit_active_rename_before_interaction(window, cx) {
                     this.clear_selection();
@@ -7316,7 +7318,7 @@ fn rename_name_cell(
     cell.child(entry_icon(entry, app_icon)).child(input)
 }
 
-fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
+pub(super) fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
     if super::remote_fs::is_remote(&entry.path) {
         if entry.uses_directory_shortcut_icon() {
             return directory_shortcut_icon().into_any_element();

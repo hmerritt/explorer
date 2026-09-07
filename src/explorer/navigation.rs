@@ -181,6 +181,9 @@ impl ExplorerView {
         rebuild_sidebar: bool,
         select_after_load: Vec<PathBuf>,
     ) {
+        if path != self.path {
+            self.cancel_pending_remote_transfer_reveal();
+        }
         let _timing_batch = crate::debug_options::NavTimingBatch::start();
         let total_started = Instant::now();
         let original_path = self.path.clone();
@@ -357,6 +360,7 @@ impl ExplorerView {
         kind: SidebarGroupKind,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_pending_remote_transfer_reveal();
         if self.active_sidebar_group() == Some(kind) {
             self.refresh_sidebar_group_view(cx);
             return;
@@ -803,6 +807,7 @@ impl ExplorerView {
         entry: &FileEntry,
         modifiers: SelectionModifiers,
     ) {
+        self.cancel_pending_remote_transfer_reveal();
         self.cancel_pending_click_rename();
 
         if let Some(ix) = self.entry_index_by_path(&entry.path) {

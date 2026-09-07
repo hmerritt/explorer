@@ -1,17 +1,19 @@
 use super::{
+    app_icons::NativeIconSize,
+    navigation::HistoryMode,
     remote_dialog::{open_remote_credentials_dialog, open_remote_host_key_dialog},
     remote_download::RemoteDownloadError,
     remote_fs,
     remote_transfer::{self, JobSnapshot, State},
     tooltip::explorer_tooltip,
-    view::ExplorerView,
+    view::{ExplorerView, PendingRemoteTransferReveal},
 };
 use crate::settings::SettingsState;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement,
-    SharedString, Window, div, prelude::*, px, relative, rgb,
+    MouseButton, SharedString, Window, div, prelude::*, px, relative, rgb,
 };
-use std::time::Duration;
+use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 const TRANSFER_UI_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 const TRANSFER_PANEL_MAX_HEIGHT: f32 = 260.0;
@@ -58,6 +60,15 @@ const TRANSFER_ACTION_CANCEL: &str = "\u{E711}";
 const TRANSFER_ACTION_DISMISS: &str = "\u{E73E}";
 const TRANSFER_ACTION_DISCARD: &str = "\u{E74D}";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferRevealSide {
+    Source,
+    Destination,
+}
+
+type TransferRevealHandler =
+    Rc<dyn Fn(u64, TransferRevealSide, &mut Window, &mut App) + 'static>;
+
 impl ExplorerView {
     pub(super) fn start_remote_events(&mut self, cx: &mut Context<Self>) {
         self.remote_transfer_snapshots = super::remote_transfer::snapshots();
@@ -76,6 +87,7 @@ impl ExplorerView {
                             ) {
                                 view.remote_transfer_panel_collapsed = false;
                             }
+                            view.reconcile_pending_remote_transfer_reveal(&snapshots, cx);
                             view.remote_transfer_snapshots = snapshots;
                             cx.notify();
                         }
@@ -99,7 +111,10 @@ impl ExplorerView {
                         let revision = super::remote_transfer::completion_revision();
                         if revision != completion {
                             completion = revision;
-                            view.reload_with_entry_metadata_resolution(cx);
+                            let snapshots = super::remote_transfer::snapshots();
+                            if !view.complete_pending_remote_transfer_reveal(&snapshots, cx) {
+                                view.reload_with_entry_metadata_resolution(cx);
+                            }
                             view.emit_filesystem_changed(cx);
                         }
                         if view.active_dialog_window.is_some() {
@@ -175,15 +190,138 @@ impl ExplorerView {
         cx.notify();
     }
 
-    pub(super) fn render_native_transfers(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn cancel_pending_remote_transfer_reveal(&mut self) {
+        self.pending_remote_transfer_reveal = None;
+    }
+
+    fn reveal_remote_transfer(
+        &mut self,
+        id: u64,
+        side: TransferRevealSide,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = self
+            .remote_transfer_snapshots
+            .iter()
+            .find(|job| job.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let target = match side {
+            TransferRevealSide::Source => job.source_reveal.clone(),
+            TransferRevealSide::Destination => job.destination_reveal.clone(),
+        };
+
+        self.cancel_pending_remote_transfer_reveal();
+        self.navigate_to_directory_with_watcher_selecting(
+            target.directory.clone(),
+            HistoryMode::Record,
+            target.paths.clone(),
+            cx,
+        );
+        if side == TransferRevealSide::Destination
+            && !matches!(job.state, State::Completed | State::Cancelled)
+        {
+            self.pending_remote_transfer_reveal = Some(PendingRemoteTransferReveal {
+                job_id: id,
+                target,
+            });
+        }
+        cx.notify();
+    }
+
+    fn reconcile_pending_remote_transfer_reveal(
+        &mut self,
+        snapshots: &[JobSnapshot],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_remote_transfer_reveal.as_mut() else {
+            return;
+        };
+        if self.path != pending.target.directory {
+            self.pending_remote_transfer_reveal = None;
+            return;
+        }
+        let Some(job) = snapshots.iter().find(|job| job.id == pending.job_id) else {
+            if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id)
+            {
+                pending.target = target;
+            }
+            self.finish_pending_remote_transfer_reveal(cx);
+            return;
+        };
+        pending.target = job.destination_reveal.clone();
+        if job.state == State::Completed {
+            if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id)
+            {
+                pending.target = target;
+            }
+            self.finish_pending_remote_transfer_reveal(cx);
+        } else if job.state == State::Cancelled {
+            self.pending_remote_transfer_reveal = None;
+        }
+    }
+
+    fn complete_pending_remote_transfer_reveal(
+        &mut self,
+        snapshots: &[JobSnapshot],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pending) = self.pending_remote_transfer_reveal.as_mut() else {
+            return false;
+        };
+        if self.path != pending.target.directory {
+            self.pending_remote_transfer_reveal = None;
+            return false;
+        }
+        if let Some(job) = snapshots.iter().find(|job| job.id == pending.job_id) {
+            pending.target = job.destination_reveal.clone();
+            if job.state != State::Completed {
+                return false;
+            }
+        }
+        if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id) {
+            pending.target = target;
+        }
+        self.finish_pending_remote_transfer_reveal(cx);
+        true
+    }
+
+    fn finish_pending_remote_transfer_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_remote_transfer_reveal.take() else {
+            return;
+        };
+        if self.path == pending.target.directory {
+            self.reload_with_entry_metadata_resolution_selecting(pending.target.paths, cx);
+        }
+    }
+
+    pub(super) fn render_native_transfers(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let jobs = self.remote_transfer_snapshots.clone();
+        let native_icons = jobs
+            .iter()
+            .filter_map(|job| {
+                self.native_icon_for_entry(&job.icon_entry, NativeIconSize::Details, cx)
+                    .map(|icon| (job.id, icon))
+            })
+            .collect();
+        let entity = cx.entity();
+        let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
+            let _ = entity.update(cx, |view, cx| {
+                view.reveal_remote_transfer(id, side, cx);
+            });
+        });
         render_transfer_panel(
-            self.remote_transfer_snapshots.clone(),
+            jobs,
+            native_icons,
             self.remote_transfer_panel_collapsed,
             cx.listener(|view, _: &ClickEvent, _, cx| {
                 view.remote_transfer_panel_collapsed = !view.remote_transfer_panel_collapsed;
                 cx.stop_propagation();
                 cx.notify();
             }),
+            on_reveal,
             cx,
         )
     }
@@ -202,8 +340,10 @@ fn transfer_panel_should_expand(previous: &[JobSnapshot], next: &[JobSnapshot]) 
 
 fn render_transfer_panel<V: 'static>(
     jobs: Vec<JobSnapshot>,
+    native_icons: HashMap<u64, Arc<gpui::Image>>,
     collapsed: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_reveal: TransferRevealHandler,
     cx: &mut Context<V>,
 ) -> AnyElement {
     if jobs.is_empty() {
@@ -264,7 +404,16 @@ fn render_transfer_panel<V: 'static>(
                                     .overflow_y_scroll()
                                     .children(
                                         jobs.into_iter()
-                                            .map(|job| render_transfer_job(job, sftp, cx)),
+                                            .map(|job| {
+                                                let native_icon = native_icons.get(&job.id).cloned();
+                                                render_transfer_job(
+                                                    job,
+                                                    native_icon,
+                                                    sftp,
+                                                    on_reveal.clone(),
+                                                    cx,
+                                                )
+                                            }),
                                     ),
                             ),
                     ),
@@ -429,7 +578,9 @@ fn transfer_header_cell(
 
 fn render_transfer_job<V: 'static>(
     job: JobSnapshot,
+    native_icon: Option<Arc<gpui::Image>>,
     sftp: crate::settings::SftpSettings,
+    on_reveal: TransferRevealHandler,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let has_detail = job.state == State::Attention || !job.warnings.is_empty();
@@ -446,7 +597,13 @@ fn render_transfer_job<V: 'static>(
         .w_full()
         .border_b_1()
         .border_color(rgb(TRANSFER_BORDER_SOFT))
-        .child(render_transfer_row(job, sftp, cx))
+        .child(render_transfer_row(
+            job,
+            native_icon,
+            sftp,
+            on_reveal,
+            cx,
+        ))
         .when_some(detail_job, |item, job| {
             item.child(render_transfer_detail_band(job, sftp, cx))
         })
@@ -455,18 +612,18 @@ fn render_transfer_job<V: 'static>(
 
 fn render_transfer_row<V: 'static>(
     job: JobSnapshot,
+    native_icon: Option<Arc<gpui::Image>>,
     sftp: crate::settings::SftpSettings,
+    on_reveal: TransferRevealHandler,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let id = job.id;
     let title = job.title();
     let file_count = job.files();
     let tooltip = transfer_name_tooltip(&title, &job.message);
-    let icon = if job.current_is_directory {
-        super::icons::folder_icon().into_any_element()
-    } else {
-        super::icons::file_icon_for_path(std::path::Path::new(&title)).into_any_element()
-    };
+    let icon = super::render::entry_icon(&job.icon_entry, native_icon);
+    let reveal_job_id = id;
+    let reveal_destination = on_reveal.clone();
 
     div()
         .id(SharedString::from(format!("sftp-transfer-row-{id}")))
@@ -477,7 +634,21 @@ fn render_transfer_row<V: 'static>(
         .h(px(TRANSFER_ROW_HEIGHT))
         .w_full()
         .bg(rgb(TRANSFER_SURFACE))
+        .cursor_pointer()
         .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            reveal_destination(
+                reveal_job_id,
+                TransferRevealSide::Destination,
+                window,
+                cx,
+            );
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            on_reveal(reveal_job_id, TransferRevealSide::Source, window, cx);
+            cx.stop_propagation();
+        })
         .child(
             div()
                 .id(("sftp-filename", id))
@@ -694,7 +865,17 @@ fn render_transfer_action_button<V: 'static>(
         .active(|style| style.opacity(0.72))
         .tooltip(explorer_tooltip(action.label))
         .child(action.glyph)
-        .on_click(cx.listener(move |_, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+            if !event.standard_click() {
+                cx.stop_propagation();
+                return;
+            }
             remote_transfer::control(id, action.key, sftp);
             cx.stop_propagation();
             cx.notify();
@@ -784,7 +965,17 @@ fn render_conflict_action_button<V: 'static>(
         .hover(|style| style.bg(rgb(TRANSFER_AMBER_TRACK)))
         .active(|style| style.opacity(0.72))
         .child(action.label)
-        .on_click(cx.listener(move |_, _, _, cx| {
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+            if !event.standard_click() {
+                cx.stop_propagation();
+                return;
+            }
             remote_transfer::control(id, action.key, sftp);
             cx.stop_propagation();
             cx.notify();
@@ -964,6 +1155,11 @@ fn attention_count_label(count: usize) -> String {
 mod tests {
     use super::super::remote_transfer::{JobSnapshot, State};
     use super::*;
+    use crate::explorer::{
+        selection::SelectionModifiers,
+        test_support::{TempDir, selected_names, test_view_entity_at_path, test_view_with_entries},
+    };
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn transfer_ui_updates_are_limited_to_twice_per_second() {
@@ -983,15 +1179,233 @@ mod tests {
                     .w_full()
                     .child(render_transfer_panel(
                         self.jobs.clone(),
+                        HashMap::new(),
                         self.collapsed,
                         cx.listener(|panel, _: &ClickEvent, _, cx| {
                             panel.collapsed = !panel.collapsed;
                             cx.notify();
                         }),
+                        Rc::new(|_, _, _, _| {}),
                         cx,
                     )),
             )
         }
+    }
+
+    struct InteractivePanel {
+        job: JobSnapshot,
+        reveals: Vec<(u64, TransferRevealSide)>,
+    }
+
+    impl gpui::Render for InteractivePanel {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let entity = cx.entity();
+            div().size_full().child(render_transfer_panel(
+                vec![self.job.clone()],
+                HashMap::new(),
+                false,
+                cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()),
+                Rc::new(move |id, side, _, cx| {
+                    let _ = entity.update(cx, |panel, cx| {
+                        panel.reveals.push((id, side));
+                        cx.notify();
+                    });
+                }),
+                cx,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn transfer_rows_map_primary_and_secondary_clicks_without_activating_from_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (panel, cx) = cx.add_window_view(|_, _| InteractivePanel {
+            job: JobSnapshot::for_test(State::Transferring),
+            reveals: Vec::new(),
+        });
+        cx.run_until_parked();
+
+        let row = cx.debug_bounds("sftp-transfer-row-123").unwrap();
+        let row_position = gpui::point(row.origin.x + px(180.0), row.center().y);
+        cx.simulate_mouse_down(row_position, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(row_position, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(row_position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(row_position, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&panel, |panel, _| {
+            assert_eq!(
+                panel.reveals,
+                vec![
+                    (123, TransferRevealSide::Destination),
+                    (123, TransferRevealSide::Source),
+                ]
+            );
+        });
+
+        let pause = cx.debug_bounds("sftp-pause-123").unwrap().center();
+        cx.simulate_mouse_down(pause, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(pause, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(pause, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(pause, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&panel, |panel, _| assert_eq!(panel.reveals.len(), 2));
+    }
+
+    #[gpui::test]
+    fn transfer_reveal_navigates_current_view_and_selects_top_level_items(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let initial = temp.path().join("initial");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&initial).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        for directory in [&source, &destination] {
+            fs::write(directory.join("a.txt"), b"a").unwrap();
+            fs::write(directory.join("b.txt"), b"b").unwrap();
+        }
+        let (view, cx) = test_view_entity_at_path(cx, initial.clone());
+
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                let mut job = JobSnapshot::for_test(State::Completed);
+                job.source_reveal.directory = source.clone();
+                job.source_reveal.paths = vec![source.join("a.txt"), source.join("b.txt")];
+                job.destination_reveal.directory = destination.clone();
+                job.destination_reveal.paths =
+                    vec![destination.join("a.txt"), destination.join("b.txt")];
+                explorer.remote_transfer_snapshots = vec![job];
+                explorer.reveal_remote_transfer(123, TransferRevealSide::Destination, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(explorer.path, destination);
+            assert_eq!(selected_names(explorer), vec!["a.txt", "b.txt"]);
+            assert_eq!(explorer.back_stack.last(), Some(&initial.clone().into()));
+        });
+
+        let history_len = cx.read_entity(&view, |explorer, _| explorer.back_stack.len());
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                explorer.clear_selection();
+                explorer.reveal_remote_transfer(123, TransferRevealSide::Destination, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(explorer.path, destination);
+            assert_eq!(selected_names(explorer), vec!["a.txt", "b.txt"]);
+            assert_eq!(explorer.back_stack.len(), history_len);
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                explorer.reveal_remote_transfer(123, TransferRevealSide::Source, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(explorer.path, source);
+            assert_eq!(selected_names(explorer), vec!["a.txt", "b.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn in_flight_destination_reveal_selects_the_item_after_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let initial = temp.path().join("initial");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&initial).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let target = destination.join("later.txt");
+        let (view, cx) = test_view_entity_at_path(cx, initial);
+
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                let mut job = JobSnapshot::for_test(State::Transferring);
+                job.destination_reveal.directory = destination.clone();
+                job.destination_reveal.paths = vec![target.clone()];
+                explorer.remote_transfer_snapshots = vec![job];
+                explorer.reveal_remote_transfer(123, TransferRevealSide::Destination, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(explorer.path, destination);
+            assert!(selected_names(explorer).is_empty());
+            assert!(explorer.pending_remote_transfer_reveal.is_some());
+        });
+
+        fs::write(&target, b"arrived").unwrap();
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                assert!(explorer.complete_pending_remote_transfer_reveal(&[], cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(selected_names(explorer), vec!["later.txt"]);
+            assert!(explorer.pending_remote_transfer_reveal.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn manual_navigation_cancels_an_in_flight_destination_reveal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let initial = temp.path().join("initial");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&initial).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, initial.clone());
+
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                let mut job = JobSnapshot::for_test(State::Transferring);
+                job.destination_reveal.directory = destination.clone();
+                job.destination_reveal.paths = vec![destination.join("later.txt")];
+                explorer.remote_transfer_snapshots = vec![job];
+                explorer.reveal_remote_transfer(123, TransferRevealSide::Destination, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |explorer, cx| {
+                explorer.navigate_to_directory_with_watcher(
+                    initial.clone(),
+                    HistoryMode::Record,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |explorer, _| {
+            assert_eq!(explorer.path, initial);
+            assert!(explorer.pending_remote_transfer_reveal.is_none());
+        });
+    }
+
+    #[test]
+    fn explicit_entry_selection_cancels_a_pending_transfer_reveal() {
+        let mut view = test_view_with_entries(&["other.txt"]);
+        view.pending_remote_transfer_reveal = Some(PendingRemoteTransferReveal {
+            job_id: 123,
+            target: super::super::remote_transfer::RevealTarget {
+                directory: PathBuf::from("selection"),
+                paths: vec![PathBuf::from("selection/later.txt")],
+            },
+        });
+        let entry = view.entries[0].clone();
+        view.apply_entry_mouse_down_selection(&entry, SelectionModifiers::default());
+        assert!(view.pending_remote_transfer_reveal.is_none());
     }
 
     #[test]
