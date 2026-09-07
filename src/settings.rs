@@ -23,6 +23,10 @@ pub(crate) const DEFAULT_MEDIA_PREVIEW_SIZE: u32 = 400;
 pub(crate) const MAX_MEDIA_PREVIEW_SIZE: u32 = 4096;
 pub(crate) const DEFAULT_SFTP_QUEUE_DEPTH: u32 = 32;
 pub(crate) const MAX_SFTP_QUEUE_DEPTH: u32 = 512;
+pub(crate) const DEFAULT_UPDATER_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+pub(crate) const MIN_UPDATER_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+pub(crate) const DEFAULT_UPDATER_FEED_URL: &str =
+    "https://github.com/hmerritt/explorer/releases/latest/download";
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 const LINUX_CONFIG_DIR_NAME: &str = "explorer";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -114,6 +118,7 @@ pub struct ExplorerSettings {
     pub sidebar: SidebarSettings,
     pub sftp: SftpSettings,
     pub tabs: TabSettings,
+    pub updater: UpdaterSettings,
     pub view: ViewSettings,
 }
 
@@ -122,12 +127,13 @@ impl Serialize for ExplorerSettings {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(6))?;
+        let mut map = serializer.serialize_map(Some(7))?;
         map.serialize_entry("app", &SerializableAppSettings::new(self))?;
         map.serialize_entry("contextmenu", &self.contextmenu)?;
         map.serialize_entry("sidebar", &SerializableSidebarSettings::new(self))?;
         map.serialize_entry("sftp", &self.sftp)?;
         map.serialize_entry("tabs", &self.tabs)?;
+        map.serialize_entry("updater", &self.updater)?;
         map.serialize_entry("view", &self.view)?;
         map.end()
     }
@@ -812,6 +818,150 @@ pub struct TabSettings {
     pub highlight_focused: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdaterSettings {
+    pub enabled: bool,
+    pub check_interval: Duration,
+    pub feed_url: String,
+}
+
+impl Default for UpdaterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval: DEFAULT_UPDATER_CHECK_INTERVAL,
+            feed_url: DEFAULT_UPDATER_FEED_URL.to_owned(),
+        }
+    }
+}
+
+impl Serialize for UpdaterSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("enabled", &self.enabled)?;
+        map.serialize_entry(
+            "check_interval",
+            &format_updater_duration(self.check_interval),
+        )?;
+        map.serialize_entry("feed_url", &self.feed_url)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdaterSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(updater_settings_from_value(value))
+    }
+}
+
+fn updater_settings_from_value(value: Value) -> UpdaterSettings {
+    let defaults = UpdaterSettings::default();
+    let Some(object) = value.as_object() else {
+        eprintln!("updater must be an object; using updater defaults");
+        return defaults;
+    };
+
+    let enabled = match object.get("enabled") {
+        None => defaults.enabled,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            eprintln!("updater.enabled must be a boolean; using default true");
+            defaults.enabled
+        }
+    };
+
+    let check_interval = match object.get("check_interval") {
+        None => defaults.check_interval,
+        Some(Value::String(value)) => match parse_updater_duration(value) {
+            Ok(duration) if duration >= MIN_UPDATER_CHECK_INTERVAL => duration,
+            Ok(_) => {
+                eprintln!("updater.check_interval must be at least 10m; using default 6h");
+                defaults.check_interval
+            }
+            Err(error) => {
+                eprintln!("updater.check_interval: {error}; using default 6h");
+                defaults.check_interval
+            }
+        },
+        Some(_) => {
+            eprintln!("updater.check_interval must be a duration string; using default 6h");
+            defaults.check_interval
+        }
+    };
+
+    let feed_url = match object.get("feed_url") {
+        None => defaults.feed_url,
+        Some(Value::String(value)) => match normalize_updater_feed_url(value) {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!("updater.feed_url: {error}; using default {DEFAULT_UPDATER_FEED_URL}");
+                defaults.feed_url
+            }
+        },
+        Some(_) => {
+            eprintln!(
+                "updater.feed_url must be an HTTP or HTTPS URL string; using default {DEFAULT_UPDATER_FEED_URL}"
+            );
+            defaults.feed_url
+        }
+    };
+
+    UpdaterSettings {
+        enabled,
+        check_interval,
+        feed_url,
+    }
+}
+
+fn parse_updater_duration(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let amount = number
+        .parse::<u64>()
+        .map_err(|_| "must use a positive integer followed by s, m, or h".to_owned())?;
+    if amount == 0 {
+        return Err("must be greater than zero".to_owned());
+    }
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        _ => return Err("must end with s, m, or h".to_owned()),
+    };
+    amount
+        .checked_mul(multiplier)
+        .map(Duration::from_secs)
+        .ok_or_else(|| "is too large".to_owned())
+}
+
+fn format_updater_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds % (60 * 60) == 0 {
+        format!("{}h", seconds / (60 * 60))
+    } else if seconds % 60 == 0 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn normalize_updater_feed_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let url = gpui::http_client::Url::parse(value)
+        .map_err(|_| "must be a valid HTTP or HTTPS URL".to_owned())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("must use http:// or https:// and include a host".to_owned());
+    }
+    Ok(value.trim_end_matches('/').to_owned())
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ViewSettings {
@@ -929,6 +1079,7 @@ impl Default for ExplorerSettings {
             sidebar: SidebarSettings::default(),
             sftp: SftpSettings::default(),
             tabs: TabSettings::default(),
+            updater: UpdaterSettings::default(),
             view: ViewSettings::default(),
         }
     }
@@ -3017,10 +3168,68 @@ mod tests {
             vec![SidebarGroupKind::Pinned]
         );
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
+        assert_eq!(settings.updater, UpdaterSettings::default());
         assert_eq!(
             settings.sidebar.items.len(),
             if cfg!(target_os = "macos") { 6 } else { 4 }
         );
+    }
+
+    #[test]
+    fn updater_settings_round_trip_with_snake_case_duration_and_normalized_url() {
+        let settings: ExplorerSettings = serde_json::from_str(
+            r#"{
+                "updater": {
+                    "enabled": false,
+                    "check_interval": "45m",
+                    "feed_url": "https://updates.example.com/explorer/"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(!settings.updater.enabled);
+        assert_eq!(
+            settings.updater.check_interval,
+            Duration::from_secs(45 * 60)
+        );
+        assert_eq!(
+            settings.updater.feed_url,
+            "https://updates.example.com/explorer"
+        );
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["updater"]["check_interval"], "45m");
+        assert_eq!(
+            serde_json::from_value::<ExplorerSettings>(value).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn invalid_updater_fields_fall_back_individually() {
+        let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+            "updater": {
+                "enabled": false,
+                "check_interval": "9m",
+                "feed_url": "file:///tmp/releases"
+            }
+        }))
+        .unwrap();
+        assert!(!settings.updater.enabled);
+        assert_eq!(
+            settings.updater.check_interval,
+            DEFAULT_UPDATER_CHECK_INTERVAL
+        );
+        assert_eq!(settings.updater.feed_url, DEFAULT_UPDATER_FEED_URL);
+    }
+
+    #[test]
+    fn updater_duration_accepts_supported_units() {
+        assert_eq!(parse_updater_duration("600s").unwrap().as_secs(), 600);
+        assert_eq!(parse_updater_duration("10m").unwrap().as_secs(), 600);
+        assert_eq!(parse_updater_duration("6h").unwrap().as_secs(), 21_600);
+        assert!(parse_updater_duration("1d").is_err());
+        assert!(parse_updater_duration("1.5h").is_err());
     }
 
     #[test]

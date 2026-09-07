@@ -122,6 +122,11 @@ Minimal example:
         "copy_verify": true,
         "start": "~/Downloads"
     },
+    "updater": {
+        "enabled": true,
+        "check_interval": "6h",
+        "feed_url": "https://github.com/hmerritt/explorer/releases/latest/download"
+    },
     "view": {
         "media_preview_size": 400,
         "mode": "details",

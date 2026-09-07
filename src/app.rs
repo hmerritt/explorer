@@ -1,9 +1,10 @@
+#[cfg(any(target_os = "linux", test))]
+use std::env;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::{
     borrow::Cow,
-    env,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
@@ -1273,11 +1274,13 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
     ]);
 }
 
-pub fn run() {
+pub fn run(args: Vec<OsString>, first_run: bool) {
+    #[cfg(not(target_os = "windows"))]
+    let _ = first_run;
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
 
-    let initial_launch_request = LaunchRequest::from_args(env::args_os());
+    let initial_launch_request = LaunchRequest::from_args(args.clone());
     let single_instance_primary = match prepare_single_instance_launch(&initial_launch_request) {
         SingleInstanceLaunch::Primary(primary) => primary,
         SingleInstanceLaunch::RoutedToPrimary => return,
@@ -1303,8 +1306,10 @@ pub fn run() {
     app.run(move |cx: &mut App| {
         register_embedded_fonts(cx);
         crate::http_client::initialize(cx);
-        crate::debug_options::initialize(cx, env::args_os());
+        crate::debug_options::initialize(cx, args.clone());
         crate::settings::initialize(cx);
+        #[cfg(target_os = "windows")]
+        crate::updater::start(first_run, cx);
         crate::explorer::initialize_cache_directory();
         crate::explorer::initialize_clipboard_summary(cx);
         crate::explorer::initialize_native_icon_cache(cx);

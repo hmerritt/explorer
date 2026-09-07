@@ -148,6 +148,8 @@ jobs:
     release_windows:
         name: Release ${{ matrix.name }}
         runs-on: windows-latest
+        env:
+            SQUIRREL_WINDOWS_VERSION: 2.0.1
         strategy:
             fail-fast: false
             matrix:
@@ -160,56 +162,87 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v6
 
-            - name: Validate tag format
-              id: tag_check
+            - name: Validate release version
               shell: pwsh
               run: |
-                  if ("${{ github.ref_name }}" -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
-                    "valid=true" >> $env:GITHUB_OUTPUT
-                  } else {
-                    "valid=false" >> $env:GITHUB_OUTPUT
-                    Write-Host "Tag '${{ github.ref_name }}' does not match numeric semver (e.g. 1.2.3). Skipping release."
+                  $tag = "${{ github.ref_name }}"
+                  if ($tag -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+                    throw "Release tag '$tag' must be numeric semver (for example 1.2.3)."
+                  }
+                  $manifest = Get-Content -Raw Cargo.toml
+                  if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+                    throw "Unable to read the package version from Cargo.toml."
+                  }
+                  if ($Matches[1] -ne $tag) {
+                    throw "Release tag '$tag' does not match Cargo.toml version '$($Matches[1])'."
                   }
 
             - name: Install Rust
-              if: steps.tag_check.outputs.valid == 'true'
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: ${{ matrix.target }}
 
             - name: Cache Cargo
-              if: steps.tag_check.outputs.valid == 'true'
               uses: Swatinem/rust-cache@v2
               with:
                   key: ${{ matrix.target }}
 
             - name: Install UPX
-              if: steps.tag_check.outputs.valid == 'true'
               uses: step-security/ghaction-upx@v4
               with:
                   install-only: true
 
             - name: Build
-              if: steps.tag_check.outputs.valid == 'true'
               run: cargo build --release --locked --target ${{ matrix.target }}
 
-            - name: Package artifact
-              if: steps.tag_check.outputs.valid == 'true'
+            - name: Package portable ZIP
               shell: pwsh
               run: |
-                  New-Item -ItemType Directory -Force -Path dist, package | Out-Null
-                  Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "package/${{ matrix.package_binary }}"
-                  upx -9 "package/${{ matrix.package_binary }}"
-                  upx -t "package/${{ matrix.package_binary }}"
-                  Compress-Archive -Path "package/${{ matrix.package_binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
+                  New-Item -ItemType Directory -Force -Path dist, dist/portable | Out-Null
+                  Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/portable/${{ matrix.package_binary }}"
+                  upx -9 "dist/portable/${{ matrix.package_binary }}"
+                  upx -t "dist/portable/${{ matrix.package_binary }}"
+                  Compress-Archive -Path "dist/portable/${{ matrix.package_binary }}" -DestinationPath "dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip" -Force
+
+            - name: Package Squirrel installer
+              shell: pwsh
+              run: |
+                  ./scripts/windows/package-squirrel.ps1 `
+                    -Version "${{ github.ref_name }}" `
+                    -BinaryPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+                    -OutputDir "dist/squirrel" `
+                    -SquirrelWindowsVersion $env:SQUIRREL_WINDOWS_VERSION
+
+            - name: Verify Windows release assets
+              shell: pwsh
+              run: |
+                  $version = "${{ github.ref_name }}"
+                  $required = @(
+                    "dist/explorer-$version-${{ matrix.name }}.zip",
+                    "dist/squirrel/explorer-$version-windows-amd64-installer.exe",
+                    "dist/squirrel/RELEASES",
+                    "dist/squirrel/explorer-$version-full.nupkg"
+                  )
+                  foreach ($path in $required) {
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                      throw "Required Windows release artifact is missing: $path"
+                    }
+                    if ((Get-Item -LiteralPath $path).Length -le 0) {
+                      throw "Required Windows release artifact is empty: $path"
+                    }
+                  }
 
             - name: Upload release asset
-              if: steps.tag_check.outputs.valid == 'true'
               uses: softprops/action-gh-release@v3
               with:
                   draft: true
                   generate_release_notes: true
-                  files: dist/*.zip
+                  fail_on_unmatched_files: true
+                  files: |
+                      dist/explorer-${{ github.ref_name }}-${{ matrix.name }}.zip
+                      dist/squirrel/explorer-${{ github.ref_name }}-windows-amd64-installer.exe
+                      dist/squirrel/RELEASES
+                      dist/squirrel/explorer-${{ github.ref_name }}-full.nupkg
 
     release_macos:
         name: Release ${{ matrix.name }}

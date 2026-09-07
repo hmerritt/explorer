@@ -1,5 +1,6 @@
 /target/
 /vendor/**/target/
+/dist
 
 # Editor and OS files
 .vscode/

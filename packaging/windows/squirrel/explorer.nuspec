@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>explorer</id>
+    <version>$version$</version>
+    <title>Explorer</title>
+    <authors>Harry Merritt</authors>
+    <owners>Harry Merritt</owners>
+    <description>A GPU-accelerated file explorer built with GPUI.</description>
+    <projectUrl>https://github.com/hmerritt/explorer</projectUrl>
+    <icon>explorer.png</icon>
+    <iconUrl>https://raw.githubusercontent.com/hmerritt/explorer/master/assets/explorer.png</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <language>en-US</language>
+  </metadata>
+  <files>
+    <file src="file-explorer.exe" target="lib\net45\file-explorer.exe" />
+    <file src="app.ico" target="lib\net45\app.ico" />
+    <file src="app.ico" target="app.ico" />
+    <file src="explorer.png" target="explorer.png" />
+  </files>
+</package>

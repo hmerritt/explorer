@@ -72,6 +72,49 @@ notarize with Apple, staple the notarization ticket, and package as a `.dmg` or
 
 ---
 
+### Windows installer and updates
+
+Windows releases keep two different copies of the executable: the portable ZIP
+is compressed with UPX, while the Squirrel package is always built from the
+uncompressed Cargo release binary. To build and validate the unsigned installer
+locally from PowerShell with NuGet available on `PATH`:
+
+```powershell
+cargo build --release --locked --target x86_64-pc-windows-msvc
+./scripts/windows/package-squirrel.ps1 `
+  -Version "0.22.0" `
+  -BinaryPath "target/x86_64-pc-windows-msvc/release/explorer.exe"
+```
+
+The script pins Squirrel.Windows 2.0.1, uses
+`packaging/windows/squirrel/explorer.nuspec`, and writes the installer,
+`RELEASES`, and the full package to `dist/squirrel`. It deliberately creates no
+delta package or MSI. It also verifies the NuGet payload, release-manifest names,
+sizes and hashes, the embedded setup payload, and known dummy-binary markers.
+
+Release tags must be numeric and exactly match the package version in
+`Cargo.toml`. A usable GitHub release must publish all four Windows assets from
+the same build:
+
+- `explorer-<version>-windows-amd64.zip`
+- `explorer-<version>-windows-amd64-installer.exe`
+- `RELEASES`
+- `explorer-<version>-full.nupkg`
+
+Do not publish a partial release: installed clients use the stable
+`releases/latest/download` directory and require both `RELEASES` and its complete
+full package. Updates install in the background and become active only after the
+running Explorer process closes and the user reopens it.
+
+Before publishing, use a disposable Windows user or VM and a controlled HTTP
+feed. Install version A, publish a complete version B feed, wait for the update,
+confirm A remains usable, then reopen and confirm B runs. Also verify Start Menu
+and Desktop shortcuts, image **Open with** entries, first-run delay, offline and
+malformed feeds, Unicode/spaced install paths, repeated checks, and uninstall.
+Portable and Scoop launches must never start `Update.exe`.
+
+---
+
 <small>
     <a href="https://www.flaticon.com/free-icons/folder" title="folder icons">Folder icons created by kmg design - Flaticon</a>
 </small>
