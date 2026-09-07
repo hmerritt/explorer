@@ -13383,11 +13383,30 @@ mod remote_icon_tests {
     struct Icons;
     impl gpui::Render for Icons {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let location = super::super::remote_fs::RemoteLocation::parse("sftp://server/résumé.PDF").unwrap();
-            let entry = FileEntry::from_provider(location.provider_path(), "résumé.PDF".into(), false, Some(12), None);
-            div().flex().flex_col()
-                .child(div().flex().debug_selector(|| "remote-details-icon".into()).child(entry_icon(&entry, None)))
-                .child(div().flex().debug_selector(|| "remote-large-icon".into()).child(large_entry_icon(&entry, None, None)))
+            let location =
+                super::super::remote_fs::RemoteLocation::parse("sftp://server/résumé.PDF").unwrap();
+            let entry = FileEntry::from_provider(
+                location.provider_path(),
+                "résumé.PDF".into(),
+                false,
+                Some(12),
+                None,
+            );
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .debug_selector(|| "remote-details-icon".into())
+                        .child(entry_icon(&entry, None)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .debug_selector(|| "remote-large-icon".into())
+                        .child(large_entry_icon(&entry, None, None)),
+                )
         }
     }
     #[gpui::test]

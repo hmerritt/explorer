@@ -6,20 +6,31 @@ pub fn photoshop_resource(id: u16, jpeg: &[u8], width: u32, height: u32) -> Vec<
     resource.extend(id.to_be_bytes());
     resource.extend([3, b'p', b'r', b'e']);
     resource.extend((28u32 + jpeg.len() as u32).to_be_bytes());
-    for value in [1, width, height, width * 3, width * height * 3, jpeg.len() as u32] {
+    for value in [
+        1,
+        width,
+        height,
+        width * 3,
+        width * height * 3,
+        jpeg.len() as u32,
+    ] {
         resource.extend(value.to_be_bytes());
     }
     resource.extend(24u16.to_be_bytes());
     resource.extend(1u16.to_be_bytes());
     resource.extend(jpeg);
-    if resource.len() % 2 != 0 { resource.push(0); }
+    if resource.len() % 2 != 0 {
+        resource.push(0);
+    }
     resource
 }
 
 pub fn jpeg(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
     let image = image::RgbImage::from_pixel(width, height, image::Rgb(color));
     let mut bytes = Cursor::new(Vec::new());
-    image.write_to(&mut bytes, image::ImageFormat::Jpeg).unwrap();
+    image
+        .write_to(&mut bytes, image::ImageFormat::Jpeg)
+        .unwrap();
     bytes.into_inner()
 }
 
@@ -43,8 +54,18 @@ pub fn deflate_rgb16(width: u32, height: u32, resource: Option<&[u8]>) -> Vec<u8
         }
         strips.push(encoder.finish().unwrap());
     }
-    let shorts = |values: &[u16]| values.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>();
-    let longs = |values: &[u32]| values.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<_>>();
+    let shorts = |values: &[u16]| {
+        values
+            .iter()
+            .flat_map(|x| x.to_be_bytes())
+            .collect::<Vec<_>>()
+    };
+    let longs = |values: &[u32]| {
+        values
+            .iter()
+            .flat_map(|x| x.to_be_bytes())
+            .collect::<Vec<_>>()
+    };
     let count = strips.len() as u32;
     let mut tags = vec![
         (256u16, 4u16, 1, longs(&[width])),
@@ -56,10 +77,17 @@ pub fn deflate_rgb16(width: u32, height: u32, resource: Option<&[u8]>) -> Vec<u8
         (274, 3, 1, shorts(&[1])),
         (277, 3, 1, shorts(&[3])),
         (278, 4, 1, longs(&[rows])),
-        (279, 4, count, longs(&strips.iter().map(|s| s.len() as u32).collect::<Vec<_>>())),
+        (
+            279,
+            4,
+            count,
+            longs(&strips.iter().map(|s| s.len() as u32).collect::<Vec<_>>()),
+        ),
         (284, 3, 1, shorts(&[1])),
     ];
-    if let Some(resource) = resource { tags.push((34377, 1, resource.len() as u32, resource.to_vec())); }
+    if let Some(resource) = resource {
+        tags.push((34377, 1, resource.len() as u32, resource.to_vec()));
+    }
     let mut bytes = b"MM\0*\0\0\0\x08".to_vec();
     bytes.extend((tags.len() as u16).to_be_bytes());
     bytes.resize(8 + 2 + tags.len() * 12 + 4, 0);
@@ -69,15 +97,21 @@ pub fn deflate_rgb16(width: u32, height: u32, resource: Option<&[u8]>) -> Vec<u8
         bytes[entry..entry + 2].copy_from_slice(&tag.to_be_bytes());
         bytes[entry + 2..entry + 4].copy_from_slice(&kind.to_be_bytes());
         bytes[entry + 4..entry + 8].copy_from_slice(&count.to_be_bytes());
-        let position = if data.len() <= 4 { entry + 8 } else {
+        let position = if data.len() <= 4 {
+            entry + 8
+        } else {
             let offset = bytes.len();
             bytes[entry + 8..entry + 12].copy_from_slice(&(offset as u32).to_be_bytes());
             bytes.resize(offset + data.len(), 0);
             offset
         };
         bytes[position..position + data.len()].copy_from_slice(&data);
-        if tag == 273 { offsets_position = position; }
-        if bytes.len() % 2 != 0 { bytes.push(0); }
+        if tag == 273 {
+            offsets_position = position;
+        }
+        if bytes.len() % 2 != 0 {
+            bytes.push(0);
+        }
     }
     for (index, strip) in strips.into_iter().enumerate() {
         let position = offsets_position + index * 4;

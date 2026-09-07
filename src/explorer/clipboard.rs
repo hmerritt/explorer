@@ -806,11 +806,10 @@ pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<Clip
     let metadata = serde_json::to_string(&metadata)
         .map_err(|error| format!("Could not write Explorer clipboard data: {error}"))?;
 
-    if clipboard
-        .paths
-        .iter()
-        .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
-    {
+    if clipboard.paths.iter().any(|path| {
+        super::remote_fs::is_remote(path)
+            || crate::explorer::portable_devices::is_portable_path(path)
+    }) {
         // Synthetic portable locations are meaningful only inside Explorer. Keep
         // them in our metadata without advertising them as native filesystem paths.
         Ok(ClipboardItem::new_string_with_metadata(
@@ -1294,7 +1293,10 @@ fn is_markdown_list_or_quote(line: &str) -> bool {
 fn clipboard_text(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| super::remote_fs::display_address(path).unwrap_or_else(|| path.to_string_lossy().into_owned()))
+        .map(|path| {
+            super::remote_fs::display_address(path)
+                .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

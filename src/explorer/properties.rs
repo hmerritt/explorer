@@ -1375,7 +1375,8 @@ impl PropertiesDialog {
         let path = single_file_image_path(&snapshot.target, snapshot.item_kind)?;
         if self.image_viewer_path.as_deref() != Some(path) {
             let path = path.to_path_buf();
-            let viewer = new_embedded_image_viewer(path.clone(), self.focus_handle.clone(), true, cx);
+            let viewer =
+                new_embedded_image_viewer(path.clone(), self.focus_handle.clone(), true, cx);
             cx.subscribe_in(
                 &viewer,
                 window,
@@ -4720,7 +4721,9 @@ fn collect_property_item(
     date_format: &str,
     tree_mode: PropertyTreeMode<'_>,
 ) -> Result<PropertyItem, String> {
-    if super::remote_fs::is_remote(path) { return collect_remote_property_item(path); }
+    if super::remote_fs::is_remote(path) {
+        return collect_remote_property_item(path);
+    }
     if crate::explorer::portable_devices::is_portable_path(path) {
         return collect_portable_property_item(path);
     }
@@ -4884,16 +4887,38 @@ fn collect_portable_property_item(path: &Path) -> Result<PropertyItem, String> {
 
 fn collect_remote_property_item(path: &Path) -> Result<PropertyItem, String> {
     let attrs = super::remote_fs::metadata(path)?;
-    let location = super::remote_fs::RemoteLocation::from_provider(path).ok_or("Invalid SFTP location")?;
-    let entry = FileEntry::from_provider(path.to_owned(), location.path.rsplit('/').next().unwrap_or("/").into(), attrs.is_dir(), attrs.size, attrs.modified().ok());
+    let location =
+        super::remote_fs::RemoteLocation::from_provider(path).ok_or("Invalid SFTP location")?;
+    let entry = FileEntry::from_provider(
+        path.to_owned(),
+        location.path.rsplit('/').next().unwrap_or("/").into(),
+        attrs.is_dir(),
+        attrs.size,
+        attrs.modified().ok(),
+    );
     Ok(PropertyItem {
-        path: path.to_owned(), exists: true, is_dir: attrs.is_dir(), type_label: Some(entry.type_label()),
-        location: super::remote_fs::parent(path).and_then(|p| super::remote_fs::display_address(&p)),
-        size: attrs.size.map(PropertyValue::ready), size_on_disk: None, contains: None, selection_counts: None,
-        created: None, modified: attrs.modified().ok(), accessed: attrs.accessed().ok(), readonly: None, hidden: None,
-        owner: attrs.user.or_else(|| attrs.uid.map(|v| v.to_string())), group: attrs.group.or_else(|| attrs.gid.map(|v| v.to_string())),
-        unix_mode: attrs.permissions, permission_summary: attrs.permissions.map(|m| format!("{:04o}", m & 0o7777)),
-        run_as_admin: None, shortcut: None, details: Vec::new(),
+        path: path.to_owned(),
+        exists: true,
+        is_dir: attrs.is_dir(),
+        type_label: Some(entry.type_label()),
+        location: super::remote_fs::parent(path)
+            .and_then(|p| super::remote_fs::display_address(&p)),
+        size: attrs.size.map(PropertyValue::ready),
+        size_on_disk: None,
+        contains: None,
+        selection_counts: None,
+        created: None,
+        modified: attrs.modified().ok(),
+        accessed: attrs.accessed().ok(),
+        readonly: None,
+        hidden: None,
+        owner: attrs.user.or_else(|| attrs.uid.map(|v| v.to_string())),
+        group: attrs.group.or_else(|| attrs.gid.map(|v| v.to_string())),
+        unix_mode: attrs.permissions,
+        permission_summary: attrs.permissions.map(|m| format!("{:04o}", m & 0o7777)),
+        run_as_admin: None,
+        shortcut: None,
+        details: Vec::new(),
     })
 }
 

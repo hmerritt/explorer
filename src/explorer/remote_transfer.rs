@@ -624,7 +624,8 @@ fn valid_manifest(m: &Manifest) -> bool {
                         .and_then(|p| p.child(&format!(".explorer-{}-{index}.filepart", m.id)))
                         .is_ok_and(|expected| expected == *partial)
                 })
-                && i.resume_prefix.is_none_or(|prefix| prefix <= i.metadata.size)
+                && i.resume_prefix
+                    .is_none_or(|prefix| prefix <= i.metadata.size)
         })
 }
 pub(super) fn enqueue(
@@ -2278,9 +2279,7 @@ mod tests {
         let job = test_job();
         let first = Location::Local(PathBuf::from("local/a.PDF"));
         let second = Location::Local(PathBuf::from("local/b.unknown"));
-        let destination = Location::Remote(
-            RemoteLocation::parse("sftp://server/uploads").unwrap(),
-        );
+        let destination = Location::Remote(RemoteLocation::parse("sftp://server/uploads").unwrap());
         {
             let mut manifest = job.data.lock().unwrap();
             manifest.sources = vec![first.clone(), second.clone()];
@@ -2305,10 +2304,16 @@ mod tests {
             snapshot.source_reveal,
             RevealTarget {
                 directory: PathBuf::from("local"),
-                paths: vec![PathBuf::from("local/a.PDF"), PathBuf::from("local/b.unknown")],
+                paths: vec![
+                    PathBuf::from("local/a.PDF"),
+                    PathBuf::from("local/b.unknown")
+                ],
             }
         );
-        assert_eq!(snapshot.destination_reveal.directory, destination.provider_path());
+        assert_eq!(
+            snapshot.destination_reveal.directory,
+            destination.provider_path()
+        );
         assert_eq!(
             snapshot.destination_reveal.paths,
             vec![
@@ -2348,15 +2353,11 @@ mod tests {
     #[test]
     fn mixed_parent_source_reveal_selects_the_first_parent_group() {
         let job = test_job();
-        let first = Location::Remote(
-            RemoteLocation::parse("sftp://server/first/a.txt").unwrap(),
-        );
-        let same_parent = Location::Remote(
-            RemoteLocation::parse("sftp://server/first/b.txt").unwrap(),
-        );
-        let other_parent = Location::Remote(
-            RemoteLocation::parse("sftp://server/other/c.txt").unwrap(),
-        );
+        let first = Location::Remote(RemoteLocation::parse("sftp://server/first/a.txt").unwrap());
+        let same_parent =
+            Location::Remote(RemoteLocation::parse("sftp://server/first/b.txt").unwrap());
+        let other_parent =
+            Location::Remote(RemoteLocation::parse("sftp://server/other/c.txt").unwrap());
         {
             let mut manifest = job.data.lock().unwrap();
             manifest.sources = vec![first.clone(), same_parent.clone(), other_parent];
@@ -2380,9 +2381,8 @@ mod tests {
             let mut manifest = job.data.lock().unwrap();
             manifest.planned = true;
             let mut directory = item(0, false, false);
-            directory.source = Location::Remote(
-                RemoteLocation::parse("sftp://server/folder/Photos").unwrap(),
-            );
+            directory.source =
+                Location::Remote(RemoteLocation::parse("sftp://server/folder/Photos").unwrap());
             directory.destination = Location::Local(PathBuf::from("destination/Photos"));
             directory.metadata.kind = Kind::Directory;
             manifest.sources = vec![directory.source.clone()];
@@ -2578,13 +2578,7 @@ mod tests {
         assert_eq!(current.resume_prefix, None);
         checkpoint_resume_prefix(&job, &mut current, RESUME_CHECKPOINT_INTERVAL, false).unwrap();
         assert_eq!(current.resume_prefix, Some(RESUME_CHECKPOINT_INTERVAL));
-        checkpoint_resume_prefix(
-            &job,
-            &mut current,
-            RESUME_CHECKPOINT_INTERVAL + 1,
-            true,
-        )
-        .unwrap();
+        checkpoint_resume_prefix(&job, &mut current, RESUME_CHECKPOINT_INTERVAL + 1, true).unwrap();
         assert_eq!(
             job.data.lock().unwrap().items[0].resume_prefix,
             Some(RESUME_CHECKPOINT_INTERVAL + 1)
@@ -2596,12 +2590,10 @@ mod tests {
         let mut job = test_job();
         job.store = state.path().join("job.json");
         job.data.lock().unwrap().items = vec![item(4096, false, false)];
-        job.progress.lock().unwrap().record(
-            std::time::Instant::now(),
-            0,
-            3072,
-            3072,
-        );
+        job.progress
+            .lock()
+            .unwrap()
+            .record(std::time::Instant::now(), 0, 3072, 3072);
 
         checkpoint_current_progress(&job).unwrap();
 

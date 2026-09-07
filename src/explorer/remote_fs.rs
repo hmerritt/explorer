@@ -727,7 +727,12 @@ mod tests {
             let child = root.child(name).unwrap();
             let provider = child.provider_path();
             assert_ne!(provider.file_name().unwrap().to_string_lossy(), name);
-            assert_eq!(RemoteLocation::from_provider(&provider).unwrap().tab_label(), name);
+            assert_eq!(
+                RemoteLocation::from_provider(&provider)
+                    .unwrap()
+                    .tab_label(),
+                name
+            );
         }
     }
 }

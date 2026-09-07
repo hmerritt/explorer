@@ -499,11 +499,10 @@ impl DraggedEntries {
     }
 
     pub(super) fn external_paths(&self) -> gpui::ExternalPaths {
-        if self
-            .paths
-            .iter()
-            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
-        {
+        if self.paths.iter().any(|path| {
+            super::remote_fs::is_remote(path)
+                || crate::explorer::portable_devices::is_portable_path(path)
+        }) {
             return gpui::ExternalPaths::new(Vec::new());
         }
         gpui::ExternalPaths::with_operations(
@@ -974,9 +973,19 @@ impl ExplorerView {
         }
 
         let resolved_destination = destination.resolve(&self.path);
-        if super::remote_fs::is_remote(&resolved_destination) || dragged.paths.iter().any(|p| super::remote_fs::is_remote(p)) {
-            if modifiers.alt { self.set_error_notice("Remote shortcut drops are not supported.".to_owned()); return; }
-            self.start_native_transfer(dragged.paths.clone(), resolved_destination, modifiers.shift && !modifiers.control, cx);
+        if super::remote_fs::is_remote(&resolved_destination)
+            || dragged.paths.iter().any(|p| super::remote_fs::is_remote(p))
+        {
+            if modifiers.alt {
+                self.set_error_notice("Remote shortcut drops are not supported.".to_owned());
+                return;
+            }
+            self.start_native_transfer(
+                dragged.paths.clone(),
+                resolved_destination,
+                modifiers.shift && !modifiers.control,
+                cx,
+            );
             return;
         }
         if crate::explorer::portable_devices::is_portable_path(&resolved_destination)
@@ -1077,7 +1086,12 @@ impl ExplorerView {
 
         let resolved_destination = destination.resolve(&self.path);
         if super::remote_fs::is_remote(&resolved_destination) {
-            self.start_native_transfer(paths, resolved_destination, modifiers.shift && !modifiers.control, cx);
+            self.start_native_transfer(
+                paths,
+                resolved_destination,
+                modifiers.shift && !modifiers.control,
+                cx,
+            );
             return;
         }
         let validity = external_drop_target_validity(

@@ -20,7 +20,11 @@ fn remote_test_roots() -> &'static std::sync::Mutex<std::collections::HashSet<Pa
 }
 
 pub(super) fn path_is_remote_for_test(path: &Path) -> bool {
-    remote_test_roots().lock().unwrap().iter().any(|root| path.starts_with(root))
+    remote_test_roots()
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|root| path.starts_with(root))
 }
 
 /// Exercise remote navigation with a real temporary filesystem and no server.
@@ -28,7 +32,12 @@ pub(super) struct RemoteDriveForTest(PathBuf);
 
 impl RemoteDriveForTest {
     pub(super) fn new(root: &Path) -> Self {
-        assert!(remote_test_roots().lock().unwrap().insert(root.to_path_buf()));
+        assert!(
+            remote_test_roots()
+                .lock()
+                .unwrap()
+                .insert(root.to_path_buf())
+        );
         Self(root.to_path_buf())
     }
 }

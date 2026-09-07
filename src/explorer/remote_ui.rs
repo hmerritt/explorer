@@ -66,8 +66,7 @@ enum TransferRevealSide {
     Destination,
 }
 
-type TransferRevealHandler =
-    Rc<dyn Fn(u64, TransferRevealSide, &mut Window, &mut App) + 'static>;
+type TransferRevealHandler = Rc<dyn Fn(u64, TransferRevealSide, &mut Window, &mut App) + 'static>;
 
 impl ExplorerView {
     pub(super) fn start_remote_events(&mut self, cx: &mut Context<Self>) {
@@ -223,10 +222,8 @@ impl ExplorerView {
         if side == TransferRevealSide::Destination
             && !matches!(job.state, State::Completed | State::Cancelled)
         {
-            self.pending_remote_transfer_reveal = Some(PendingRemoteTransferReveal {
-                job_id: id,
-                target,
-            });
+            self.pending_remote_transfer_reveal =
+                Some(PendingRemoteTransferReveal { job_id: id, target });
         }
         cx.notify();
     }
@@ -402,19 +399,16 @@ fn render_transfer_panel<V: 'static>(
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .overflow_y_scroll()
-                                    .children(
-                                        jobs.into_iter()
-                                            .map(|job| {
-                                                let native_icon = native_icons.get(&job.id).cloned();
-                                                render_transfer_job(
-                                                    job,
-                                                    native_icon,
-                                                    sftp,
-                                                    on_reveal.clone(),
-                                                    cx,
-                                                )
-                                            }),
-                                    ),
+                                    .children(jobs.into_iter().map(|job| {
+                                        let native_icon = native_icons.get(&job.id).cloned();
+                                        render_transfer_job(
+                                            job,
+                                            native_icon,
+                                            sftp,
+                                            on_reveal.clone(),
+                                            cx,
+                                        )
+                                    })),
                             ),
                     ),
             )
@@ -597,13 +591,7 @@ fn render_transfer_job<V: 'static>(
         .w_full()
         .border_b_1()
         .border_color(rgb(TRANSFER_BORDER_SOFT))
-        .child(render_transfer_row(
-            job,
-            native_icon,
-            sftp,
-            on_reveal,
-            cx,
-        ))
+        .child(render_transfer_row(job, native_icon, sftp, on_reveal, cx))
         .when_some(detail_job, |item, job| {
             item.child(render_transfer_detail_band(job, sftp, cx))
         })
@@ -637,12 +625,7 @@ fn render_transfer_row<V: 'static>(
         .cursor_pointer()
         .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            reveal_destination(
-                reveal_job_id,
-                TransferRevealSide::Destination,
-                window,
-                cx,
-            );
+            reveal_destination(reveal_job_id, TransferRevealSide::Destination, window, cx);
             cx.stop_propagation();
         })
         .on_mouse_down(MouseButton::Right, move |_, window, cx| {
@@ -1356,9 +1339,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn manual_navigation_cancels_an_in_flight_destination_reveal(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn manual_navigation_cancels_an_in_flight_destination_reveal(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let initial = temp.path().join("initial");
         let destination = temp.path().join("destination");
@@ -1551,7 +1532,10 @@ mod tests {
         assert!(cx.debug_bounds("sftp-filename-123").is_some());
         assert!(cx.debug_bounds("sftp-transfer-icon-123").is_some());
         assert_eq!(
-            cx.debug_bounds("sftp-transfer-row-123").unwrap().size.height,
+            cx.debug_bounds("sftp-transfer-row-123")
+                .unwrap()
+                .size
+                .height,
             px(super::super::constants::ROW_HEIGHT)
         );
         assert!(cx.debug_bounds("sftp-transfer-columns").is_some());

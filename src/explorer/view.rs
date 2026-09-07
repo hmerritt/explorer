@@ -34,8 +34,8 @@ use crate::explorer::{
     explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress,
-        path_is_filesystem_root, path_is_remote_drive, path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress, path_is_filesystem_root,
+        path_is_remote_drive, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
@@ -755,7 +755,8 @@ impl ExplorerView {
             self.invalidate_recursive_search_cache();
             self.reload_async_with_options(
                 ReloadMode {
-                    cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                    cache_policy:
+                        crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                     preserve_selection: true,
                     rebuild_sidebar: true,
                     preserve_context_menu: false,
@@ -810,7 +811,14 @@ impl ExplorerView {
         let selected_paths = self.prepare_directory_reload(mode);
 
         let load_started = Instant::now();
-        match DirectoryLoadRequest::new(&self.path, self.entry_visibility(), self.directory_is_remote, mode.cache_policy).load() {
+        match DirectoryLoadRequest::new(
+            &self.path,
+            self.entry_visibility(),
+            self.directory_is_remote,
+            mode.cache_policy,
+        )
+        .load()
+        {
             Ok(entries) => {
                 crate::debug_options::log_nav_timing(
                     load_started.elapsed(),
@@ -1157,7 +1165,12 @@ impl ExplorerView {
             preserve_live_selection,
         };
         let path = state.path.clone();
-        let request = DirectoryLoadRequest::new(&path, self.entry_visibility(), self.directory_is_remote, mode.cache_policy);
+        let request = DirectoryLoadRequest::new(
+            &path,
+            self.entry_visibility(),
+            self.directory_is_remote,
+            mode.cache_policy,
+        );
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -1236,7 +1249,12 @@ impl ExplorerView {
             preserve_live_selection: false,
         };
         let path = state.path.clone();
-        let request = DirectoryLoadRequest::new(&path, self.entry_visibility(), self.directory_is_remote, mode.cache_policy);
+        let request = DirectoryLoadRequest::new(
+            &path,
+            self.entry_visibility(),
+            self.directory_is_remote,
+            mode.cache_policy,
+        );
         crate::debug_options::log_nav_timing(
             total_started.elapsed(),
             format_args!("reload.async_start path={path:?} generation={generation}"),
@@ -1544,7 +1562,9 @@ impl ExplorerView {
         self.codebase_summary_generation = self.codebase_summary_generation.wrapping_add(1);
         let generation = self.codebase_summary_generation;
         let path = self.path.clone();
-        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        if super::remote_fs::is_remote(&path)
+            || crate::explorer::portable_devices::is_portable_path(&path)
+            || path_is_wsl_unc_root(&path)
         {
             let changed = self.codebase_summary.take().is_some();
             self.codebase_summary_task = None;
@@ -1589,7 +1609,9 @@ impl ExplorerView {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         let path = self.path.clone();
-        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) || path_is_wsl_unc_root(&path)
+        if super::remote_fs::is_remote(&path)
+            || crate::explorer::portable_devices::is_portable_path(&path)
+            || path_is_wsl_unc_root(&path)
         {
             let changed = self.git_status.take().is_some();
             self.git_status_task = None;
@@ -1635,7 +1657,9 @@ impl ExplorerView {
             self.shell_shortcut_resolution_generation.wrapping_add(1);
         let generation = self.shell_shortcut_resolution_generation;
         let path = self.path.clone();
-        if super::remote_fs::is_remote(&path) || crate::explorer::portable_devices::is_portable_path(&path) {
+        if super::remote_fs::is_remote(&path)
+            || crate::explorer::portable_devices::is_portable_path(&path)
+        {
             self.shell_shortcut_resolution_task = None;
             return;
         }
@@ -1672,7 +1696,8 @@ impl ExplorerView {
         if !self.show_folder_size {
             return false;
         }
-        if super::remote_fs::is_remote(&self.path) || crate::explorer::portable_devices::is_portable_path(&self.path)
+        if super::remote_fs::is_remote(&self.path)
+            || crate::explorer::portable_devices::is_portable_path(&self.path)
             || path_is_filesystem_root(&self.path)
             || path_is_wsl_unc_root(&self.path)
         {
@@ -3870,14 +3895,18 @@ mod tests {
         let selected = path.join("old.txt");
         std::fs::write(&selected, b"old").unwrap();
         let visibility = EntryVisibility::new(true, true);
-        DirectoryLoadRequest::new(&path, visibility, true, DirectoryLoadPolicy::Cached).load().unwrap();
+        DirectoryLoadRequest::new(&path, visibility, true, DirectoryLoadPolicy::Cached)
+            .load()
+            .unwrap();
         // Simulate an external change after another tab populated the shared cache.
         std::fs::write(path.join("external.txt"), b"external").unwrap();
         let (view, cx) = cx.add_window_view({
             let path = path.clone();
             move |window, cx| {
                 let mut view = ExplorerView::new_unloaded_with_settings_for_test(
-                    path, Some(cx.focus_handle()), &test_explorer_settings(),
+                    path,
+                    Some(cx.focus_handle()),
+                    &test_explorer_settings(),
                 );
                 view.show_dotfiles = visibility.show_dotfiles;
                 view.show_hidden_files = visibility.show_hidden_attributes;
@@ -3896,7 +3925,9 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        cx.read_entity(&view, |view, _| assert_eq!(names(&view.all_entries), ["old.txt"]));
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(names(&view.all_entries), ["old.txt"])
+        });
 
         for trigger in 0..4 {
             let name = format!("new-{trigger}.txt");
@@ -3907,7 +3938,7 @@ mod tests {
                     view.restore_selection_from_paths(std::slice::from_ref(&selected));
                     match trigger {
                         0 => view.refresh_with_entry_metadata_and_search_resolution(cx), // icon
-                        1 => view.handle_refresh(&Refresh, window, cx), // keyboard
+                        1 => view.handle_refresh(&Refresh, window, cx),                  // keyboard
                         2 => view.refresh_with_entry_metadata_resolution(cx), // context menu
                         _ => view.reload_async_with_entry_metadata_resolution(cx), // watcher
                     }
@@ -3917,14 +3948,21 @@ mod tests {
             cx.run_until_parked();
             cx.read_entity(&view, |view, _| {
                 assert!(view.all_entries.iter().any(|entry| entry.name == name));
-                assert!(view.all_entries.iter().any(|entry| entry.name == "external.txt"));
+                assert!(
+                    view.all_entries
+                        .iter()
+                        .any(|entry| entry.name == "external.txt")
+                );
                 assert_eq!(view.search_query(), "old");
                 assert_eq!(view.selected_paths(), [selected.clone()]);
                 assert_eq!(view.path(), path.as_path());
                 assert!(view.back_stack.is_empty());
                 assert!(view.forward_stack.is_empty());
             });
-            let cached = DirectoryLoadRequest::new(&path, visibility, true, DirectoryLoadPolicy::Cached).load().unwrap();
+            let cached =
+                DirectoryLoadRequest::new(&path, visibility, true, DirectoryLoadPolicy::Cached)
+                    .load()
+                    .unwrap();
             assert!(cached.iter().any(|entry| entry.name == name));
         }
     }
@@ -4018,7 +4056,8 @@ mod tests {
                     select_after_load: Vec::new(),
                     rename_after_load: None,
                     mode: ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -4071,7 +4110,8 @@ mod tests {
                     select_after_load: Vec::new(),
                     rename_after_load: None,
                     mode: ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -4129,7 +4169,8 @@ mod tests {
                     select_after_load: vec![target.clone()],
                     rename_after_load: None,
                     mode: ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -4208,7 +4249,8 @@ mod tests {
                     select_after_load: Vec::new(),
                     rename_after_load: None,
                     mode: ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: false,
                         rebuild_sidebar: false,
                         preserve_context_menu: false,
@@ -4301,7 +4343,8 @@ mod tests {
                     select_after_load: Vec::new(),
                     rename_after_load: None,
                     mode: ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: false,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,

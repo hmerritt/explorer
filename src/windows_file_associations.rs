@@ -58,10 +58,9 @@ pub(crate) fn handle_file_association_command(
     match file_association_command(args) {
         Some(FileAssociationCommand::Register) => {
             let current_exe = std::env::current_exe()?;
-            let executable_path = crate::windows_squirrel::stable_launcher_for_current_exe(
-                &current_exe,
-            )
-            .unwrap_or(current_exe);
+            let executable_path =
+                crate::windows_squirrel::stable_launcher_for_current_exe(&current_exe)
+                    .unwrap_or(current_exe);
             register_file_associations(&executable_path)?;
             println!(
                 "Registered Explorer image file associations for {}.",

@@ -145,9 +145,7 @@ impl russh_sftp::server::Handler for Server {
         if read == 0 {
             Err(StatusCode::Eof)
         } else {
-            self.faults
-                .read
-                .fetch_add(read as u64, Ordering::Relaxed);
+            self.faults.read.fetch_add(read as u64, Ordering::Relaxed);
             Ok(Data { id, data })
         }
     }
@@ -444,10 +442,7 @@ fn interrupted_upload_resumes_from_saved_prefix_without_rereading() {
         assert!(!destination.path().join("file").exists());
         let partial = destination.path().join(".explorer-42-0.filepart");
         assert_eq!(fs::metadata(&partial).unwrap().len(), 2048);
-        assert_eq!(
-            job.data.lock().unwrap().items[0].resume_prefix,
-            Some(2048)
-        );
+        assert_eq!(job.data.lock().unwrap().items[0].resume_prefix, Some(2048));
         let sparse = OpenOptions::new().write(true).open(&partial).unwrap();
         sparse.set_len(4096).unwrap();
         drop(sparse);

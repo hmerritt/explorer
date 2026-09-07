@@ -219,13 +219,15 @@ impl Serialize for SerializableAppSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(5))?;
+        let mut map = serializer.serialize_map(Some(6))?;
         map.serialize_entry(
             "cache_cleanup_interval_days",
             &self.settings.cache_cleanup_interval_days,
         )?;
         map.serialize_entry("copy_verify", &self.settings.copy_verify)?;
         map.serialize_entry("new_window_behaviour", &self.settings.new_window_behaviour)?;
+        #[cfg(target_os = "windows")]
+        map.serialize_entry("tray", &self.settings.tray)?;
         map.serialize_entry(
             "start",
             &format_configured_path(&self.settings.start, self.slash),
@@ -663,6 +665,10 @@ pub struct AppSettings {
     pub copy_verify: bool,
     #[serde(default)]
     pub new_window_behaviour: NewWindowBehaviour,
+    /// Keep Explorer available from the Windows notification area after its windows close.
+    #[cfg(target_os = "windows")]
+    #[serde(default = "default_tray_enabled")]
+    pub tray: bool,
     #[serde(
         default = "default_app_start_path",
         deserialize_with = "deserialize_app_start_path"
@@ -1091,10 +1097,17 @@ impl Default for AppSettings {
             cache_cleanup_interval_days: DEFAULT_CACHE_CLEANUP_INTERVAL_DAYS,
             copy_verify: default_copy_verify(),
             new_window_behaviour: NewWindowBehaviour::Focus,
+            #[cfg(target_os = "windows")]
+            tray: default_tray_enabled(),
             start: default_app_start_path(),
             ytdlp_options: default_ytdlp_options(),
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+const fn default_tray_enabled() -> bool {
+    true
 }
 
 impl Default for SidebarSettings {
@@ -3711,6 +3724,24 @@ mod tests {
             serde_json::from_str(r#"{"app":{"new_window_behaviour":"focus"}}"#)
                 .expect("deserialize focus app setting");
         assert_eq!(settings.app.new_window_behaviour, NewWindowBehaviour::Focus);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn app_tray_setting_defaults_true_and_round_trips() {
+        let settings: ExplorerSettings =
+            serde_json::from_str(r#"{"app":{}}"#).expect("deserialize default app settings");
+        assert!(settings.app.tray);
+
+        let mut app = AppSettings::default();
+        app.tray = false;
+        assert_eq!(
+            serde_json::to_value(&app).expect("serialize app settings")["tray"],
+            false
+        );
+        let settings: ExplorerSettings = serde_json::from_str(r#"{"app":{"tray":false}}"#)
+            .expect("deserialize disabled tray setting");
+        assert!(!settings.app.tray);
     }
 
     #[test]

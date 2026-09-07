@@ -19,8 +19,8 @@ use futures::{
 };
 use gpui::{
     App, Application, Bounds, Context, DisplayId, Global, KeyBinding, Pixels, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, point, prelude::*, px,
-    size,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, point,
+    prelude::*, px, size,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,37 @@ const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
 
 struct Explorer {
     explorer: gpui::Entity<ExplorerTabs>,
+}
+
+#[derive(Default)]
+struct ExplorerWindowRegistry {
+    /// Explorer windows in most-recently-active order. Handles do not keep windows alive.
+    order: Vec<WindowHandle<Explorer>>,
+}
+
+impl Global for ExplorerWindowRegistry {}
+
+fn initialize_explorer_window_registry(cx: &mut App) {
+    cx.set_global(ExplorerWindowRegistry::default());
+}
+
+fn mark_explorer_window_active(handle: WindowHandle<Explorer>, cx: &mut App) {
+    cx.update_global::<ExplorerWindowRegistry, _>(|registry, _| {
+        registry.order.retain(|candidate| *candidate != handle);
+        registry.order.insert(0, handle);
+    });
+}
+
+fn registered_explorer_windows(cx: &mut App) -> Vec<WindowHandle<Explorer>> {
+    let handles = cx.global::<ExplorerWindowRegistry>().order.clone();
+    let live = handles
+        .into_iter()
+        .filter(|handle| handle.read(cx).is_ok())
+        .collect::<Vec<_>>();
+    cx.update_global::<ExplorerWindowRegistry, _>(|registry, _| {
+        registry.order.clone_from(&live);
+    });
+    live
 }
 
 struct SingleInstanceServer {
@@ -484,48 +515,61 @@ fn observe_explorer_window_bounds(window: &mut Window, cx: &mut Context<Explorer
 #[cfg(test)]
 fn observe_explorer_window_bounds(_: &mut Window, _: &mut Context<Explorer>) {}
 
-pub(crate) fn open_explorer_window_at(
+fn open_explorer_window_at(
     initial_path: PathBuf,
     window_bounds: WindowBounds,
     display_id: Option<DisplayId>,
     cx: &mut App,
-) {
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(window_bounds),
-            display_id,
-            window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from(APP_TITLE)),
-                appears_transparent: true,
-                traffic_light_position: cfg!(target_os = "macos")
-                    .then_some(point(px(12.0), px(11.0))),
+) -> WindowHandle<Explorer> {
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(window_bounds),
+                display_id,
+                window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from(APP_TITLE)),
+                    appears_transparent: true,
+                    traffic_light_position: cfg!(target_os = "macos")
+                        .then_some(point(px(12.0), px(11.0))),
+                    ..Default::default()
+                }),
+                window_decorations: Some(if cfg!(target_os = "linux") {
+                    WindowDecorations::Client
+                } else {
+                    WindowDecorations::Server
+                }),
+                app_id: Some(APP_ID.to_owned()),
                 ..Default::default()
-            }),
-            window_decorations: Some(if cfg!(target_os = "linux") {
-                WindowDecorations::Client
-            } else {
-                WindowDecorations::Server
-            }),
-            app_id: Some(APP_ID.to_owned()),
-            ..Default::default()
-        },
-        move |window, cx| {
-            let path = initial_path;
-            let explorer = cx.new(|cx| {
-                let focus_handle = cx.focus_handle();
-                focus_handle.focus(window);
-                ExplorerTabs::new(path, focus_handle, window, cx)
-            });
+            },
+            move |window, cx| {
+                let path = initial_path;
+                let explorer = cx.new(|cx| {
+                    let focus_handle = cx.focus_handle();
+                    focus_handle.focus(window);
+                    ExplorerTabs::new(path, focus_handle, window, cx)
+                });
 
-            cx.new(|cx| {
-                observe_explorer_window_bounds(window, cx);
+                cx.new(|cx| {
+                    observe_explorer_window_bounds(window, cx);
+                    let handle = window
+                        .window_handle()
+                        .downcast::<Explorer>()
+                        .expect("Explorer window has Explorer root type");
+                    cx.observe_window_activation(window, move |_, window, cx| {
+                        if window.is_window_active() {
+                            mark_explorer_window_active(handle, cx);
+                        }
+                    })
+                    .detach();
 
-                Explorer { explorer }
-            })
-        },
-    )
-    .expect("failed to open Explorer window");
+                    Explorer { explorer }
+                })
+            },
+        )
+        .expect("failed to open Explorer window");
+    mark_explorer_window_active(handle, cx);
+    handle
 }
 
 fn open_explorer_window(cx: &mut App) {
@@ -585,26 +629,36 @@ fn handle_explorer_launch_request(cx: &mut App) {
 }
 
 fn focus_existing_window(cx: &mut App) -> bool {
-    let mut windows = cx.window_stack().unwrap_or_default();
-    if windows.is_empty()
-        && let Some(active_window) = cx.active_window()
-    {
-        windows.push(active_window);
-    }
-    if windows.is_empty() {
-        windows = cx.windows();
-    }
-
-    for handle in windows {
+    for handle in registered_explorer_windows(cx) {
         if handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
         {
+            mark_explorer_window_active(handle, cx);
             return true;
         }
     }
 
     false
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_or_focus_explorer_window(cx: &mut App) {
+    if !focus_existing_window(cx) {
+        open_explorer_window(cx);
+    }
+    cx.activate(true);
+}
+
+#[cfg(target_os = "windows")]
+fn apply_tray_initialization_result(
+    result: Result<(), String>,
+    cx: &mut App,
+) -> Result<(), String> {
+    if result.is_ok() {
+        cx.set_quit_on_last_window_closed(false);
+    }
+    result
 }
 
 fn start_single_instance_request_handler(
@@ -1275,7 +1329,6 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
 }
 
 pub fn run(args: Vec<OsString>, first_run: bool) {
-    #[cfg(not(target_os = "windows"))]
     let _ = first_run;
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
@@ -1308,8 +1361,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
         crate::http_client::initialize(cx);
         crate::debug_options::initialize(cx, args.clone());
         crate::settings::initialize(cx);
-        #[cfg(target_os = "windows")]
-        crate::updater::start(first_run, cx);
+        initialize_explorer_window_registry(cx);
         crate::explorer::initialize_cache_directory();
         crate::explorer::initialize_clipboard_summary(cx);
         crate::explorer::initialize_native_icon_cache(cx);
@@ -1318,6 +1370,15 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
         crate::explorer::initialize_file_checksum_cache(cx);
         crate::explorer::initialize_cache_cleanup(cx);
         cx.bind_keys(platform_key_bindings());
+
+        #[cfg(target_os = "windows")]
+        if cx.global::<SettingsState>().value.app.tray {
+            if let Err(error) =
+                apply_tray_initialization_result(crate::windows_tray::initialize(cx), cx)
+            {
+                eprintln!("Explorer tray initialization failed; closing the final window will still exit: {error}");
+            }
+        }
 
         if let Some(primary) = single_instance_primary {
             install_single_instance_server(primary, cx);
@@ -2393,6 +2454,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn explorer_registry_filters_other_window_types(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("registry-filter");
+        fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| {
+            open_explorer_window_at(dir.clone(), default_window_bounds(cx), None, cx);
+            crate::image_viewer::open_image_window(dir.join("photo.png"), cx);
+        });
+        cx.run_until_parked();
+
+        let explorer_windows = cx.update(registered_explorer_windows);
+        assert_eq!(explorer_windows.len(), 1);
+        assert_eq!(cx.windows().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui::test]
+    fn explorer_registry_tracks_activation_order(cx: &mut TestAppContext) {
+        initialize_test_explorer_app(cx);
+        let dir = unique_temp_dir("activation-order");
+        fs::create_dir_all(&dir).unwrap();
+        let first = cx
+            .update(|cx| open_explorer_window_at(dir.clone(), default_window_bounds(cx), None, cx));
+        let second = cx
+            .update(|cx| open_explorer_window_at(dir.clone(), default_window_bounds(cx), None, cx));
+        assert_eq!(cx.update(registered_explorer_windows), vec![second, first]);
+
+        first
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(registered_explorer_windows), vec![first, second]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn tray_lifecycle_policy_retains_last_window_only_after_success(cx: &mut TestAppContext) {
+        cx.update(|app| {
+            assert!(app.quit_on_last_window_closed());
+            assert!(apply_tray_initialization_result(Ok(()), app).is_ok());
+            assert!(!app.quit_on_last_window_closed());
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn tray_initialization_failure_preserves_last_window_exit(cx: &mut TestAppContext) {
+        cx.update(|app| {
+            assert!(apply_tray_initialization_result(Err("fixture failure".into()), app).is_err());
+            assert!(app.quit_on_last_window_closed());
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn explicit_quit_still_runs_shutdown_with_last_window_exit_disabled(cx: &mut TestAppContext) {
+        let did_quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cx.update(|app| {
+            app.set_quit_on_last_window_closed(false);
+            let did_quit = did_quit.clone();
+            app.on_app_quit(move |_| {
+                did_quit.store(true, std::sync::atomic::Ordering::SeqCst);
+                async {}
+            })
+            .detach();
+        });
+        cx.quit();
+        assert!(did_quit.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[gpui::test]
     fn focus_launch_activates_existing_window_without_opening_another(cx: &mut TestAppContext) {
         initialize_test_explorer_app(cx);
         let dir = unique_temp_dir("focus-launch-existing");
@@ -2853,6 +2986,7 @@ mod tests {
         cx.update(|app| {
             register_embedded_fonts(app);
             app.set_global(SettingsState::for_test(ExplorerSettings::default()));
+            initialize_explorer_window_registry(app);
             crate::explorer::initialize_clipboard_summary(app);
             crate::explorer::initialize_native_icon_cache(app);
             crate::explorer::initialize_image_thumbnail_cache(app);

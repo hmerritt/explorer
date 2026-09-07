@@ -2385,16 +2385,10 @@ mod tests {
 
     #[test]
     fn remote_directories_skip_native_icons_and_remote_paths_stay_non_native() {
-        let location = super::super::remote_fs::RemoteLocation::parse("sftp://host/folder")
-            .unwrap();
+        let location =
+            super::super::remote_fs::RemoteLocation::parse("sftp://host/folder").unwrap();
         let path = location.provider_path();
-        let directory = FileEntry::from_provider(
-            path.clone(),
-            "folder".into(),
-            true,
-            None,
-            None,
-        );
+        let directory = FileEntry::from_provider(path.clone(), "folder".into(), true, None, None);
         let directory_link = FileEntry {
             path: path.clone(),
             name: "folder".into(),

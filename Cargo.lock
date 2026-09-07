@@ -2574,6 +2574,7 @@ dependencies = [
  "russh",
  "russh-sftp",
  "rustfft",
+ "semver",
  "serde",
  "serde_json",
  "sevenz-rust2",

@@ -321,7 +321,10 @@ impl WindowsJob {
 
 impl PendingDownload {
     fn persist(mut self) -> Result<DownloadResult, String> {
-        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([self.destination.join(&self.file_name)]);
+        let _cache_invalidation =
+            crate::explorer::remote_directory_cache::DirectoryMutation::new([self
+                .destination
+                .join(&self.file_name)]);
         let mut index = 1usize;
         loop {
             let file_name = download_file_name(&self.file_name, index);
@@ -359,8 +362,16 @@ impl ExplorerView {
         if is_remote_download(&download) {
             if download.url.scheme() == "sftp" {
                 match super::remote_fs::RemoteLocation::parse(download.url.as_str()) {
-                    Ok(location) => self.start_native_transfer(vec![location.provider_path()], self.path.clone(), false, cx),
-                    Err(error) => { self.set_error_notice(error); cx.notify(); },
+                    Ok(location) => self.start_native_transfer(
+                        vec![location.provider_path()],
+                        self.path.clone(),
+                        false,
+                        cx,
+                    ),
+                    Err(error) => {
+                        self.set_error_notice(error);
+                        cx.notify();
+                    }
                 }
                 return;
             }
@@ -424,7 +435,8 @@ impl ExplorerView {
 
     fn enqueue_remote_download(&mut self, download: ClipboardDownload, cx: &mut Context<Self>) {
         self.begin_download_batch_if_needed();
-        self.pending_remote_downloads.push_back((download, self.path.clone()));
+        self.pending_remote_downloads
+            .push_back((download, self.path.clone()));
         if self.active_remote_download.is_none() {
             self.start_next_remote_download(cx);
         }
@@ -549,7 +561,15 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForCredentials;
                 }
-                match open_remote_credentials_dialog(cx.entity(), id, host, username, message, false, cx) {
+                match open_remote_credentials_dialog(
+                    cx.entity(),
+                    id,
+                    host,
+                    username,
+                    message,
+                    false,
+                    cx,
+                ) {
                     Ok(handle) => self.active_dialog_window = Some(handle),
                     Err(error) => {
                         self.complete_download(
@@ -561,10 +581,25 @@ impl ExplorerView {
                     }
                 }
             }
-            Err(RemoteDownloadError::PassphraseRequired { host, username, key_path }) => {
-                match open_remote_credentials_dialog(cx.entity(), id, host, username, Some(format!("Unlock private key {}", key_path.display())), true, cx) {
+            Err(RemoteDownloadError::PassphraseRequired {
+                host,
+                username,
+                key_path,
+            }) => {
+                match open_remote_credentials_dialog(
+                    cx.entity(),
+                    id,
+                    host,
+                    username,
+                    Some(format!("Unlock private key {}", key_path.display())),
+                    true,
+                    cx,
+                ) {
                     Ok(handle) => self.active_dialog_window = Some(handle),
-                    Err(error) => { self.complete_download(id, Err(error), cx); self.finish_active_remote_download(cx); },
+                    Err(error) => {
+                        self.complete_download(id, Err(error), cx);
+                        self.finish_active_remote_download(cx);
+                    }
                 }
             }
             Err(RemoteDownloadError::UnknownHost(key)) => {
@@ -596,7 +631,13 @@ impl ExplorerView {
         credentials: RemoteCredentials,
         cx: &mut Context<Self>,
     ) {
-        if super::remote_fs::reply(id, super::remote_fs::PromptReply::Credentials(credentials.clone())) { self.clear_active_dialog_window(); return; }
+        if super::remote_fs::reply(
+            id,
+            super::remote_fs::PromptReply::Credentials(credentials.clone()),
+        ) {
+            self.clear_active_dialog_window();
+            return;
+        }
         let Some(active) = self
             .active_remote_download
             .as_mut()
@@ -620,8 +661,13 @@ impl ExplorerView {
     ) {
         if id >= (1 << 63) {
             match remember_host_key(&key) {
-                Ok(()) => { super::remote_fs::reply(id, super::remote_fs::PromptReply::Accept); },
-                Err(error) => { super::remote_fs::reply(id, super::remote_fs::PromptReply::Cancel); self.set_error_notice(error); },
+                Ok(()) => {
+                    super::remote_fs::reply(id, super::remote_fs::PromptReply::Accept);
+                }
+                Err(error) => {
+                    super::remote_fs::reply(id, super::remote_fs::PromptReply::Cancel);
+                    self.set_error_notice(error);
+                }
             }
             self.clear_active_dialog_window();
             return;
@@ -640,7 +686,10 @@ impl ExplorerView {
     }
 
     pub(super) fn cancel_remote_prompt(&mut self, id: u64, cx: &mut Context<Self>) {
-        if super::remote_fs::reply(id, super::remote_fs::PromptReply::Cancel) { self.clear_active_dialog_window(); return; }
+        if super::remote_fs::reply(id, super::remote_fs::PromptReply::Cancel) {
+            self.clear_active_dialog_window();
+            return;
+        }
         if self.active_remote_download.as_ref().map(|active| active.id) != Some(id) {
             return;
         }
@@ -1020,9 +1069,10 @@ fn run_ytdlp_download(
     on_progress: impl Fn(YtDlpProgressEvent) + Send + 'static,
 ) -> Result<DownloadResult, String> {
     let mut command = Command::new(&command_spec.executable);
-    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([
-        command_spec.current_dir.clone(),
-    ]);
+    let _cache_invalidation =
+        crate::explorer::remote_directory_cache::DirectoryMutation::new([command_spec
+            .current_dir
+            .clone()]);
     command
         .args(&command_spec.args)
         .current_dir(&command_spec.current_dir)

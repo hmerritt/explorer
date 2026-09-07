@@ -214,6 +214,7 @@ fn windows_window_controls(window: &Window) -> Option<AnyElement> {
     (!buttons.is_empty()).then(|| {
         div()
             .id("explorer-windows-window-controls")
+            .debug_selector(|| "explorer-windows-window-controls".to_owned())
             .flex()
             .flex_row()
             .h_full()
@@ -226,9 +227,11 @@ fn windows_window_controls(window: &Window) -> Option<AnyElement> {
 #[cfg(target_os = "windows")]
 fn windows_caption_button(button: WindowCaptionButton) -> AnyElement {
     let is_close = button == WindowCaptionButton::Close;
+    let id = button.id();
 
     div()
-        .id(button.id())
+        .id(id)
+        .debug_selector(move || id.to_owned())
         .flex()
         .items_center()
         .justify_center()

@@ -912,7 +912,9 @@ fn load_or_create_thumbnail_cache_bytes(
     let loaded = load_or_create_thumbnail_with_timings(request, cache_dir, cancel, false);
     let image = loaded.image?;
     let mut rgba = image.image.as_bytes(0)?.to_vec();
-    for pixel in rgba.chunks_exact_mut(4) { pixel.swap(0, 2); }
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
     encode_rgba_qoi_bytes(&rgba, image.width, image.height)
 }
 
@@ -924,24 +926,38 @@ fn load_or_create_thumbnail_with_timings(
 ) -> ImageThumbnailLoadResult {
     let mut loaded = ImageThumbnailLoadResult::empty(ImageThumbnailLoadOutcome::Failed);
     let image = (|| {
-        if cancel.load(Ordering::Relaxed) { return None; }
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let started = enabled.then(Instant::now);
         let cached = read_cached_thumbnail(cache_dir, &request.key);
-        loaded.timings.set(ThumbnailStage::CacheRead, started.map(|s| s.elapsed()));
+        loaded
+            .timings
+            .set(ThumbnailStage::CacheRead, started.map(|s| s.elapsed()));
         loaded.cache_hit = Some(cached.is_some());
-        if cancel.load(Ordering::Relaxed) { return None; }
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         if let Some(bytes) = cached {
             let started = enabled.then(Instant::now);
             let image = decode_cached_thumbnail_rgba(&bytes);
-            loaded.timings.set(ThumbnailStage::CacheDecode, started.map(|s| s.elapsed()));
+            loaded
+                .timings
+                .set(ThumbnailStage::CacheDecode, started.map(|s| s.elapsed()));
             if image.is_some() {
                 loaded.outcome = ImageThumbnailLoadOutcome::CacheHit;
                 return image;
             }
-            if let Some(path) = thumbnail_file_path(cache_dir, &request.key) { let _ = fs::remove_file(path); }
+            if let Some(path) = thumbnail_file_path(cache_dir, &request.key) {
+                let _ = fs::remove_file(path);
+            }
         }
         loaded.cache_hit = Some(false);
-        if request.source_policy == ThumbnailSourcePolicy::CacheOnly || cancel.load(Ordering::Relaxed) { return None; }
+        if request.source_policy == ThumbnailSourcePolicy::CacheOnly
+            || cancel.load(Ordering::Relaxed)
+        {
+            return None;
+        }
         let started = enabled.then(Instant::now);
         let result = if super::portable_devices::is_portable_path(&request.path) {
             load_portable_thumbnail_rgba(&request.path, request.size)
@@ -949,22 +965,36 @@ fn load_or_create_thumbnail_with_timings(
             match request.kind {
                 ImageThumbnailKind::Image => {
                     let thumbnail = load_thumbnail_rgba_with_cancel_timed(
-                        &request.path, ThumbnailSpec::standard(request.size), cancel, enabled,
+                        &request.path,
+                        ThumbnailSpec::standard(request.size),
+                        cancel,
+                        enabled,
                     );
                     let cache_read = loaded.timings.get(ThumbnailStage::CacheRead);
                     let cache_decode = loaded.timings.get(ThumbnailStage::CacheDecode);
                     loaded.timings = thumbnail.timings;
                     loaded.timings.set(ThumbnailStage::CacheRead, cache_read);
-                    loaded.timings.set(ThumbnailStage::CacheDecode, cache_decode);
+                    loaded
+                        .timings
+                        .set(ThumbnailStage::CacheDecode, cache_decode);
                     thumbnail.result
-                },
-                ImageThumbnailKind::Pdf => load_pdf_first_page_rgba(&request.path, request.size, cancel),
-                ImageThumbnailKind::Video => load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
-                    .map(|extraction| extraction.value).map_err(|e| e.to_string()),
+                }
+                ImageThumbnailKind::Pdf => {
+                    load_pdf_first_page_rgba(&request.path, request.size, cancel)
+                }
+                ImageThumbnailKind::Video => {
+                    load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
+                        .map(|extraction| extraction.value)
+                        .map_err(|e| e.to_string())
+                }
             }
         };
-        loaded.timings.set(ThumbnailStage::Extract, started.map(|s| s.elapsed()));
-        if result.is_ok() { loaded.outcome = ImageThumbnailLoadOutcome::Generated; }
+        loaded
+            .timings
+            .set(ThumbnailStage::Extract, started.map(|s| s.elapsed()));
+        if result.is_ok() {
+            loaded.outcome = ImageThumbnailLoadOutcome::Generated;
+        }
         result.ok()
     })();
     if cancel.load(Ordering::Relaxed) {
@@ -974,25 +1004,46 @@ fn load_or_create_thumbnail_with_timings(
             loaded.cache_image = Some(image.clone());
         }
         let started = enabled.then(Instant::now);
-        loaded.image = Some(cached_thumbnail_image_from_rgba_with_animated_source(image, animated_source_for_request(request)));
-        loaded.timings.set(ThumbnailStage::RenderPrepare, started.map(|s| s.elapsed()));
+        loaded.image = Some(cached_thumbnail_image_from_rgba_with_animated_source(
+            image,
+            animated_source_for_request(request),
+        ));
+        loaded
+            .timings
+            .set(ThumbnailStage::RenderPrepare, started.map(|s| s.elapsed()));
     }
     loaded
 }
 
 /// Properties uses the same source policy, cache identity and decoder as hover.
 /// Called on a background executor; a miss never delays the full-size viewer.
-pub(crate) fn load_properties_thumbnail(path: &Path, size: u32, cancel: &AtomicBool) -> Option<Arc<RenderImage>> {
+pub(crate) fn load_properties_thumbnail(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+) -> Option<Arc<RenderImage>> {
     // Avoid introducing new reads of remote/portable sources just for a placeholder.
-    if path_is_remote_drive(path) || super::portable_devices::is_portable_path(path) { return None; }
+    if path_is_remote_drive(path) || super::portable_devices::is_portable_path(path) {
+        return None;
+    }
     let entry = FileEntry::from_path(path.to_owned())?;
     let request = ImageThumbnailRequest {
-        kind: ImageThumbnailKind::Image, usage: ImageThumbnailUsage::HoverPreview, size,
+        kind: ImageThumbnailKind::Image,
+        usage: ImageThumbnailUsage::HoverPreview,
+        size,
         source_policy: ThumbnailSourcePolicy::ReadSource,
         key: hover_image_preview_key(&entry, size),
-        path: path.to_owned(), directory: path.parent()?.to_owned(),
+        path: path.to_owned(),
+        directory: path.parent()?.to_owned(),
     };
-    load_or_create_thumbnail_with_timings(&request, image_thumbnail_cache_dir().as_deref(), cancel, false).image.map(|image| image.image)
+    load_or_create_thumbnail_with_timings(
+        &request,
+        image_thumbnail_cache_dir().as_deref(),
+        cancel,
+        false,
+    )
+    .image
+    .map(|image| image.image)
 }
 
 fn load_portable_thumbnail_rgba(path: &Path, size: u32) -> Result<image::RgbaImage, String> {
@@ -1039,7 +1090,10 @@ impl ImageThumbnailLoadResult {
         }
     }
 
-    fn cache_write_job(&mut self, job: &ImageThumbnailLoadJob) -> Option<ImageThumbnailCacheWriteJob> {
+    fn cache_write_job(
+        &mut self,
+        job: &ImageThumbnailLoadJob,
+    ) -> Option<ImageThumbnailCacheWriteJob> {
         if self.outcome != ImageThumbnailLoadOutcome::Generated {
             return None;
         }
@@ -1652,24 +1706,48 @@ pub mod benchmark_support {
     /// Uses production request deduplication, queue selection, bounded workers,
     /// cache load and render preparation, and state commit. GPU presentation is
     /// intentionally excluded and must be measured in the running UI.
-    pub fn queued_thumbnail_batch_for_benchmark(paths: &[PathBuf], size: u32, cache_dir: Option<&Path>, memory_hits: bool) -> serde_json::Value {
+    pub fn queued_thumbnail_batch_for_benchmark(
+        paths: &[PathBuf],
+        size: u32,
+        cache_dir: Option<&Path>,
+        memory_hits: bool,
+    ) -> serde_json::Value {
         use super::*;
         let mut cache = ImageThumbnailCacheInner::with_writer(cache_dir.map(Path::to_owned), None);
-        let requests: Vec<_> = paths.iter().map(|path| {
-            let entry = FileEntry::from_path(path.clone()).expect("benchmark input metadata");
-            let mut request = image_thumbnail_request_for_entry(&entry, path.parent().unwrap(), ThumbnailSourcePolicy::ReadSource).unwrap();
-            request.size = size;
-            request.key = image_thumbnail_key_for_usage(&entry, request.kind, request.usage, size);
-            request
-        }).collect();
+        let requests: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let entry = FileEntry::from_path(path.clone()).expect("benchmark input metadata");
+                let mut request = image_thumbnail_request_for_entry(
+                    &entry,
+                    path.parent().unwrap(),
+                    ThumbnailSourcePolicy::ReadSource,
+                )
+                .unwrap();
+                request.size = size;
+                request.key =
+                    image_thumbnail_key_for_usage(&entry, request.kind, request.usage, size);
+                request
+            })
+            .collect();
         if memory_hits {
             for request in &requests {
-                let loaded = load_or_create_thumbnail_with_timings(request, cache_dir, &AtomicBool::new(false), false);
-                cache.states.insert(request.key.clone(), ImageThumbnailState::Ready(loaded.image.expect("populate memory cache")));
+                let loaded = load_or_create_thumbnail_with_timings(
+                    request,
+                    cache_dir,
+                    &AtomicBool::new(false),
+                    false,
+                );
+                cache.states.insert(
+                    request.key.clone(),
+                    ImageThumbnailState::Ready(loaded.image.expect("populate memory cache")),
+                );
             }
         }
         let started = Instant::now();
-        for request in requests { cache.thumbnail_for_request(request); }
+        for request in requests {
+            cache.thumbnail_for_request(request);
+        }
         let generation = cache.loader_generation;
         let (send, receive) = std::sync::mpsc::channel();
         let mut active = 0;
@@ -1677,17 +1755,30 @@ pub mod benchmark_support {
         let mut completed = 0;
         loop {
             while active < image_thumbnail_loader_concurrency() {
-                let Some(job) = cache.next_load_job_matching(generation, |_| true) else { break; };
+                let Some(job) = cache.next_load_job_matching(generation, |_| true) else {
+                    break;
+                };
                 active += 1;
                 let send = send.clone();
                 super::super::thumbnail_io::pool().spawn(move || {
-                    let loaded = load_or_create_thumbnail_with_timings(&job.request, job.cache_dir.as_deref(), &job.cancel, true);
+                    let loaded = load_or_create_thumbnail_with_timings(
+                        &job.request,
+                        job.cache_dir.as_deref(),
+                        &job.cancel,
+                        true,
+                    );
                     send.send((job, loaded)).expect("benchmark receiver");
                 });
             }
-            if active == 0 { break; }
+            if active == 0 {
+                break;
+            }
             let (job, loaded) = receive.recv().expect("benchmark worker");
-            assert!(loaded.image.is_some(), "benchmark source failed: {}", job.request.path.display());
+            assert!(
+                loaded.image.is_some(),
+                "benchmark source failed: {}",
+                job.request.path.display()
+            );
             assert!(cache.finish_prepared_request(job.request, job.generation, loaded.image));
             first.get_or_insert(started.elapsed());
             completed += 1;
@@ -1962,10 +2053,7 @@ mod tests {
 
         assert_eq!(preview.kind, ImageThumbnailKind::Image);
         assert_eq!(preview.usage, ImageThumbnailUsage::HoverPreview);
-        assert_eq!(
-            preview.usage.cache_namespace(preview.kind),
-            "image-v3"
-        );
+        assert_eq!(preview.usage.cache_namespace(preview.kind), "image-v3");
         assert_eq!(
             preview.key,
             hover_image_preview_key(&entry, HOVER_IMAGE_PREVIEW_SIZE)
@@ -2186,25 +2274,46 @@ mod tests {
     fn cache_write_transfers_pixels_only_once_and_does_not_copy_without_a_cache() {
         let temp = TempDir::new();
         let path = temp.path().join("image.png");
-        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])).save(&path).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
         let entry = FileEntry::from_path(path).unwrap();
-        let request = image_thumbnail_request_for_entry(&entry, temp.path(), ThumbnailSourcePolicy::ReadSource).unwrap();
+        let request = image_thumbnail_request_for_entry(
+            &entry,
+            temp.path(),
+            ThumbnailSourcePolicy::ReadSource,
+        )
+        .unwrap();
         let job = ImageThumbnailLoadJob {
-            request, generation: 1, cache_dir: Some(temp.path().join("cache")),
-            cancel: Arc::new(AtomicBool::new(false)), queued_at: Instant::now(),
+            request,
+            generation: 1,
+            cache_dir: Some(temp.path().join("cache")),
+            cancel: Arc::new(AtomicBool::new(false)),
+            queued_at: Instant::now(),
         };
-        let mut generated = load_or_create_thumbnail_with_timings(&job.request, job.cache_dir.as_deref(), &job.cancel, true);
+        let mut generated = load_or_create_thumbnail_with_timings(
+            &job.request,
+            job.cache_dir.as_deref(),
+            &job.cancel,
+            true,
+        );
         assert_eq!(generated.outcome, ImageThumbnailLoadOutcome::Generated);
         let pixel_pointer = generated.cache_image.as_ref().unwrap().as_ptr();
         let write = generated.cache_write_job(&job).unwrap();
         assert_eq!(write.image.as_ptr(), pixel_pointer);
         assert_eq!(&write.image.as_raw()[..4], &[1, 2, 3, 255]);
         assert!(generated.cache_write_job(&job).is_none());
-        let uncached = load_or_create_thumbnail_with_timings(&job.request, None, &job.cancel, false);
+        let uncached =
+            load_or_create_thumbnail_with_timings(&job.request, None, &job.cancel, false);
         assert!(uncached.image.is_some());
         assert!(uncached.cache_image.is_none());
         job.cancel.store(true, Ordering::Relaxed);
-        let cancelled = load_or_create_thumbnail_with_timings(&job.request, job.cache_dir.as_deref(), &job.cancel, true);
+        let cancelled = load_or_create_thumbnail_with_timings(
+            &job.request,
+            job.cache_dir.as_deref(),
+            &job.cancel,
+            true,
+        );
         assert_eq!(cancelled.outcome, ImageThumbnailLoadOutcome::Cancelled);
         assert!(cancelled.image.is_none());
     }

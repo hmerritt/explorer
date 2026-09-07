@@ -14,6 +14,8 @@ mod loaders;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod settings;
 #[cfg(any(target_os = "windows", test))]
+mod update_check;
+#[cfg(test)]
 mod updater;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod window_chrome;
@@ -23,6 +25,8 @@ mod window_state;
 mod windows_file_associations;
 #[cfg(any(target_os = "windows", test))]
 mod windows_squirrel;
+#[cfg(target_os = "windows")]
+mod windows_tray;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{

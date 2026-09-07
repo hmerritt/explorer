@@ -1,19 +1,28 @@
 //! The CPU budget and source I/O shared by every image-thumbnail request.
 use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
-    sync::{Arc, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 pub(super) fn concurrency() -> usize {
-    std::thread::available_parallelism().map(usize::from).unwrap_or(4).clamp(2, 4)
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .clamp(2, 4)
 }
 
 pub(super) fn pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| rayon::ThreadPoolBuilder::new()
-        .num_threads(concurrency())
-        .thread_name(|index| format!("image-thumbnail-{index}"))
-        .build().expect("create thumbnail decode pool"))
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(concurrency())
+            .thread_name(|index| format!("image-thumbnail-{index}"))
+            .build()
+            .expect("create thumbnail decode pool")
+    })
 }
 
 /// Unlike BufReader::seek(Start), nearby metadata seeks retain read-ahead.
@@ -25,7 +34,10 @@ pub(super) struct BufferedSource<R> {
 
 impl<R: Read> BufferedSource<R> {
     pub(super) fn new(reader: R) -> Self {
-        Self { inner: BufReader::new(reader), position: 0 }
+        Self {
+            inner: BufReader::new(reader),
+            position: 0,
+        }
     }
 }
 
@@ -38,7 +50,9 @@ impl<R: Read> Read for BufferedSource<R> {
 }
 
 impl<R: Read> BufRead for BufferedSource<R> {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> { self.inner.fill_buf() }
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
     fn consume(&mut self, count: usize) {
         self.inner.consume(count);
         self.position += count as u64;

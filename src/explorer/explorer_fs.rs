@@ -35,7 +35,9 @@ impl ExplorerFs {
     }
 
     pub(super) fn classify(&self, path: &Path) -> ExplorerLocation {
-        if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) { return ExplorerLocation::Remote(location); }
+        if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) {
+            return ExplorerLocation::Remote(location);
+        }
         if archive_fs::is_archive_path(path) {
             ExplorerLocation::Archive(path.to_path_buf())
         } else if portable_devices::is_portable_path(path) {
@@ -98,7 +100,8 @@ impl ExplorerFs {
     }
 
     pub(super) fn create_dir(&self, path: &Path) -> Result<(), String> {
-        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
+        let _cache_invalidation =
+            crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
         if !self.can_mutate(path) {
             return Err(self.read_only_error());
         }
@@ -126,7 +129,8 @@ impl ExplorerFs {
     }
 
     pub(super) fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
+        let _cache_invalidation =
+            crate::explorer::remote_directory_cache::DirectoryMutation::new([path.to_path_buf()]);
         if !self.can_mutate(path) {
             return Err(self.read_only_error());
         }

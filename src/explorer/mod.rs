@@ -26,7 +26,6 @@ mod icons;
 mod image_preview;
 mod image_resize;
 mod image_thumbnails;
-mod thumbnail_io;
 mod large_icons;
 mod mouse_selection;
 mod navigation;
@@ -39,8 +38,8 @@ mod remote_dialog;
 mod remote_directory_cache;
 mod remote_download;
 mod remote_fs;
-mod remote_ui;
 mod remote_transfer;
+mod remote_ui;
 mod rename;
 mod render;
 mod resumable_copy;
@@ -55,6 +54,7 @@ mod tabs;
 mod test_support;
 mod text_hover_preview;
 mod text_input;
+mod thumbnail_io;
 mod tooltip;
 mod video;
 mod video_hover_preview;
@@ -112,7 +112,9 @@ pub(crate) use filesystem::{
 };
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 pub(crate) use formatting::format_size;
-pub(crate) use image_thumbnails::{initialize as initialize_image_thumbnail_cache, load_properties_thumbnail};
+pub(crate) use image_thumbnails::{
+    initialize as initialize_image_thumbnail_cache, load_properties_thumbnail,
+};
 pub(crate) use properties::initialize_file_checksum_cache;
 pub(crate) use scrollbar::{
     HorizontalScrollbarDrag, HorizontalScrollbarMetrics, ScrollbarArrow, ScrollbarDrag,

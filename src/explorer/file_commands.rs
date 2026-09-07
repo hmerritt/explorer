@@ -109,12 +109,34 @@ impl ExplorerView {
         if super::remote_fs::is_remote(&self.path) {
             let path = self.path.clone();
             cx.spawn(async move |this, cx| {
-                let result = cx.background_executor().spawn(async move { create_new_item_in_directory(&path, kind) }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { create_new_item_in_directory(&path, kind) })
+                    .await;
                 let _ = this.update(cx, |view, cx| {
-                    match result { Ok(path) => { view.reload_async_with_options(super::view::ReloadMode { cache_policy: super::remote_directory_cache::DirectoryLoadPolicy::Fresh, preserve_selection: true, rebuild_sidebar: false, preserve_context_menu: false }, vec![path], true, false, false, cx); }, Err(error) => view.set_error_notice(error) }
+                    match result {
+                        Ok(path) => {
+                            view.reload_async_with_options(
+                                super::view::ReloadMode {
+                                    cache_policy:
+                                        super::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                                    preserve_selection: true,
+                                    rebuild_sidebar: false,
+                                    preserve_context_menu: false,
+                                },
+                                vec![path],
+                                true,
+                                false,
+                                false,
+                                cx,
+                            );
+                        }
+                        Err(error) => view.set_error_notice(error),
+                    }
                     cx.notify();
                 });
-            }).detach();
+            })
+            .detach();
             return;
         }
         match create_new_item_in_directory(&self.path, kind) {
@@ -122,7 +144,8 @@ impl ExplorerView {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -276,15 +299,25 @@ impl ExplorerView {
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
-        if super::remote_fs::is_remote(&self.path) || clipboard.paths.iter().any(|p| super::remote_fs::is_remote(p)) {
-            self.start_native_transfer(clipboard.paths, self.path.clone(), clipboard.operation == FileClipboardOperation::Cut, cx);
-            return;
-        }
-        if crate::explorer::portable_devices::is_portable_path(&self.path)
+        if super::remote_fs::is_remote(&self.path)
             || clipboard
                 .paths
                 .iter()
-                .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
+                .any(|p| super::remote_fs::is_remote(p))
+        {
+            self.start_native_transfer(
+                clipboard.paths,
+                self.path.clone(),
+                clipboard.operation == FileClipboardOperation::Cut,
+                cx,
+            );
+            return;
+        }
+        if crate::explorer::portable_devices::is_portable_path(&self.path)
+            || clipboard.paths.iter().any(|path| {
+                super::remote_fs::is_remote(path)
+                    || crate::explorer::portable_devices::is_portable_path(path)
+            })
         {
             self.start_portable_transfer(
                 clipboard.paths,
@@ -361,15 +394,20 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if super::remote_fs::is_remote(&self.path) {
-            self.set_error_notice("Paste the image into a local folder, then copy that file to the server.".to_owned());
-            cx.notify(); return;
+            self.set_error_notice(
+                "Paste the image into a local folder, then copy that file to the server."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
         }
         match create_clipboard_image_file_in_directory(&self.path, image) {
             Ok(path) => {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -398,15 +436,20 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if super::remote_fs::is_remote(&self.path) {
-            self.set_error_notice("Paste this content into a local file, then copy that file to the server.".to_owned());
-            cx.notify(); return;
+            self.set_error_notice(
+                "Paste this content into a local file, then copy that file to the server."
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
         }
         match create_clipboard_materialization_in_directory(&self.path, &materialization) {
             Ok(path) => {
                 self.clear_operation_notice();
                 self.reload_async_with_options_and_focused_rename(
                     crate::explorer::view::ReloadMode {
-                        cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                        cache_policy:
+                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
                         preserve_selection: true,
                         rebuild_sidebar: true,
                         preserve_context_menu: false,
@@ -463,10 +506,10 @@ impl ExplorerView {
         if paths.is_empty() {
             return;
         }
-        if paths
-            .iter()
-            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
-        {
+        if paths.iter().any(|path| {
+            super::remote_fs::is_remote(path)
+                || crate::explorer::portable_devices::is_portable_path(path)
+        }) {
             self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
             self.clear_operation_notice();
             self.open_pending_dialog_window(cx);
@@ -485,10 +528,10 @@ impl ExplorerView {
             return;
         }
 
-        if paths
-            .iter()
-            .any(|path| super::remote_fs::is_remote(path) || crate::explorer::portable_devices::is_portable_path(path))
-        {
+        if paths.iter().any(|path| {
+            super::remote_fs::is_remote(path)
+                || crate::explorer::portable_devices::is_portable_path(path)
+        }) {
             self.pending_permanent_delete = Some(PendingPermanentDelete { paths });
             self.clear_operation_notice();
             self.open_pending_dialog_window(cx);
@@ -1038,8 +1081,15 @@ fn cleanup_file_operation_undo(undo: FileOperationUndo) {
 
 fn undo_copied_paths(undo: &FileOperationCopyUndo) -> Result<(), String> {
     let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(
-        undo.created_files.iter().chain(&undo.created_directories).cloned()
-            .chain(undo.replaced_files.iter().map(|file| file.destination.clone()))
+        undo.created_files
+            .iter()
+            .chain(&undo.created_directories)
+            .cloned()
+            .chain(
+                undo.replaced_files
+                    .iter()
+                    .map(|file| file.destination.clone()),
+            ),
     );
     preflight_copy_undo(undo)?;
 
@@ -1241,7 +1291,10 @@ fn undo_trash_paths(trash: TrashUndo) -> Result<Vec<PathBuf>, String> {
             items,
             original_paths,
         } => {
-            let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new(original_paths.iter().cloned());
+            let _cache_invalidation =
+                crate::explorer::remote_directory_cache::DirectoryMutation::new(
+                    original_paths.iter().cloned(),
+                );
             restore_trash_items(items)?;
             Ok(original_paths)
         }
@@ -1408,7 +1461,9 @@ fn create_new_item_in_directory_with_cancel(
         let name = new_item_name(kind.base_name(), index);
         let path = if let Some(location) = super::remote_fs::RemoteLocation::from_provider(parent) {
             location.child(&name)?.provider_path()
-        } else { parent.join(&name) };
+        } else {
+            parent.join(&name)
+        };
 
         if explorer_fs.exists(&path)? {
             index = next_new_item_index(index, &name)?;

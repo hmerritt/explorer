@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
@@ -41,6 +41,7 @@ pub(crate) struct WindowsPlatform {
     drop_target_helper: IDropTargetHelper,
     handle: HWND,
     disable_direct_composition: bool,
+    quit_on_last_window_closed: Rc<Cell<bool>>,
 }
 
 struct WindowsPlatformInner {
@@ -49,6 +50,7 @@ struct WindowsPlatformInner {
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
     main_receiver: flume::Receiver<Runnable>,
+    quit_on_last_window_closed: Rc<Cell<bool>>,
 }
 
 pub(crate) struct WindowsPlatformState {
@@ -101,6 +103,7 @@ impl WindowsPlatform {
             rand::random::<u32>() as usize
         };
         let raw_window_handles = Arc::new(RwLock::new(SmallVec::new()));
+        let quit_on_last_window_closed = Rc::new(Cell::new(true));
         let text_system = Arc::new(
             DirectWriteTextSystem::new(&directx_devices)
                 .context("Error creating DirectWriteTextSystem")?,
@@ -112,6 +115,7 @@ impl WindowsPlatform {
             validation_number,
             main_receiver: Some(main_receiver),
             directx_devices: Some(directx_devices),
+            quit_on_last_window_closed: quit_on_last_window_closed.clone(),
         };
         let result = unsafe {
             CreateWindowExW(
@@ -159,6 +163,7 @@ impl WindowsPlatform {
             disable_direct_composition,
             windows_version,
             drop_target_helper,
+            quit_on_last_window_closed,
         })
     }
 
@@ -326,6 +331,10 @@ impl Platform for WindowsPlatform {
         self.foreground_executor()
             .spawn(async { unsafe { PostQuitMessage(0) } })
             .detach();
+    }
+
+    fn set_quit_on_last_window_closed(&self, quit: bool) {
+        self.quit_on_last_window_closed.set(quit);
     }
 
     fn restart(&self, binary_path: Option<PathBuf>) {
@@ -685,6 +694,7 @@ impl WindowsPlatformInner {
             raw_window_handles: context.raw_window_handles.clone(),
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.take().unwrap(),
+            quit_on_last_window_closed: context.quit_on_last_window_closed.clone(),
         }))
     }
 
@@ -717,7 +727,9 @@ impl WindowsPlatformInner {
         }
         match message {
             WM_GPUI_CLOSE_ONE_WINDOW => {
-                if self.close_one_window(HWND(lparam.0 as _)) {
+                if self.close_one_window(HWND(lparam.0 as _))
+                    && self.quit_on_last_window_closed.get()
+                {
                     unsafe { PostQuitMessage(0) };
                 }
                 Some(0)
@@ -835,6 +847,7 @@ struct PlatformWindowCreateContext {
     validation_number: usize,
     main_receiver: Option<flume::Receiver<Runnable>>,
     directx_devices: Option<DirectXDevices>,
+    quit_on_last_window_closed: Rc<Cell<bool>>,
 }
 
 fn open_target(target: impl AsRef<OsStr>) -> Result<()> {

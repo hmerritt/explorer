@@ -922,19 +922,41 @@ impl ExplorerView {
         let target_path = original_path.with_file_name(&target_name);
 
         if super::remote_fs::is_remote(&original_path) {
-            let Some(cx) = cx else { return false; };
+            let Some(cx) = cx else {
+                return false;
+            };
             self.rename_focus_out = None;
             self.active_rename = None;
             cx.spawn(async move |this, cx| {
-                let result = cx.background_executor().spawn(async move { super::remote_fs::rename(&original_path, &target_name) }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { super::remote_fs::rename(&original_path, &target_name) })
+                    .await;
                 let _ = this.update(cx, |view, cx| {
                     match result {
-                        Ok(path) => { view.reload_async_with_options(super::view::ReloadMode { cache_policy: super::remote_directory_cache::DirectoryLoadPolicy::Fresh, preserve_selection: true, rebuild_sidebar: false, preserve_context_menu: false }, vec![path], true, false, false, cx); view.emit_filesystem_changed(cx); },
+                        Ok(path) => {
+                            view.reload_async_with_options(
+                                super::view::ReloadMode {
+                                    cache_policy:
+                                        super::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                                    preserve_selection: true,
+                                    rebuild_sidebar: false,
+                                    preserve_context_menu: false,
+                                },
+                                vec![path],
+                                true,
+                                false,
+                                false,
+                                cx,
+                            );
+                            view.emit_filesystem_changed(cx);
+                        }
                         Err(error) => view.set_error_notice(error),
                     }
                     cx.notify();
                 });
-            }).detach();
+            })
+            .detach();
             return true;
         }
         match rename_path(&original_path, &target_path) {
@@ -1465,7 +1487,10 @@ fn validate_rename_text(text: &str) -> Result<(), String> {
 }
 
 fn rename_path(original_path: &Path, target_path: &Path) -> io::Result<()> {
-    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([original_path.to_path_buf(), target_path.to_path_buf()]);
+    let _cache_invalidation = crate::explorer::remote_directory_cache::DirectoryMutation::new([
+        original_path.to_path_buf(),
+        target_path.to_path_buf(),
+    ]);
     if crate::explorer::portable_devices::is_portable_path(original_path) {
         let name = target_path
             .file_name()
