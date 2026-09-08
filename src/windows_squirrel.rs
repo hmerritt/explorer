@@ -349,13 +349,10 @@ mod tests {
 
     #[test]
     fn lifecycle_paths_use_stable_root_launcher() {
-        let current =
-            Path::new(r"C:\Users\alice\AppData\Local\explorer\app-0.22.0\file-explorer.exe");
-        let installation = installation_for_lifecycle(current).unwrap();
-        assert_eq!(
-            installation.launcher,
-            PathBuf::from(r"C:\Users\alice\AppData\Local\explorer\file-explorer.exe")
-        );
+        let root = PathBuf::from("Local App Data").join(PACKAGE_ID);
+        let current = root.join("app-0.22.0").join(PACKAGED_EXECUTABLE);
+        let installation = installation_for_lifecycle(&current).unwrap();
+        assert_eq!(installation.launcher, root.join(PACKAGED_EXECUTABLE));
     }
 
     #[test]
