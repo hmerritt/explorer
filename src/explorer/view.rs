@@ -349,6 +349,7 @@ pub(super) enum ExplorerViewEvent {
     FilesystemChanged,
     MountedVolumeEjected(PathBuf),
     OpenDirectoryInNewTab(PathBuf),
+    ExpandTransfers,
 }
 
 impl EventEmitter<ExplorerViewEvent> for ExplorerView {}

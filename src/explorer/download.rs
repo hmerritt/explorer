@@ -392,7 +392,7 @@ impl ExplorerView {
             destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
-        self.remote_transfer_panel_collapsed = false;
+        self.request_transfer_panel_expansion(cx);
 
         let client = cx.http_client();
         let (progress_tx, progress_rx) = mpsc::channel();
@@ -462,7 +462,7 @@ impl ExplorerView {
             destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
-        self.remote_transfer_panel_collapsed = false;
+        self.request_transfer_panel_expansion(cx);
         let credentials = embedded_credentials(&download).or_else(|| {
             endpoint_key(&download).and_then(|key| self.remote_credentials.get(&key).cloned())
         });
@@ -566,7 +566,7 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForCredentials;
                 }
-                self.remote_transfer_panel_collapsed = false;
+                self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
                     cx.entity(),
                     id,
@@ -599,7 +599,7 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForCredentials;
                 }
-                self.remote_transfer_panel_collapsed = false;
+                self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
                     cx.entity(),
                     id,
@@ -624,7 +624,7 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForHostConfirmation;
                 }
-                self.remote_transfer_panel_collapsed = false;
+                self.request_transfer_panel_expansion(cx);
                 match open_remote_host_key_dialog(cx.entity(), id, *key, cx) {
                     Ok(handle) => self.active_dialog_window = Some(handle),
                     Err(error) => {
@@ -775,7 +775,7 @@ impl ExplorerView {
             destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
-        self.remote_transfer_panel_collapsed = false;
+        self.request_transfer_panel_expansion(cx);
 
         let command = ytdlp_command_spec(executable, options, url.as_str(), destination);
         let process_control = YtDlpProcessControl::new();
@@ -974,7 +974,7 @@ impl ExplorerView {
                 self.download_batch_failed += 1;
                 self.download_batch_last_error = Some(error.clone());
                 self.download_notice_rows[row_index].status = DownloadNoticeStatus::Failed(error);
-                self.remote_transfer_panel_collapsed = false;
+                self.request_transfer_panel_expansion(cx);
             }
         }
 

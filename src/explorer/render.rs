@@ -358,6 +358,7 @@ pub(super) struct ExplorerSharedChrome {
     pub(super) navbar: AnyElement,
     pub(super) utility_bar: AnyElement,
     pub(super) sidebar: Option<AnyElement>,
+    pub(super) status_bar: AnyElement,
     pub(super) overlays: Vec<AnyElement>,
 }
 
@@ -918,6 +919,9 @@ impl ExplorerView {
         {
             overlays.push(menu);
         }
+        if let Some(popup) = self.render_clipboard_status_popup_overlay(window, cx) {
+            overlays.push(popup);
+        }
 
         ExplorerSharedChrome {
             navbar: self.render_navbar(window, cx).into_any_element(),
@@ -925,6 +929,7 @@ impl ExplorerView {
                 .render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx)
                 .into_any_element(),
             sidebar: sidebar_visible.then(|| self.render_sidebar(cx)),
+            status_bar: self.render_status_bar(cx),
             overlays,
         }
     }
@@ -3696,8 +3701,10 @@ impl ExplorerView {
                     LinearProgressStyle::explorer_copy_green(),
                 ))
             })
-            .child(self.render_transfers(cx))
-            .child(self.render_status_bar(cx))
+            .when(!self.shared_chrome_hosted, |this| {
+                this.child(self.render_transfers(cx))
+                    .child(self.render_status_bar(cx))
+            })
     }
 }
 
@@ -3910,10 +3917,12 @@ impl Render for ExplorerView {
                     .when(sidebar_visible, |this| this.child(self.render_sidebar(cx)))
                     .child(self.render_pane_body(window, cx))
             })
-            .when_some(
-                self.render_clipboard_status_popup_overlay(window, cx),
-                |this, popup| this.child(popup),
-            )
+            .when(!self.shared_chrome_hosted, |this| {
+                this.when_some(
+                    self.render_clipboard_status_popup_overlay(window, cx),
+                    |this, popup| this.child(popup),
+                )
+            })
             .when_some(context_menu_overlay, |this, menu| this.child(menu))
             .when_some(
                 self.render_image_hover_preview_overlay(window, cx),

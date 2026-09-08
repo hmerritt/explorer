@@ -65,15 +65,19 @@ const TRANSFER_ACTION_DISCARD: &str = "\u{E74D}";
 const TRANSFER_BADGE_RADIUS: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum TransferJobId {
-    Download(u64),
+pub(super) enum TransferJobId {
+    Download { owner: Option<u64>, id: u64 },
     Server(u64),
 }
 
 impl TransferJobId {
     fn selector(self) -> String {
         match self {
-            Self::Download(id) => format!("download-{id}"),
+            Self::Download {
+                owner: Some(owner),
+                id,
+            } => format!("download-{owner}-{id}"),
+            Self::Download { owner: None, id } => format!("download-{id}"),
             Self::Server(id) => format!("server-{id}"),
         }
     }
@@ -84,8 +88,8 @@ impl TransferJobId {
 }
 
 #[derive(Clone)]
-struct TransferPanelJob {
-    id: TransferJobId,
+pub(super) struct TransferPanelJob {
+    pub(super) id: TransferJobId,
     state: State,
     message: String,
     bytes: u64,
@@ -127,11 +131,11 @@ impl TransferPanelJob {
         }
     }
 
-    fn from_download(row: &DownloadNoticeRow) -> Self {
+    fn from_download(row: &DownloadNoticeRow, owner: Option<u64>) -> Self {
         let (state, message, bytes, total, percentage, indeterminate, progress_status) =
             download_transfer_state(row);
         Self {
-            id: TransferJobId::Download(row.id),
+            id: TransferJobId::Download { owner, id: row.id },
             state,
             message,
             bytes,
@@ -246,17 +250,35 @@ fn download_transfer_state(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransferRevealSide {
+pub(super) enum TransferRevealSide {
     Source,
     Destination,
 }
 
-type TransferRevealHandler =
+pub(super) type TransferRevealHandler =
     Rc<dyn Fn(TransferJobId, TransferRevealSide, &mut Window, &mut App) + 'static>;
-type TransferControlHandler =
+pub(super) type TransferControlHandler =
     Rc<dyn Fn(TransferJobId, &'static str, &mut Window, &mut App) + 'static>;
 
+#[derive(Default)]
+pub(super) struct TransferPanelParts {
+    pub(super) jobs: Vec<TransferPanelJob>,
+    pub(super) native_icons: HashMap<TransferJobId, Arc<gpui::Image>>,
+}
+
+impl TransferPanelParts {
+    pub(super) fn extend(&mut self, other: Self) {
+        self.jobs.extend(other.jobs);
+        self.native_icons.extend(other.native_icons);
+    }
+}
+
 impl ExplorerView {
+    pub(super) fn request_transfer_panel_expansion(&mut self, cx: &mut Context<Self>) {
+        self.remote_transfer_panel_collapsed = false;
+        cx.emit(super::view::ExplorerViewEvent::ExpandTransfers);
+    }
+
     pub(super) fn start_remote_events(&mut self, cx: &mut Context<Self>) {
         self.remote_transfer_snapshots = super::remote_transfer::snapshots();
         self.update_transfer_completion_retention(cx);
@@ -377,7 +399,7 @@ impl ExplorerView {
             self.cancel_transfer_completion_cleanup();
         }
         if transfer_panel_should_expand(&previous, &snapshots) {
-            self.remote_transfer_panel_collapsed = false;
+            self.request_transfer_panel_expansion(cx);
         }
         self.reconcile_pending_remote_transfer_reveal(&snapshots, cx);
         let changed = snapshots != previous;
@@ -469,7 +491,7 @@ impl ExplorerView {
         match super::remote_transfer::enqueue(paths, destination, move_sources, sftp) {
             Ok(_) => {
                 self.cancel_transfer_completion_cleanup();
-                self.remote_transfer_panel_collapsed = false;
+                self.request_transfer_panel_expansion(cx);
                 self.clear_operation_notice();
             }
             Err(error) => self.set_error_notice(error),
@@ -481,7 +503,7 @@ impl ExplorerView {
         self.pending_remote_transfer_reveal = None;
     }
 
-    fn reveal_remote_transfer(
+    pub(super) fn reveal_remote_transfer(
         &mut self,
         id: u64,
         side: TransferRevealSide,
@@ -582,18 +604,25 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn render_transfers(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn transfer_panel_parts(
+        &mut self,
+        owner: Option<u64>,
+        include_remote: bool,
+        cx: &mut Context<Self>,
+    ) -> TransferPanelParts {
         let mut jobs = self
             .download_notice_rows
             .iter()
-            .map(TransferPanelJob::from_download)
+            .map(|row| TransferPanelJob::from_download(row, owner))
             .collect::<Vec<_>>();
-        jobs.extend(
-            self.remote_transfer_snapshots
-                .clone()
-                .into_iter()
-                .map(TransferPanelJob::from_server),
-        );
+        if include_remote {
+            jobs.extend(
+                self.remote_transfer_snapshots
+                    .clone()
+                    .into_iter()
+                    .map(TransferPanelJob::from_server),
+            );
+        }
         let native_icons = jobs
             .iter()
             .filter_map(|job| {
@@ -601,6 +630,30 @@ impl ExplorerView {
                     .map(|icon| (job.id, icon))
             })
             .collect();
+        TransferPanelParts { jobs, native_icons }
+    }
+
+    pub(super) fn control_remote_transfer(
+        &mut self,
+        id: u64,
+        action: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let sftp = cx
+            .try_global::<SettingsState>()
+            .map(|settings| settings.value.sftp)
+            .unwrap_or_default();
+        remote_transfer::control(id, action, sftp);
+        if action == "dismiss" {
+            self.remote_transfer_snapshots.retain(|job| job.id != id);
+        }
+        let snapshots = remote_transfer::snapshots();
+        self.apply_remote_transfer_snapshots(snapshots, cx);
+        cx.notify();
+    }
+
+    pub(super) fn render_transfers(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let TransferPanelParts { jobs, native_icons } = self.transfer_panel_parts(None, true, cx);
         let entity = cx.entity();
         let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
             if let TransferJobId::Server(id) = id {
@@ -612,28 +665,17 @@ impl ExplorerView {
         let entity = cx.entity();
         let on_control: TransferControlHandler = Rc::new(move |id, action, _, cx| {
             let _ = entity.update(cx, |view, cx| match id {
-                TransferJobId::Download(id) if action == "cancel" => {
+                TransferJobId::Download { id, .. } if action == "cancel" => {
                     view.cancel_download(id, cx);
                 }
                 TransferJobId::Server(id) => {
-                    let sftp = cx
-                        .try_global::<SettingsState>()
-                        .map(|settings| settings.value.sftp)
-                        .unwrap_or_default();
-                    remote_transfer::control(id, action, sftp);
-                    if action == "dismiss" {
-                        view.remote_transfer_snapshots.retain(|job| job.id != id);
-                    }
-                    let snapshots = remote_transfer::snapshots();
-                    view.apply_remote_transfer_snapshots(snapshots, cx);
-                    cx.notify();
+                    view.control_remote_transfer(id, action, cx);
                 }
-                TransferJobId::Download(_) => {}
+                TransferJobId::Download { .. } => {}
             });
         });
         render_transfer_panel(
-            jobs,
-            native_icons,
+            TransferPanelParts { jobs, native_icons },
             self.remote_transfer_panel_collapsed,
             cx.listener(|view, _: &ClickEvent, _, cx| {
                 view.remote_transfer_panel_collapsed = !view.remote_transfer_panel_collapsed;
@@ -658,15 +700,15 @@ fn transfer_panel_should_expand(previous: &[JobSnapshot], next: &[JobSnapshot]) 
     })
 }
 
-fn render_transfer_panel<V: 'static>(
-    jobs: Vec<TransferPanelJob>,
-    native_icons: HashMap<TransferJobId, Arc<gpui::Image>>,
+pub(super) fn render_transfer_panel<V: 'static>(
+    parts: TransferPanelParts,
     collapsed: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_reveal: TransferRevealHandler,
     on_control: TransferControlHandler,
     _cx: &mut Context<V>,
 ) -> AnyElement {
+    let TransferPanelParts { jobs, native_icons } = parts;
     if jobs.is_empty() {
         return div().into_any_element();
     }
@@ -1628,8 +1670,10 @@ mod tests {
                     .debug_selector(|| "transfer-space".into())
                     .w_full()
                     .child(render_transfer_panel(
-                        self.jobs.clone(),
-                        HashMap::new(),
+                        TransferPanelParts {
+                            jobs: self.jobs.clone(),
+                            native_icons: HashMap::new(),
+                        },
                         self.collapsed,
                         cx.listener(|panel, _: &ClickEvent, _, cx| {
                             panel.collapsed = !panel.collapsed;
@@ -1652,8 +1696,10 @@ mod tests {
         fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
             let entity = cx.entity();
             div().size_full().child(render_transfer_panel(
-                vec![self.job.clone()],
-                HashMap::new(),
+                TransferPanelParts {
+                    jobs: vec![self.job.clone()],
+                    native_icons: HashMap::new(),
+                },
                 false,
                 cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()),
                 Rc::new(move |id, side, _, cx| {
@@ -1947,14 +1993,17 @@ mod tests {
 
     #[test]
     fn download_rows_map_progress_attention_and_cancel_capabilities() {
-        let known = TransferPanelJob::from_download(&download_row(
-            1,
-            DownloadNoticeStatus::Downloading {
-                downloaded_bytes: 25,
-                total_bytes: Some(100),
-            },
-        ));
-        assert_eq!(known.id, TransferJobId::Download(1));
+        let known = TransferPanelJob::from_download(
+            &download_row(
+                1,
+                DownloadNoticeStatus::Downloading {
+                    downloaded_bytes: 25,
+                    total_bytes: Some(100),
+                },
+            ),
+            None,
+        );
+        assert_eq!(known.id, TransferJobId::Download { owner: None, id: 1 });
         assert_eq!(known.state, State::Transferring);
         assert_eq!(known.percentage, Some(25));
         assert!(!known.indeterminate);
@@ -1975,36 +2024,44 @@ mod tests {
             ["cancel"]
         );
 
-        let unknown = TransferPanelJob::from_download(&download_row(
-            2,
-            DownloadNoticeStatus::Downloading {
-                downloaded_bytes: 512,
-                total_bytes: None,
-            },
-        ));
+        let unknown = TransferPanelJob::from_download(
+            &download_row(
+                2,
+                DownloadNoticeStatus::Downloading {
+                    downloaded_bytes: 512,
+                    total_bytes: None,
+                },
+            ),
+            None,
+        );
         assert_eq!(unknown.percentage, None);
         assert!(unknown.indeterminate);
         assert_eq!(transfer_progress_labels(&unknown).secondary, "512 bytes");
 
-        let waiting = TransferPanelJob::from_download(&download_row(
-            3,
-            DownloadNoticeStatus::WaitingForCredentials,
-        ));
+        let waiting = TransferPanelJob::from_download(
+            &download_row(3, DownloadNoticeStatus::WaitingForCredentials),
+            None,
+        );
         assert_eq!(waiting.state, State::Attention);
         assert_eq!(waiting.progress_status, "Waiting");
         assert!(waiting.download_active);
 
-        let failed = TransferPanelJob::from_download(&download_row(
-            4,
-            DownloadNoticeStatus::Failed("Download failed".to_owned()),
-        ));
+        let failed = TransferPanelJob::from_download(
+            &download_row(
+                4,
+                DownloadNoticeStatus::Failed("Download failed".to_owned()),
+            ),
+            None,
+        );
         assert_eq!(failed.state, State::Attention);
         assert_eq!(failed.message, "Download failed");
         assert!(!failed.indeterminate);
         assert!(transfer_row_actions(&failed).is_empty());
 
-        let completed =
-            TransferPanelJob::from_download(&download_row(5, DownloadNoticeStatus::Completed));
+        let completed = TransferPanelJob::from_download(
+            &download_row(5, DownloadNoticeStatus::Completed),
+            None,
+        );
         assert_eq!(completed.state, State::Completed);
         assert_eq!(completed.percentage, Some(100));
         assert_eq!(transfer_progress_labels(&completed).secondary, "Completed");
@@ -2015,17 +2072,23 @@ mod tests {
     fn mixed_download_and_server_jobs_share_the_transfer_table_and_toolbar(
         cx: &mut gpui::TestAppContext,
     ) {
-        let download = TransferPanelJob::from_download(&download_row(
-            1,
-            DownloadNoticeStatus::Downloading {
-                downloaded_bytes: 25,
-                total_bytes: Some(100),
-            },
-        ));
-        let failed = TransferPanelJob::from_download(&download_row(
-            2,
-            DownloadNoticeStatus::Failed("Download failed".to_owned()),
-        ));
+        let download = TransferPanelJob::from_download(
+            &download_row(
+                1,
+                DownloadNoticeStatus::Downloading {
+                    downloaded_bytes: 25,
+                    total_bytes: Some(100),
+                },
+            ),
+            None,
+        );
+        let failed = TransferPanelJob::from_download(
+            &download_row(
+                2,
+                DownloadNoticeStatus::Failed("Download failed".to_owned()),
+            ),
+            None,
+        );
         let server = TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring));
         let (_, cx) = cx.add_window_view(|_, _| Panel {
             jobs: vec![download, failed, server],

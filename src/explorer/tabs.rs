@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    rc::Rc,
     time::Duration,
 };
 
@@ -20,6 +21,10 @@ use crate::explorer::{
     drag_drop::{DraggedEntries, DropDestination},
     icons::{
         drive_wsl_icon, drives_group_icon, folder_icon, network_group_icon, pinned_group_icon,
+    },
+    remote_ui::{
+        TransferControlHandler, TransferJobId, TransferPanelParts, TransferRevealHandler,
+        render_transfer_panel,
     },
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
@@ -535,6 +540,7 @@ pub struct ExplorerTabs {
     tab_context_menu: Option<TabContextMenu>,
     tab_scroll_handle: ScrollHandle,
     should_move_window: bool,
+    transfer_panel_collapsed: bool,
 }
 
 impl WindowDragState for ExplorerTabs {
@@ -588,6 +594,7 @@ impl ExplorerTabs {
             tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
             should_move_window: false,
+            transfer_panel_collapsed: false,
         }
     }
 
@@ -619,6 +626,7 @@ impl ExplorerTabs {
             tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
             should_move_window: false,
+            transfer_panel_collapsed: false,
         }
     }
 
@@ -1831,6 +1839,86 @@ impl ExplorerTabs {
             .is_some_and(|tab| tab.layout.set_ratio(drag.split_id, ratio))
     }
 
+    fn pane_view_for_transfer_owner(&self, owner: u64) -> Option<Entity<ExplorerView>> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .find(|pane| pane.id.0 == owner)
+            .map(|pane| pane.view.clone())
+    }
+
+    fn transfer_panel_parts(&self, cx: &mut Context<Self>) -> TransferPanelParts {
+        let active_view_id = self
+            .active_tab()
+            .map(ExplorerTab::active_view)
+            .map(|view| view.entity_id());
+        let sources = self
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|pane| (pane.id.0, pane.view.clone()))
+            .collect::<Vec<_>>();
+        let mut parts = TransferPanelParts::default();
+        for (owner, view) in sources {
+            let include_remote = active_view_id == Some(view.entity_id());
+            parts.extend(view.update(cx, |view, cx| {
+                view.transfer_panel_parts(Some(owner), include_remote, cx)
+            }));
+        }
+        parts
+    }
+
+    fn render_transfers(&self, cx: &mut Context<Self>) -> AnyElement {
+        let parts = self.transfer_panel_parts(cx);
+        let entity = cx.entity();
+        let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
+            let TransferJobId::Server(id) = id else {
+                return;
+            };
+            let active_view = entity.read(cx).active_tab().map(ExplorerTab::active_view);
+            if let Some(view) = active_view {
+                let _ = view.update(cx, |view, cx| {
+                    view.reveal_remote_transfer(id, side, cx);
+                });
+            }
+        });
+
+        let entity = cx.entity();
+        let on_control: TransferControlHandler = Rc::new(move |id, action, _, cx| match id {
+            TransferJobId::Download {
+                owner: Some(owner),
+                id,
+            } if action == "cancel" => {
+                let owner_view = entity.read(cx).pane_view_for_transfer_owner(owner);
+                if let Some(view) = owner_view {
+                    let _ = view.update(cx, |view, cx| view.cancel_download(id, cx));
+                }
+            }
+            TransferJobId::Server(id) => {
+                let active_view = entity.read(cx).active_tab().map(ExplorerTab::active_view);
+                if let Some(view) = active_view {
+                    let _ = view.update(cx, |view, cx| {
+                        view.control_remote_transfer(id, action, cx);
+                    });
+                }
+            }
+            TransferJobId::Download { .. } => {}
+        });
+
+        render_transfer_panel(
+            parts,
+            self.transfer_panel_collapsed,
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.transfer_panel_collapsed = !this.transfer_panel_collapsed;
+                cx.stop_propagation();
+                cx.notify();
+            }),
+            on_reveal,
+            on_control,
+            cx,
+        )
+    }
+
     fn render_active_layout(
         &self,
         tab: &ExplorerTab,
@@ -2298,18 +2386,20 @@ impl Render for ExplorerTabs {
                 view.render_shared_chrome(window, view_cx)
             })
         });
-        let (navbar, utility_bar, sidebar, chrome_overlays) = match shared_chrome {
+        let (navbar, utility_bar, sidebar, status_bar, chrome_overlays) = match shared_chrome {
             Some(chrome) => (
                 Some(chrome.navbar),
                 Some(chrome.utility_bar),
                 chrome.sidebar,
+                Some(chrome.status_bar),
                 chrome.overlays,
             ),
-            None => (None, None, None, Vec::new()),
+            None => (None, None, None, None, Vec::new()),
         };
         let active_layout = active_workspace
             .as_ref()
             .map(|tab| self.render_active_layout(tab, window, cx));
+        let transfers = self.render_transfers(cx);
         let tab_context_menu = self.render_tab_context_menu(cx);
 
         let mut content = div()
@@ -2373,11 +2463,22 @@ impl Render for ExplorerTabs {
                     .child(
                         div()
                             .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w(px(0.0))
                             .h_full()
                             .overflow_hidden()
-                            .when_some(active_layout, |this, layout| this.child(layout)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .when_some(active_layout, |this, layout| this.child(layout)),
+                            )
+                            .child(transfers)
+                            .when_some(status_bar, |this, status_bar| this.child(status_bar)),
                     ),
             );
 
@@ -2554,6 +2655,10 @@ fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Conte
             }
             ExplorerViewEvent::OpenDirectoryInNewTab(path) => {
                 this.add_configured_tab(path.clone(), window, cx);
+                cx.notify();
+            }
+            ExplorerViewEvent::ExpandTransfers => {
+                this.transfer_panel_collapsed = false;
                 cx.notify();
             }
         },
@@ -2835,6 +2940,10 @@ mod tests {
             FileClipboard, FileClipboardOperation, clipboard_summary, file_clipboard_from_item,
             initialize_clipboard_summary, write_to_clipboard_and_refresh,
         },
+        codebase_summary::{CodebaseLanguageSummary, CodebaseSummary},
+        download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
+        git_status::GitRepositoryStatus,
+        remote_transfer::{JobSnapshot, State as TransferState},
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
@@ -2937,6 +3046,19 @@ mod tests {
             ExplorerTabs::new_for_test(path, focus_handle, cx)
         });
         (temp, tabs, cx)
+    }
+
+    fn transfer_download_row(id: u64, destination: PathBuf) -> DownloadNoticeRow {
+        DownloadNoticeRow {
+            id,
+            kind: DownloadNoticeKind::File,
+            file_name: format!("download-{id}.zip"),
+            destination,
+            status: DownloadNoticeStatus::Downloading {
+                downloaded_bytes: 25,
+                total_bytes: Some(100),
+            },
+        }
     }
 
     fn create_zip_archive(path: &Path, entries: &[(&str, &[u8])]) {
@@ -5887,6 +6009,299 @@ mod tests {
                 }
             });
         });
+    }
+
+    #[gpui::test]
+    fn shared_bottom_chrome_tracks_focus_and_aggregates_window_transfers(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+
+        let (workspace_tab, left_pane, right_pane, inactive_tab, inactive_pane, right_view) = cx
+            .update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    tabs.add_background_tab(temp.path().join("a"), window, cx);
+                    let workspace_tab = tabs.tabs[0].id;
+                    let left_pane = tabs.tabs[0].active_pane;
+                    let source_tab = tabs.tabs[1].id;
+                    let right_pane = tabs.tabs[1].active_pane;
+                    assert!(tabs.split_tab_into_pane(
+                        source_tab,
+                        workspace_tab,
+                        left_pane,
+                        SplitDirection::Right,
+                        window,
+                        cx,
+                    ));
+                    tabs.add_background_tab(temp.path().join("b"), window, cx);
+                    let inactive_tab = tabs.tabs[1].id;
+                    let inactive_pane = tabs.tabs[1].active_pane;
+
+                    let split = &tabs.tabs[0];
+                    let left_view = split.pane(left_pane).unwrap().view.clone();
+                    let right_view = split.pane(right_pane).unwrap().view.clone();
+                    let inactive_view = tabs.tabs[1].active_view();
+                    let remote = JobSnapshot::for_test(TransferState::Transferring);
+                    for (view, destination) in [
+                        (left_view.clone(), temp.path().join("left")),
+                        (right_view.clone(), temp.path().join("right")),
+                        (inactive_view, temp.path().join("inactive")),
+                    ] {
+                        view.update(cx, |view, cx| {
+                            view.download_notice_rows = vec![transfer_download_row(7, destination)];
+                            view.remote_transfer_snapshots = vec![remote.clone()];
+                            cx.notify();
+                        });
+                    }
+                    right_view.update(cx, |view, cx| {
+                        view.git_status = Some(GitRepositoryStatus {
+                            repo_root: temp.path().to_path_buf(),
+                            branch: "focused".to_owned(),
+                            divergence: None,
+                        });
+                        cx.notify();
+                    });
+                    left_view.update(cx, |view, cx| {
+                        view.codebase_summary = Some(CodebaseSummary {
+                            repo_root: temp.path().to_path_buf(),
+                            total_code: 10,
+                            languages: vec![CodebaseLanguageSummary {
+                                name: "Rust".to_owned(),
+                                code: 10,
+                                percentage: 100,
+                                color: 0xde3c10,
+                            }],
+                        });
+                        cx.notify();
+                    });
+                    cx.notify();
+                    (
+                        workspace_tab,
+                        left_pane,
+                        right_pane,
+                        inactive_tab,
+                        inactive_pane,
+                        right_view,
+                    )
+                })
+            });
+        cx.run_until_parked();
+
+        let parts = cx.update(|_, app| tabs.update(app, |tabs, cx| tabs.transfer_panel_parts(cx)));
+        assert_eq!(parts.jobs.len(), 4);
+        assert_eq!(
+            parts
+                .jobs
+                .iter()
+                .filter(|job| matches!(job.id, TransferJobId::Server(_)))
+                .count(),
+            1
+        );
+        assert_eq!((left_pane.0, right_pane.0, inactive_pane.0), (1, 2, 3));
+        for selector in [
+            "transfer-row-download-1-7",
+            "transfer-row-download-2-7",
+            "transfer-row-download-3-7",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+
+        let left_bounds = cx
+            .debug_bounds("explorer-pane-1")
+            .expect("left pane bounds");
+        let right_bounds = cx
+            .debug_bounds("explorer-pane-2")
+            .expect("right pane bounds");
+        let sidebar = cx.debug_bounds("explorer-sidebar").expect("sidebar bounds");
+        let transfers = cx.debug_bounds("transfers").expect("transfers bounds");
+        let status = cx
+            .debug_bounds("explorer-status-bar")
+            .expect("status bar bounds");
+        assert_eq!(transfers.origin.x, sidebar.right());
+        assert_eq!(status.origin.x, sidebar.right());
+        assert_eq!(transfers.right(), status.right());
+        assert!(left_bounds.bottom() <= transfers.origin.y);
+        assert!(right_bounds.bottom() <= transfers.origin.y);
+        assert_eq!(transfers.bottom(), status.origin.y);
+        assert!(cx.debug_bounds("git-branch-status").is_some());
+        assert!(cx.debug_bounds("codebase-lines-of-code").is_none());
+
+        cx.simulate_click(left_bounds.center(), Modifiers::default());
+        cx.refresh().expect("refresh focused status bar");
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, cx| {
+            let tab = tabs.active_tab().unwrap();
+            assert_eq!(tab.active_pane, left_pane);
+            assert_eq!(
+                tab.active_view().entity_id(),
+                tab.pane(left_pane).unwrap().view.entity_id()
+            );
+            assert!(tab.active_view().read(cx).git_status.is_none());
+            assert!(tab.active_view().read(cx).shared_chrome_hosted);
+            assert!(
+                tab.pane(right_pane)
+                    .unwrap()
+                    .view
+                    .read(cx)
+                    .shared_chrome_hosted
+            );
+        });
+        assert!(cx.debug_bounds("codebase-lines-of-code").is_some());
+        assert!(cx.debug_bounds("explorer-status-bar").is_some());
+
+        let cancel = cx
+            .debug_bounds("transfer-cancel-download-1-7")
+            .expect("left download cancel button");
+        cx.simulate_click(cancel.center(), Modifiers::default());
+        cx.read_entity(&tabs, |tabs, cx| {
+            let split = tabs
+                .tabs
+                .iter()
+                .find(|tab| tab.id == workspace_tab)
+                .unwrap();
+            assert!(
+                split
+                    .pane(left_pane)
+                    .unwrap()
+                    .view
+                    .read(cx)
+                    .download_notice_rows
+                    .is_empty()
+            );
+            assert_eq!(
+                split
+                    .pane(right_pane)
+                    .unwrap()
+                    .view
+                    .read(cx)
+                    .download_notice_rows
+                    .len(),
+                1
+            );
+            assert_eq!(
+                tabs.tabs
+                    .iter()
+                    .find(|tab| tab.id == inactive_tab)
+                    .unwrap()
+                    .active_view()
+                    .read(cx)
+                    .download_notice_rows
+                    .len(),
+                1
+            );
+        });
+
+        let toggle = cx.debug_bounds("transfer-toggle").expect("transfer toggle");
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                assert!(tabs.transfer_panel_collapsed);
+                tabs.activate_tab(inactive_tab, window, cx);
+                assert!(tabs.transfer_panel_collapsed);
+                right_view.update(cx, |view, cx| {
+                    view.request_transfer_panel_expansion(cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| assert!(!tabs.transfer_panel_collapsed));
+    }
+
+    #[gpui::test]
+    fn shared_transfer_reveal_navigates_only_the_focused_pane(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "destination"]);
+        let destination = temp.path().join("destination");
+
+        let (left_pane, right_pane, left_view, right_view) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let workspace_tab = tabs.tabs[0].id;
+                let left_pane = tabs.tabs[0].active_pane;
+                let source_tab = tabs.tabs[1].id;
+                let right_pane = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    source_tab,
+                    workspace_tab,
+                    left_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                let split = &tabs.tabs[0];
+                let left_view = split.pane(left_pane).unwrap().view.clone();
+                let right_view = split.pane(right_pane).unwrap().view.clone();
+                let mut remote = JobSnapshot::for_test(TransferState::Completed);
+                remote.destination_reveal.directory = destination.clone();
+                remote.destination_reveal.paths = Vec::new();
+                for view in [&left_view, &right_view] {
+                    view.update(cx, |view, cx| {
+                        view.remote_transfer_snapshots = vec![remote.clone()];
+                        cx.notify();
+                    });
+                }
+                cx.notify();
+                (left_pane, right_pane, left_view, right_view)
+            })
+        });
+        cx.run_until_parked();
+
+        let left_bounds = cx
+            .debug_bounds("explorer-pane-1")
+            .expect("left pane bounds");
+        cx.simulate_click(left_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("transfer-row-server-123")
+            .expect("remote transfer row");
+        cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, left_pane);
+            assert_eq!(left_view.read(cx).path(), destination.as_path());
+            assert_eq!(right_view.read(cx).path(), temp.path().join("a").as_path());
+            assert_ne!(left_pane, right_pane);
+        });
+    }
+
+    #[gpui::test]
+    fn shared_status_bar_stays_below_a_vertical_split_and_right_of_the_sidebar(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a"]);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let workspace_tab = tabs.tabs[0].id;
+                let top_pane = tabs.tabs[0].active_pane;
+                let source_tab = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source_tab,
+                    workspace_tab,
+                    top_pane,
+                    SplitDirection::Down,
+                    window,
+                    cx,
+                ));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        let top = cx.debug_bounds("explorer-pane-1").expect("top pane bounds");
+        let bottom = cx
+            .debug_bounds("explorer-pane-2")
+            .expect("bottom pane bounds");
+        let sidebar = cx.debug_bounds("explorer-sidebar").expect("sidebar bounds");
+        let status = cx
+            .debug_bounds("explorer-status-bar")
+            .expect("shared status bar bounds");
+        assert!(top.bottom() <= bottom.origin.y);
+        assert!(bottom.bottom() <= status.origin.y);
+        assert_eq!(status.origin.x, sidebar.right());
+        assert!(cx.debug_bounds("transfers").is_none());
     }
 
     #[gpui::test]
