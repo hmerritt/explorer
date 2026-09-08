@@ -1,7 +1,5 @@
 ## 1
 
-- Reorder sidebar items (in Drives, Network, WSL, etc...). Save order to settings in an object sidebar.order, where the keys are the group, and the value is an array for the order. Rename sidebar.items to sidebar.pinned.
-
 ## 2
 
 ## 3

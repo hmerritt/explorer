@@ -21,7 +21,7 @@ use gpui::{
     Task, UniformListScrollHandle, Window, point, px, size,
 };
 
-use crate::explorer::sidebar::{SidebarSections, sidebar_sections};
+use crate::explorer::sidebar::{SidebarDragIdentity, SidebarSections, sidebar_sections};
 use crate::explorer::{
     address_bar::AddressBarState,
     archive_diagnostics::ArchiveDiagnostics,
@@ -144,7 +144,7 @@ pub struct ExplorerView {
     pub(super) cut_paths: BTreeSet<PathBuf>,
     pub(super) file_operation_undo_stack: Vec<FileOperationUndo>,
     pub(super) active_drop_indicator: Option<DropIndicator>,
-    pub(super) dragging_sidebar_item: Option<usize>,
+    pub(super) dragging_sidebar_item: Option<SidebarDragIdentity>,
     pub(super) sidebar_width: f32,
     pub(super) sidebar_auto_hide_expanded: bool,
     pub(super) sidebar_lower_hovered: bool,

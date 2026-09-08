@@ -10,7 +10,9 @@ use crate::explorer::portable_devices::{PortableDeviceRoot, portable_device_root
 use crate::explorer::{
     DirectoryKind, drive_display_label, local_drive_roots, resolve_directory_kind, wsl_drive_roots,
 };
-use crate::settings::{SidebarHiddenItem, SidebarSettings, expand_configured_path};
+use crate::settings::{
+    SidebarHiddenItem, SidebarOrderItem, SidebarSettings, expand_configured_path,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SidebarItem {
@@ -32,6 +34,15 @@ pub(super) enum SidebarItemKind {
     OneDrive,
     PortableDevice,
     DriveWsl,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum SidebarDragIdentity {
+    Pinned(usize),
+    Ordered {
+        group: crate::settings::SidebarGroupKind,
+        item: SidebarOrderItem,
+    },
 }
 
 pub(super) fn sidebar_sections(
@@ -57,7 +68,38 @@ pub(super) fn sidebar_sections(
         portable_device_roots(),
     );
     append_remote_items(&mut sections, settings, super::remote_fs::site_is_connected);
+    apply_sidebar_orders(&mut sections, settings);
     sections
+}
+
+fn apply_sidebar_orders(sections: &mut SidebarSections, settings: &SidebarSettings) {
+    apply_sidebar_order(&mut sections.drives, &settings.order.drives);
+    apply_sidebar_order(&mut sections.network_drives, &settings.order.network);
+    apply_sidebar_order(&mut sections.wsl_drives, &settings.order.wsl);
+}
+
+fn apply_sidebar_order(items: &mut [SidebarItem], order: &[SidebarOrderItem]) {
+    items.sort_by_key(|item| {
+        order
+            .iter()
+            .position(|ordered| ordered == &sidebar_order_item(item))
+            .unwrap_or(usize::MAX)
+    });
+}
+
+pub(super) fn sidebar_order_item(item: &SidebarItem) -> SidebarOrderItem {
+    match item.kind {
+        SidebarItemKind::GoogleDrive => SidebarOrderItem::GoogleDrive,
+        SidebarItemKind::OneDrive => SidebarOrderItem::OneDrive,
+        SidebarItemKind::Remote(_) => super::remote_fs::RemoteLocation::from_provider(&item.path)
+            .and_then(|location| {
+                let mut url = gpui::http_client::Url::parse(&location.site).ok()?;
+                url.set_path(&location.path);
+                Some(SidebarOrderItem::Remote(url.to_string()))
+            })
+            .unwrap_or_else(|| SidebarOrderItem::Path(item.path.clone())),
+        _ => SidebarOrderItem::Path(item.path.clone()),
+    }
 }
 
 fn append_remote_items(
@@ -117,7 +159,7 @@ fn sidebar_sections_from_roots_internal(
     network_drives.extend(google_drive);
     network_drives.extend(onedrive);
     let mut sections = SidebarSections {
-        user_directories: configured_sidebar_items(&settings.items, filesystem_name),
+        user_directories: configured_sidebar_items(&settings.pinned, filesystem_name),
         drives: {
             let mut drives = drive_items_from_roots(drive_roots, filesystem_name);
             drives.extend(portable_device_items(portable_roots));
@@ -757,7 +799,7 @@ mod tests {
     fn sidebar_sections_keep_wsl_drives_separate_from_local_drives() {
         let sections = sidebar_sections_from_roots(
             &SidebarSettings {
-                items: Vec::new(),
+                pinned: Vec::new(),
                 ..SidebarSettings::default()
             },
             "Filesystem",
@@ -813,7 +855,7 @@ mod tests {
         let mounted_path = PathBuf::from("/mnt/team");
         let sections = sidebar_sections_from_sources(
             &SidebarSettings {
-                items: Vec::new(),
+                pinned: Vec::new(),
                 ..SidebarSettings::default()
             },
             "Filesystem",
@@ -870,7 +912,7 @@ mod tests {
             configured_index: None,
         };
         let settings = SidebarSettings {
-            items: Vec::new(),
+            pinned: Vec::new(),
             remote: vec![
                 RemoteSidebarItem {
                     address: "alpha.example".to_owned(),
@@ -921,6 +963,95 @@ mod tests {
         );
         assert_eq!(sections.network_drives[3], google_drive);
         assert_eq!(sections.network_drives[4], onedrive);
+    }
+
+    #[test]
+    fn stored_order_applies_after_all_sidebar_group_sources_are_assembled() {
+        let first_drive = PathBuf::from(if cfg!(target_os = "windows") {
+            r"C:\"
+        } else {
+            "/"
+        });
+        let second_drive = PathBuf::from(if cfg!(target_os = "windows") {
+            r"D:\"
+        } else {
+            "/mnt/archive"
+        });
+        let mapped_path = PathBuf::from(if cfg!(target_os = "windows") {
+            r"S:\"
+        } else {
+            "/mnt/team"
+        });
+        let first_wsl = PathBuf::from(r"\\wsl.localhost\Ubuntu\");
+        let second_wsl = PathBuf::from(r"\\wsl.localhost\Debian\");
+        let onedrive = SidebarItem {
+            label: "OneDrive".to_owned(),
+            path: PathBuf::from("onedrive"),
+            kind: SidebarItemKind::OneDrive,
+            configured_index: None,
+        };
+        let mut settings = SidebarSettings {
+            pinned: Vec::new(),
+            remote: vec![RemoteSidebarItem {
+                address: "files.example".to_owned(),
+                path: "/team".to_owned(),
+                label: Some("Files".to_owned()),
+            }],
+            ..SidebarSettings::default()
+        };
+        let mut sections = sidebar_sections_from_sources(
+            &settings,
+            "Filesystem",
+            vec![first_drive.clone(), second_drive.clone()],
+            Vec::new(),
+            vec![NetworkDrive {
+                label: "Team Share".to_owned(),
+                path: mapped_path.clone(),
+                state: NetworkDriveState::Connected,
+                local_name: None,
+                remote_name: r"\\server\team".to_owned(),
+            }],
+            None,
+            Some(onedrive),
+            vec![first_wsl.clone(), second_wsl.clone()],
+        );
+        append_remote_items(&mut sections, &settings, |_| false);
+        let remote = sections
+            .network_drives
+            .iter()
+            .find(|item| matches!(item.kind, SidebarItemKind::Remote(_)))
+            .map(sidebar_order_item)
+            .unwrap();
+        settings.order.drives = vec![SidebarOrderItem::Path(second_drive.clone())];
+        settings.order.network = vec![SidebarOrderItem::OneDrive, remote];
+        settings.order.wsl = vec![SidebarOrderItem::Path(second_wsl.clone())];
+
+        apply_sidebar_orders(&mut sections, &settings);
+
+        assert_eq!(
+            sections
+                .drives
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>(),
+            vec![second_drive, first_drive]
+        );
+        assert_eq!(
+            sections
+                .network_drives
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["OneDrive", "Files", "Team Share"]
+        );
+        assert_eq!(
+            sections
+                .wsl_drives
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>(),
+            vec![second_wsl, first_wsl]
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1046,7 +1177,7 @@ mod tests {
                 SidebarHiddenItem::GoogleDrive,
                 SidebarHiddenItem::OneDrive,
             ],
-            items: vec![pinned_and_drive.clone()],
+            pinned: vec![pinned_and_drive.clone()],
             ..SidebarSettings::default()
         };
         let google_drive = SidebarItem {
@@ -1090,7 +1221,7 @@ mod tests {
         let sections = sidebar_sections_from_roots(
             &SidebarSettings {
                 hide_groups: vec![SidebarGroupKind::Wsl],
-                items: Vec::new(),
+                pinned: Vec::new(),
                 ..SidebarSettings::default()
             },
             "Filesystem",

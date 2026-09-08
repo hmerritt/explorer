@@ -3556,7 +3556,7 @@ mod tests {
         cx.update(|window, app| {
             tabs.update(app, |_, cx| observe_tab_view(&view, window, cx));
             view.update(app, |view, _| {
-                view.sidebar_settings.items = vec![sidebar_path.clone()];
+                view.sidebar_settings.pinned = vec![sidebar_path.clone()];
                 view.sidebar_sections = crate::explorer::sidebar::sidebar_sections(
                     &view.sidebar_settings,
                     &view.filesystem_name,

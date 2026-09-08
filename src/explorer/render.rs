@@ -103,7 +103,9 @@ use crate::explorer::{
     },
     search::search_text_element,
     selection::SelectionModifiers,
-    sidebar::{SidebarItem, SidebarItemKind, sidebar_hidden_item},
+    sidebar::{
+        SidebarDragIdentity, SidebarItem, SidebarItemKind, sidebar_hidden_item, sidebar_order_item,
+    },
     sidebar_group_view::{drive_capacity_text, used_capacity_fraction},
     text_hover_preview::{
         HoverPreviewKind, TEXT_HOVER_PREVIEW_LINE_HEIGHT, TEXT_HOVER_PREVIEW_PADDING,
@@ -230,7 +232,7 @@ impl Render for FileColumnHeaderDragPreview {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SidebarItemDrag {
-    configured_index: usize,
+    identity: SidebarDragIdentity,
     label: SharedString,
     path: PathBuf,
     kind: SidebarItemKind,
@@ -1701,7 +1703,7 @@ impl ExplorerView {
                     children.push(
                         self.render_sidebar_insertion_zone(
                             item.configured_index
-                                .unwrap_or(self.sidebar_settings.items.len()),
+                                .unwrap_or(self.sidebar_settings.pinned.len()),
                             index,
                             SIDEBAR_ITEM_GAP,
                             cx,
@@ -1710,6 +1712,7 @@ impl ExplorerView {
                     children.push(self.render_sidebar_row(
                         index,
                         item,
+                        SidebarGroupKind::Pinned,
                         SIDEBAR_GROUP_CHILD_INDENT,
                         cx,
                     ));
@@ -1720,7 +1723,7 @@ impl ExplorerView {
                     .last()
                     .and_then(|item| item.configured_index)
                     .map(|index| index + 1)
-                    .unwrap_or(self.sidebar_settings.items.len());
+                    .unwrap_or(self.sidebar_settings.pinned.len());
                 children.push(self.render_sidebar_insertion_zone(
                     final_insertion_index,
                     sections.user_directories.len(),
@@ -1756,6 +1759,7 @@ impl ExplorerView {
                     children.push(self.render_sidebar_row(
                         index + 2_000,
                         item,
+                        SidebarGroupKind::Drives,
                         SIDEBAR_GROUP_CHILD_INDENT,
                         cx,
                     ));
@@ -1789,6 +1793,7 @@ impl ExplorerView {
                     children.push(self.render_sidebar_row(
                         index + 3_000,
                         item,
+                        SidebarGroupKind::Network,
                         SIDEBAR_GROUP_CHILD_INDENT,
                         cx,
                     ));
@@ -1825,6 +1830,7 @@ impl ExplorerView {
                     children.push(self.render_sidebar_row(
                         index + 4_000,
                         item,
+                        SidebarGroupKind::Wsl,
                         SIDEBAR_GROUP_CHILD_INDENT,
                         cx,
                     ));
@@ -2145,6 +2151,7 @@ impl ExplorerView {
         &self,
         id: usize,
         item: SidebarItem,
+        group: SidebarGroupKind,
         content_indent: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2154,7 +2161,14 @@ impl ExplorerView {
         let path = item.path.clone();
         let icon_item = item.clone();
         let configured_index = item.configured_index;
-        let is_dragging = sidebar_item_is_dragging(configured_index, self.dragging_sidebar_item);
+        let drag_identity = configured_index
+            .map(SidebarDragIdentity::Pinned)
+            .unwrap_or_else(|| SidebarDragIdentity::Ordered {
+                group,
+                item: sidebar_order_item(&item),
+            });
+        let is_dragging =
+            sidebar_item_is_dragging(&drag_identity, self.dragging_sidebar_item.as_ref());
         let accepts_directory_drop = matches!(
             item.kind,
             SidebarItemKind::Directory(_)
@@ -2270,81 +2284,120 @@ impl ExplorerView {
             }),
         );
 
-        if let Some(configured_index) = configured_index {
-            let drag_label = SharedString::from(item.label.clone());
-            let drag_path = item.path.clone();
-            let drag_kind = item.kind;
-            row = row
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                        if this.dragging_sidebar_item.take().is_some() {
-                            cx.notify();
-                        }
-                    }),
-                )
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                        if this.dragging_sidebar_item.take().is_some() {
-                            cx.notify();
-                        }
-                    }),
-                )
-                .on_drag(
-                    SidebarItemDrag {
-                        configured_index,
-                        label: drag_label,
-                        path: drag_path,
-                        kind: drag_kind,
-                    },
-                    {
-                        let entity = entity.clone();
-                        move |drag, _, _, cx| {
-                            let width = entity.update(cx, |this, cx| {
-                                this.dragging_sidebar_item = Some(drag.configured_index);
-                                cx.notify();
-                                this.sidebar_width
-                            });
-                            let font = entity.read(cx).font.clone();
-                            cx.new(move |_| SidebarItemDragPreview {
-                                label: drag.label.clone(),
-                                path: drag.path.clone(),
-                                kind: drag.kind,
-                                width,
-                                font,
-                            })
-                        }
-                    },
-                )
-                .on_drag_move::<SidebarItemDrag>({
-                    let entity = entity.clone();
-                    move |event: &DragMoveEvent<SidebarItemDrag>, _, cx| {
-                        if !event.bounds.contains(&event.event.position) {
-                            return;
-                        }
-                        let top = f32::from(event.bounds.origin.y);
-                        let height = f32::from(event.bounds.size.height);
-                        let cursor_y = f32::from(event.event.position.y);
-                        let before = cursor_y < top + (height / 2.0);
-                        let fallback_source = event.drag(cx).configured_index;
-
-                        let _ = entity.update(cx, |this, cx| {
-                            let source_index =
-                                this.dragging_sidebar_item.unwrap_or(fallback_source);
-                            if let Some(new_index) = crate::settings::reorder_sidebar_item(
-                                source_index,
-                                configured_index,
-                                before,
-                                cx,
-                            ) {
-                                this.dragging_sidebar_item = Some(new_index);
-                                cx.notify();
-                            }
-                        });
+        let drag_label = SharedString::from(item.label.clone());
+        let drag_path = item.path.clone();
+        let drag_kind = item.kind;
+        let target_drag_identity = drag_identity.clone();
+        row = row
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.dragging_sidebar_item.take().is_some() {
+                        cx.notify();
                     }
-                });
-        }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.dragging_sidebar_item.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drag(
+                SidebarItemDrag {
+                    identity: drag_identity,
+                    label: drag_label,
+                    path: drag_path,
+                    kind: drag_kind,
+                },
+                {
+                    let entity = entity.clone();
+                    move |drag, _, _, cx| {
+                        let width = entity.update(cx, |this, cx| {
+                            this.dragging_sidebar_item = Some(drag.identity.clone());
+                            cx.notify();
+                            this.sidebar_width
+                        });
+                        let font = entity.read(cx).font.clone();
+                        cx.new(move |_| SidebarItemDragPreview {
+                            label: drag.label.clone(),
+                            path: drag.path.clone(),
+                            kind: drag.kind,
+                            width,
+                            font,
+                        })
+                    }
+                },
+            )
+            .on_drag_move::<SidebarItemDrag>({
+                let entity = entity.clone();
+                move |event: &DragMoveEvent<SidebarItemDrag>, _, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    let top = f32::from(event.bounds.origin.y);
+                    let height = f32::from(event.bounds.size.height);
+                    let cursor_y = f32::from(event.event.position.y);
+                    let before = cursor_y < top + (height / 2.0);
+                    let fallback_source = event.drag(cx).identity.clone();
+
+                    let _ = entity.update(cx, |this, cx| {
+                        let source = this
+                            .dragging_sidebar_item
+                            .clone()
+                            .unwrap_or(fallback_source);
+                        match (&source, &target_drag_identity) {
+                            (
+                                SidebarDragIdentity::Pinned(source_index),
+                                SidebarDragIdentity::Pinned(target_index),
+                            ) => {
+                                if let Some(new_index) = crate::settings::reorder_sidebar_item(
+                                    *source_index,
+                                    *target_index,
+                                    before,
+                                    cx,
+                                ) {
+                                    this.dragging_sidebar_item =
+                                        Some(SidebarDragIdentity::Pinned(new_index));
+                                    cx.notify();
+                                }
+                            }
+                            (
+                                SidebarDragIdentity::Ordered {
+                                    group: source_group,
+                                    item: source_item,
+                                },
+                                SidebarDragIdentity::Ordered {
+                                    group: target_group,
+                                    item: target_item,
+                                },
+                            ) if source_group == target_group => {
+                                let visible_items =
+                                    crate::explorer::sidebar_group_view::sidebar_group_items(
+                                        *source_group,
+                                        &this.sidebar_sections,
+                                    )
+                                    .iter()
+                                    .map(sidebar_order_item)
+                                    .collect::<Vec<_>>();
+                                if crate::settings::reorder_sidebar_group_item(
+                                    *source_group,
+                                    source_item,
+                                    target_item,
+                                    before,
+                                    &visible_items,
+                                    cx,
+                                ) {
+                                    cx.notify();
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                }
+            });
 
         if accepts_directory_drop {
             row = row
@@ -4063,10 +4116,10 @@ fn sidebar_pin_path_from_value(dragged_value: &dyn Any) -> Option<PathBuf> {
 }
 
 fn sidebar_item_is_dragging(
-    configured_index: Option<usize>,
-    dragging_index: Option<usize>,
+    identity: &SidebarDragIdentity,
+    dragging: Option<&SidebarDragIdentity>,
 ) -> bool {
-    configured_index.is_some() && configured_index == dragging_index
+    dragging == Some(identity)
 }
 
 fn sidebar_context_menu_target(
@@ -7861,7 +7914,7 @@ mod tests {
         git_status::{GitDivergence, GitRepositoryStatus},
         navigation::DirectoryOpenMode,
         selection::SelectionModifiers,
-        sidebar::{SidebarItem, SidebarItemKind, SidebarSections},
+        sidebar::{SidebarDragIdentity, SidebarItem, SidebarItemKind, SidebarSections},
         test_support::{TempDir, selected_names, test_view_entity, test_view_entity_at_path},
         view::{ExplorerView, OperationNoticeKind, ViewModeSelection},
     };
@@ -7897,7 +7950,7 @@ mod tests {
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
-        SidebarGroupKind, SidebarHiddenItem, SortDirection,
+        SidebarGroupKind, SidebarHiddenItem, SidebarOrderItem, SortDirection,
     };
 
     fn entry_names(view: &ExplorerView) -> Vec<String> {
@@ -9242,12 +9295,12 @@ mod tests {
     }
 
     #[test]
-    fn only_configured_sidebar_item_matching_active_drag_is_dimmed() {
-        assert!(sidebar_item_is_dragging(Some(2), Some(2)));
-        assert!(!sidebar_item_is_dragging(Some(2), Some(1)));
-        assert!(!sidebar_item_is_dragging(Some(2), None));
-        assert!(!sidebar_item_is_dragging(None, None));
-        assert!(!sidebar_item_is_dragging(None, Some(2)));
+    fn only_sidebar_item_matching_active_drag_is_dimmed() {
+        let first = SidebarDragIdentity::Pinned(2);
+        let second = SidebarDragIdentity::Pinned(1);
+        assert!(sidebar_item_is_dragging(&first, Some(&first)));
+        assert!(!sidebar_item_is_dragging(&first, Some(&second)));
+        assert!(!sidebar_item_is_dragging(&first, None));
     }
 
     #[test]
@@ -9466,7 +9519,7 @@ mod tests {
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         cx.set_global(SettingsState::for_test(settings.clone()));
 
         let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -9509,7 +9562,7 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Network];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -9557,7 +9610,7 @@ mod tests {
         let path = temp.path().to_path_buf();
         let pinned_path = temp.path().join("pinned");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = vec![pinned_path.clone()];
+        settings.sidebar.pinned = vec![pinned_path.clone()];
         settings.sidebar.expanded_groups = vec![
             SidebarGroupKind::Pinned,
             SidebarGroupKind::Drives,
@@ -9612,7 +9665,7 @@ mod tests {
         let pinned_path = temp.path().join("pinned");
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Pinned];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -9674,7 +9727,7 @@ mod tests {
         let pinned_path = temp.path().join("pinned");
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = Vec::new();
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -9727,7 +9780,7 @@ mod tests {
         let pinned_path = temp.path().join("pinned");
         fs::create_dir(&pinned_path).unwrap();
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = vec![pinned_path.clone()];
+        settings.sidebar.pinned = vec![pinned_path.clone()];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
         let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -9759,7 +9812,7 @@ mod tests {
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Drives];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -9798,12 +9851,85 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dragging_drive_row_reorders_and_persists_group_order(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let first_drive = temp.path().join("first-drive");
+        let second_drive = temp.path().join("second-drive");
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.pinned = Vec::new();
+        settings.sidebar.expanded_groups = vec![SidebarGroupKind::Drives];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.sidebar_sections = SidebarSections {
+                drives: vec![
+                    SidebarItem {
+                        label: "First".to_owned(),
+                        path: first_drive,
+                        kind: SidebarItemKind::Drive,
+                        configured_index: None,
+                    },
+                    SidebarItem {
+                        label: "Second".to_owned(),
+                        path: second_drive,
+                        kind: SidebarItemKind::Drive,
+                        configured_index: None,
+                    },
+                ],
+                ..SidebarSections::default()
+            };
+            view
+        });
+
+        cx.run_until_parked();
+        let first = cx
+            .debug_bounds("explorer-sidebar-row-2000")
+            .expect("first drive row bounds");
+        let second = cx
+            .debug_bounds("explorer-sidebar-row-2001")
+            .expect("second drive row bounds");
+        let start = second.center();
+        let activate = gpui::point(start.x + gpui::px(10.0), start.y);
+        let target = gpui::point(first.center().x, first.origin.y + gpui::px(2.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(activate, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let expected = cx.read_entity(&view, |view, _| {
+            vec![
+                SidebarOrderItem::Path(view.sidebar_sections.drives[1].path.clone()),
+                SidebarOrderItem::Path(view.sidebar_sections.drives[0].path.clone()),
+            ]
+        });
+        assert_eq!(
+            cx.read(|cx| cx
+                .global::<SettingsState>()
+                .value
+                .sidebar
+                .order
+                .drives
+                .clone()),
+            expected
+        );
+        cx.read_entity(&view, |view, _| {
+            assert!(view.dragging_sidebar_item.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn right_clicking_sidebar_group_header_persists_and_repaints(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         cx.set_global(SettingsState::for_test(settings.clone()));
 
         let (view, cx) = cx.add_window_view(move |window, cx| {
@@ -9858,7 +9984,7 @@ mod tests {
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         cx.set_global(SettingsState::for_test(settings.clone()));
 
         let (view, cx) = cx.add_window_view(move |window, cx| {
@@ -9922,7 +10048,7 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -9955,7 +10081,7 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
         settings.sidebar.hide_groups = vec![SidebarGroupKind::Wsl];
         cx.set_global(SettingsState::for_test(settings.clone()));
@@ -9989,7 +10115,7 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = Vec::new();
+        settings.sidebar.pinned = Vec::new();
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Wsl];
         cx.set_global(SettingsState::for_test(settings.clone()));
 
@@ -10023,7 +10149,7 @@ mod tests {
         let applications_path = temp.path().join("Applications");
         let bin_path = temp.path().join(".Trash");
         let mut settings = crate::settings::ExplorerSettings::default();
-        settings.sidebar.items = vec![applications_path.clone(), bin_path.clone()];
+        settings.sidebar.pinned = vec![applications_path.clone(), bin_path.clone()];
         settings.sidebar.expanded_groups = vec![SidebarGroupKind::Pinned];
         cx.set_global(SettingsState::for_test(settings.clone()));
 

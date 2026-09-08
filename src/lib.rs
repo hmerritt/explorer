@@ -32,7 +32,8 @@ mod windows_tray;
 pub use settings::{
     AppSettings, ContextMenuSettings, CustomContextMenuItem, ExplorerSettings, FileColumnKind,
     FileColumnSettings, NewWindowBehaviour, SftpSettings, SidebarGroupKind, SidebarHiddenItem,
-    SidebarSettings, TabSettings, UpdaterSettings, ViewSettings,
+    SidebarOrderItem, SidebarOrderSettings, SidebarSettings, TabSettings, UpdaterSettings,
+    ViewSettings,
 };
 
 #[cfg(all(

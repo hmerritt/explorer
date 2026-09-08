@@ -156,7 +156,12 @@ Example with sidebar and contextmenu items:
     "sidebar": {
         "hide_groups": ["network", "wsl"],
         "hide_items": ["google_drive", "C:/"],
-        "items": ["~", "~/Downloads", "~/Documents", "~/Pictures"],
+        "pinned": ["~", "~/Downloads", "~/Documents", "~/Pictures"],
+        "order": {
+            "drives": ["D:/", "C:/"],
+            "network": ["sftp://production/var/www", "onedrive", "google_drive"],
+            "wsl": ["//wsl.localhost/Ubuntu/"]
+        },
         "width": 225
     },
     "contextmenu": [
@@ -170,6 +175,11 @@ Example with sidebar and contextmenu items:
     ]
 }
 ```
+
+Sidebar item order is stored independently for the `drives`, `network`, and `wsl` groups.
+Path-backed items use their displayed path, SFTP bookmarks use a credential-free URL including
+the bookmarked folder, and cloud roots use `google_drive` or `onedrive`. Pinned folders are ordered
+directly by the `pinned` array. Existing `sidebar.items` settings are migrated to `sidebar.pinned`.
 
 Context-menu entries can launch an external executable or invoke a built-in action. The native
 no-dialog ZIP action is configured as:

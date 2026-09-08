@@ -80,6 +80,75 @@ pub enum SidebarGroupKind {
     Wsl,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum SidebarOrderItem {
+    Path(PathBuf),
+    Remote(String),
+    GoogleDrive,
+    OneDrive,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SidebarOrderSettings {
+    pub drives: Vec<SidebarOrderItem>,
+    pub network: Vec<SidebarOrderItem>,
+    pub wsl: Vec<SidebarOrderItem>,
+}
+
+impl SidebarOrderSettings {
+    fn items_mut(&mut self, kind: SidebarGroupKind) -> Option<&mut Vec<SidebarOrderItem>> {
+        match kind {
+            SidebarGroupKind::Pinned => None,
+            SidebarGroupKind::Drives => Some(&mut self.drives),
+            SidebarGroupKind::Network => Some(&mut self.network),
+            SidebarGroupKind::Wsl => Some(&mut self.wsl),
+        }
+    }
+}
+
+impl Serialize for SidebarOrderItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&sidebar_order_item_to_string(self, AddressSlash::Forward))
+    }
+}
+
+impl<'de> Deserialize<'de> for SidebarOrderItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        sidebar_order_item_from_str(&value)
+            .ok_or_else(|| de::Error::custom("invalid sidebar order item"))
+    }
+}
+
+impl Serialize for SidebarOrderSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        SerializableSidebarOrderSettings {
+            order: self,
+            slash: AddressSlash::Forward,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SidebarOrderSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(sidebar_order_settings_from_value(&value))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SidebarHiddenItem {
     GoogleDrive,
@@ -256,7 +325,7 @@ impl Serialize for SerializableSidebarSettings<'_> {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(6))?;
+        let mut map = serializer.serialize_map(Some(7))?;
         map.serialize_entry("expanded_groups", &self.settings.expanded_groups)?;
         map.serialize_entry("hide_groups", &self.settings.hide_groups)?;
         map.serialize_entry(
@@ -267,9 +336,16 @@ impl Serialize for SerializableSidebarSettings<'_> {
             },
         )?;
         map.serialize_entry(
-            "items",
+            "pinned",
             &SerializableSidebarItems {
-                items: &self.settings.items,
+                items: &self.settings.pinned,
+                slash: self.slash,
+            },
+        )?;
+        map.serialize_entry(
+            "order",
+            &SerializableSidebarOrderSettings {
+                order: &self.settings.order,
                 slash: self.slash,
             },
         )?;
@@ -318,6 +394,34 @@ impl Serialize for SerializableSidebarItems<'_> {
             .map(|path| format_configured_path(path, self.slash))
             .collect::<Vec<_>>();
         items.serialize(serializer)
+    }
+}
+
+struct SerializableSidebarOrderSettings<'a> {
+    order: &'a SidebarOrderSettings,
+    slash: AddressSlash,
+}
+
+impl Serialize for SerializableSidebarOrderSettings<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        for (name, items) in [
+            ("drives", self.order.drives.as_slice()),
+            ("network", self.order.network.as_slice()),
+            ("wsl", self.order.wsl.as_slice()),
+        ] {
+            if !items.is_empty() {
+                let values = items
+                    .iter()
+                    .map(|item| sidebar_order_item_to_string(item, self.slash))
+                    .collect::<Vec<_>>();
+                map.serialize_entry(name, &values)?;
+            }
+        }
+        map.end()
     }
 }
 
@@ -687,7 +791,7 @@ impl Serialize for AppSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct SidebarSettings {
     #[serde(default, deserialize_with = "deserialize_remote_sidebar_items")]
@@ -702,15 +806,31 @@ pub struct SidebarSettings {
     #[serde(default, deserialize_with = "deserialize_sidebar_hide_items")]
     pub hide_items: Vec<SidebarHiddenItem>,
     #[serde(
-        default = "default_sidebar_items",
-        deserialize_with = "deserialize_sidebar_items"
+        alias = "items",
+        default = "default_sidebar_pinned",
+        deserialize_with = "deserialize_sidebar_pinned"
     )]
-    pub items: Vec<PathBuf>,
+    pub pinned: Vec<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_sidebar_order")]
+    pub order: SidebarOrderSettings,
     #[serde(
         default = "default_sidebar_width",
         deserialize_with = "deserialize_sidebar_width"
     )]
     pub width: u32,
+}
+
+impl Serialize for SidebarSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let settings = ExplorerSettings {
+            sidebar: self.clone(),
+            ..ExplorerSettings::default()
+        };
+        SerializableSidebarSettings::new(&settings).serialize(serializer)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1117,7 +1237,8 @@ impl Default for SidebarSettings {
             expanded_groups: default_sidebar_expanded_groups(),
             hide_groups: Vec::new(),
             hide_items: Vec::new(),
-            items: default_sidebar_items(),
+            pinned: default_sidebar_pinned(),
+            order: SidebarOrderSettings::default(),
             width: SIDEBAR_DEFAULT_WIDTH,
         }
     }
@@ -1432,7 +1553,7 @@ pub(crate) fn can_pin_sidebar_path(path: &Path, settings: &ExplorerSettings) -> 
     path.is_dir()
         && !settings
             .sidebar
-            .items
+            .pinned
             .iter()
             .filter_map(|path| expand_configured_path(path))
             .any(|configured_path| configured_path == path)
@@ -1456,6 +1577,26 @@ pub(crate) fn reorder_sidebar_item(
 ) -> Option<usize> {
     update_settings(cx, |settings| {
         reorder_sidebar_item_in_settings(source_index, target_index, before, settings)
+    })
+}
+
+pub(crate) fn reorder_sidebar_group_item(
+    kind: SidebarGroupKind,
+    dragged: &SidebarOrderItem,
+    target: &SidebarOrderItem,
+    before: bool,
+    visible_items: &[SidebarOrderItem],
+    cx: &mut impl BorrowAppContext,
+) -> bool {
+    update_settings(cx, |settings| {
+        reorder_sidebar_group_item_in_settings(
+            kind,
+            dragged,
+            target,
+            before,
+            visible_items,
+            settings,
+        )
     })
 }
 
@@ -1548,8 +1689,8 @@ fn pin_sidebar_path_in_settings(
     if !can_pin_sidebar_path(&path, settings) {
         return false;
     }
-    let insertion_index = insertion_index.min(settings.sidebar.items.len());
-    settings.sidebar.items.insert(insertion_index, path);
+    let insertion_index = insertion_index.min(settings.sidebar.pinned.len());
+    settings.sidebar.pinned.insert(insertion_index, path);
     true
 }
 
@@ -1560,22 +1701,53 @@ fn reorder_sidebar_item_in_settings(
     settings: &mut ExplorerSettings,
 ) -> Option<usize> {
     let new_index = sidebar_reorder_index(
-        settings.sidebar.items.len(),
+        settings.sidebar.pinned.len(),
         source_index,
         target_index,
         before,
     )?;
-    let item = settings.sidebar.items.remove(source_index);
-    settings.sidebar.items.insert(new_index, item);
+    let item = settings.sidebar.pinned.remove(source_index);
+    settings.sidebar.pinned.insert(new_index, item);
     Some(new_index)
+}
+
+fn reorder_sidebar_group_item_in_settings(
+    kind: SidebarGroupKind,
+    dragged: &SidebarOrderItem,
+    target: &SidebarOrderItem,
+    before: bool,
+    visible_items: &[SidebarOrderItem],
+    settings: &mut ExplorerSettings,
+) -> bool {
+    let Some(order) = settings.sidebar.order.items_mut(kind) else {
+        return false;
+    };
+    for item in visible_items {
+        if !order.contains(item) {
+            order.push(item.clone());
+        }
+    }
+    let Some(source_index) = order.iter().position(|item| item == dragged) else {
+        return false;
+    };
+    let Some(target_index) = order.iter().position(|item| item == target) else {
+        return false;
+    };
+    let Some(new_index) = sidebar_reorder_index(order.len(), source_index, target_index, before)
+    else {
+        return false;
+    };
+    let item = order.remove(source_index);
+    order.insert(new_index, item);
+    true
 }
 
 fn unpin_sidebar_item_in_settings(
     configured_index: usize,
     settings: &mut ExplorerSettings,
 ) -> Option<PathBuf> {
-    (configured_index < settings.sidebar.items.len())
-        .then(|| settings.sidebar.items.remove(configured_index))
+    (configured_index < settings.sidebar.pinned.len())
+        .then(|| settings.sidebar.pinned.remove(configured_index))
 }
 
 fn hide_sidebar_item_in_settings(item: SidebarHiddenItem, settings: &mut ExplorerSettings) -> bool {
@@ -1728,6 +1900,7 @@ fn load_settings_document_from_path_for(
     }
 
     let mut document = serde_json::from_str::<Value>(&source).map_err(io::Error::other)?;
+    migrate_sidebar_items_to_pinned(&mut document);
     migrate_remote_sidebar(&mut document, path);
     let mut value =
         serde_json::from_value::<ExplorerSettings>(document.clone()).map_err(io::Error::other)?;
@@ -1752,6 +1925,18 @@ fn load_settings_document_from_path_for(
     }
 
     Ok(LoadedSettings { value, document })
+}
+
+fn migrate_sidebar_items_to_pinned(document: &mut Value) {
+    let Some(sidebar) = document.get_mut("sidebar").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let legacy = sidebar.remove("items");
+    if !sidebar.contains_key("pinned")
+        && let Some(legacy) = legacy
+    {
+        sidebar.insert("pinned".into(), legacy);
+    }
 }
 
 fn migrate_legacy_google_drive_setting(document: &Value, settings: &mut ExplorerSettings) {
@@ -1920,7 +2105,7 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
                 format!("invalid date_format: {error}"),
             )
         })?;
-    for path in &settings.sidebar.items {
+    for path in &settings.sidebar.pinned {
         validate_configured_path(path)?;
     }
     validate_configured_path(&settings.app.start)?;
@@ -2527,9 +2712,9 @@ fn platform_root_path() -> PathBuf {
     }
 }
 
-fn default_sidebar_items() -> Vec<PathBuf> {
+fn default_sidebar_pinned() -> Vec<PathBuf> {
     let home = crate::explorer::user_home_dir();
-    default_sidebar_items_from_paths(
+    default_sidebar_pinned_from_paths(
         home.clone(),
         crate::explorer::user_desktop_dir(home.as_deref()),
         crate::explorer::user_documents_dir(home.as_deref()),
@@ -2539,7 +2724,7 @@ fn default_sidebar_items() -> Vec<PathBuf> {
     )
 }
 
-fn default_sidebar_items_from_paths(
+fn default_sidebar_pinned_from_paths(
     home: Option<PathBuf>,
     desktop: Option<PathBuf>,
     documents: Option<PathBuf>,
@@ -2643,7 +2828,7 @@ fn sidebar_group_kind_from_str(value: &str) -> Option<SidebarGroupKind> {
     }
 }
 
-fn deserialize_sidebar_items<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+fn deserialize_sidebar_pinned<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -2655,6 +2840,76 @@ where
             SidebarItemSetting::Legacy(location) => location.configured_path(),
         })
         .collect())
+}
+
+fn deserialize_sidebar_order<'de, D>(deserializer: D) -> Result<SidebarOrderSettings, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(sidebar_order_settings_from_value(&value))
+}
+
+fn sidebar_order_settings_from_value(value: &Value) -> SidebarOrderSettings {
+    let Some(object) = value.as_object() else {
+        return SidebarOrderSettings::default();
+    };
+    SidebarOrderSettings {
+        drives: sidebar_order_items_from_value(object.get("drives")),
+        network: sidebar_order_items_from_value(object.get("network")),
+        wsl: sidebar_order_items_from_value(object.get("wsl")),
+    }
+}
+
+fn sidebar_order_items_from_value(value: Option<&Value>) -> Vec<SidebarOrderItem> {
+    let Some(values) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for item in values
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(sidebar_order_item_from_str)
+    {
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+fn sidebar_order_item_from_str(value: &str) -> Option<SidebarOrderItem> {
+    match value {
+        "google_drive" => Some(SidebarOrderItem::GoogleDrive),
+        "onedrive" => Some(SidebarOrderItem::OneDrive),
+        _ if value.starts_with("sftp://") => {
+            normalize_remote_sidebar_order_item(value).map(SidebarOrderItem::Remote)
+        }
+        _ => {
+            let path = PathBuf::from(value);
+            path.is_absolute().then_some(SidebarOrderItem::Path(path))
+        }
+    }
+}
+
+fn normalize_remote_sidebar_order_item(value: &str) -> Option<String> {
+    let url = gpui::http_client::Url::parse(value).ok()?;
+    (url.scheme() == "sftp"
+        && url.host_str().is_some()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path().starts_with('/'))
+    .then(|| url.to_string())
+}
+
+fn sidebar_order_item_to_string(item: &SidebarOrderItem, slash: AddressSlash) -> String {
+    match item {
+        SidebarOrderItem::Path(path) => format_configured_path(path, slash),
+        SidebarOrderItem::Remote(remote) => remote.clone(),
+        SidebarOrderItem::GoogleDrive => "google_drive".to_owned(),
+        SidebarOrderItem::OneDrive => "onedrive".to_owned(),
+    }
 }
 
 fn deserialize_sidebar_hide_groups<'de, D>(
@@ -3183,7 +3438,7 @@ mod tests {
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(settings.updater, UpdaterSettings::default());
         assert_eq!(
-            settings.sidebar.items.len(),
+            settings.sidebar.pinned.len(),
             if cfg!(target_os = "macos") { 6 } else { 4 }
         );
     }
@@ -3522,7 +3777,7 @@ mod tests {
         let bin = PathBuf::from(".Trash");
 
         assert_eq!(
-            default_sidebar_items_from_paths(
+            default_sidebar_pinned_from_paths(
                 Some(home.clone()),
                 Some(desktop.clone()),
                 Some(documents.clone()),
@@ -3542,7 +3797,7 @@ mod tests {
         let downloads = PathBuf::from("Downloads");
 
         assert_eq!(
-            default_sidebar_items_from_paths(
+            default_sidebar_pinned_from_paths(
                 Some(home.clone()),
                 Some(desktop.clone()),
                 Some(documents.clone()),
@@ -3610,7 +3865,7 @@ mod tests {
             vec![SidebarGroupKind::Pinned]
         );
         assert_eq!(settings.sidebar.width, SIDEBAR_DEFAULT_WIDTH);
-        assert_eq!(settings.sidebar.items.len(), 4);
+        assert_eq!(settings.sidebar.pinned.len(), 4);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4391,9 +4646,9 @@ mod tests {
         assert!(json.contains("\n    \"hide_groups\": [],"));
         assert!(json.contains("\n    \"hide_items\": [],"));
         assert!(document["sidebar"].get("hide").is_none());
-        let expected_sidebar_items = settings
+        let expected_sidebar_pinned = settings
             .sidebar
-            .items
+            .pinned
             .iter()
             .map(|path| {
                 Value::String(format_configured_path(
@@ -4403,9 +4658,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            document["sidebar"]["items"],
-            Value::Array(expected_sidebar_items)
+            document["sidebar"]["pinned"],
+            Value::Array(expected_sidebar_pinned)
         );
+        assert_eq!(document["sidebar"]["order"], serde_json::json!({}));
         assert!(
             json.contains("\n  \"tabs\": {\"focus_new\": false, \"highlight_focused\": false},")
         );
@@ -5330,29 +5586,187 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sidebar_items_load_and_normalize_to_strings() {
+    fn legacy_sidebar_items_load_and_normalize_to_pinned_strings() {
         let mut document: Value = serde_json::from_str(
             r#"{"sidebar":{"items":[{"kind":"home","note":"home"},{"kind":"downloads","note":"downloads"}]}}"#,
         )
         .unwrap();
         let mut settings: ExplorerSettings = serde_json::from_value(document.clone()).unwrap();
-        assert_eq!(settings.sidebar.items.len(), 2);
+        assert_eq!(settings.sidebar.pinned.len(), 2);
 
         assert_eq!(
             reorder_sidebar_item_in_settings(1, 0, true, &mut settings),
             Some(0)
         );
         sync_settings_document(&mut document, &settings);
-        assert!(document["sidebar"]["items"][0].is_string());
-        assert!(document["sidebar"]["items"][1].is_string());
+        assert!(document["sidebar"].get("items").is_none());
+        assert!(document["sidebar"]["pinned"][0].is_string());
+        assert!(document["sidebar"]["pinned"][1].is_string());
 
         assert_eq!(
             unpin_sidebar_item_in_settings(1, &mut settings),
-            Some(default_sidebar_items()[0].clone())
+            Some(default_sidebar_pinned()[0].clone())
         );
         sync_settings_document(&mut document, &settings);
-        assert_eq!(document["sidebar"]["items"].as_array().unwrap().len(), 1);
-        assert!(document["sidebar"]["items"][0].is_string());
+        assert_eq!(document["sidebar"]["pinned"].as_array().unwrap().len(), 1);
+        assert!(document["sidebar"]["pinned"][0].is_string());
+    }
+
+    #[test]
+    fn settings_file_migrates_sidebar_items_and_prefers_existing_pinned() {
+        let dir = unique_temp_dir("sidebar-pinned-migration");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE_NAME);
+        let legacy = dir.join("legacy");
+        let pinned = dir.join("pinned");
+
+        fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "sidebar": {"items": [legacy]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = load_settings_from_path(&path).unwrap();
+        assert_eq!(loaded.sidebar.pinned, vec![dir.join("legacy")]);
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(normalized["sidebar"].get("items").is_none());
+        assert_eq!(normalized["sidebar"]["pinned"].as_array().unwrap().len(), 1);
+
+        fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({
+                "sidebar": {"items": [dir.join("legacy")], "pinned": [pinned]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = load_settings_from_path(&path).unwrap();
+        assert_eq!(loaded.sidebar.pinned, vec![dir.join("pinned")]);
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(normalized["sidebar"].get("items").is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidebar_order_ignores_invalid_unknown_and_duplicate_entries() {
+        let first = if cfg!(target_os = "windows") {
+            "C:/"
+        } else {
+            "/first"
+        };
+        let settings: ExplorerSettings = serde_json::from_value(serde_json::json!({
+            "sidebar": {
+                "order": {
+                    "drives": [first, first, "relative", 42],
+                    "network": [
+                        "sftp://alice@example.com:2200/var/www",
+                        "onedrive",
+                        "google_drive",
+                        "sftp://alice:secret@example.com/private"
+                    ],
+                    "pinned": [first],
+                    "future": [first]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            settings.sidebar.order.drives,
+            vec![SidebarOrderItem::Path(PathBuf::from(first))]
+        );
+        assert_eq!(settings.sidebar.order.network.len(), 3);
+        assert_eq!(
+            settings.sidebar.order.network[1],
+            SidebarOrderItem::OneDrive
+        );
+        assert_eq!(
+            settings.sidebar.order.network[2],
+            SidebarOrderItem::GoogleDrive
+        );
+        assert!(settings.sidebar.order.wsl.is_empty());
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert!(value["sidebar"]["order"].get("pinned").is_none());
+        assert!(value["sidebar"]["order"].get("future").is_none());
+    }
+
+    #[test]
+    fn sidebar_order_serializes_paths_with_configured_slashes() {
+        let path = PathBuf::from(if cfg!(target_os = "windows") {
+            r"D:\"
+        } else {
+            "/Volumes/Archive"
+        });
+        let mut settings = ExplorerSettings::default();
+        settings.sidebar.order.drives = vec![SidebarOrderItem::Path(path.clone())];
+        settings.sidebar.order.network = vec![
+            SidebarOrderItem::Remote("sftp://example.com/archive".to_owned()),
+            SidebarOrderItem::OneDrive,
+        ];
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            value["sidebar"]["order"]["drives"][0],
+            format_configured_path(&path, settings_address_slash(&settings))
+        );
+        assert_eq!(
+            value["sidebar"]["order"]["network"],
+            serde_json::json!(["sftp://example.com/archive", "onedrive"])
+        );
+    }
+
+    #[test]
+    fn sidebar_group_reorder_merges_visible_items_and_retains_missing_items() {
+        let missing = SidebarOrderItem::Path(PathBuf::from(if cfg!(target_os = "windows") {
+            "M:/"
+        } else {
+            "/missing"
+        }));
+        let first = SidebarOrderItem::Path(PathBuf::from(if cfg!(target_os = "windows") {
+            "C:/"
+        } else {
+            "/first"
+        }));
+        let second = SidebarOrderItem::Path(PathBuf::from(if cfg!(target_os = "windows") {
+            "D:/"
+        } else {
+            "/second"
+        }));
+        let newcomer = SidebarOrderItem::Path(PathBuf::from(if cfg!(target_os = "windows") {
+            "E:/"
+        } else {
+            "/new"
+        }));
+        let visible = vec![first.clone(), second.clone(), newcomer.clone()];
+        let mut settings = ExplorerSettings::default();
+        settings.sidebar.order.drives = vec![missing.clone(), first.clone(), second.clone()];
+
+        assert!(reorder_sidebar_group_item_in_settings(
+            SidebarGroupKind::Drives,
+            &newcomer,
+            &second,
+            true,
+            &visible,
+            &mut settings,
+        ));
+        assert_eq!(
+            settings.sidebar.order.drives,
+            vec![missing, first.clone(), newcomer, second.clone()]
+        );
+        let unchanged = settings.sidebar.order.clone();
+        assert!(!reorder_sidebar_group_item_in_settings(
+            SidebarGroupKind::Pinned,
+            &second,
+            &first,
+            true,
+            &visible,
+            &mut settings,
+        ));
+        assert_eq!(settings.sidebar.order, unchanged);
     }
 
     #[test]
@@ -5586,7 +6000,7 @@ mod tests {
 
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: Vec::new(),
+                pinned: Vec::new(),
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
@@ -5616,7 +6030,7 @@ mod tests {
             1,
             &mut settings
         ));
-        assert_eq!(settings.sidebar.items, vec![second, third, first]);
+        assert_eq!(settings.sidebar.pinned, vec![second, third, first]);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -5630,7 +6044,7 @@ mod tests {
 
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: Vec::new(),
+                pinned: Vec::new(),
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
@@ -5641,8 +6055,8 @@ mod tests {
             0,
             &mut settings
         ));
-        assert_eq!(settings.sidebar.items.len(), 1);
-        assert_eq!(settings.sidebar.items[0], downloads);
+        assert_eq!(settings.sidebar.pinned.len(), 1);
+        assert_eq!(settings.sidebar.pinned[0], downloads);
     }
 
     #[test]
@@ -5657,12 +6071,12 @@ mod tests {
     #[test]
     fn sidebar_reorder_preserves_invisible_configured_items() {
         let missing = unique_temp_dir("missing-sidebar");
-        let defaults = default_sidebar_items();
+        let defaults = default_sidebar_pinned();
         let home = defaults[0].clone();
         let downloads = defaults[3].clone();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: vec![home.clone(), missing.clone(), downloads.clone()],
+                pinned: vec![home.clone(), missing.clone(), downloads.clone()],
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
@@ -5672,7 +6086,7 @@ mod tests {
             reorder_sidebar_item_in_settings(2, 0, true, &mut settings),
             Some(0)
         );
-        assert_eq!(settings.sidebar.items, vec![downloads, home, missing]);
+        assert_eq!(settings.sidebar.pinned, vec![downloads, home, missing]);
     }
 
     #[test]
@@ -5680,12 +6094,12 @@ mod tests {
         let dir = unique_temp_dir("unpin-sidebar");
         let first = dir.join("first");
         let second = dir.join("second");
-        let defaults = default_sidebar_items();
+        let defaults = default_sidebar_pinned();
         let home = defaults[0].clone();
         let downloads = defaults[3].clone();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: vec![
+                pinned: vec![
                     home.clone(),
                     first.clone(),
                     second.clone(),
@@ -5700,28 +6114,28 @@ mod tests {
             unpin_sidebar_item_in_settings(1, &mut settings),
             Some(first)
         );
-        assert_eq!(settings.sidebar.items, vec![home, second, downloads]);
+        assert_eq!(settings.sidebar.pinned, vec![home, second, downloads]);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn sidebar_unpin_ignores_invalid_indices() {
-        let defaults = default_sidebar_items();
+        let defaults = default_sidebar_pinned();
         let mut settings = ExplorerSettings {
             sidebar: SidebarSettings {
-                items: vec![defaults[0].clone(), defaults[3].clone()],
+                pinned: vec![defaults[0].clone(), defaults[3].clone()],
                 ..SidebarSettings::default()
             },
             ..ExplorerSettings::default()
         };
-        let original = settings.sidebar.items.clone();
+        let original = settings.sidebar.pinned.clone();
 
         assert_eq!(unpin_sidebar_item_in_settings(2, &mut settings), None);
         assert_eq!(
             unpin_sidebar_item_in_settings(usize::MAX, &mut settings),
             None
         );
-        assert_eq!(settings.sidebar.items, original);
+        assert_eq!(settings.sidebar.pinned, original);
     }
 
     #[test]
