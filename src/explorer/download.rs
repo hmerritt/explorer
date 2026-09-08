@@ -73,6 +73,7 @@ pub(super) struct DownloadNoticeRow {
     pub(super) id: u64,
     pub(super) kind: DownloadNoticeKind,
     pub(super) file_name: String,
+    pub(super) destination: PathBuf,
     pub(super) status: DownloadNoticeStatus,
 }
 
@@ -383,14 +384,16 @@ impl ExplorerView {
 
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
+        let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
+            destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
+        self.remote_transfer_panel_collapsed = false;
 
-        let destination = self.path.clone();
         let client = cx.http_client();
         let (progress_tx, progress_rx) = mpsc::channel();
         let finished = Arc::new(AtomicBool::new(false));
@@ -445,7 +448,7 @@ impl ExplorerView {
     fn start_next_remote_download(&mut self, cx: &mut Context<Self>) {
         let Some((download, destination)) = self.pending_remote_downloads.pop_front() else {
             self.remote_credentials.clear();
-            self.finish_download_batch_if_idle();
+            self.finish_download_batch_if_idle(cx);
             cx.notify();
             return;
         };
@@ -456,8 +459,10 @@ impl ExplorerView {
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
+            destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
+        self.remote_transfer_panel_collapsed = false;
         let credentials = embedded_credentials(&download).or_else(|| {
             endpoint_key(&download).and_then(|key| self.remote_credentials.get(&key).cloned())
         });
@@ -561,6 +566,7 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForCredentials;
                 }
+                self.remote_transfer_panel_collapsed = false;
                 match open_remote_credentials_dialog(
                     cx.entity(),
                     id,
@@ -586,6 +592,14 @@ impl ExplorerView {
                 username,
                 key_path,
             }) => {
+                if let Some(row) = self
+                    .download_notice_rows
+                    .iter_mut()
+                    .find(|row| row.id == id)
+                {
+                    row.status = DownloadNoticeStatus::WaitingForCredentials;
+                }
+                self.remote_transfer_panel_collapsed = false;
                 match open_remote_credentials_dialog(
                     cx.entity(),
                     id,
@@ -610,6 +624,7 @@ impl ExplorerView {
                 {
                     row.status = DownloadNoticeStatus::WaitingForHostConfirmation;
                 }
+                self.remote_transfer_panel_collapsed = false;
                 match open_remote_host_key_dialog(cx.entity(), id, *key, cx) {
                     Ok(handle) => self.active_dialog_window = Some(handle),
                     Err(error) => {
@@ -750,16 +765,19 @@ impl ExplorerView {
         let ClipboardVideoDownload { url, site_domain } = download;
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
+        let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             id,
             kind: DownloadNoticeKind::Video {
                 site_domain: site_domain.clone(),
             },
             file_name: format!("Video from {site_domain}"),
+            destination: destination.clone(),
             status: DownloadNoticeStatus::Connecting,
         });
+        self.remote_transfer_panel_collapsed = false;
 
-        let command = ytdlp_command_spec(executable, options, url.as_str(), self.path.clone());
+        let command = ytdlp_command_spec(executable, options, url.as_str(), destination);
         let process_control = YtDlpProcessControl::new();
         let process_state = process_control.shared();
         self.ytdlp_process_controls.push((id, process_control));
@@ -800,9 +818,11 @@ impl ExplorerView {
     }
 
     fn begin_download_batch_if_needed(&mut self) {
-        if !self.download_notice_rows.is_empty() {
+        self.cancel_transfer_completion_cleanup();
+        if self.download_batch_active {
             return;
         }
+        self.download_batch_active = true;
         self.download_tasks.clear();
         self.ytdlp_process_controls.clear();
         self.download_batch_succeeded = 0;
@@ -834,7 +854,7 @@ impl ExplorerView {
             return;
         }
 
-        self.finish_download_batch_if_idle();
+        self.finish_download_batch_if_idle(cx);
         cx.notify();
     }
 
@@ -954,13 +974,14 @@ impl ExplorerView {
                 self.download_batch_failed += 1;
                 self.download_batch_last_error = Some(error.clone());
                 self.download_notice_rows[row_index].status = DownloadNoticeStatus::Failed(error);
+                self.remote_transfer_panel_collapsed = false;
             }
         }
 
-        self.finish_download_batch_if_idle();
+        self.finish_download_batch_if_idle(cx);
     }
 
-    fn finish_download_batch_if_idle(&mut self) {
+    fn finish_download_batch_if_idle(&mut self, cx: &mut Context<Self>) {
         if self.active_remote_download.is_some() || !self.pending_remote_downloads.is_empty() {
             return;
         }
@@ -975,48 +996,16 @@ impl ExplorerView {
         let succeeded = self.download_batch_succeeded;
         let failed = self.download_batch_failed;
         let last_error = self.download_batch_last_error.clone().unwrap_or_default();
-        let last_file_name = self
-            .download_notice_rows
-            .last()
-            .map(|row| row.file_name.clone())
-            .unwrap_or_default();
-        let video_sites = self
-            .download_notice_rows
-            .iter()
-            .filter_map(|row| match &row.kind {
-                DownloadNoticeKind::Video { site_domain } => Some(site_domain.clone()),
-                DownloadNoticeKind::File => None,
-            })
-            .collect::<Vec<_>>();
-        let video_batch = video_sites.len() == self.download_notice_rows.len();
-        let same_video_site = video_sites.first().and_then(|first| {
-            video_sites
-                .iter()
-                .all(|site| site == first)
-                .then(|| first.clone())
-        });
-        self.download_notice_rows.clear();
+        self.download_batch_active = false;
+        self.download_notice_rows
+            .retain(|row| !matches!(row.status, DownloadNoticeStatus::Failed(_)));
         if succeeded == 0 && failed == 0 {
             self.operation_notice = None;
+            self.update_transfer_completion_retention(cx);
             return;
         }
-        self.operation_notice = Some(if failed == 0 {
-            let text = if video_batch && succeeded == 1 {
-                format!(
-                    "Downloaded video from {}.",
-                    same_video_site.as_deref().unwrap_or("multiple sites")
-                )
-            } else if video_batch {
-                match same_video_site.as_deref() {
-                    Some(site) => format!("Downloaded {succeeded} videos from {site}."),
-                    None => format!("Downloaded {succeeded} videos from multiple sites."),
-                }
-            } else if succeeded == 1 {
-                format!("Downloaded \"{last_file_name}\".")
-            } else {
-                format!("Downloaded {succeeded} files.")
-            };
-            OperationNotice::info(text)
+        self.operation_notice = if failed == 0 {
+            None
         } else {
             let text = match (succeeded, failed) {
                 (0, 1) => format!("Download failed: {last_error}"),
@@ -1025,8 +1014,9 @@ impl ExplorerView {
                     format!("Downloaded {succeeded} files; {failed} failed: {last_error}")
                 }
             };
-            OperationNotice::error(text)
-        });
+            Some(OperationNotice::error(text))
+        };
+        self.update_transfer_completion_retention(cx);
     }
 }
 
@@ -1527,6 +1517,7 @@ mod tests {
                         site_domain: "youtube.com".to_owned(),
                     },
                     file_name: "Video from youtube.com".to_owned(),
+                    destination: temp.path().to_path_buf(),
                     status: DownloadNoticeStatus::Connecting,
                 }];
 
@@ -1756,7 +1747,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelling_one_video_keeps_other_downloads_and_excludes_it_from_summary(
+    fn cancelling_one_video_keeps_other_downloads_and_excludes_it_from_completion_notice(
         cx: &mut TestAppContext,
     ) {
         let temp = tempfile::tempdir().expect("temp directory");
@@ -1775,6 +1766,7 @@ mod tests {
                             site_domain: "youtube.com".to_owned(),
                         },
                         file_name: "Video from youtube.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
@@ -1783,6 +1775,7 @@ mod tests {
                             site_domain: "vimeo.com".to_owned(),
                         },
                         file_name: "Video from vimeo.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
@@ -1819,17 +1812,17 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.download_batch_succeeded, 1);
             assert_eq!(view.download_batch_failed, 0);
+            assert!(view.operation_notice.is_none());
+            assert_eq!(view.download_notice_rows.len(), 1);
             assert_eq!(
-                view.operation_notice
-                    .as_ref()
-                    .map(|notice| notice.text.as_str()),
-                Some("Downloaded video from youtube.com.")
+                view.download_notice_rows[0].status,
+                DownloadNoticeStatus::Completed
             );
         });
     }
 
     #[gpui::test]
-    fn same_site_video_downloads_share_the_existing_batch_summary(cx: &mut TestAppContext) {
+    fn completed_video_downloads_remain_for_five_seconds_without_a_notice(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
 
@@ -1842,6 +1835,7 @@ mod tests {
                             site_domain: "vimeo.com".to_owned(),
                         },
                         file_name: "Video from vimeo.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
@@ -1850,6 +1844,7 @@ mod tests {
                             site_domain: "vimeo.com".to_owned(),
                         },
                         file_name: "Video from vimeo.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
@@ -1860,19 +1855,21 @@ mod tests {
         });
 
         cx.read_entity(&view, |view, _| {
-            assert!(view.download_notice_rows.is_empty());
+            assert_eq!(view.download_notice_rows.len(), 2);
             assert_eq!(view.download_batch_succeeded, 2);
-            assert_eq!(
-                view.operation_notice
-                    .as_ref()
-                    .map(|notice| notice.text.as_str()),
-                Some("Downloaded 2 videos from vimeo.com.")
-            );
+            assert!(view.operation_notice.is_none());
+        });
+        cx.executor()
+            .advance_clock(super::super::remote_ui::TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert!(view.operation_notice.is_none());
         });
     }
 
     #[gpui::test]
-    fn mixed_site_video_downloads_use_a_generic_batch_summary(cx: &mut TestAppContext) {
+    fn mixed_site_video_downloads_do_not_create_a_completion_notice(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
 
@@ -1885,6 +1882,7 @@ mod tests {
                             site_domain: "vimeo.com".to_owned(),
                         },
                         file_name: "Video from vimeo.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
@@ -1893,6 +1891,7 @@ mod tests {
                             site_domain: "dailymotion.com".to_owned(),
                         },
                         file_name: "Video from dailymotion.com".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
@@ -1902,12 +1901,8 @@ mod tests {
         });
 
         cx.read_entity(&view, |view, _| {
-            assert_eq!(
-                view.operation_notice
-                    .as_ref()
-                    .map(|notice| notice.text.as_str()),
-                Some("Downloaded 2 videos from multiple sites.")
-            );
+            assert_eq!(view.download_notice_rows.len(), 2);
+            assert!(view.operation_notice.is_none());
         });
     }
 
@@ -2016,7 +2011,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clipboard_url_paste_downloads_and_reports_completion(cx: &mut TestAppContext) {
+    fn clipboard_url_paste_retains_completion_without_a_notice(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let destination = temp.path().to_path_buf();
         let client = FakeHttpClient::create(|request| async move {
@@ -2035,7 +2030,11 @@ mod tests {
         let (view, cx) = test_view_entity_at_path(cx, destination.clone());
 
         cx.update(|window, app| {
-            view.update(app, |view, cx| view.paste_clipboard(window, cx));
+            view.update(app, |view, cx| {
+                view.remote_transfer_panel_collapsed = true;
+                view.paste_clipboard(window, cx);
+                assert!(!view.remote_transfer_panel_collapsed);
+            });
         });
         cx.run_until_parked();
         cx.executor().advance_clock(DOWNLOAD_PROGRESS_INTERVAL);
@@ -2046,18 +2045,24 @@ mod tests {
             b"data"
         );
         cx.read_entity(&view, |view, _| {
-            assert!(view.download_notice_rows.is_empty());
+            assert_eq!(view.download_notice_rows.len(), 1);
             assert_eq!(
-                view.operation_notice
-                    .as_ref()
-                    .map(|notice| notice.text.as_str()),
-                Some("Downloaded \"file.zip\".")
+                view.download_notice_rows[0].status,
+                DownloadNoticeStatus::Completed
             );
+            assert!(view.operation_notice.is_none());
+        });
+        cx.executor()
+            .advance_clock(super::super::remote_ui::TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert!(view.operation_notice.is_none());
         });
     }
 
     #[gpui::test]
-    fn overlapping_downloads_start_concurrently_and_share_a_final_summary(cx: &mut TestAppContext) {
+    fn overlapping_downloads_share_retained_completion_rows(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let destination = temp.path().to_path_buf();
         let client = FakeHttpClient::create(|request| {
@@ -2097,13 +2102,13 @@ mod tests {
             b"/two.zip"
         );
         cx.read_entity(&view, |view, _| {
-            assert!(view.download_notice_rows.is_empty());
-            assert_eq!(
-                view.operation_notice
-                    .as_ref()
-                    .map(|notice| notice.text.as_str()),
-                Some("Downloaded 2 files.")
+            assert_eq!(view.download_notice_rows.len(), 2);
+            assert!(
+                view.download_notice_rows
+                    .iter()
+                    .all(|row| row.status == DownloadNoticeStatus::Completed)
             );
+            assert!(view.operation_notice.is_none());
         });
     }
 
@@ -2125,6 +2130,7 @@ mod tests {
                     id: 7,
                     kind: DownloadNoticeKind::File,
                     file_name: "partial.zip".to_owned(),
+                    destination: destination.clone(),
                     status: DownloadNoticeStatus::Downloading {
                         downloaded_bytes: 7,
                         total_bytes: Some(100),
@@ -2145,7 +2151,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cancelling_one_download_excludes_it_from_the_batch_summary(cx: &mut TestAppContext) {
+    fn cancelling_one_download_retains_only_the_completed_row(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
 
@@ -2156,12 +2162,14 @@ mod tests {
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Completed,
                     },
                     DownloadNoticeRow {
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "cancel.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
@@ -2172,12 +2180,165 @@ mod tests {
         });
 
         cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 1);
+            assert_eq!(view.download_notice_rows[0].id, 1);
+            assert!(view.operation_notice.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn completion_retention_starts_after_the_last_download_finishes(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_batch_active = true;
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        kind: DownloadNoticeKind::File,
+                        file_name: "one.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        kind: DownloadNoticeKind::File,
+                        file_name: "two.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
+            });
+        });
+        cx.executor()
+            .advance_clock(super::super::remote_ui::TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 2);
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.complete_download(2, Ok(DownloadResult::Video), cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 2);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn new_download_during_retention_restarts_the_shared_timer(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_batch_active = true;
+                view.download_notice_rows.push(DownloadNoticeRow {
+                    id: 1,
+                    kind: DownloadNoticeKind::File,
+                    file_name: "one.zip".to_owned(),
+                    destination: temp.path().to_path_buf(),
+                    status: DownloadNoticeStatus::Connecting,
+                });
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.begin_download_batch_if_needed();
+                view.download_notice_rows.push(DownloadNoticeRow {
+                    id: 2,
+                    kind: DownloadNoticeKind::File,
+                    file_name: "two.zip".to_owned(),
+                    destination: temp.path().to_path_buf(),
+                    status: DownloadNoticeStatus::Connecting,
+                });
+                assert_eq!(view.download_batch_succeeded, 0);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 2);
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.complete_download(2, Ok(DownloadResult::Video), cx);
+            });
+        });
+        cx.executor()
+            .advance_clock(super::super::remote_ui::TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn failure_summary_remains_while_only_successful_rows_are_retained(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_batch_active = true;
+                view.download_notice_rows = vec![
+                    DownloadNoticeRow {
+                        id: 1,
+                        kind: DownloadNoticeKind::File,
+                        file_name: "complete.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                    DownloadNoticeRow {
+                        id: 2,
+                        kind: DownloadNoticeKind::File,
+                        file_name: "failed.zip".to_owned(),
+                        destination: temp.path().to_path_buf(),
+                        status: DownloadNoticeStatus::Connecting,
+                    },
+                ];
+                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(2, Err("network unavailable".to_owned()), cx);
+            });
+        });
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 1);
+            assert_eq!(view.download_notice_rows[0].id, 1);
+            assert_eq!(
+                view.operation_notice
+                    .as_ref()
+                    .map(|notice| notice.text.as_str()),
+                Some("Downloaded 1 files; 1 failed: network unavailable")
+            );
+        });
+        cx.executor()
+            .advance_clock(super::super::remote_ui::TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
             assert!(view.download_notice_rows.is_empty());
             assert_eq!(
                 view.operation_notice
                     .as_ref()
                     .map(|notice| notice.text.as_str()),
-                Some("Downloaded \"complete.zip\".")
+                Some("Downloaded 1 files; 1 failed: network unavailable")
             );
         });
     }
@@ -2196,6 +2357,7 @@ mod tests {
                     id: 3,
                     kind: DownloadNoticeKind::File,
                     file_name: "complete.zip".to_owned(),
+                    destination: completed_path.parent().unwrap().to_path_buf(),
                     status: DownloadNoticeStatus::Completed,
                 });
                 view.cancel_download(3, cx);

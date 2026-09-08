@@ -1,5 +1,7 @@
 use super::{
     app_icons::NativeIconSize,
+    download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
+    entry::FileEntry,
     navigation::HistoryMode,
     remote_dialog::{open_remote_credentials_dialog, open_remote_host_key_dialog},
     remote_download::RemoteDownloadError,
@@ -16,6 +18,7 @@ use gpui::{
 use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 const TRANSFER_UI_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+pub(super) const TRANSFER_COMPLETION_RETENTION: Duration = Duration::from_secs(5);
 const TRANSFER_PANEL_MAX_HEIGHT: f32 = 260.0;
 const TRANSFER_TOOLBAR_HEIGHT: f32 = 36.0;
 const TRANSFER_HEADER_HEIGHT: f32 = 28.0;
@@ -59,6 +62,188 @@ const TRANSFER_ACTION_RESUME: &str = "\u{E768}";
 const TRANSFER_ACTION_CANCEL: &str = "\u{E711}";
 const TRANSFER_ACTION_DISMISS: &str = "\u{E73E}";
 const TRANSFER_ACTION_DISCARD: &str = "\u{E74D}";
+const TRANSFER_BADGE_RADIUS: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TransferJobId {
+    Download(u64),
+    Server(u64),
+}
+
+impl TransferJobId {
+    fn selector(self) -> String {
+        match self {
+            Self::Download(id) => format!("download-{id}"),
+            Self::Server(id) => format!("server-{id}"),
+        }
+    }
+
+    fn is_server(self) -> bool {
+        matches!(self, Self::Server(_))
+    }
+}
+
+#[derive(Clone)]
+struct TransferPanelJob {
+    id: TransferJobId,
+    state: State,
+    message: String,
+    bytes: u64,
+    total: Option<u64>,
+    warnings: Vec<String>,
+    title: String,
+    files: usize,
+    retained_partials: bool,
+    percentage: Option<u8>,
+    indeterminate: bool,
+    progress_status: String,
+    speed: Option<f64>,
+    remaining: Option<Duration>,
+    icon_entry: FileEntry,
+    download_active: bool,
+}
+
+impl TransferPanelJob {
+    fn from_server(job: JobSnapshot) -> Self {
+        let title = job.title();
+        let files = job.files();
+        Self {
+            id: TransferJobId::Server(job.id),
+            state: job.state,
+            message: job.message,
+            bytes: job.bytes,
+            total: Some(job.total),
+            warnings: job.warnings,
+            title,
+            files,
+            retained_partials: job.retained_partials,
+            percentage: job.percentage,
+            indeterminate: job.percentage.is_none(),
+            progress_status: "Preparing".to_owned(),
+            speed: job.speed,
+            remaining: job.remaining,
+            icon_entry: job.icon_entry,
+            download_active: false,
+        }
+    }
+
+    fn from_download(row: &DownloadNoticeRow) -> Self {
+        let (state, message, bytes, total, percentage, indeterminate, progress_status) =
+            download_transfer_state(row);
+        Self {
+            id: TransferJobId::Download(row.id),
+            state,
+            message,
+            bytes,
+            total,
+            warnings: Vec::new(),
+            title: row.file_name.clone(),
+            files: 1,
+            retained_partials: false,
+            percentage,
+            indeterminate,
+            progress_status,
+            speed: None,
+            remaining: None,
+            icon_entry: FileEntry::from_provider(
+                row.destination.join(&row.file_name),
+                row.file_name.clone(),
+                false,
+                total,
+                None,
+            ),
+            download_active: row.status.is_active(),
+        }
+    }
+
+    fn is_server(&self) -> bool {
+        self.id.is_server()
+    }
+}
+
+fn download_transfer_state(
+    row: &DownloadNoticeRow,
+) -> (State, String, u64, Option<u64>, Option<u8>, bool, String) {
+    match &row.status {
+        DownloadNoticeStatus::Connecting => (
+            State::Connecting,
+            match &row.kind {
+                DownloadNoticeKind::Video { site_domain } => {
+                    format!("Downloading video from {site_domain}")
+                }
+                DownloadNoticeKind::File => format!("Downloading {}", row.file_name),
+            },
+            0,
+            None,
+            None,
+            true,
+            "Preparing".to_owned(),
+        ),
+        DownloadNoticeStatus::WaitingForCredentials => (
+            State::Attention,
+            format!("Waiting for sign-in to download {}", row.file_name),
+            0,
+            None,
+            None,
+            true,
+            "Waiting".to_owned(),
+        ),
+        DownloadNoticeStatus::WaitingForHostConfirmation => (
+            State::Attention,
+            format!(
+                "Waiting for server confirmation to download {}",
+                row.file_name
+            ),
+            0,
+            None,
+            None,
+            true,
+            "Waiting".to_owned(),
+        ),
+        DownloadNoticeStatus::Downloading {
+            downloaded_bytes,
+            total_bytes,
+        } => {
+            let percentage = total_bytes.map(|total| {
+                if total == 0 {
+                    100
+                } else {
+                    downloaded_bytes
+                        .saturating_mul(100)
+                        .saturating_div(total)
+                        .min(100) as u8
+                }
+            });
+            (
+                State::Transferring,
+                "Downloading".to_owned(),
+                *downloaded_bytes,
+                *total_bytes,
+                percentage,
+                total_bytes.is_none(),
+                "Preparing".to_owned(),
+            )
+        }
+        DownloadNoticeStatus::Completed => (
+            State::Completed,
+            "Download completed".to_owned(),
+            0,
+            None,
+            Some(100),
+            false,
+            "Completed".to_owned(),
+        ),
+        DownloadNoticeStatus::Failed(error) => (
+            State::Attention,
+            error.clone(),
+            0,
+            None,
+            None,
+            false,
+            "Failed".to_owned(),
+        ),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferRevealSide {
@@ -66,11 +251,15 @@ enum TransferRevealSide {
     Destination,
 }
 
-type TransferRevealHandler = Rc<dyn Fn(u64, TransferRevealSide, &mut Window, &mut App) + 'static>;
+type TransferRevealHandler =
+    Rc<dyn Fn(TransferJobId, TransferRevealSide, &mut Window, &mut App) + 'static>;
+type TransferControlHandler =
+    Rc<dyn Fn(TransferJobId, &'static str, &mut Window, &mut App) + 'static>;
 
 impl ExplorerView {
     pub(super) fn start_remote_events(&mut self, cx: &mut Context<Self>) {
         self.remote_transfer_snapshots = super::remote_transfer::snapshots();
+        self.update_transfer_completion_retention(cx);
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -79,17 +268,7 @@ impl ExplorerView {
                 if this
                     .update(cx, |view, cx| {
                         let snapshots = super::remote_transfer::snapshots();
-                        if snapshots != view.remote_transfer_snapshots {
-                            if transfer_panel_should_expand(
-                                &view.remote_transfer_snapshots,
-                                &snapshots,
-                            ) {
-                                view.remote_transfer_panel_collapsed = false;
-                            }
-                            view.reconcile_pending_remote_transfer_reveal(&snapshots, cx);
-                            view.remote_transfer_snapshots = snapshots;
-                            cx.notify();
-                        }
+                        view.apply_remote_transfer_snapshots(snapshots, cx);
                     })
                     .is_err()
                 {
@@ -114,6 +293,7 @@ impl ExplorerView {
                             if !view.complete_pending_remote_transfer_reveal(&snapshots, cx) {
                                 view.reload_with_entry_metadata_resolution(cx);
                             }
+                            view.apply_remote_transfer_snapshots(snapshots, cx);
                             view.emit_filesystem_changed(cx);
                         }
                         if view.active_dialog_window.is_some() {
@@ -171,6 +351,113 @@ impl ExplorerView {
         .detach();
     }
 
+    fn apply_remote_transfer_snapshots(
+        &mut self,
+        mut snapshots: Vec<JobSnapshot>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self.remote_transfer_snapshots.clone();
+        let newly_completed = snapshots.iter().any(|job| {
+            job.auto_dismiss
+                && !previous
+                    .iter()
+                    .any(|previous_job| previous_job.id == job.id && previous_job.auto_dismiss)
+        });
+        let retained = previous
+            .iter()
+            .filter(|previous_job| {
+                previous_job.auto_dismiss && !snapshots.iter().any(|job| job.id == previous_job.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        snapshots.extend(retained);
+        snapshots.sort_by_key(|job| job.id);
+
+        if newly_completed {
+            self.cancel_transfer_completion_cleanup();
+        }
+        if transfer_panel_should_expand(&previous, &snapshots) {
+            self.remote_transfer_panel_collapsed = false;
+        }
+        self.reconcile_pending_remote_transfer_reveal(&snapshots, cx);
+        let changed = snapshots != previous;
+        self.remote_transfer_snapshots = snapshots;
+        self.update_transfer_completion_retention(cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn cancel_transfer_completion_cleanup(&mut self) {
+        self.transfer_completion_cleanup_task = None;
+    }
+
+    fn has_unfinished_transfer(&self) -> bool {
+        self.download_notice_rows
+            .iter()
+            .any(|row| row.status.is_active())
+            || self
+                .remote_transfer_snapshots
+                .iter()
+                .any(|job| !matches!(job.state, State::Completed | State::Cancelled))
+    }
+
+    fn has_auto_dismiss_transfer(&self) -> bool {
+        self.download_notice_rows
+            .iter()
+            .any(|row| matches!(row.status, DownloadNoticeStatus::Completed))
+            || self
+                .remote_transfer_snapshots
+                .iter()
+                .any(|job| job.auto_dismiss)
+    }
+
+    pub(super) fn update_transfer_completion_retention(&mut self, cx: &mut Context<Self>) {
+        if self.has_unfinished_transfer() || !self.has_auto_dismiss_transfer() {
+            self.cancel_transfer_completion_cleanup();
+            return;
+        }
+        if self.transfer_completion_cleanup_task.is_some() {
+            return;
+        }
+
+        self.transfer_completion_cleanup_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(TRANSFER_COMPLETION_RETENTION)
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.transfer_completion_cleanup_task = None;
+                let fresh = super::remote_transfer::snapshots();
+                let has_new_completion = fresh.iter().any(|job| {
+                    job.auto_dismiss
+                        && !view
+                            .remote_transfer_snapshots
+                            .iter()
+                            .any(|current| current.id == job.id && current.auto_dismiss)
+                });
+                view.apply_remote_transfer_snapshots(fresh, cx);
+                view.cancel_transfer_completion_cleanup();
+                if has_new_completion || view.has_unfinished_transfer() {
+                    view.update_transfer_completion_retention(cx);
+                    return;
+                }
+
+                view.download_notice_rows
+                    .retain(|row| !matches!(row.status, DownloadNoticeStatus::Completed));
+                let completed_server_ids = view
+                    .remote_transfer_snapshots
+                    .iter()
+                    .filter(|job| job.auto_dismiss)
+                    .map(|job| job.id)
+                    .collect::<Vec<_>>();
+                view.remote_transfer_snapshots
+                    .retain(|job| !job.auto_dismiss);
+                super::remote_transfer::forget_clean_completions(&completed_server_ids);
+                cx.notify();
+            });
+        }));
+    }
+
     pub(super) fn start_native_transfer(
         &mut self,
         paths: Vec<std::path::PathBuf>,
@@ -181,6 +468,7 @@ impl ExplorerView {
         let sftp = cx.global::<SettingsState>().value.sftp;
         match super::remote_transfer::enqueue(paths, destination, move_sources, sftp) {
             Ok(_) => {
+                self.cancel_transfer_completion_cleanup();
                 self.remote_transfer_panel_collapsed = false;
                 self.clear_operation_notice();
             }
@@ -294,8 +582,18 @@ impl ExplorerView {
         }
     }
 
-    pub(super) fn render_native_transfers(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let jobs = self.remote_transfer_snapshots.clone();
+    pub(super) fn render_transfers(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut jobs = self
+            .download_notice_rows
+            .iter()
+            .map(TransferPanelJob::from_download)
+            .collect::<Vec<_>>();
+        jobs.extend(
+            self.remote_transfer_snapshots
+                .clone()
+                .into_iter()
+                .map(TransferPanelJob::from_server),
+        );
         let native_icons = jobs
             .iter()
             .filter_map(|job| {
@@ -305,8 +603,32 @@ impl ExplorerView {
             .collect();
         let entity = cx.entity();
         let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
-            let _ = entity.update(cx, |view, cx| {
-                view.reveal_remote_transfer(id, side, cx);
+            if let TransferJobId::Server(id) = id {
+                let _ = entity.update(cx, |view, cx| {
+                    view.reveal_remote_transfer(id, side, cx);
+                });
+            }
+        });
+        let entity = cx.entity();
+        let on_control: TransferControlHandler = Rc::new(move |id, action, _, cx| {
+            let _ = entity.update(cx, |view, cx| match id {
+                TransferJobId::Download(id) if action == "cancel" => {
+                    view.cancel_download(id, cx);
+                }
+                TransferJobId::Server(id) => {
+                    let sftp = cx
+                        .try_global::<SettingsState>()
+                        .map(|settings| settings.value.sftp)
+                        .unwrap_or_default();
+                    remote_transfer::control(id, action, sftp);
+                    if action == "dismiss" {
+                        view.remote_transfer_snapshots.retain(|job| job.id != id);
+                    }
+                    let snapshots = remote_transfer::snapshots();
+                    view.apply_remote_transfer_snapshots(snapshots, cx);
+                    cx.notify();
+                }
+                TransferJobId::Download(_) => {}
             });
         });
         render_transfer_panel(
@@ -319,6 +641,7 @@ impl ExplorerView {
                 cx.notify();
             }),
             on_reveal,
+            on_control,
             cx,
         )
     }
@@ -336,28 +659,25 @@ fn transfer_panel_should_expand(previous: &[JobSnapshot], next: &[JobSnapshot]) 
 }
 
 fn render_transfer_panel<V: 'static>(
-    jobs: Vec<JobSnapshot>,
-    native_icons: HashMap<u64, Arc<gpui::Image>>,
+    jobs: Vec<TransferPanelJob>,
+    native_icons: HashMap<TransferJobId, Arc<gpui::Image>>,
     collapsed: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_reveal: TransferRevealHandler,
-    cx: &mut Context<V>,
+    on_control: TransferControlHandler,
+    _cx: &mut Context<V>,
 ) -> AnyElement {
     if jobs.is_empty() {
         return div().into_any_element();
     }
-    let sftp = cx
-        .try_global::<SettingsState>()
-        .map(|settings| settings.value.sftp)
-        .unwrap_or_default();
     let attention_count = jobs
         .iter()
         .filter(|job| job.state == State::Attention)
         .count();
 
     div()
-        .id("sftp-transfers")
-        .debug_selector(|| "sftp-transfers".to_owned())
+        .id("transfers")
+        .debug_selector(|| "transfers".to_owned())
         .flex()
         .flex_col()
         .w_full()
@@ -378,8 +698,8 @@ fn render_transfer_panel<V: 'static>(
         .when(!collapsed, |panel| {
             panel.child(
                 div()
-                    .id("sftp-transfer-table-scroll")
-                    .debug_selector(|| "sftp-transfer-table-scroll".to_owned())
+                    .id("transfer-table-scroll")
+                    .debug_selector(|| "transfer-table-scroll".to_owned())
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_x_scroll()
@@ -392,8 +712,8 @@ fn render_transfer_panel<V: 'static>(
                             .child(render_transfer_table_header())
                             .child(
                                 div()
-                                    .id("sftp-transfer-rows")
-                                    .debug_selector(|| "sftp-transfer-rows".to_owned())
+                                    .id("transfer-rows")
+                                    .debug_selector(|| "transfer-rows".to_owned())
                                     .flex()
                                     .flex_col()
                                     .flex_1()
@@ -404,9 +724,8 @@ fn render_transfer_panel<V: 'static>(
                                         render_transfer_job(
                                             job,
                                             native_icon,
-                                            sftp,
                                             on_reveal.clone(),
-                                            cx,
+                                            on_control.clone(),
                                         )
                                     })),
                             ),
@@ -428,14 +747,14 @@ fn render_transfer_toolbar(
         TRANSFER_COLLAPSE_DOWN
     };
     let tooltip = if collapsed {
-        "Expand server transfers"
+        "Expand transfers"
     } else {
-        "Collapse server transfers"
+        "Collapse transfers"
     };
 
     div()
-        .id("sftp-transfer-toggle")
-        .debug_selector(|| "sftp-transfer-toggle".to_owned())
+        .id("transfer-toggle")
+        .debug_selector(|| "transfer-toggle".to_owned())
         .flex()
         .flex_row()
         .items_center()
@@ -468,27 +787,17 @@ fn render_transfer_toolbar(
             div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_size(px(13.0))
-                .child("Server transfers"),
-        )
-        .child(
-            div()
-                .px(px(7.0))
-                .py(px(2.0))
-                .rounded(px(8.0))
-                .bg(rgb(TRANSFER_NEUTRAL_TRACK))
-                .text_size(px(11.0))
-                .text_color(rgb(TRANSFER_TEXT_SECONDARY))
-                .child(transfer_count_label(job_count)),
+                .child("Transfers"),
         )
         .child(div().flex_1())
         .when(attention_count > 0, |toolbar| {
             toolbar.child(
                 div()
-                    .id("sftp-transfer-attention-count")
-                    .debug_selector(|| "sftp-transfer-attention-count".to_owned())
+                    .id("transfer-attention-count")
+                    .debug_selector(|| "transfer-attention-count".to_owned())
                     .px(px(8.0))
                     .py(px(3.0))
-                    .rounded(px(2.0))
+                    .rounded(px(TRANSFER_BADGE_RADIUS))
                     .bg(rgb(TRANSFER_AMBER_TRACK))
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
@@ -496,13 +805,25 @@ fn render_transfer_toolbar(
                     .child(attention_count_label(attention_count)),
             )
         })
+        .child(
+            div()
+                .id("transfer-count")
+                .debug_selector(|| "transfer-count".to_owned())
+                .px(px(7.0))
+                .py(px(2.0))
+                .rounded(px(TRANSFER_BADGE_RADIUS))
+                .bg(rgb(TRANSFER_NEUTRAL_TRACK))
+                .text_size(px(11.0))
+                .text_color(rgb(TRANSFER_TEXT_SECONDARY))
+                .child(transfer_count_label(job_count)),
+        )
         .into_any_element()
 }
 
 fn render_transfer_table_header() -> AnyElement {
     div()
-        .id("sftp-transfer-columns")
-        .debug_selector(|| "sftp-transfer-columns".to_owned())
+        .id("transfer-columns")
+        .debug_selector(|| "transfer-columns".to_owned())
         .flex()
         .flex_row()
         .h(px(TRANSFER_HEADER_HEIGHT))
@@ -549,8 +870,8 @@ fn transfer_header_cell(
     separator: bool,
 ) -> AnyElement {
     let cell = div()
-        .id(SharedString::from(format!("sftp-transfer-column-{key}")))
-        .debug_selector(move || format!("sftp-transfer-column-{key}"))
+        .id(SharedString::from(format!("transfer-column-{key}")))
+        .debug_selector(move || format!("transfer-column-{key}"))
         .flex()
         .items_center()
         .h_full()
@@ -570,72 +891,76 @@ fn transfer_header_cell(
     }
 }
 
-fn render_transfer_job<V: 'static>(
-    job: JobSnapshot,
+fn render_transfer_job(
+    job: TransferPanelJob,
     native_icon: Option<Arc<gpui::Image>>,
-    sftp: crate::settings::SftpSettings,
     on_reveal: TransferRevealHandler,
-    cx: &mut Context<V>,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
     let has_detail = job.state == State::Attention || !job.warnings.is_empty();
     let detail_job = has_detail.then(|| job.clone());
+    let selector = job.id.selector();
 
     div()
-        .id(SharedString::from(format!("sftp-transfer-job-{}", job.id)))
-        .debug_selector({
-            let id = job.id;
-            move || format!("sftp-transfer-job-{id}")
-        })
+        .id(SharedString::from(format!("transfer-job-{selector}")))
+        .debug_selector(move || format!("transfer-job-{selector}"))
         .flex()
         .flex_col()
         .w_full()
         .border_b_1()
         .border_color(rgb(TRANSFER_BORDER_SOFT))
-        .child(render_transfer_row(job, native_icon, sftp, on_reveal, cx))
+        .child(render_transfer_row(
+            job,
+            native_icon,
+            on_reveal,
+            on_control.clone(),
+        ))
         .when_some(detail_job, |item, job| {
-            item.child(render_transfer_detail_band(job, sftp, cx))
+            item.child(render_transfer_detail_band(job, on_control))
         })
         .into_any_element()
 }
 
-fn render_transfer_row<V: 'static>(
-    job: JobSnapshot,
+fn render_transfer_row(
+    job: TransferPanelJob,
     native_icon: Option<Arc<gpui::Image>>,
-    sftp: crate::settings::SftpSettings,
     on_reveal: TransferRevealHandler,
-    cx: &mut Context<V>,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
     let id = job.id;
-    let title = job.title();
-    let file_count = job.files();
+    let selector = id.selector();
+    let title = job.title.clone();
+    let file_count = job.files;
     let tooltip = transfer_name_tooltip(&title, &job.message);
     let icon = super::render::entry_icon(&job.icon_entry, native_icon);
     let reveal_job_id = id;
     let reveal_destination = on_reveal.clone();
 
     div()
-        .id(SharedString::from(format!("sftp-transfer-row-{id}")))
-        .debug_selector(move || format!("sftp-transfer-row-{id}"))
+        .id(SharedString::from(format!("transfer-row-{selector}")))
+        .debug_selector(move || format!("transfer-row-{}", id.selector()))
         .flex()
         .flex_row()
         .items_center()
         .h(px(TRANSFER_ROW_HEIGHT))
         .w_full()
         .bg(rgb(TRANSFER_SURFACE))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            reveal_destination(reveal_job_id, TransferRevealSide::Destination, window, cx);
-            cx.stop_propagation();
-        })
-        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
-            on_reveal(reveal_job_id, TransferRevealSide::Source, window, cx);
-            cx.stop_propagation();
+        .when(job.is_server(), |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    reveal_destination(reveal_job_id, TransferRevealSide::Destination, window, cx);
+                    cx.stop_propagation();
+                })
+                .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                    on_reveal(reveal_job_id, TransferRevealSide::Source, window, cx);
+                    cx.stop_propagation();
+                })
         })
         .child(
             div()
-                .id(("sftp-filename", id))
-                .debug_selector(move || format!("sftp-filename-{id}"))
+                .id(SharedString::from(format!("transfer-filename-{selector}")))
+                .debug_selector(move || format!("transfer-filename-{}", id.selector()))
                 .flex()
                 .items_center()
                 .flex_1()
@@ -647,8 +972,8 @@ fn render_transfer_row<V: 'static>(
                 .tooltip(explorer_tooltip(tooltip))
                 .child(
                     div()
-                        .id(("sftp-transfer-icon", id))
-                        .debug_selector(move || format!("sftp-transfer-icon-{id}"))
+                        .id(SharedString::from(format!("transfer-icon-{selector}")))
+                        .debug_selector(move || format!("transfer-icon-{}", id.selector()))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -673,8 +998,8 @@ fn render_transfer_row<V: 'static>(
         .child(render_transfer_speed_cell(&job))
         .child(
             div()
-                .id(SharedString::from(format!("sftp-transfer-remaining-{id}")))
-                .debug_selector(move || format!("sftp-transfer-remaining-{id}"))
+                .id(SharedString::from(format!("transfer-remaining-{selector}")))
+                .debug_selector(move || format!("transfer-remaining-{}", id.selector()))
                 .flex()
                 .items_center()
                 .w(px(TRANSFER_REMAINING_WIDTH))
@@ -684,15 +1009,16 @@ fn render_transfer_row<V: 'static>(
                 .text_color(rgb(TRANSFER_TEXT_SECONDARY))
                 .child(transfer_remaining_text(&job)),
         )
-        .child(render_transfer_actions(&job, sftp, cx))
+        .child(render_transfer_actions(&job, on_control))
         .into_any_element()
 }
 
-fn render_transfer_speed_cell(job: &JobSnapshot) -> AnyElement {
+fn render_transfer_speed_cell(job: &TransferPanelJob) -> AnyElement {
     let id = job.id;
+    let selector = id.selector();
     div()
-        .id(SharedString::from(format!("sftp-transfer-speed-{id}")))
-        .debug_selector(move || format!("sftp-transfer-speed-{id}"))
+        .id(SharedString::from(format!("transfer-speed-{selector}")))
+        .debug_selector(move || format!("transfer-speed-{selector}"))
         .flex()
         .items_center()
         .w(px(TRANSFER_SPEED_WIDTH))
@@ -704,13 +1030,14 @@ fn render_transfer_speed_cell(job: &JobSnapshot) -> AnyElement {
         .into_any_element()
 }
 
-fn render_transfer_progress_cell(job: &JobSnapshot) -> AnyElement {
+fn render_transfer_progress_cell(job: &TransferPanelJob) -> AnyElement {
     let id = job.id;
+    let selector = id.selector();
     let labels = transfer_progress_labels(job);
 
     div()
-        .id(SharedString::from(format!("sftp-transfer-progress-{id}")))
-        .debug_selector(move || format!("sftp-transfer-progress-{id}"))
+        .id(SharedString::from(format!("transfer-progress-{selector}")))
+        .debug_selector(move || format!("transfer-progress-{selector}"))
         .flex()
         .items_center()
         .w(px(TRANSFER_PROGRESS_WIDTH))
@@ -738,17 +1065,15 @@ fn render_transfer_progress_cell(job: &JobSnapshot) -> AnyElement {
         .into_any_element()
 }
 
-fn transfer_progress_bar(job: &JobSnapshot) -> AnyElement {
+fn transfer_progress_bar(job: &TransferPanelJob) -> AnyElement {
     let (color, track) = transfer_progress_colors(job.state);
+    let id = job.id;
+    let selector = job.id.selector();
     let bar = div()
         .id(SharedString::from(format!(
-            "sftp-transfer-progress-bar-{}",
-            job.id
+            "transfer-progress-bar-{selector}"
         )))
-        .debug_selector({
-            let id = job.id;
-            move || format!("sftp-transfer-progress-bar-{id}")
-        })
+        .debug_selector(move || format!("transfer-progress-bar-{}", id.selector()))
         .relative()
         .w(px(92.0))
         .h(px(4.0))
@@ -768,8 +1093,8 @@ fn transfer_progress_bar(job: &JobSnapshot) -> AnyElement {
                 .bg(rgb(color)),
         )
         .into_any_element()
-    } else {
-        let id = job.id;
+    } else if job.indeterminate {
+        let animation_id = SharedString::from(format!("transfer-indeterminate-{selector}"));
         bar.child(
             div()
                 .absolute()
@@ -777,7 +1102,7 @@ fn transfer_progress_bar(job: &JobSnapshot) -> AnyElement {
                 .bottom(px(0.0))
                 .bg(rgb(color))
                 .with_animation(
-                    ("sftp-transfer-indeterminate", id),
+                    animation_id,
                     Animation::new(Duration::from_millis(1_400)).repeat(),
                     |segment, delta| {
                         let left = -0.30 + (1.30 * delta);
@@ -786,18 +1111,20 @@ fn transfer_progress_bar(job: &JobSnapshot) -> AnyElement {
                 ),
         )
         .into_any_element()
+    } else {
+        bar.into_any_element()
     }
 }
 
-fn render_transfer_actions<V: 'static>(
-    job: &JobSnapshot,
-    sftp: crate::settings::SftpSettings,
-    cx: &mut Context<V>,
+fn render_transfer_actions(
+    job: &TransferPanelJob,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
     let id = job.id;
+    let selector = id.selector();
     div()
-        .id(SharedString::from(format!("sftp-transfer-actions-{id}")))
-        .debug_selector(move || format!("sftp-transfer-actions-{id}"))
+        .id(SharedString::from(format!("transfer-actions-{selector}")))
+        .debug_selector(move || format!("transfer-actions-{selector}"))
         .flex()
         .items_center()
         .justify_end()
@@ -809,20 +1136,23 @@ fn render_transfer_actions<V: 'static>(
         .children(
             transfer_row_actions(job)
                 .into_iter()
-                .map(|action| render_transfer_action_button(id, action, sftp, cx)),
+                .map(|action| render_transfer_action_button(id, action, on_control.clone())),
         )
         .into_any_element()
 }
 
-fn render_transfer_action_button<V: 'static>(
-    id: u64,
+fn render_transfer_action_button(
+    id: TransferJobId,
     action: TransferAction,
-    sftp: crate::settings::SftpSettings,
-    cx: &mut Context<V>,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
+    let selector = id.selector();
     div()
-        .id(SharedString::from(format!("sftp-{}-{id}", action.key)))
-        .debug_selector(move || format!("sftp-{}-{id}", action.key))
+        .id(SharedString::from(format!(
+            "transfer-{}-{selector}",
+            action.key
+        )))
+        .debug_selector(move || format!("transfer-{}-{selector}", action.key))
         .flex()
         .items_center()
         .justify_center()
@@ -854,27 +1184,27 @@ fn render_transfer_action_button<V: 'static>(
         .on_mouse_down(MouseButton::Right, |_, _, cx| {
             cx.stop_propagation();
         })
-        .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+        .on_click(move |event: &ClickEvent, window, cx| {
             if !event.standard_click() {
                 cx.stop_propagation();
                 return;
             }
-            remote_transfer::control(id, action.key, sftp);
+            on_control(id, action.key, window, cx);
             cx.stop_propagation();
-            cx.notify();
-        }))
+        })
         .into_any_element()
 }
 
-fn render_transfer_detail_band<V: 'static>(
-    job: JobSnapshot,
-    sftp: crate::settings::SftpSettings,
-    cx: &mut Context<V>,
+fn render_transfer_detail_band(
+    job: TransferPanelJob,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
     let id = job.id;
+    let selector = id.selector();
+    let show_conflict_actions = job.state == State::Attention && job.is_server();
     div()
-        .id(SharedString::from(format!("sftp-transfer-detail-{id}")))
-        .debug_selector(move || format!("sftp-transfer-detail-{id}"))
+        .id(SharedString::from(format!("transfer-detail-{selector}")))
+        .debug_selector(move || format!("transfer-detail-{selector}"))
         .flex()
         .flex_row()
         .items_center()
@@ -904,7 +1234,7 @@ fn render_transfer_detail_band<V: 'static>(
                 })
                 .children(job.warnings.into_iter().map(|warning| div().child(warning))),
         )
-        .when(job.state == State::Attention, |details| {
+        .when(show_conflict_actions, |details| {
             details.child(
                 div()
                     .flex()
@@ -913,25 +1243,26 @@ fn render_transfer_detail_band<V: 'static>(
                     .items_center()
                     .justify_end()
                     .gap(px(6.0))
-                    .children(
-                        conflict_actions()
-                            .into_iter()
-                            .map(|action| render_conflict_action_button(id, action, sftp, cx)),
-                    ),
+                    .children(conflict_actions().into_iter().map(|action| {
+                        render_conflict_action_button(id, action, on_control.clone())
+                    })),
             )
         })
         .into_any_element()
 }
 
-fn render_conflict_action_button<V: 'static>(
-    id: u64,
+fn render_conflict_action_button(
+    id: TransferJobId,
     action: TransferAction,
-    sftp: crate::settings::SftpSettings,
-    cx: &mut Context<V>,
+    on_control: TransferControlHandler,
 ) -> AnyElement {
+    let selector = id.selector();
     div()
-        .id(SharedString::from(format!("sftp-{}-{id}", action.key)))
-        .debug_selector(move || format!("sftp-{}-{id}", action.key))
+        .id(SharedString::from(format!(
+            "transfer-{}-{selector}",
+            action.key
+        )))
+        .debug_selector(move || format!("transfer-{}-{selector}", action.key))
         .flex()
         .items_center()
         .justify_center()
@@ -954,15 +1285,14 @@ fn render_conflict_action_button<V: 'static>(
         .on_mouse_down(MouseButton::Right, |_, _, cx| {
             cx.stop_propagation();
         })
-        .on_click(cx.listener(move |_, event: &ClickEvent, _, cx| {
+        .on_click(move |event: &ClickEvent, window, cx| {
             if !event.standard_click() {
                 cx.stop_propagation();
                 return;
             }
-            remote_transfer::control(id, action.key, sftp);
+            on_control(id, action.key, window, cx);
             cx.stop_propagation();
-            cx.notify();
-        }))
+        })
         .into_any_element()
 }
 
@@ -974,7 +1304,19 @@ struct TransferAction {
     destructive: bool,
 }
 
-fn transfer_row_actions(job: &JobSnapshot) -> Vec<TransferAction> {
+fn transfer_row_actions(job: &TransferPanelJob) -> Vec<TransferAction> {
+    if !job.is_server() {
+        return job
+            .download_active
+            .then_some(TransferAction {
+                key: "cancel",
+                label: "Cancel",
+                glyph: TRANSFER_ACTION_CANCEL,
+                destructive: true,
+            })
+            .into_iter()
+            .collect();
+    }
     let idle = matches!(
         job.state,
         State::Paused | State::Attention | State::Cancelled
@@ -1065,17 +1407,30 @@ struct TransferProgressLabels {
     secondary: String,
 }
 
-fn transfer_progress_labels(job: &JobSnapshot) -> TransferProgressLabels {
+fn transfer_progress_labels(job: &TransferPanelJob) -> TransferProgressLabels {
     match job.percentage {
         Some(percentage) => TransferProgressLabels {
             primary: format!("{percentage}%"),
-            secondary: transfer_size_pair(job.bytes, job.total),
+            secondary: job
+                .total
+                .map(|total| transfer_size_pair(job.bytes, total))
+                .unwrap_or_else(|| job.progress_status.clone()),
         },
         None => TransferProgressLabels {
             primary: String::new(),
-            secondary: "Preparing".to_owned(),
+            secondary: if job.bytes > 0 {
+                transfer_size(job.bytes)
+            } else {
+                job.progress_status.clone()
+            },
         },
     }
+}
+
+fn transfer_size(bytes: u64) -> String {
+    use super::formatting::format_size_parts;
+    let (value, unit) = format_size_parts(bytes);
+    format!("{value} {unit}")
 }
 
 fn transfer_size_pair(bytes: u64, total: u64) -> String {
@@ -1089,7 +1444,7 @@ fn transfer_size_pair(bytes: u64, total: u64) -> String {
     }
 }
 
-fn transfer_speed_text(job: &JobSnapshot) -> String {
+fn transfer_speed_text(job: &TransferPanelJob) -> String {
     use super::formatting::format_size_parts;
     if job.state != State::Transferring {
         return "~".to_owned();
@@ -1110,7 +1465,7 @@ fn transfer_name_tooltip(title: &str, message: &str) -> String {
     }
 }
 
-fn transfer_remaining_text(job: &JobSnapshot) -> String {
+fn transfer_remaining_text(job: &TransferPanelJob) -> String {
     use super::formatting::format_transfer_remaining;
     if job.state != State::Transferring {
         return "~".to_owned();
@@ -1121,10 +1476,7 @@ fn transfer_remaining_text(job: &JobSnapshot) -> String {
 }
 
 fn transfer_count_label(count: usize) -> String {
-    format!(
-        "{count} {}",
-        if count == 1 { "transfer" } else { "transfers" }
-    )
+    count.to_string()
 }
 
 fn attention_count_label(count: usize) -> String {
@@ -1149,8 +1501,123 @@ mod tests {
         assert_eq!(TRANSFER_UI_UPDATE_INTERVAL, Duration::from_millis(500));
     }
 
+    #[gpui::test]
+    fn mixed_transfer_completion_waits_for_the_last_unfinished_row(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows = vec![download_row(7, DownloadNoticeStatus::Connecting)];
+                view.apply_remote_transfer_snapshots(
+                    vec![JobSnapshot::for_test(State::Completed)],
+                    cx,
+                );
+            });
+        });
+        cx.executor().advance_clock(TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 1);
+            assert_eq!(view.remote_transfer_snapshots.len(), 1);
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.download_notice_rows[0].status = DownloadNoticeStatus::Completed;
+                view.update_transfer_completion_retention(cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.download_notice_rows.len(), 1);
+            assert_eq!(view.remote_transfer_snapshots.len(), 1);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.download_notice_rows.is_empty());
+            assert!(view.remote_transfer_snapshots.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn server_completion_restarts_retention_and_preserves_collapsed_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut first = JobSnapshot::for_test(State::Transferring);
+                first.id = 1;
+                view.apply_remote_transfer_snapshots(vec![first], cx);
+                view.remote_transfer_panel_collapsed = true;
+                let mut first = JobSnapshot::for_test(State::Completed);
+                first.id = 1;
+                view.apply_remote_transfer_snapshots(vec![first], cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut first = JobSnapshot::for_test(State::Completed);
+                first.id = 1;
+                let mut second = JobSnapshot::for_test(State::Transferring);
+                second.id = 2;
+                view.apply_remote_transfer_snapshots(vec![first, second], cx);
+                view.remote_transfer_panel_collapsed = true;
+                let mut first = JobSnapshot::for_test(State::Completed);
+                first.id = 1;
+                let mut second = JobSnapshot::for_test(State::Completed);
+                second.id = 2;
+                view.apply_remote_transfer_snapshots(vec![first, second], cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.remote_transfer_snapshots.len(), 2);
+            assert!(view.remote_transfer_panel_collapsed);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.remote_transfer_snapshots.is_empty());
+            assert!(view.remote_transfer_panel_collapsed);
+        });
+    }
+
+    #[gpui::test]
+    fn warning_and_attention_server_rows_are_not_auto_dismissed(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut warning = JobSnapshot::for_test(State::Completed);
+                warning.id = 1;
+                warning.auto_dismiss = false;
+                warning.warnings = vec!["Timestamp could not be preserved".to_owned()];
+                let mut attention = JobSnapshot::for_test(State::Attention);
+                attention.id = 2;
+                view.apply_remote_transfer_snapshots(vec![warning, attention], cx);
+            });
+        });
+        cx.executor().advance_clock(TRANSFER_COMPLETION_RETENTION);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.remote_transfer_snapshots.len(), 2);
+            assert!(view.transfer_completion_cleanup_task.is_none());
+        });
+    }
+
     struct Panel {
-        jobs: Vec<JobSnapshot>,
+        jobs: Vec<TransferPanelJob>,
         collapsed: bool,
     }
 
@@ -1169,6 +1636,7 @@ mod tests {
                             cx.notify();
                         }),
                         Rc::new(|_, _, _, _| {}),
+                        Rc::new(|_, _, _, _| {}),
                         cx,
                     )),
             )
@@ -1176,7 +1644,7 @@ mod tests {
     }
 
     struct InteractivePanel {
-        job: JobSnapshot,
+        job: TransferPanelJob,
         reveals: Vec<(u64, TransferRevealSide)>,
     }
 
@@ -1189,11 +1657,14 @@ mod tests {
                 false,
                 cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()),
                 Rc::new(move |id, side, _, cx| {
-                    let _ = entity.update(cx, |panel, cx| {
-                        panel.reveals.push((id, side));
-                        cx.notify();
-                    });
+                    if let TransferJobId::Server(id) = id {
+                        let _ = entity.update(cx, |panel, cx| {
+                            panel.reveals.push((id, side));
+                            cx.notify();
+                        });
+                    }
                 }),
+                Rc::new(|_, _, _, _| {}),
                 cx,
             ))
         }
@@ -1204,12 +1675,12 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (panel, cx) = cx.add_window_view(|_, _| InteractivePanel {
-            job: JobSnapshot::for_test(State::Transferring),
+            job: TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring)),
             reveals: Vec::new(),
         });
         cx.run_until_parked();
 
-        let row = cx.debug_bounds("sftp-transfer-row-123").unwrap();
+        let row = cx.debug_bounds("transfer-row-server-123").unwrap();
         let row_position = gpui::point(row.origin.x + px(180.0), row.center().y);
         cx.simulate_mouse_down(row_position, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(row_position, MouseButton::Left, gpui::Modifiers::default());
@@ -1226,7 +1697,10 @@ mod tests {
             );
         });
 
-        let pause = cx.debug_bounds("sftp-pause-123").unwrap().center();
+        let pause = cx
+            .debug_bounds("transfer-pause-server-123")
+            .unwrap()
+            .center();
         cx.simulate_mouse_down(pause, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_up(pause, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_down(pause, MouseButton::Right, gpui::Modifiers::default());
@@ -1391,7 +1865,7 @@ mod tests {
 
     #[test]
     fn transfer_progress_remaining_and_speed_copy_is_compact_and_separator_free() {
-        let mut job = JobSnapshot::for_test(State::Transferring);
+        let mut job = TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring));
         let labels = transfer_progress_labels(&job);
         assert_eq!(labels.primary, "50%");
         assert_eq!(labels.secondary, "512 bytes / 1.0 KB");
@@ -1404,7 +1878,7 @@ mod tests {
         assert_eq!(transfer_remaining_text(&job), "1s");
 
         job.bytes = 2 * super::super::constants::MB_BYTES;
-        job.total = 10 * super::super::constants::MB_BYTES;
+        job.total = Some(10 * super::super::constants::MB_BYTES);
         assert_eq!(transfer_progress_labels(&job).secondary, "2.00 / 10.00 MB");
 
         job.remaining = None;
@@ -1414,6 +1888,7 @@ mod tests {
         assert_eq!(transfer_speed_text(&job), "~");
 
         job.percentage = None;
+        job.bytes = 0;
         assert_eq!(
             transfer_progress_labels(&job),
             TransferProgressLabels {
@@ -1427,7 +1902,7 @@ mod tests {
     fn transfer_speed_uses_file_size_units_and_handles_unavailable_samples() {
         use super::super::constants::{GB_BYTES, KB_BYTES, MB_BYTES, TB_BYTES};
 
-        let mut job = JobSnapshot::for_test(State::Transferring);
+        let mut job = TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring));
         for (speed, expected) in [
             (0.0, "0 bytes/s"),
             (512.0, "512 bytes/s"),
@@ -1460,15 +1935,195 @@ mod tests {
         assert_eq!(transfer_name_tooltip("report.zip", ""), "report.zip");
     }
 
+    fn download_row(id: u64, status: DownloadNoticeStatus) -> DownloadNoticeRow {
+        DownloadNoticeRow {
+            id,
+            kind: DownloadNoticeKind::File,
+            file_name: format!("download-{id}.zip"),
+            destination: PathBuf::from("downloads"),
+            status,
+        }
+    }
+
+    #[test]
+    fn download_rows_map_progress_attention_and_cancel_capabilities() {
+        let known = TransferPanelJob::from_download(&download_row(
+            1,
+            DownloadNoticeStatus::Downloading {
+                downloaded_bytes: 25,
+                total_bytes: Some(100),
+            },
+        ));
+        assert_eq!(known.id, TransferJobId::Download(1));
+        assert_eq!(known.state, State::Transferring);
+        assert_eq!(known.percentage, Some(25));
+        assert!(!known.indeterminate);
+        assert_eq!(
+            transfer_progress_labels(&known),
+            TransferProgressLabels {
+                primary: "25%".to_owned(),
+                secondary: "25 / 100 bytes".to_owned(),
+            }
+        );
+        assert_eq!(transfer_speed_text(&known), "~");
+        assert_eq!(transfer_remaining_text(&known), "~");
+        assert_eq!(
+            transfer_row_actions(&known)
+                .into_iter()
+                .map(|action| action.key)
+                .collect::<Vec<_>>(),
+            ["cancel"]
+        );
+
+        let unknown = TransferPanelJob::from_download(&download_row(
+            2,
+            DownloadNoticeStatus::Downloading {
+                downloaded_bytes: 512,
+                total_bytes: None,
+            },
+        ));
+        assert_eq!(unknown.percentage, None);
+        assert!(unknown.indeterminate);
+        assert_eq!(transfer_progress_labels(&unknown).secondary, "512 bytes");
+
+        let waiting = TransferPanelJob::from_download(&download_row(
+            3,
+            DownloadNoticeStatus::WaitingForCredentials,
+        ));
+        assert_eq!(waiting.state, State::Attention);
+        assert_eq!(waiting.progress_status, "Waiting");
+        assert!(waiting.download_active);
+
+        let failed = TransferPanelJob::from_download(&download_row(
+            4,
+            DownloadNoticeStatus::Failed("Download failed".to_owned()),
+        ));
+        assert_eq!(failed.state, State::Attention);
+        assert_eq!(failed.message, "Download failed");
+        assert!(!failed.indeterminate);
+        assert!(transfer_row_actions(&failed).is_empty());
+
+        let completed =
+            TransferPanelJob::from_download(&download_row(5, DownloadNoticeStatus::Completed));
+        assert_eq!(completed.state, State::Completed);
+        assert_eq!(completed.percentage, Some(100));
+        assert_eq!(transfer_progress_labels(&completed).secondary, "Completed");
+        assert!(transfer_row_actions(&completed).is_empty());
+    }
+
+    #[gpui::test]
+    fn mixed_download_and_server_jobs_share_the_transfer_table_and_toolbar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let download = TransferPanelJob::from_download(&download_row(
+            1,
+            DownloadNoticeStatus::Downloading {
+                downloaded_bytes: 25,
+                total_bytes: Some(100),
+            },
+        ));
+        let failed = TransferPanelJob::from_download(&download_row(
+            2,
+            DownloadNoticeStatus::Failed("Download failed".to_owned()),
+        ));
+        let server = TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring));
+        let (_, cx) = cx.add_window_view(|_, _| Panel {
+            jobs: vec![download, failed, server],
+            collapsed: false,
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(400.0)));
+        cx.run_until_parked();
+
+        let download_row = cx.debug_bounds("transfer-row-download-1").unwrap();
+        let failed_row = cx.debug_bounds("transfer-row-download-2").unwrap();
+        let server_row = cx.debug_bounds("transfer-row-server-123").unwrap();
+        assert!(download_row.origin.y < failed_row.origin.y);
+        assert!(failed_row.origin.y < server_row.origin.y);
+        assert!(cx.debug_bounds("transfer-cancel-download-1").is_some());
+        assert!(cx.debug_bounds("transfer-detail-download-2").is_some());
+        assert!(cx.debug_bounds("transfer-replace-download-2").is_none());
+        assert!(cx.debug_bounds("transfer-pause-server-123").is_some());
+
+        let toolbar = cx.debug_bounds("transfer-toggle").unwrap();
+        let attention = cx.debug_bounds("transfer-attention-count").unwrap();
+        let count = cx.debug_bounds("transfer-count").unwrap();
+        assert!(attention.origin.x < count.origin.x);
+        assert_eq!(
+            count.origin.x + count.size.width,
+            toolbar.origin.x + toolbar.size.width - px(12.0)
+        );
+        assert_eq!(TRANSFER_BADGE_RADIUS, 2.0);
+    }
+
+    #[gpui::test]
+    fn download_cancel_action_from_the_shared_panel_cancels_only_that_download(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        cx.set_global(SettingsState::for_test(
+            crate::settings::ExplorerSettings::default(),
+        ));
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path.clone(), focus_handle);
+            view.download_notice_rows = vec![
+                DownloadNoticeRow {
+                    destination: path.clone(),
+                    ..download_row(
+                        10,
+                        DownloadNoticeStatus::Downloading {
+                            downloaded_bytes: 25,
+                            total_bytes: Some(100),
+                        },
+                    )
+                },
+                DownloadNoticeRow {
+                    destination: path,
+                    ..download_row(
+                        11,
+                        DownloadNoticeStatus::Downloading {
+                            downloaded_bytes: 50,
+                            total_bytes: Some(100),
+                        },
+                    )
+                },
+            ];
+            view.download_tasks = vec![(10, gpui::Task::ready(())), (11, gpui::Task::ready(()))];
+            view
+        });
+        cx.run_until_parked();
+
+        let cancel = cx
+            .debug_bounds("transfer-cancel-download-10")
+            .expect("download cancel action")
+            .center();
+        cx.simulate_mouse_down(cancel, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(cancel, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.download_notice_rows
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                [11]
+            );
+            assert_eq!(view.download_tasks.len(), 1);
+        });
+    }
+
     #[test]
     fn transfer_action_model_preserves_existing_controls() {
-        let action_keys = |job: &JobSnapshot| {
+        let action_keys = |job: &TransferPanelJob| {
             transfer_row_actions(job)
                 .into_iter()
                 .map(|action| action.key)
                 .collect::<Vec<_>>()
         };
-        let mut job = JobSnapshot::for_test(State::Transferring);
+        let mut job = TransferPanelJob::from_server(JobSnapshot::for_test(State::Transferring));
         assert_eq!(action_keys(&job), vec!["pause", "cancel"]);
 
         job.state = State::Attention;
@@ -1486,8 +2141,8 @@ mod tests {
 
     #[test]
     fn transfer_counts_are_named_without_punctuation_separators() {
-        assert_eq!(transfer_count_label(1), "1 transfer");
-        assert_eq!(transfer_count_label(3), "3 transfers");
+        assert_eq!(transfer_count_label(1), "1");
+        assert_eq!(transfer_count_label(3), "3");
         assert_eq!(attention_count_label(1), "1 needs attention");
         assert_eq!(attention_count_label(2), "2 need attention");
     }
@@ -1522,43 +2177,45 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (panel, cx) = cx.add_window_view(|_, _| Panel {
-            jobs: vec![JobSnapshot::for_test(State::Attention)],
+            jobs: vec![TransferPanelJob::from_server(JobSnapshot::for_test(
+                State::Attention,
+            ))],
             collapsed: false,
         });
         cx.simulate_resize(gpui::size(px(320.0), px(240.0)));
         cx.run_until_parked();
-        let bounds = cx.debug_bounds("sftp-transfers").expect("transfer panel");
+        let bounds = cx.debug_bounds("transfers").expect("transfer panel");
         assert!(bounds.size.width <= px(320.0));
-        assert!(cx.debug_bounds("sftp-filename-123").is_some());
-        assert!(cx.debug_bounds("sftp-transfer-icon-123").is_some());
+        assert!(cx.debug_bounds("transfer-filename-server-123").is_some());
+        assert!(cx.debug_bounds("transfer-icon-server-123").is_some());
         assert_eq!(
-            cx.debug_bounds("sftp-transfer-row-123")
+            cx.debug_bounds("transfer-row-server-123")
                 .unwrap()
                 .size
                 .height,
             px(super::super::constants::ROW_HEIGHT)
         );
-        assert!(cx.debug_bounds("sftp-transfer-columns").is_some());
+        assert!(cx.debug_bounds("transfer-columns").is_some());
         for selector in [
-            "sftp-transfer-column-name",
-            "sftp-transfer-column-progress",
-            "sftp-transfer-column-speed",
-            "sftp-transfer-column-remaining",
-            "sftp-transfer-column-actions",
+            "transfer-column-name",
+            "transfer-column-progress",
+            "transfer-column-speed",
+            "transfer-column-remaining",
+            "transfer-column-actions",
         ] {
             assert!(cx.debug_bounds(selector).is_some());
         }
-        assert!(cx.debug_bounds("sftp-transfer-column-status").is_none());
-        assert!(cx.debug_bounds("sftp-transfer-status-123").is_none());
-        assert!(cx.debug_bounds("sftp-transfer-progress-123").is_some());
-        assert!(cx.debug_bounds("sftp-transfer-speed-123").is_some());
-        assert!(cx.debug_bounds("sftp-transfer-detail-123").is_some());
-        assert!(cx.debug_bounds("sftp-replace-123").is_some());
-        assert!(cx.debug_bounds("sftp-transfer-table-scroll").is_some());
+        assert!(cx.debug_bounds("transfer-column-status").is_none());
+        assert!(cx.debug_bounds("transfer-status-server-123").is_none());
+        assert!(cx.debug_bounds("transfer-progress-server-123").is_some());
+        assert!(cx.debug_bounds("transfer-speed-server-123").is_some());
+        assert!(cx.debug_bounds("transfer-detail-server-123").is_some());
+        assert!(cx.debug_bounds("transfer-replace-server-123").is_some());
+        assert!(cx.debug_bounds("transfer-table-scroll").is_some());
         assert!(cx.debug_bounds("transfer-space").unwrap().size.height > px(0.0));
 
         let toggle = cx
-            .debug_bounds("sftp-transfer-toggle")
+            .debug_bounds("transfer-toggle")
             .expect("transfer tray toggle")
             .center();
         cx.simulate_mouse_down(toggle, gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -1566,7 +2223,7 @@ mod tests {
         cx.run_until_parked();
         cx.read_entity(&panel, |panel, _| assert!(panel.collapsed));
         assert_eq!(
-            cx.debug_bounds("sftp-transfers").unwrap().size.height,
+            cx.debug_bounds("transfers").unwrap().size.height,
             px(TRANSFER_TOOLBAR_HEIGHT + 1.0)
         );
 
@@ -1588,7 +2245,7 @@ mod tests {
             .map(|id| {
                 let mut job = JobSnapshot::for_test(State::Transferring);
                 job.id = id;
-                job
+                TransferPanelJob::from_server(job)
             })
             .collect();
         let (_, cx) = cx.add_window_view(|_, _| Panel {
@@ -1598,8 +2255,8 @@ mod tests {
         cx.simulate_resize(gpui::size(px(900.0), px(700.0)));
         cx.run_until_parked();
 
-        let panel = cx.debug_bounds("sftp-transfers").unwrap();
-        let rows = cx.debug_bounds("sftp-transfer-rows").unwrap();
+        let panel = cx.debug_bounds("transfers").unwrap();
+        let rows = cx.debug_bounds("transfer-rows").unwrap();
         assert!(panel.size.height <= px(TRANSFER_PANEL_MAX_HEIGHT + 1.0));
         assert!(rows.size.height < px(12.0 * TRANSFER_ROW_HEIGHT));
     }
@@ -1607,15 +2264,17 @@ mod tests {
     #[gpui::test]
     fn collapsed_transfer_panel_renders_only_the_toolbar(cx: &mut gpui::TestAppContext) {
         let (_, cx) = cx.add_window_view(|_, _| Panel {
-            jobs: vec![JobSnapshot::for_test(State::Transferring)],
+            jobs: vec![TransferPanelJob::from_server(JobSnapshot::for_test(
+                State::Transferring,
+            ))],
             collapsed: true,
         });
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("sftp-transfer-toggle").is_some());
-        assert!(cx.debug_bounds("sftp-transfer-columns").is_none());
+        assert!(cx.debug_bounds("transfer-toggle").is_some());
+        assert!(cx.debug_bounds("transfer-columns").is_none());
         assert_eq!(
-            cx.debug_bounds("sftp-transfers").unwrap().size.height,
+            cx.debug_bounds("transfers").unwrap().size.height,
             px(TRANSFER_TOOLBAR_HEIGHT + 1.0)
         );
     }

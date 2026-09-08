@@ -276,6 +276,19 @@ fn clean_completion(m: &Manifest) -> bool {
         && m.warnings.is_empty()
         && m.items.iter().all(|i| i.completed && !i.skipped)
 }
+
+fn remove_clean_completion_store(job: &Job) {
+    if !clean_completion(&job.data.lock().unwrap()) {
+        return;
+    }
+    if let Err(error) = fs::remove_file(&job.store) {
+        set_state(
+            job,
+            State::Attention,
+            format!("Transfer completed, but saved state could not be removed: {error}"),
+        );
+    }
+}
 fn transfer_percentage(m: &Manifest, bytes: u64, total: u64) -> Option<u8> {
     if !m.planned {
         return None;
@@ -355,6 +368,7 @@ pub(super) struct JobSnapshot {
     title: String,
     files: usize,
     pub retained_partials: bool,
+    pub(super) auto_dismiss: bool,
     pub percentage: Option<u8>,
     pub speed: Option<f64>,
     pub remaining: Option<Duration>,
@@ -378,6 +392,7 @@ impl JobSnapshot {
             title: "file.txt".into(),
             files: 1,
             retained_partials: false,
+            auto_dismiss: state == State::Completed,
             percentage: Some(50),
             speed: Some(512.0),
             remaining: Some(Duration::from_secs(1)),
@@ -417,10 +432,8 @@ pub(super) fn snapshots() -> Vec<JobSnapshot> {
         .collect()
 }
 fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
-    if clean_completion(&job.data.lock().unwrap()) {
-        return None;
-    }
     let m = job.data.lock().unwrap();
+    let auto_dismiss = clean_completion(&m);
     let progress = job.progress.lock().unwrap();
     let current_bytes = if progress.item == Some(m.current) {
         progress
@@ -464,10 +477,23 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
             .items
             .iter()
             .any(|i| i.partial.is_some() && (!i.completed || i.skipped)),
+        auto_dismiss,
         source_reveal,
         destination_reveal,
         icon_entry,
     })
+}
+
+pub(super) fn forget_clean_completions(ids: &[u64]) {
+    let mut jobs = manager().jobs.lock().unwrap();
+    for id in ids {
+        let remove = jobs
+            .get(id)
+            .is_some_and(|job| clean_completion(&job.data.lock().unwrap()));
+        if remove {
+            jobs.remove(id);
+        }
+    }
 }
 
 fn source_reveal_target(manifest: &Manifest) -> Option<RevealTarget> {
@@ -756,7 +782,9 @@ pub(super) fn control(id: u64, action: &str, pipeline: SftpSettings) {
                 return;
             }
             drop(m);
-            if let Err(e) = fs::remove_file(&job.store) {
+            if let Err(e) = fs::remove_file(&job.store)
+                && e.kind() != io::ErrorKind::NotFound
+            {
                 set_state(
                     &job,
                     State::Attention,
@@ -886,12 +914,7 @@ fn start_action(job: Arc<Job>, discard: bool) {
             Err(e) => set_state(&job, State::Attention, e.to_string()),
         }
         if let Err(e) = save(&job) { set_state(&job, State::Attention, format!("Could not save transfer state: {e}")); }
-        if clean_completion(&job.data.lock().unwrap()) {
-            match fs::remove_file(&job.store) {
-                Ok(()) => { manager().jobs.lock().unwrap().remove(&data.id); },
-                Err(error) => set_state(&job, State::Attention, format!("Transfer completed, but saved state could not be removed: {error}")),
-            }
-        }
+        remove_clean_completion_store(&job);
         job.running.store(false, Ordering::Release);
     });
 }
@@ -2464,7 +2487,7 @@ mod tests {
         assert_eq!(job_snapshot(&job, now).unwrap().percentage, Some(50));
     }
     #[test]
-    fn remote_completion_is_hidden_but_notifies_and_retains_unresolved_jobs() {
+    fn remote_completion_is_auto_dismissible_but_retains_unresolved_jobs() {
         let job = test_job();
         {
             let mut m = job.data.lock().unwrap();
@@ -2476,23 +2499,65 @@ mod tests {
         let before = completion_revision();
         complete_job(&job);
         assert!(completion_revision() > before);
-        assert!(job_snapshot(&job, std::time::Instant::now()).is_none());
+        assert!(
+            job_snapshot(&job, std::time::Instant::now())
+                .unwrap()
+                .auto_dismiss
+        );
         job.data
             .lock()
             .unwrap()
             .warnings
             .push("Timestamp could not be preserved".into());
-        assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+        assert!(
+            !job_snapshot(&job, std::time::Instant::now())
+                .unwrap()
+                .auto_dismiss
+        );
         {
             let mut m = job.data.lock().unwrap();
             m.warnings.clear();
             m.items[0].skipped = true;
         }
-        assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+        assert!(
+            !job_snapshot(&job, std::time::Instant::now())
+                .unwrap()
+                .auto_dismiss
+        );
         for state in [State::Paused, State::Attention, State::Cancelled] {
             set_state(&job, state, "Review required");
-            assert!(job_snapshot(&job, std::time::Instant::now()).is_some());
+            assert!(
+                !job_snapshot(&job, std::time::Instant::now())
+                    .unwrap()
+                    .auto_dismiss
+            );
         }
+    }
+
+    #[test]
+    fn clean_completion_removes_durable_state_but_keeps_its_snapshot() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let job = protocol_tests::job(
+            temp.path(),
+            Location::Remote(RemoteLocation::parse("sftp://server/folder/file.txt").unwrap()),
+            Location::Local(temp.path().join("destination")),
+        );
+        {
+            let mut manifest = job.data.lock().unwrap();
+            manifest.items = vec![item(10, true, false)];
+            manifest.planned = true;
+            manifest.bytes = 10;
+            manifest.current = 1;
+        }
+        complete_job(&job);
+        save(&job).expect("persist completed transfer before cleanup");
+
+        remove_clean_completion_store(&job);
+
+        assert!(!job.store.exists());
+        let snapshot = job_snapshot(&job, std::time::Instant::now()).unwrap();
+        assert_eq!(snapshot.state, State::Completed);
+        assert!(snapshot.auto_dismiss);
     }
     #[test]
     fn remote_speed_window_survives_file_finalization_but_resets_on_reconnect() {

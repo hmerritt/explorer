@@ -15,7 +15,7 @@ use gpui::{
     ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, list,
-    prelude::*, px, relative, rgb, transparent_black, uniform_list,
+    prelude::*, px, rgb, transparent_black, uniform_list,
 };
 
 #[cfg(test)]
@@ -63,7 +63,6 @@ use crate::explorer::{
         context_menu_item_is_visually_active, context_menu_item_top, context_menu_path_is_active,
         context_menu_pointer_tip_origin, context_submenu_left,
     },
-    download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
     drag_drop::{
         DragPreview, DraggedEntries, DropDestination, DropIndicator, FileOperationKind,
         drop_indicator_origin, row_drop_destination_for_entry,
@@ -130,8 +129,6 @@ const NAME_CELL_LEFT_PADDING: f32 = 16.0;
 const NAME_ICON_TEXT_GAP: f32 = 8.0;
 const DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE: f32 = 2.0;
 const NAME_TEXT_SIZE: f32 = 12.0;
-const DOWNLOAD_CANCEL_GLYPH: &str = "\u{E711}";
-const DOWNLOAD_CANCEL_BUTTON_SIZE: f32 = 22.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
 const FILE_ENTRY_BG: u32 = 0xffffff;
 const FILE_ENTRY_SELECTED_BG: u32 = 0xcce8ff;
@@ -3640,16 +3637,13 @@ impl ExplorerView {
             .when_some(self.operation_notice.as_ref(), |this, notice| {
                 this.child(render_operation_notice(notice))
             })
-            .when(!self.download_notice_rows.is_empty(), |this| {
-                this.child(render_download_notices(&self.download_notice_rows, cx))
-            })
             .when(self.recursive_search_is_working(), |this| {
                 this.child(linear_indeterminate(
                     "recursive-search-linear-progress",
                     LinearProgressStyle::explorer_copy_green(),
                 ))
             })
-            .child(self.render_native_transfers(cx))
+            .child(self.render_transfers(cx))
             .child(self.render_status_bar(cx))
     }
 }
@@ -4247,233 +4241,6 @@ fn render_operation_notice(notice: &OperationNotice) -> AnyElement {
         .text_color(rgb(text))
         .child(SharedString::from(notice.text.clone()))
         .into_any_element()
-}
-
-fn render_download_notices(
-    rows: &[DownloadNoticeRow],
-    cx: &mut Context<ExplorerView>,
-) -> AnyElement {
-    let rows = rows
-        .iter()
-        .map(|row| render_download_notice_row(row, cx))
-        .collect::<Vec<_>>();
-    div()
-        .id("download-notices")
-        .debug_selector(|| "download-notices".to_owned())
-        .w_full()
-        .flex()
-        .flex_col()
-        .children(rows)
-        .into_any_element()
-}
-
-fn render_download_notice_row(
-    row: &DownloadNoticeRow,
-    cx: &mut Context<ExplorerView>,
-) -> AnyElement {
-    let (kind, text) = match &row.status {
-        DownloadNoticeStatus::Connecting => (
-            OperationNoticeKind::Info,
-            match &row.kind {
-                DownloadNoticeKind::Video { site_domain } => {
-                    format!("Downloading video from {site_domain}...")
-                }
-                DownloadNoticeKind::File => format!("Downloading \"{}\"...", row.file_name),
-            },
-        ),
-        DownloadNoticeStatus::WaitingForCredentials => (
-            OperationNoticeKind::Info,
-            format!("Waiting for sign-in to download \"{}\"...", row.file_name),
-        ),
-        DownloadNoticeStatus::WaitingForHostConfirmation => (
-            OperationNoticeKind::Info,
-            format!(
-                "Waiting for server confirmation to download \"{}\"...",
-                row.file_name
-            ),
-        ),
-        DownloadNoticeStatus::Downloading {
-            downloaded_bytes,
-            total_bytes: Some(total_bytes),
-        } => (
-            OperationNoticeKind::Info,
-            downloading_notice_text(row, *downloaded_bytes, Some(*total_bytes)),
-        ),
-        DownloadNoticeStatus::Downloading {
-            downloaded_bytes,
-            total_bytes: None,
-        } => (
-            OperationNoticeKind::Info,
-            downloading_notice_text(row, *downloaded_bytes, None),
-        ),
-        DownloadNoticeStatus::Completed => (
-            OperationNoticeKind::Info,
-            match &row.kind {
-                DownloadNoticeKind::Video { site_domain } => {
-                    format!("Downloaded video from {site_domain}.")
-                }
-                DownloadNoticeKind::File => format!("Downloaded \"{}\".", row.file_name),
-            },
-        ),
-        DownloadNoticeStatus::Failed(error) => (OperationNoticeKind::Error, error.clone()),
-    };
-    let (bg, border, text_color, _) = operation_notice_style(kind);
-    let id = row.id;
-
-    div()
-        .id(SharedString::from(format!("download-notice-{id}")))
-        .debug_selector(move || format!("download-notice-{id}"))
-        .w_full()
-        .flex()
-        .flex_col()
-        .bg(rgb(bg))
-        .border_b_1()
-        .border_color(rgb(border))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .py(px(OPEN_ERROR_VERTICAL_PADDING))
-                .px(px(OPEN_ERROR_HORIZONTAL_PADDING))
-                .text_size(px(12.0))
-                .text_color(rgb(text_color))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .child(SharedString::from(text)),
-                )
-                .when(row.status.is_active(), |this| {
-                    this.child(download_cancel_button(id, cx))
-                }),
-        )
-        .when_some(download_progress_element(row), |this, progress| {
-            this.child(progress)
-        })
-        .into_any_element()
-}
-
-fn downloading_notice_text(
-    row: &DownloadNoticeRow,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
-) -> String {
-    let subject = match &row.kind {
-        DownloadNoticeKind::File => format!("Downloading \"{}\"", row.file_name),
-        DownloadNoticeKind::Video { site_domain } => {
-            format!("Downloading video from {site_domain}")
-        }
-    };
-    let downloaded = format_size(Some(downloaded_bytes));
-    let Some(total_bytes) = total_bytes else {
-        return format!("{subject} — {downloaded}");
-    };
-    let percent = if total_bytes == 0 {
-        100
-    } else {
-        downloaded_bytes.saturating_mul(100) / total_bytes
-    };
-    format!(
-        "{subject} — {downloaded} of {} ({}%)",
-        format_size(Some(total_bytes)),
-        percent.min(100)
-    )
-}
-
-fn download_cancel_button(id: u64, cx: &mut Context<ExplorerView>) -> AnyElement {
-    div()
-        .id(("download-cancel", id))
-        .debug_selector(move || format!("download-cancel-{id}"))
-        .ml(px(8.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .w(px(DOWNLOAD_CANCEL_BUTTON_SIZE))
-        .h(px(DOWNLOAD_CANCEL_BUTTON_SIZE))
-        .rounded(px(3.0))
-        .font(nav_icon_font())
-        .text_size(px(11.0))
-        .text_color(rgb(0x404040))
-        .cursor_default()
-        .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
-        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.cancel_download(id, cx);
-            cx.stop_propagation();
-        }))
-        .tooltip(explorer_tooltip("Cancel download"))
-        .child(DOWNLOAD_CANCEL_GLYPH)
-        .into_any_element()
-}
-
-fn download_progress_element(row: &DownloadNoticeRow) -> Option<AnyElement> {
-    const HEIGHT: f32 = 4.0;
-    const COLOR: u32 = 0x36a646;
-    const TRACK: u32 = 0xe1f3e4;
-
-    match row.status {
-        DownloadNoticeStatus::Connecting
-        | DownloadNoticeStatus::WaitingForCredentials
-        | DownloadNoticeStatus::WaitingForHostConfirmation
-        | DownloadNoticeStatus::Downloading {
-            total_bytes: None, ..
-        } => {
-            let id = row.id;
-            Some(
-                div()
-                    .debug_selector(move || format!("download-progress-{id}"))
-                    .relative()
-                    .w_full()
-                    .h(px(HEIGHT))
-                    .overflow_hidden()
-                    .bg(rgb(TRACK))
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(0.0))
-                            .bottom(px(0.0))
-                            .bg(rgb(COLOR))
-                            .with_animation(
-                                ("download-indeterminate", id),
-                                Animation::new(Duration::from_millis(1_500)).repeat(),
-                                |bar, delta| {
-                                    let width = 0.35;
-                                    let left = -width + (1.0 + width) * delta;
-                                    bar.left(relative(left)).w(relative(width))
-                                },
-                            ),
-                    )
-                    .into_any_element(),
-            )
-        }
-        DownloadNoticeStatus::Downloading {
-            downloaded_bytes,
-            total_bytes: Some(total_bytes),
-        } => {
-            let fraction = if total_bytes == 0 {
-                1.0
-            } else {
-                (downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0)
-            };
-            let id = row.id;
-            Some(
-                div()
-                    .debug_selector(move || format!("download-progress-{id}"))
-                    .w_full()
-                    .h(px(HEIGHT))
-                    .bg(rgb(TRACK))
-                    .child(div().h_full().w(relative(fraction)).bg(rgb(COLOR)))
-                    .into_any_element(),
-            )
-        }
-        DownloadNoticeStatus::Completed | DownloadNoticeStatus::Failed(_) => None,
-    }
 }
 
 fn operation_notice_style(kind: OperationNoticeKind) -> (u32, u32, u32, &'static str) {
@@ -8089,7 +7856,6 @@ mod tests {
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
             NAV_BUTTON_ACTIVE_OPACITY,
         },
-        download::{DownloadNoticeKind, DownloadNoticeRow, DownloadNoticeStatus},
         entry::FileEntry,
         filesystem::NetworkDriveState,
         git_status::{GitDivergence, GitRepositoryStatus},
@@ -8116,7 +7882,7 @@ mod tests {
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
-        directory_open_mode_for_entry_click, downloading_notice_text, drop_indicator_target_width,
+        directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
         file_entry_background_color, filename_text_width, folder_status_summary,
         format_address_path, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
@@ -12565,135 +12331,6 @@ mod tests {
             operation_notice_style(OperationNoticeKind::Success),
             (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success")
         );
-    }
-
-    #[test]
-    fn download_notice_text_uses_video_site_and_exact_byte_progress() {
-        let video = DownloadNoticeRow {
-            id: 1,
-            kind: DownloadNoticeKind::Video {
-                site_domain: "youtube.com".to_owned(),
-            },
-            file_name: "Video from youtube.com".to_owned(),
-            status: DownloadNoticeStatus::Connecting,
-        };
-        assert_eq!(
-            downloading_notice_text(&video, 25, Some(100)),
-            "Downloading video from youtube.com — 25 bytes of 100 bytes (25%)"
-        );
-        assert_eq!(
-            downloading_notice_text(&video, 25, None),
-            "Downloading video from youtube.com — 25 bytes"
-        );
-
-        let file = DownloadNoticeRow {
-            id: 2,
-            kind: DownloadNoticeKind::File,
-            file_name: "archive.zip".to_owned(),
-            status: DownloadNoticeStatus::Connecting,
-        };
-        assert_eq!(
-            downloading_notice_text(&file, 100, Some(50)),
-            "Downloading \"archive.zip\" — 100 bytes of 50 bytes (100%)"
-        );
-    }
-
-    #[gpui::test]
-    fn concurrent_download_notices_render_as_stacked_progress_rows(cx: &mut gpui::TestAppContext) {
-        let temp = TempDir::new();
-        let path = temp.path().to_path_buf();
-        cx.set_global(SettingsState::for_test(
-            crate::settings::ExplorerSettings::default(),
-        ));
-        let (view, cx) = cx.add_window_view(move |window, cx| {
-            let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
-            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
-            view.download_notice_rows = vec![
-                DownloadNoticeRow {
-                    id: 10,
-                    kind: DownloadNoticeKind::File,
-                    file_name: "known.zip".to_owned(),
-                    status: DownloadNoticeStatus::Downloading {
-                        downloaded_bytes: 25,
-                        total_bytes: Some(100),
-                    },
-                },
-                DownloadNoticeRow {
-                    id: 11,
-                    kind: DownloadNoticeKind::File,
-                    file_name: "unknown.zip".to_owned(),
-                    status: DownloadNoticeStatus::Downloading {
-                        downloaded_bytes: 25,
-                        total_bytes: None,
-                    },
-                },
-                DownloadNoticeRow {
-                    id: 12,
-                    kind: DownloadNoticeKind::File,
-                    file_name: "complete.zip".to_owned(),
-                    status: DownloadNoticeStatus::Completed,
-                },
-                DownloadNoticeRow {
-                    id: 13,
-                    kind: DownloadNoticeKind::File,
-                    file_name: "failed.zip".to_owned(),
-                    status: DownloadNoticeStatus::Failed("Download failed".to_owned()),
-                },
-                DownloadNoticeRow {
-                    id: 14,
-                    kind: DownloadNoticeKind::Video {
-                        site_domain: "youtube.com".to_owned(),
-                    },
-                    file_name: "Video from youtube.com".to_owned(),
-                    status: DownloadNoticeStatus::Connecting,
-                },
-            ];
-            view
-        });
-
-        cx.run_until_parked();
-
-        let first = cx
-            .debug_bounds("download-notice-10")
-            .expect("first download row");
-        let second = cx
-            .debug_bounds("download-notice-11")
-            .expect("second download row");
-        assert!(first.origin.y < second.origin.y);
-        assert!(cx.debug_bounds("download-progress-10").is_some());
-        assert!(cx.debug_bounds("download-progress-11").is_some());
-        let cancel = cx
-            .debug_bounds("download-cancel-10")
-            .expect("active download cancel button");
-        assert!(cancel.center().x > first.center().x);
-        assert!(cx.debug_bounds("download-cancel-11").is_some());
-        assert!(cx.debug_bounds("download-cancel-12").is_none());
-        assert!(cx.debug_bounds("download-cancel-13").is_none());
-        assert!(cx.debug_bounds("download-progress-14").is_some());
-        let video_cancel = cx
-            .debug_bounds("download-cancel-14")
-            .expect("active video download cancel button");
-
-        cx.simulate_mouse_down(
-            video_cancel.center(),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_up(
-            video_cancel.center(),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.run_until_parked();
-
-        cx.read_entity(&view, |view, _| {
-            assert!(view.download_notice_rows.iter().all(|row| row.id != 14));
-            assert!(view.download_notice_rows.iter().any(|row| row.id == 10));
-        });
-        assert!(cx.debug_bounds("download-notice-10").is_some());
-        assert!(cx.debug_bounds("download-notice-11").is_some());
-        assert!(cx.debug_bounds("download-notice-12").is_some());
     }
 
     #[test]
