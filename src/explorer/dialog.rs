@@ -16,7 +16,10 @@ use std::{
 use crate::explorer::{
     constants::EXPLORER_COPY_GREEN,
     entry::FileEntry,
-    filesystem::{FileConflictBatch, FileOperationKind, FileOperationPhase, FileOperationProgress},
+    filesystem::{
+        FileConflictBatch, FileOperationKind, FileOperationPhase, FileOperationProgress,
+        RemoteDeletePhase, RemoteDeleteProgress,
+    },
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::{format_size, format_timestamp, format_transfer_rate},
     icons::{
@@ -96,6 +99,7 @@ pub(super) enum ExplorerDialogKind {
     Trash(PendingTrash),
     FileConflict(FileConflictBatch),
     FileOperation(FileOperationProgress),
+    RemoteDeleteOperation(RemoteDeleteProgress),
 }
 
 pub(super) struct ExplorerDialog {
@@ -110,6 +114,7 @@ pub(super) struct ExplorerDialog {
     folder_size_task: Option<Task<()>>,
     folder_size_cancel: Option<Arc<AtomicBool>>,
     file_operation_progress: Option<FileOperationProgress>,
+    remote_delete_progress: Option<RemoteDeleteProgress>,
     file_operation_speed: FileOperationSpeedTracker,
     file_operation_task: Option<Task<()>>,
     file_operation_terminate_tooltip: bool,
@@ -254,18 +259,50 @@ impl ExplorerView {
         }
     }
 
+    pub(super) fn open_remote_delete_operation_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.active_dialog_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.active_dialog_window = None;
+        }
+
+        let Some(progress) = self
+            .active_remote_delete
+            .as_ref()
+            .map(|operation| operation.progress.clone())
+        else {
+            return;
+        };
+
+        match open_dialog_window(
+            ExplorerDialogKind::RemoteDeleteOperation(progress),
+            cx.entity(),
+            self.date_format.clone(),
+            cx,
+        ) {
+            Ok(handle) => self.active_dialog_window = Some(handle),
+            Err(error) => self.set_error_notice(format!("Failed to open progress dialog: {error}")),
+        }
+    }
+
     pub(super) fn clear_active_dialog_window(&mut self) {
         self.active_dialog_window = None;
     }
 
     fn dialog_window_released(&mut self, kind: ExplorerDialogKind, completed: bool) {
-        if !completed {
-            match kind {
-                ExplorerDialogKind::PermanentDelete(_) => self.cancel_pending_permanent_delete(),
-                ExplorerDialogKind::Trash(_) => self.cancel_pending_trash(),
-                ExplorerDialogKind::FileConflict(_) => {}
-                ExplorerDialogKind::FileOperation(_) => self.cancel_active_file_operation(),
-            }
+        if completed {
+            return;
+        }
+        match kind {
+            ExplorerDialogKind::PermanentDelete(_) => self.cancel_pending_permanent_delete(),
+            ExplorerDialogKind::Trash(_) => self.cancel_pending_trash(),
+            ExplorerDialogKind::FileConflict(_) => {}
+            ExplorerDialogKind::FileOperation(_) => self.cancel_active_file_operation(),
+            ExplorerDialogKind::RemoteDeleteOperation(_) => self.cancel_active_remote_delete(),
         }
         self.clear_active_dialog_window();
     }
@@ -283,6 +320,10 @@ impl ExplorerDialog {
             ExplorerDialogKind::FileOperation(progress) => Some(progress.clone()),
             _ => None,
         };
+        let remote_delete_progress = match &kind {
+            ExplorerDialogKind::RemoteDeleteOperation(progress) => Some(progress.clone()),
+            _ => None,
+        };
         let focused_choice = default_dialog_choice(&kind);
         let font = crate::settings::current_app_font(cx);
 
@@ -298,6 +339,7 @@ impl ExplorerDialog {
             folder_size_task: None,
             folder_size_cancel: None,
             file_operation_progress,
+            remote_delete_progress,
             file_operation_speed: FileOperationSpeedTracker::default(),
             file_operation_task: None,
             file_operation_terminate_tooltip: false,
@@ -378,8 +420,8 @@ impl ExplorerDialog {
         self.completed = true;
         self.cancel_folder_size_task();
         let _ = self.explorer.update(cx, |explorer, cx| {
-            explorer.confirm_pending_permanent_delete(cx);
             explorer.clear_active_dialog_window();
+            explorer.confirm_pending_permanent_delete(cx);
             cx.notify();
         });
         window.remove_window();
@@ -418,6 +460,10 @@ impl ExplorerDialog {
                 }
                 ExplorerDialogKind::FileOperation(_) => {
                     explorer.cancel_active_file_operation();
+                    explorer.clear_active_dialog_window();
+                }
+                ExplorerDialogKind::RemoteDeleteOperation(_) => {
+                    explorer.cancel_active_remote_delete();
                     explorer.clear_active_dialog_window();
                 }
             }
@@ -557,7 +603,10 @@ impl ExplorerDialog {
     }
 
     fn start_file_operation_progress_task(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.kind, ExplorerDialogKind::FileOperation(_)) {
+        if !matches!(
+            self.kind,
+            ExplorerDialogKind::FileOperation(_) | ExplorerDialogKind::RemoteDeleteOperation(_)
+        ) {
             return;
         }
 
@@ -570,13 +619,18 @@ impl ExplorerDialog {
                 let should_continue = this
                     .update(cx, |dialog, cx| {
                         if dialog.completed
-                            || !matches!(dialog.kind, ExplorerDialogKind::FileOperation(_))
+                            || !matches!(
+                                dialog.kind,
+                                ExplorerDialogKind::FileOperation(_)
+                                    | ExplorerDialogKind::RemoteDeleteOperation(_)
+                            )
                         {
                             return false;
                         }
                         dialog.refresh_file_operation_progress(cx);
                         cx.notify();
                         dialog.file_operation_progress.is_some()
+                            || dialog.remote_delete_progress.is_some()
                     })
                     .unwrap_or(false);
 
@@ -594,6 +648,16 @@ impl ExplorerDialog {
             .read_with(cx, |explorer, _| {
                 explorer
                     .active_file_operation
+                    .as_ref()
+                    .map(|operation| operation.progress.clone())
+            })
+            .ok()
+            .flatten();
+        self.remote_delete_progress = self
+            .explorer
+            .read_with(cx, |explorer, _| {
+                explorer
+                    .active_remote_delete
                     .as_ref()
                     .map(|operation| operation.progress.clone())
             })
@@ -643,6 +707,9 @@ impl Render for ExplorerDialog {
                     self.render_file_conflict(conflicts, cx)
                 }
                 ExplorerDialogKind::FileOperation(_) => self.render_file_operation(window, cx),
+                ExplorerDialogKind::RemoteDeleteOperation(_) => {
+                    self.render_remote_delete_operation(window, cx)
+                }
             })
             .when(self.file_operation_terminate_tooltip, |this| {
                 this.child(
@@ -943,6 +1010,73 @@ impl ExplorerDialog {
             .into_any_element()
     }
 
+    fn render_remote_delete_operation(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let progress = self.remote_delete_progress.as_ref();
+        let current_item = progress
+            .and_then(|progress| progress.current_item.as_deref())
+            .map(path_display_name)
+            .unwrap_or_else(|| "Preparing...".to_owned());
+        let status = progress
+            .map(remote_delete_item_label)
+            .unwrap_or_else(|| "Preparing to delete".to_owned());
+        let percent = progress.map(RemoteDeleteProgress::percent).unwrap_or(0.0);
+
+        div()
+            .id("remote-delete-progress")
+            .debug_selector(|| "remote-delete-progress".to_owned())
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(PROGRESS_DIALOG_TITLE_TEXT_SIZE))
+                    .child("Deleting"),
+            )
+            .child(
+                div()
+                    .mt(px(PROGRESS_DIALOG_CURRENT_ITEM_TOP_MARGIN))
+                    .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
+                    .truncate()
+                    .child(SharedString::from(current_item)),
+            )
+            .child(render_determinate_progress_bar(percent))
+            .child(
+                div()
+                    .mt(px(PROGRESS_DIALOG_STATUS_TOP_MARGIN))
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(PROGRESS_DIALOG_TEXT_SIZE))
+                    .text_color(rgb(0x595959))
+                    .child(SharedString::from(status)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
+                    .child(
+                        dialog_button(
+                            "remote-delete-cancel",
+                            "Cancel",
+                            false,
+                            window.scale_factor(),
+                        )
+                        .tooltip(explorer_tooltip("Cancel deletion"))
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                this.cancel(window, cx);
+                                cx.stop_propagation();
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_file_operation_buttons(
         &self,
         show_terminate: bool,
@@ -1061,7 +1195,9 @@ fn dialog_window_size(
             let height = file_conflict_dialog_height(&text.title, font, cx);
             (CONFLICT_DIALOG_WIDTH, height)
         }
-        ExplorerDialogKind::FileOperation(_) => (PROGRESS_DIALOG_WIDTH, progress_dialog_height()),
+        ExplorerDialogKind::FileOperation(_) | ExplorerDialogKind::RemoteDeleteOperation(_) => {
+            (PROGRESS_DIALOG_WIDTH, progress_dialog_height())
+        }
     }
 }
 
@@ -1182,6 +1318,7 @@ impl ExplorerDialogKind {
             ExplorerDialogKind::Trash(_) => "Delete File",
             ExplorerDialogKind::FileConflict(_) => "Replace or Skip Files",
             ExplorerDialogKind::FileOperation(_) => "File Operation",
+            ExplorerDialogKind::RemoteDeleteOperation(_) => "Deleting",
         }
     }
 }
@@ -1247,7 +1384,7 @@ fn default_dialog_choice(kind: &ExplorerDialogKind) -> Option<DialogChoice> {
         ExplorerDialogKind::PermanentDelete(_)
         | ExplorerDialogKind::Trash(_)
         | ExplorerDialogKind::FileConflict(_) => Some(DialogChoice::Primary),
-        ExplorerDialogKind::FileOperation(_) => None,
+        ExplorerDialogKind::FileOperation(_) | ExplorerDialogKind::RemoteDeleteOperation(_) => None,
     }
 }
 
@@ -1267,9 +1404,9 @@ fn pointer_focused_dialog_choice(
         ExplorerDialogKind::PermanentDelete(_) | ExplorerDialogKind::Trash(_) => {
             Some(requested_choice)
         }
-        ExplorerDialogKind::FileConflict(_) | ExplorerDialogKind::FileOperation(_) => {
-            current_choice
-        }
+        ExplorerDialogKind::FileConflict(_)
+        | ExplorerDialogKind::FileOperation(_)
+        | ExplorerDialogKind::RemoteDeleteOperation(_) => current_choice,
     }
 }
 
@@ -1462,6 +1599,24 @@ fn render_file_operation_progress_bar(progress: Option<&FileOperationProgress>) 
     .into_any_element()
 }
 
+fn render_determinate_progress_bar(percent: f32) -> AnyElement {
+    div()
+        .mt(px(PROGRESS_DIALOG_BAR_TOP_MARGIN))
+        .w(px(PROGRESS_DIALOG_BAR_WIDTH))
+        .h(px(PROGRESS_DIALOG_BAR_HEIGHT))
+        .border_1()
+        .border_color(rgb(0x8a8a8a))
+        .bg(rgb(0xffffff))
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(px(percent.clamp(0.0, 1.0) * PROGRESS_DIALOG_BAR_WIDTH))
+                .bg(rgb(SHELL_PROGRESS_GREEN)),
+        )
+        .into_any_element()
+}
+
 fn file_operation_progress_bar_mode(
     progress: Option<&FileOperationProgress>,
 ) -> FileOperationProgressBarMode {
@@ -1609,6 +1764,20 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
         "{action} {} of {} items ({copied} of {total})",
         progress.completed_files.min(progress.total_files),
         progress.total_files
+    )
+}
+
+fn remote_delete_item_label(progress: &RemoteDeleteProgress) -> String {
+    let action = match progress.phase {
+        RemoteDeletePhase::Preparing => "Preparing to delete",
+        RemoteDeletePhase::Deleting => "Deleting",
+        RemoteDeletePhase::Finished => "Deleted",
+        RemoteDeletePhase::Cancelled => "Cancelling",
+    };
+    format!(
+        "{action} {} of {} items",
+        progress.completed_items.min(progress.total_items),
+        progress.total_items
     )
 }
 
@@ -1835,6 +2004,9 @@ fn delete_dialog_item_kind(path: &Path) -> Option<PermanentDeleteItemKind> {
 }
 
 fn path_display_name(path: &Path) -> String {
+    if let Some(name) = super::remote_fs::display_name(path) {
+        return name;
+    }
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
@@ -1882,7 +2054,7 @@ mod tests {
             move_paths_to_directory,
         },
         test_support::TempDir,
-        view::FileOperationState,
+        view::{FileOperationState, RemoteDeleteState},
     };
     use crate::settings::{ExplorerSettings, SettingsState};
     use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
@@ -2621,6 +2793,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_delete_status_counts_selected_roots_without_byte_details() {
+        let progress = RemoteDeleteProgress {
+            phase: RemoteDeletePhase::Deleting,
+            total_items: 4,
+            completed_items: 2,
+            current_item: Some(PathBuf::from("folder/nested.txt")),
+        };
+
+        assert_eq!(progress.percent(), 0.5);
+        assert_eq!(remote_delete_item_label(&progress), "Deleting 2 of 4 items");
+        assert!(!remote_delete_item_label(&progress).contains("bytes"));
+    }
+
+    #[gpui::test]
+    fn remote_delete_dialog_shows_progress_and_cancel(cx: &mut TestAppContext) {
+        let progress = RemoteDeleteProgress {
+            phase: RemoteDeletePhase::Deleting,
+            total_items: 3,
+            completed_items: 1,
+            current_item: Some(PathBuf::from("folder/nested.txt")),
+        };
+        let (explorer, _dialog, cx) = test_dialog_entity(
+            cx,
+            ExplorerDialogKind::RemoteDeleteOperation(progress.clone()),
+        );
+        cx.update(|_, app| {
+            explorer.update(app, |view, _| {
+                view.active_remote_delete = Some(RemoteDeleteState {
+                    progress,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    task: None,
+                });
+            });
+        });
+
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("remote-delete-progress").is_some());
+        assert!(cx.debug_bounds("remote-delete-cancel").is_some());
+        assert!(cx.debug_bounds("file-operation-terminate").is_none());
+    }
+
+    #[gpui::test]
+    fn remote_delete_dialog_cancel_signals_active_operation(cx: &mut TestAppContext) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = RemoteDeleteProgress {
+            phase: RemoteDeletePhase::Deleting,
+            total_items: 2,
+            completed_items: 0,
+            current_item: Some(PathBuf::from("one.txt")),
+        };
+        let (explorer, dialog, cx) = test_dialog_entity(
+            cx,
+            ExplorerDialogKind::RemoteDeleteOperation(progress.clone()),
+        );
+
+        cx.update(|window, app| {
+            explorer.update(app, |view, _| {
+                view.active_remote_delete = Some(RemoteDeleteState {
+                    progress,
+                    cancel: cancel.clone(),
+                    task: None,
+                });
+            });
+            dialog.update(app, |dialog, cx| {
+                dialog.handle_cancel(&DialogCancel, window, cx);
+                assert!(dialog.completed);
+            });
+        });
+
+        assert!(cancel.load(Ordering::Relaxed));
+    }
+
     #[gpui::test]
     fn dialog_focus_actions_move_between_confirmation_buttons(cx: &mut TestAppContext) {
         let pending = PendingPermanentDelete {
@@ -2816,6 +3062,71 @@ mod tests {
                     archive_diagnostics: None,
                 });
                 view.open_file_operation_window(cx);
+                assert!(view.active_dialog_window.is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn remote_delete_dialog_opens_during_explorer_view_update(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_with_focus_handle_for_test(
+                PathBuf::from("dialog-test"),
+                cx.focus_handle(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.active_remote_delete = Some(RemoteDeleteState {
+                    progress: RemoteDeleteProgress {
+                        phase: RemoteDeletePhase::Preparing,
+                        total_items: 2,
+                        completed_items: 0,
+                        current_item: Some(PathBuf::from("one.txt")),
+                    },
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    task: None,
+                });
+                view.open_remote_delete_operation_window(cx);
+                assert!(view.active_dialog_window.is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn completed_confirmation_release_keeps_replacement_progress_window(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_with_focus_handle_for_test(
+                PathBuf::from("dialog-test"),
+                cx.focus_handle(),
+            )
+        });
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.active_remote_delete = Some(RemoteDeleteState {
+                    progress: RemoteDeleteProgress {
+                        phase: RemoteDeletePhase::Preparing,
+                        total_items: 1,
+                        completed_items: 0,
+                        current_item: Some(PathBuf::from("one.txt")),
+                    },
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    task: None,
+                });
+                view.open_remote_delete_operation_window(cx);
+                assert!(view.active_dialog_window.is_some());
+
+                view.dialog_window_released(
+                    ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
+                        paths: vec![PathBuf::from("one.txt")],
+                    }),
+                    true,
+                );
+
                 assert!(view.active_dialog_window.is_some());
             });
         });

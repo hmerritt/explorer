@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, UNIX_EPOCH},
 };
@@ -168,6 +168,11 @@ impl RemoteLocation {
 pub(super) fn display_address(path: &Path) -> Option<String> {
     Some(RemoteLocation::from_provider(path)?.address())
 }
+
+pub(super) fn display_name(path: &Path) -> Option<String> {
+    Some(RemoteLocation::from_provider(path)?.tab_label())
+}
+
 pub(super) fn parent(path: &Path) -> Option<PathBuf> {
     let loc = RemoteLocation::from_provider(path)?;
     if loc.path == "/" {
@@ -647,32 +652,118 @@ pub(super) fn rename(path: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(destination.provider_path())
 }
 pub(super) fn delete(path: &Path) -> Result<(), String> {
-    let loc = RemoteLocation::from_provider(path).ok_or("Invalid SFTP location")?;
-    if loc.path == "/" {
-        return Err("Cannot delete a server root".into());
+    let cancel = AtomicBool::new(false);
+    match delete_with_progress(path, &cancel, |_| {}) {
+        RemoteDeleteOutcome::Complete { .. } => Ok(()),
+        RemoteDeleteOutcome::Cancelled { .. } => Err("Deletion was cancelled.".to_owned()),
+        RemoteDeleteOutcome::Failed { error, .. } => Err(error),
     }
-    runtime()
-        .block_on(async {
-            let session = session(&loc.site, 0).await?;
-            let mut stack = vec![(loc, false)];
-            while let Some((loc, visited)) = stack.pop() {
-                let meta = session.metadata(&loc.path).await?;
-                if meta.is_dir() {
-                    if visited {
-                        session.raw.rmdir(&loc.path).await.map_err(sftp_error)?;
-                    } else {
-                        stack.push((loc.clone(), true));
-                        for (name, _) in session.list(&loc).await? {
-                            stack.push((loc.child(&name).map_err(io::Error::other)?, false));
-                        }
-                    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum RemoteDeleteOutcome {
+    Complete { deleted_any: bool },
+    Cancelled { deleted_any: bool },
+    Failed { error: String, deleted_any: bool },
+}
+
+pub(super) fn delete_with_progress(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut on_current_item: impl FnMut(PathBuf),
+) -> RemoteDeleteOutcome {
+    let Some(loc) = RemoteLocation::from_provider(path) else {
+        return RemoteDeleteOutcome::Failed {
+            error: "Invalid SFTP location".to_owned(),
+            deleted_any: false,
+        };
+    };
+    if loc.path == "/" {
+        return RemoteDeleteOutcome::Failed {
+            error: "Cannot delete a server root".into(),
+            deleted_any: false,
+        };
+    }
+
+    let mut deleted_any = false;
+    let result: Result<(), RemoteDeleteFailure> = runtime().block_on(async {
+        check_delete_cancel(cancel)?;
+        on_current_item(loc.provider_path());
+        let session = session(&loc.site, 0)
+            .await
+            .map_err(RemoteDeleteFailure::Failed)?;
+        let mut stack = vec![(loc, false)];
+        while let Some((loc, visited)) = stack.pop() {
+            check_delete_cancel(cancel)?;
+            on_current_item(loc.provider_path());
+            let meta = session
+                .metadata(&loc.path)
+                .await
+                .map_err(RemoteDeleteFailure::Failed)?;
+            if meta.is_dir() {
+                if visited {
+                    check_delete_cancel(cancel)?;
+                    on_current_item(loc.provider_path());
+                    session
+                        .raw
+                        .rmdir(&loc.path)
+                        .await
+                        .map_err(sftp_error)
+                        .map_err(RemoteDeleteFailure::Failed)?;
+                    deleted_any = true;
                 } else {
-                    session.raw.remove(&loc.path).await.map_err(sftp_error)?;
+                    stack.push((loc.clone(), true));
+                    check_delete_cancel(cancel)?;
+                    on_current_item(loc.provider_path());
+                    for (name, _) in session
+                        .list(&loc)
+                        .await
+                        .map_err(RemoteDeleteFailure::Failed)?
+                    {
+                        stack.push((
+                            loc.child(&name)
+                                .map_err(io::Error::other)
+                                .map_err(RemoteDeleteFailure::Failed)?,
+                            false,
+                        ));
+                    }
                 }
+            } else {
+                check_delete_cancel(cancel)?;
+                on_current_item(loc.provider_path());
+                session
+                    .raw
+                    .remove(&loc.path)
+                    .await
+                    .map_err(sftp_error)
+                    .map_err(RemoteDeleteFailure::Failed)?;
+                deleted_any = true;
             }
-            Ok(())
-        })
-        .map_err(|e: io::Error| e.to_string())
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => RemoteDeleteOutcome::Complete { deleted_any },
+        Err(RemoteDeleteFailure::Cancelled) => RemoteDeleteOutcome::Cancelled { deleted_any },
+        Err(RemoteDeleteFailure::Failed(error)) => RemoteDeleteOutcome::Failed {
+            error: error.to_string(),
+            deleted_any,
+        },
+    }
+}
+
+enum RemoteDeleteFailure {
+    Cancelled,
+    Failed(io::Error),
+}
+
+fn check_delete_cancel(cancel: &AtomicBool) -> Result<(), RemoteDeleteFailure> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(RemoteDeleteFailure::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +798,16 @@ mod tests {
             );
             assert_eq!(RemoteLocation::parse(&child.address()).unwrap(), child);
         }
+    }
+
+    #[test]
+    fn remote_display_name_decodes_provider_components() {
+        let location = RemoteLocation::parse("sftp://server/folder/résumé 2026.txt").unwrap();
+
+        assert_eq!(
+            display_name(&location.provider_path()).as_deref(),
+            Some("résumé 2026.txt")
+        );
     }
     #[test]
     fn credentials_and_invalid_children_are_rejected() {

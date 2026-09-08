@@ -25,14 +25,18 @@ use crate::explorer::{
     filesystem::{
         ConflictChoice, FileOperationCopyUndo, FileOperationError, FileOperationJob,
         FileOperationKind, FileOperationMove, FileOperationReplacedFile, FileOperationSummary,
-        PreparedFileOperation, archive_path_is_supported, cleanup_copy_undo_backups,
+        PreparedFileOperation, RemoteDeleteError, RemoteDeletePhase, RemoteDeleteProgress,
+        RemoteDeleteSummary, archive_path_is_supported, cleanup_copy_undo_backups,
         execute_file_operation, execute_file_operation_with_progress,
         mountable_image_path_is_supported, prepare_compress_paths,
         prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
         prepare_move_paths_to_directory, remove_existing_paths_permanently,
-        remove_paths_permanently, restore_replaced_file_from_copy_undo, trash_paths,
+        remove_paths_permanently, remove_remote_paths_permanently_with_progress,
+        restore_replaced_file_from_copy_undo, trash_paths,
     },
-    view::{ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash},
+    view::{
+        ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash, RemoteDeleteState,
+    },
 };
 
 #[cfg(test)]
@@ -348,7 +352,7 @@ impl ExplorerView {
         move_sources: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_drop_task.is_some() || self.active_file_operation.is_some() {
+        if self.pending_drop_task.is_some() || self.has_active_mutating_operation() {
             self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
@@ -498,6 +502,10 @@ impl ExplorerView {
         {
             return;
         }
+        if self.has_active_mutating_operation() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
         if self.pending_trash_task.is_some() {
             return;
         }
@@ -525,6 +533,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         if paths.is_empty() || self.pending_trash_task.is_some() {
+            return;
+        }
+        if self.has_active_mutating_operation() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }
 
@@ -630,6 +642,10 @@ impl ExplorerView {
         {
             return;
         }
+        if self.has_active_mutating_operation() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
@@ -644,6 +660,15 @@ impl ExplorerView {
         let Some(pending) = self.pending_permanent_delete.take() else {
             return;
         };
+
+        if pending
+            .paths
+            .iter()
+            .all(|path| super::remote_fs::is_remote(path))
+        {
+            self.start_remote_delete_operation(pending.paths, cx);
+            return;
+        }
 
         let selection_after_delete = self.selection_after_removing_paths(&pending.paths);
         match remove_paths_permanently(&pending.paths) {
@@ -662,6 +687,162 @@ impl ExplorerView {
 
     pub(super) fn cancel_pending_permanent_delete(&mut self) {
         self.pending_permanent_delete = None;
+    }
+
+    pub(super) fn cancel_active_remote_delete(&mut self) {
+        if let Some(operation) = self.active_remote_delete.as_ref() {
+            operation.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn start_remote_delete_operation(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.has_active_mutating_operation() || self.pending_drop_task.is_some() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+
+        let selection_after_delete = self.selection_after_removing_paths(&paths);
+        let operation_path = self.path.clone();
+        self.pending_deleted_paths = paths.clone();
+        self.filter_pending_deleted_entries();
+        if let Some(path) = selection_after_delete.as_ref() {
+            self.restore_selection_from_paths(std::slice::from_ref(path));
+            self.scroll_focused_selection_to_view_bottom();
+        } else {
+            self.clear_selection();
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = RemoteDeleteProgress {
+            phase: RemoteDeletePhase::Preparing,
+            total_items: paths.len(),
+            completed_items: 0,
+            current_item: paths.first().cloned(),
+        };
+        self.active_remote_delete = Some(RemoteDeleteState {
+            progress,
+            cancel: cancel.clone(),
+            task: None,
+        });
+        self.clear_operation_notice();
+        self.open_remote_delete_operation_window(cx);
+        cx.notify();
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let paths_for_operation = paths.clone();
+        let task = cx.spawn({
+            let cancel = cancel.clone();
+            let finished = finished.clone();
+            async move |this, cx| {
+                let operation_task = cx.background_executor().spawn({
+                    let progress_tx = progress_tx.clone();
+                    let finished = finished.clone();
+                    async move {
+                        let result = remove_remote_paths_permanently_with_progress(
+                            &paths_for_operation,
+                            &cancel,
+                            |progress| {
+                                let _ = progress_tx.send(progress);
+                            },
+                        );
+                        finished.store(true, Ordering::Relaxed);
+                        result
+                    }
+                });
+
+                while !finished.load(Ordering::Relaxed) {
+                    cx.background_executor()
+                        .timer(FILE_OPERATION_PROGRESS_INTERVAL)
+                        .await;
+                    Self::drain_remote_delete_progress(&this, cx, &progress_rx);
+                }
+
+                let result = operation_task.await;
+                Self::drain_remote_delete_progress(&this, cx, &progress_rx);
+                let _ = this.update(cx, |explorer, cx| {
+                    explorer.complete_remote_delete_operation(
+                        operation_path,
+                        paths,
+                        selection_after_delete,
+                        result,
+                        cx,
+                    );
+                    cx.notify();
+                });
+            }
+        });
+
+        if let Some(operation) = self.active_remote_delete.as_mut() {
+            operation.task = Some(task);
+        }
+    }
+
+    fn drain_remote_delete_progress(
+        this: &gpui::WeakEntity<Self>,
+        cx: &mut gpui::AsyncApp,
+        progress_rx: &mpsc::Receiver<RemoteDeleteProgress>,
+    ) {
+        let mut latest = None;
+        while let Ok(progress) = progress_rx.try_recv() {
+            latest = Some(progress);
+        }
+
+        if let Some(progress) = latest {
+            let _ = this.update(cx, |explorer, cx| {
+                if let Some(operation) = explorer.active_remote_delete.as_mut() {
+                    operation.progress = progress;
+                    cx.notify();
+                }
+            });
+        }
+    }
+
+    fn complete_remote_delete_operation(
+        &mut self,
+        operation_path: PathBuf,
+        paths: Vec<PathBuf>,
+        selection_after_delete: Option<PathBuf>,
+        result: Result<RemoteDeleteSummary, RemoteDeleteError>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.active_dialog_window.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.active_remote_delete = None;
+        self.pending_deleted_paths.clear();
+
+        let deleted_any = result
+            .as_ref()
+            .map(|summary| summary.deleted_any)
+            .unwrap_or_else(|error| error.deleted_any());
+        match result {
+            Ok(_) => {
+                self.remove_cut_paths(&paths);
+                self.reload_after_successful_delete(selection_after_delete, cx);
+                self.clear_operation_notice();
+            }
+            Err(RemoteDeleteError::Cancelled { .. }) => {
+                self.clear_operation_notice();
+                if self.path == operation_path {
+                    self.reload_after_failed_delete(paths, cx);
+                }
+            }
+            Err(RemoteDeleteError::Failed { message, .. }) => {
+                self.set_error_notice(message);
+                if self.path == operation_path {
+                    self.reload_after_failed_delete(paths, cx);
+                } else {
+                    self.reload_with_entry_metadata_resolution(cx);
+                }
+            }
+        }
+        if deleted_any {
+            self.emit_filesystem_changed(cx);
+        }
     }
 
     pub(super) fn complete_external_paths_drag(
@@ -834,7 +1015,7 @@ impl ExplorerView {
         conflict_choice: ConflictChoice,
         cx: &mut Context<Self>,
     ) {
-        if self.active_file_operation.is_some() {
+        if self.has_active_mutating_operation() {
             self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }

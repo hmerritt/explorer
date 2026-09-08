@@ -34,8 +34,8 @@ use crate::explorer::{
     explorer_fs::{ExplorerFs, ExplorerRefreshDriver},
     file_commands::FileOperationUndo,
     filesystem::{
-        EntryVisibility, FileConflictBatch, FileOperationProgress, path_is_filesystem_root,
-        path_is_remote_drive, path_is_wsl_unc_root,
+        EntryVisibility, FileConflictBatch, FileOperationProgress, RemoteDeleteProgress,
+        path_is_filesystem_root, path_is_remote_drive, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
     git_status::{GitRepositoryStatus, scan_git_repository_status},
@@ -167,6 +167,7 @@ pub struct ExplorerView {
     pub(super) pending_file_conflict: Option<FileConflictBatch>,
     pub(super) pending_drop_task: Option<Task<()>>,
     pub(super) active_file_operation: Option<FileOperationState>,
+    pub(super) active_remote_delete: Option<RemoteDeleteState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
@@ -237,6 +238,12 @@ pub(super) struct FileOperationState {
     pub(super) terminate: Arc<AtomicBool>,
     pub(super) task: Option<Task<()>>,
     pub(super) archive_diagnostics: Option<ArchiveDiagnostics>,
+}
+
+pub(super) struct RemoteDeleteState {
+    pub(super) progress: RemoteDeleteProgress,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) task: Option<Task<()>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -598,6 +605,7 @@ impl ExplorerView {
             pending_file_conflict: None,
             pending_drop_task: None,
             active_file_operation: None,
+            active_remote_delete: None,
             active_dialog_window: None,
             active_rename: None,
             rename_focus_out: None,
@@ -2014,12 +2022,12 @@ impl ExplorerView {
             .unwrap_or_else(|| tab_label_for_path(&self.path))
     }
 
-    pub(super) fn has_active_file_operation(&self) -> bool {
-        self.active_file_operation.is_some()
+    pub(super) fn has_active_mutating_operation(&self) -> bool {
+        self.active_file_operation.is_some() || self.active_remote_delete.is_some()
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
-        self.has_active_file_operation()
+        self.has_active_mutating_operation()
             || self.archive_copy_task.is_some()
             || self.pending_trash_task.is_some()
             || self.network_connection_is_working()
@@ -2314,7 +2322,7 @@ impl ExplorerView {
         self.pending_file_conflict = None;
         self.pending_drop_task = None;
 
-        if self.active_file_operation.is_none()
+        if !self.has_active_mutating_operation()
             && let Some(handle) = self.active_dialog_window.take()
         {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -2588,6 +2596,24 @@ mod tests {
         view.read_error = None;
 
         assert!(view.should_show_empty_folder_message());
+    }
+
+    #[test]
+    fn active_remote_delete_is_a_mutating_background_operation() {
+        let mut view = ExplorerView::new(PathBuf::from("remote-delete"));
+        view.active_remote_delete = Some(RemoteDeleteState {
+            progress: RemoteDeleteProgress {
+                phase: crate::explorer::filesystem::RemoteDeletePhase::Deleting,
+                total_items: 2,
+                completed_items: 0,
+                current_item: Some(PathBuf::from("one.txt")),
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+            task: None,
+        });
+
+        assert!(view.has_active_mutating_operation());
+        assert!(view.has_background_operation());
     }
 
     #[test]

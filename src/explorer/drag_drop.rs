@@ -967,7 +967,7 @@ impl ExplorerView {
         if self.is_sidebar_group_view() {
             return;
         }
-        if self.pending_drop_task.is_some() || self.active_file_operation.is_some() {
+        if self.pending_drop_task.is_some() || self.has_active_mutating_operation() {
             self.set_error_notice("Another file operation is already running.".to_owned());
             return;
         }

@@ -2938,6 +2938,51 @@ pub(super) struct FileOperationProgress {
     pub(super) cancellable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteDeletePhase {
+    Preparing,
+    Deleting,
+    Finished,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RemoteDeleteProgress {
+    pub(super) phase: RemoteDeletePhase,
+    pub(super) total_items: usize,
+    pub(super) completed_items: usize,
+    pub(super) current_item: Option<PathBuf>,
+}
+
+impl RemoteDeleteProgress {
+    pub(super) fn percent(&self) -> f32 {
+        if self.total_items == 0 {
+            0.0
+        } else {
+            (self.completed_items as f32 / self.total_items as f32).clamp(0.0, 1.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RemoteDeleteSummary {
+    pub(super) deleted_any: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RemoteDeleteError {
+    Cancelled { deleted_any: bool },
+    Failed { message: String, deleted_any: bool },
+}
+
+impl RemoteDeleteError {
+    pub(super) fn deleted_any(&self) -> bool {
+        match self {
+            Self::Cancelled { deleted_any } | Self::Failed { deleted_any, .. } => *deleted_any,
+        }
+    }
+}
+
 impl FileOperationProgress {
     pub(super) fn percent(&self) -> Option<f32> {
         (self.work_total_bytes > 0).then(|| {
@@ -3366,6 +3411,108 @@ pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+pub(super) fn remove_remote_paths_permanently_with_progress(
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(RemoteDeleteProgress),
+) -> Result<RemoteDeleteSummary, RemoteDeleteError> {
+    let _cache_invalidation =
+        crate::explorer::remote_directory_cache::DirectoryMutation::new(paths.iter().cloned());
+    if paths.is_empty() {
+        return Err(RemoteDeleteError::Failed {
+            message: "No items were selected to delete.".to_owned(),
+            deleted_any: false,
+        });
+    }
+    if paths.iter().any(|path| !super::remote_fs::is_remote(path)) {
+        return Err(RemoteDeleteError::Failed {
+            message: "SFTP deletion requires remote items.".to_owned(),
+            deleted_any: false,
+        });
+    }
+
+    let mut progress = RemoteDeleteProgress {
+        phase: RemoteDeletePhase::Preparing,
+        total_items: paths.len(),
+        completed_items: 0,
+        current_item: None,
+    };
+    on_progress(progress.clone());
+
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = RemoteDeletePhase::Cancelled;
+            on_progress(progress);
+            return Err(RemoteDeleteError::Cancelled { deleted_any: false });
+        }
+        progress.current_item = Some(path.clone());
+        on_progress(progress.clone());
+        let exists =
+            super::remote_fs::exists(path).map_err(|message| RemoteDeleteError::Failed {
+                message,
+                deleted_any: false,
+            })?;
+        if !exists {
+            return Err(RemoteDeleteError::Failed {
+                message: format!("Could not find {}.", path_display_name(path)),
+                deleted_any: false,
+            });
+        }
+    }
+
+    progress.phase = RemoteDeletePhase::Deleting;
+    progress.current_item = paths.first().cloned();
+    on_progress(progress.clone());
+    let mut deleted_any = false;
+
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            progress.phase = RemoteDeletePhase::Cancelled;
+            on_progress(progress);
+            return Err(RemoteDeleteError::Cancelled { deleted_any });
+        }
+        progress.current_item = Some(path.clone());
+        on_progress(progress.clone());
+
+        match super::remote_fs::delete_with_progress(path, cancel, |current_item| {
+            progress.current_item = Some(current_item);
+            on_progress(progress.clone());
+        }) {
+            super::remote_fs::RemoteDeleteOutcome::Complete {
+                deleted_any: root_deleted_any,
+            } => {
+                deleted_any |= root_deleted_any;
+                progress.completed_items = progress.completed_items.saturating_add(1);
+                on_progress(progress.clone());
+            }
+            super::remote_fs::RemoteDeleteOutcome::Cancelled {
+                deleted_any: root_deleted_any,
+            } => {
+                deleted_any |= root_deleted_any;
+                progress.phase = RemoteDeletePhase::Cancelled;
+                on_progress(progress);
+                return Err(RemoteDeleteError::Cancelled { deleted_any });
+            }
+            super::remote_fs::RemoteDeleteOutcome::Failed {
+                error,
+                deleted_any: root_deleted_any,
+            } => {
+                deleted_any |= root_deleted_any;
+                return Err(RemoteDeleteError::Failed {
+                    message: error,
+                    deleted_any,
+                });
+            }
+        }
+    }
+
+    progress.phase = RemoteDeletePhase::Finished;
+    progress.current_item = None;
+    progress.completed_items = progress.total_items;
+    on_progress(progress);
+    Ok(RemoteDeleteSummary { deleted_any })
 }
 
 pub(super) fn remove_existing_paths_permanently(paths: &[PathBuf]) -> Result<bool, String> {
@@ -6790,6 +6937,9 @@ fn format_path_error(operation: &str, path: &Path, error: std::io::Error) -> Str
 }
 
 fn path_display_name(path: &Path) -> String {
+    if let Some(name) = super::remote_fs::display_name(path) {
+        return name;
+    }
     path.file_name()
         .and_then(OsStr::to_str)
         .map(str::to_owned)
@@ -9504,6 +9654,52 @@ mod tests {
         assert!(
             !remove_existing_paths_permanently(std::slice::from_ref(&missing))
                 .expect("ignore missing path")
+        );
+    }
+
+    #[test]
+    fn remote_delete_cancellation_stops_before_sftp_preflight() {
+        let cancel = AtomicBool::new(true);
+        let remote_path = super::super::remote_fs::RemoteLocation::parse(
+            "sftp://example.invalid/folder/item.txt",
+        )
+        .unwrap()
+        .provider_path();
+        let mut snapshots = Vec::new();
+
+        let result =
+            remove_remote_paths_permanently_with_progress(&[remote_path], &cancel, |progress| {
+                snapshots.push(progress)
+            });
+
+        assert_eq!(
+            result,
+            Err(RemoteDeleteError::Cancelled { deleted_any: false })
+        );
+        assert_eq!(
+            snapshots.first().unwrap().phase,
+            RemoteDeletePhase::Preparing
+        );
+        assert_eq!(
+            snapshots.last().unwrap().phase,
+            RemoteDeletePhase::Cancelled
+        );
+        assert_eq!(snapshots.last().unwrap().completed_items, 0);
+    }
+
+    #[test]
+    fn remote_delete_progress_is_based_on_selected_roots() {
+        let progress = RemoteDeleteProgress {
+            phase: RemoteDeletePhase::Deleting,
+            total_items: 5,
+            completed_items: 2,
+            current_item: Some(PathBuf::from("nested/descendant.txt")),
+        };
+
+        assert_eq!(progress.percent(), 0.4);
+        assert_eq!(
+            progress.current_item,
+            Some(PathBuf::from("nested/descendant.txt"))
         );
     }
 
