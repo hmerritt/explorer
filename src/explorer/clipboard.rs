@@ -254,6 +254,14 @@ pub(super) fn write_to_clipboard_and_refresh(item: ClipboardItem, cx: &mut App) 
 }
 
 pub(super) fn refresh_clipboard_summary(cx: &mut App) {
+    refresh_clipboard_summary_inner(cx, true);
+}
+
+pub(super) fn refresh_clipboard_summary_if_changed(cx: &mut App) {
+    refresh_clipboard_summary_inner(cx, false);
+}
+
+fn refresh_clipboard_summary_inner(cx: &mut App, rescan_unchanged_files: bool) {
     if cx.try_global::<ClipboardSummaryState>().is_none() {
         cx.set_global(ClipboardSummaryState::default());
     }
@@ -270,7 +278,7 @@ pub(super) fn refresh_clipboard_summary(cx: &mut App) {
     let filesystem_payload = inspection
         .as_ref()
         .is_some_and(|inspection| inspection.file_paths.is_some());
-    if fingerprint_is_unchanged && !filesystem_payload {
+    if fingerprint_is_unchanged && (!filesystem_payload || !rescan_unchanged_files) {
         return;
     }
 
@@ -2287,6 +2295,46 @@ mod tests {
                 },
             ));
             assert!(app.global::<ClipboardSummaryState>().summary.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn changed_only_refresh_clears_cached_summary(cx: &mut gpui::TestAppContext) {
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+            let generation = app.global::<ClipboardSummaryState>().generation;
+            assert!(clipboard_summary(app).is_some());
+
+            app.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            refresh_clipboard_summary_if_changed(app);
+
+            let state = app.global::<ClipboardSummaryState>();
+            assert!(state.summary.is_none());
+            assert_eq!(state.generation, generation.wrapping_add(1));
+        });
+    }
+
+    #[gpui::test]
+    fn changed_only_refresh_does_not_restart_unchanged_file_scan(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("clipboard.txt");
+        fs::write(&path, b"clipboard").expect("write clipboard source");
+
+        cx.update(|app| {
+            initialize_clipboard_summary(app);
+            let clipboard = FileClipboard::new(FileClipboardOperation::Copy, vec![path]);
+            let item = clipboard_item_for_files(&clipboard).expect("file clipboard item");
+            write_to_clipboard_and_refresh(item, app);
+            let generation = app.global::<ClipboardSummaryState>().generation;
+
+            refresh_clipboard_summary_if_changed(app);
+
+            assert_eq!(
+                app.global::<ClipboardSummaryState>().generation,
+                generation,
+                "polling an unchanged file payload must not restart its metadata scan"
+            );
         });
     }
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use gpui::{
@@ -30,6 +31,7 @@ use crate::window_chrome::{
 };
 
 const TAB_BAR_HEIGHT: f32 = TITLEBAR_HEIGHT;
+const CLIPBOARD_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TAB_WIDTH: f32 = 225.0;
 const TAB_MIN_WIDTH: f32 = 160.0;
 const TAB_HORIZONTAL_PADDING: f32 = 10.0;
@@ -568,6 +570,7 @@ impl ExplorerTabs {
         observe_tab_view(&view, window, cx);
         observe_settings(cx);
         observe_window_activation(window, cx);
+        start_clipboard_summary_poll(window, cx);
         crate::explorer::clipboard::refresh_clipboard_summary(cx);
 
         Self {
@@ -2577,6 +2580,28 @@ fn observe_window_activation(window: &mut Window, cx: &mut Context<ExplorerTabs>
     .detach();
 }
 
+fn start_clipboard_summary_poll(window: &Window, cx: &Context<ExplorerTabs>) {
+    window
+        .spawn(cx, async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(CLIPBOARD_STATUS_POLL_INTERVAL)
+                    .await;
+                if cx
+                    .update(|window, cx| {
+                        if window.is_window_active() {
+                            crate::explorer::clipboard::refresh_clipboard_summary_if_changed(cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+}
+
 fn close_tab_button(tab_id: TabId, cx: &mut Context<ExplorerTabs>) -> AnyElement {
     div()
         .id(("explorer-tab-close", tab_id.0))
@@ -2806,7 +2831,10 @@ mod tests {
             SearchCommit, SearchEdit,
         },
         address_bar::folder_suggestions_for_input,
-        clipboard::{FileClipboard, FileClipboardOperation, file_clipboard_from_item},
+        clipboard::{
+            FileClipboard, FileClipboardOperation, clipboard_summary, file_clipboard_from_item,
+            initialize_clipboard_summary, write_to_clipboard_and_refresh,
+        },
         test_support::{TempDir, selected_names},
         view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
     };
@@ -3184,6 +3212,41 @@ mod tests {
             fs::read(temp.path().join("image.png")).unwrap(),
             vec![1, 2, 3, 4]
         );
+    }
+
+    #[gpui::test]
+    fn clipboard_status_poll_removes_summary_after_external_clear(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        cx.update(initialize_clipboard_summary);
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (tabs, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerTabs::new(path, focus_handle, window, cx)
+        });
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_none());
+
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            write_to_clipboard_and_refresh(ClipboardItem::new_string("paste me".to_owned()), app);
+            view.update(app, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("clipboard-status").is_some());
+
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            assert!(clipboard_summary(app).is_some());
+        });
+        cx.executor().advance_clock(CLIPBOARD_STATUS_POLL_INTERVAL);
+        cx.run_until_parked();
+
+        cx.update(|_, app| assert!(clipboard_summary(app).is_none()));
+        assert!(cx.debug_bounds("clipboard-status").is_none());
     }
 
     #[gpui::test]

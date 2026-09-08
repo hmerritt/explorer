@@ -1,13 +1,8 @@
 ## 1
 
-- Research what Winscp does, how it works. Take another stab at implementing it within explorer
-    - Download speeds are currently slower than using WinSCP directly, why might this be?
-- Windows taskbar icon. On window close keep running, context menu to: show version, check for updates, open new window. re-attach to an existing window
-- Windows installer, see aura for an existing implmentation: https://github.com/hmerritt/aura. Squirrel installer and auto-updater
+- Reorder sidebar items (in Drives, Network, WSL, etc...). Save order to settings in an object sidebar.order, where the keys are the group, and the value is an array for the order. Rename sidebar.items to sidebar.pinned.
 
 ## 2
-
-- Reorder sidebar items (in Drives, Network, WSL, etc...). Save order to settings in an object sidebar.order, where the keys are the group, and the value is an array for the order. Rename sidebar.items to sidebar.pinned.
 
 ## 3
 
