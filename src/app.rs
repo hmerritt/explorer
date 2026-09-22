@@ -965,6 +965,7 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBinding::new("end", MoveEnd, None),
         KeyBinding::new("shift-home", ExtendHome, None),
         KeyBinding::new("shift-end", ExtendEnd, None),
+        KeyBinding::new("left", GoUp, None),
         KeyBinding::new("right", OpenSelected, None),
         KeyBinding::new("enter", EnterSelected, None),
         KeyBinding::new("f5", Refresh, None),
@@ -1071,7 +1072,6 @@ fn push_mac_key_bindings(bindings: &mut Vec<KeyBinding>) {
 
 fn push_windows_like_key_bindings(bindings: &mut Vec<KeyBinding>) {
     bindings.extend([
-        KeyBinding::new("left", GoUp, None),
         KeyBinding::new("alt-left", GoBack, None),
         KeyBinding::new("ctrl-right", OpenSelectedInNewTab, None),
         KeyBinding::new("alt-right", GoForward, None),
@@ -1557,8 +1557,10 @@ mod tests {
             assert!(has_binding(&bindings, OpenSelected, "right", None));
         }
 
-        let windows_like_bindings = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
-        assert!(has_binding(&windows_like_bindings, GoUp, "left", None));
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+            assert!(has_binding(&bindings, GoUp, "left", None));
+        }
     }
 
     #[test]
@@ -1733,11 +1735,11 @@ mod tests {
     }
 
     #[test]
-    fn details_arrow_bindings_remain_platform_specific() {
+    fn details_arrow_bindings_match_on_mac_and_windows() {
         let details = [KeyContext::parse("Explorer").expect("valid details key context")];
 
         let mac = key_bindings_for_profile(KeyBindingProfile::Mac);
-        assert!(has_no_resolved_binding(&mac, "left", &details));
+        assert!(resolves_to(&mac, GoUp, "left", &details));
         assert!(resolves_to(&mac, OpenSelected, "right", &details));
         assert!(resolves_to(&mac, MoveUp, "up", &details));
         assert!(resolves_to(&mac, MoveDown, "down", &details));
