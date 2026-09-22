@@ -142,7 +142,6 @@ const DROP_INDICATOR_TEXT_SIZE: f32 = 12.0;
 const DROP_INDICATOR_BLUE: u32 = 0x0078d7;
 const DROP_INDICATOR_TEXT_COLOR: u32 = 0x1f1f1f;
 const DROP_INDICATOR_TARGET_MAX_WIDTH: f32 = 180.0;
-const UTILITY_TEXT_BUTTON_WIDTH: f32 = 92.0;
 const SIDEBAR_ITEM_GAP: f32 = 4.0;
 const SIDEBAR_ROW_BG: u32 = 0xffffff;
 const SIDEBAR_ROW_CURRENT_BG: u32 = 0xcce8ff;
@@ -272,16 +271,18 @@ impl Render for SidebarItemDragPreview {
             )
     }
 }
-const UTILITY_SEPARATOR_OUTER_WIDTH: f32 = 17.0;
+const UTILITY_SEPARATOR_WIDTH: f32 = 1.0;
+const UTILITY_NEW_BUTTON_WIDTH: f32 = 71.0;
+const UTILITY_CONNECT_BUTTON_WIDTH: f32 = 78.0;
 const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
 const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
-    + UTILITY_TEXT_BUTTON_WIDTH
-    + UTILITY_SEPARATOR_OUTER_WIDTH
+    + UTILITY_NEW_BUTTON_WIDTH
+    + UTILITY_CONNECT_BUTTON_WIDTH
+    + (UTILITY_SEPARATOR_WIDTH * 3.0)
     + (UTILITY_ICON_BUTTON_SIZE * 5.0)
-    + UTILITY_SEPARATOR_OUTER_WIDTH
-    + (UTILITY_BAR_ITEM_GAP * 8.0);
+    + (UTILITY_BAR_ITEM_GAP * 10.0);
 const UTILITY_SIDEBAR_TOGGLE_MENU_OFFSET: f32 =
-    UTILITY_ICON_BUTTON_SIZE + UTILITY_SEPARATOR_OUTER_WIDTH + (UTILITY_BAR_ITEM_GAP * 2.0);
+    UTILITY_ICON_BUTTON_SIZE + UTILITY_SEPARATOR_WIDTH + (UTILITY_BAR_ITEM_GAP * 2.0);
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
 const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
@@ -717,6 +718,25 @@ impl ExplorerView {
                 .child(utility_separator())
             })
             .child(utility_text_button(
+                "utility-new",
+                Some(utility_new_icon().into_any_element()),
+                "New",
+                self.open_utility_menu == Some(UtilityMenu::New),
+                can_mutate_location,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_context_menu();
+                    this.cancel_pending_click_rename();
+                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
+                        None
+                    } else {
+                        Some(UtilityMenu::New)
+                    };
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            ))
+            .child(utility_separator().debug_selector(|| "utility-new-connect-separator".into()))
+            .child(utility_text_button(
                 "utility-connect-sftp",
                 None,
                 "Connect",
@@ -735,24 +755,6 @@ impl ExplorerView {
                             Err(error) => this.set_error_notice(error),
                         }
                     }
-                    cx.notify();
-                }),
-            ))
-            .child(utility_text_button(
-                "utility-new",
-                Some(utility_new_icon().into_any_element()),
-                "New",
-                self.open_utility_menu == Some(UtilityMenu::New),
-                can_mutate_location,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.close_context_menu();
-                    this.cancel_pending_click_rename();
-                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
-                        None
-                    } else {
-                        Some(UtilityMenu::New)
-                    };
-                    cx.stop_propagation();
                     cx.notify();
                 }),
             ))
@@ -7921,7 +7923,7 @@ mod tests {
         constants::{
             COLUMN_NAME_MIN_WIDTH, COLUMN_TYPE_WIDTH, EMPTY_FOLDER_MESSAGE, EMPTY_FOLDER_TEXT_SIZE,
             EMPTY_FOLDER_TOP_MARGIN, EXPLORER_COPY_GREEN, FILE_ICON_SLOT_WIDTH, MB_BYTES,
-            NAV_BUTTON_ACTIVE_OPACITY,
+            NAV_BUTTON_ACTIVE_OPACITY, UTILITY_BAR_HORIZONTAL_PADDING,
         },
         entry::FileEntry,
         filesystem::NetworkDriveState,
@@ -7943,9 +7945,8 @@ mod tests {
         IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, NAVBAR_HEIGHT, RECURSIVE_SEARCH_ROW_HEIGHT,
         ROW_HEIGHT, RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP,
-        SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP, TITLEBAR_HEIGHT, UTILITY_TEXT_BUTTON_ICON_SIZE,
-        UTILITY_TEXT_BUTTON_WIDTH, address_suggestions_top, available_filename_text_width,
-        clipboard_status_popup_layout, codebase_makeup_segments,
+        SIDEBAR_GROUP_GAP, SIDEBAR_ITEM_GAP, TITLEBAR_HEIGHT, address_suggestions_top,
+        available_filename_text_width, clipboard_status_popup_layout, codebase_makeup_segments,
         context_menu_action_width_for_text_width, context_menu_detail_width_for_text_widths,
         context_menu_text_width, context_menu_width, context_menu_width_for_natural_width,
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
@@ -10438,6 +10439,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_precedes_separator_and_connect_with_or_without_sidebar_toggle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
+            view.sidebar_width = 320.0;
+            view
+        });
+
+        for (width, toggle_visible) in [(1000.0, false), (799.0, true)] {
+            cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
+            cx.run_until_parked();
+
+            let new = cx.debug_bounds("utility-new").expect("New bounds");
+            let separator = cx
+                .debug_bounds("utility-new-connect-separator")
+                .expect("New/Connect separator bounds");
+            let connect = cx
+                .debug_bounds("utility-connect-sftp")
+                .expect("Connect bounds");
+            let cut = cx.debug_bounds("utility-cut").expect("Cut bounds");
+            assert!(new.right() < separator.left());
+            assert!(separator.right() < connect.left());
+            assert!(connect.right() < cut.left());
+
+            let toggle = cx.debug_bounds("utility-sidebar-toggle");
+            assert_eq!(toggle.is_some(), toggle_visible);
+            if let Some(toggle) = toggle {
+                assert!(toggle.right() < new.left());
+            } else {
+                assert_eq!(new.left(), gpui::px(UTILITY_BAR_HORIZONTAL_PADDING));
+            }
+
+            let view = cx.debug_bounds("utility-view").expect("View bounds");
+            cx.simulate_click(view.center(), Modifiers::default());
+            cx.run_until_parked();
+            let view_menu_row = cx
+                .debug_bounds("utility-large-icons")
+                .expect("View menu row bounds");
+            assert!((view_menu_row.left() - view.left()).abs() <= gpui::px(16.0));
+            cx.simulate_click(
+                gpui::point(gpui::px(width - 20.0), gpui::px(500.0)),
+                Modifiers::default(),
+            );
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
     fn resizing_wide_resets_sidebar_auto_hide_override(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
@@ -10507,14 +10561,20 @@ mod tests {
         cx.simulate_mouse_up(dismiss_position, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
 
-        let view_position = cx
+        let view_bounds = cx
             .debug_bounds("utility-view")
-            .expect("view utility button bounds")
-            .center();
+            .expect("view utility button bounds");
+        let view_position = view_bounds.center();
         cx.simulate_mouse_down(view_position, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(view_position, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("utility-large-icons").is_some());
+        let view_menu_row = cx
+            .debug_bounds("utility-large-icons")
+            .expect("View menu row bounds");
+        assert!(
+            (view_menu_row.left() - view_bounds.left()).abs() <= gpui::px(16.0),
+            "View menu row: {view_menu_row:?}, View button: {view_bounds:?}"
+        );
     }
 
     #[gpui::test]
@@ -11598,12 +11658,6 @@ mod tests {
         assert_eq!(preview.size.height, gpui::px(150.0));
         assert!(preview.origin.x + preview.size.width <= gpui::px(300.0));
         assert!(preview.origin.y + preview.size.height <= gpui::px(300.0));
-    }
-
-    #[test]
-    fn utility_text_button_icon_geometry_fits_button() {
-        assert_eq!(UTILITY_TEXT_BUTTON_ICON_SIZE, 16.0);
-        assert!(UTILITY_TEXT_BUTTON_WIDTH >= 92.0);
     }
 
     #[gpui::test]
