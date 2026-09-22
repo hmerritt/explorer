@@ -1,6 +1,6 @@
 [package]
 name = "explorer"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 build = "build.rs"
 description = "A GPU-accelerated file explorer built with GPUI."
@@ -72,6 +72,7 @@ windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Globaliza
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block = "0.1.6"
 cocoa = "=0.26.0"
 icns = "0.4.0"
 objc = "0.2"

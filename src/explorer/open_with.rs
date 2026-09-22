@@ -172,11 +172,10 @@ pub(super) fn default_application_for_file(path: &Path) -> Option<DefaultApplica
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn change_default_application_for_file(
+pub(super) async fn change_default_application_for_file(
     path: &Path,
-    window: &Window,
 ) -> io::Result<DefaultAppChangeOutcome> {
-    mac_change_default_application_for_file(path, window)
+    mac_change_default_application_for_file(path).await
 }
 
 impl ExplorerView {
@@ -387,6 +386,7 @@ impl ExplorerView {
 
         #[cfg(target_os = "macos")]
         {
+            let _ = window;
             match &intent {
                 OpenFileIntent::Default => {
                     let task = cx.spawn(async move |this, cx| {
@@ -408,7 +408,7 @@ impl ExplorerView {
                                     remaining,
                                 } => {
                                     results.extend(completed);
-                                    let result = mac_choose_application_and_open(&path);
+                                    let result = mac_choose_application_and_open(&path).await;
                                     let completed =
                                         result.as_ref().is_ok_and(|outcome| outcome.is_opened());
                                     results.push((path, result));
@@ -434,10 +434,36 @@ impl ExplorerView {
                     });
                     self.open_with_task = Some(task);
                 }
-                OpenFileIntent::ChooseApplication | OpenFileIntent::SpecificApplication(_) => {
-                    let _ = window;
+                OpenFileIntent::ChooseApplication => {
+                    let task = cx.spawn(async move |this, cx| {
+                        let mut results = Vec::new();
+                        for path in paths {
+                            let result = mac_choose_application_and_open(&path).await;
+                            let completed =
+                                result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                            results.push((path, result));
+                            if !completed {
+                                break;
+                            }
+                        }
+
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.open_with_task = None;
+                            for (path, result) in results {
+                                if explorer.handle_open_with_result(&path, result) {
+                                    refresh_file_type_icons_after_default_app_may_have_changed(
+                                        &path, cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
+                    });
+                    self.open_with_task = Some(task);
+                }
+                OpenFileIntent::SpecificApplication(application) => {
                     for path in paths {
-                        let result = mac_open_file(&path, &intent);
+                        let result = mac_open_with_application(&path, application);
                         let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
                         if self.handle_open_with_result(&path, result) {
                             refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
@@ -1220,30 +1246,16 @@ struct MacApplicationSelection {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_change_default_application_for_file(
+async fn mac_change_default_application_for_file(
     path: &Path,
-    _: &Window,
 ) -> io::Result<DefaultAppChangeOutcome> {
-    let Some(selection) = mac_choose_application(MacApplicationPickerOptions::change_default())?
+    let Some(selection) =
+        mac_choose_application(MacApplicationPickerOptions::change_default()).await?
     else {
         return Ok(DefaultAppChangeOutcome::Cancelled);
     };
     mac_set_default_application_for_file_type(path, &selection.application)?;
     Ok(DefaultAppChangeOutcome::Changed)
-}
-
-#[cfg(target_os = "macos")]
-fn mac_open_file(path: &Path, intent: &OpenFileIntent) -> io::Result<OpenWithOutcome> {
-    match intent {
-        OpenFileIntent::Default => match mac_open_default_file(path)? {
-            DefaultOpenStep::Opened(outcome) => Ok(outcome),
-            DefaultOpenStep::ChooseApplication => mac_choose_application_and_open(path),
-        },
-        OpenFileIntent::ChooseApplication => mac_choose_application_and_open(path),
-        OpenFileIntent::SpecificApplication(application) => {
-            mac_open_with_application(path, application)
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1261,8 +1273,9 @@ fn mac_open_default_file(path: &Path) -> io::Result<DefaultOpenStep> {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_choose_application_and_open(path: &Path) -> io::Result<OpenWithOutcome> {
-    let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with())? else {
+async fn mac_choose_application_and_open(path: &Path) -> io::Result<OpenWithOutcome> {
+    let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with()).await?
+    else {
         return Ok(OpenWithOutcome::Cancelled);
     };
     if selection.always_open_with {
@@ -1508,15 +1521,29 @@ fn mac_control_state_is_checked(state: isize) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_choose_application(
+async fn mac_choose_application(
     options: MacApplicationPickerOptions,
 ) -> io::Result<Option<MacApplicationSelection>> {
+    let result = mac_begin_choose_application(options)?;
+    result
+        .await
+        .map_err(|_| io::Error::other("application picker closed without a result"))?
+}
+
+#[cfg(target_os = "macos")]
+fn mac_begin_choose_application(
+    options: MacApplicationPickerOptions,
+) -> io::Result<futures::channel::oneshot::Receiver<io::Result<Option<MacApplicationSelection>>>> {
+    use block::ConcreteBlock;
     use cocoa::{
         appkit::{NSModalResponse, NSOpenPanel, NSSavePanel},
         base::{NO, YES, id, nil},
         foundation::{NSArray, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};
+    use std::cell::Cell;
+
+    let (sender, receiver) = futures::channel::oneshot::channel();
 
     unsafe {
         let pool: id = msg_send![class!(NSAutoreleasePool), new];
@@ -1526,12 +1553,13 @@ fn mac_choose_application(
             panel.setCanChooseDirectories_(NO);
             panel.setAllowsMultipleSelection_(NO);
             panel.setResolvesAliases_(YES);
+            let _: () = msg_send![panel, setTreatsFilePackagesAsDirectories: NO];
 
             let applications_url = mac_file_url(Path::new("/Applications"))
                 .ok_or_else(|| io::Error::other("could not create Applications URL"))?;
             panel.setDirectoryURL(applications_url);
 
-            let app_type = NSString::alloc(nil).init_str("app");
+            let app_type = NSString::alloc(nil).init_str("com.apple.application-bundle");
             let _: id = msg_send![app_type, autorelease];
             let allowed_types = NSArray::arrayWithObject(nil, app_type);
             let _: () = msg_send![panel, setAllowedFileTypes: allowed_types];
@@ -1544,24 +1572,43 @@ fn mac_choose_application(
                 )
             });
 
-            if panel.runModal() != NSModalResponse::NSModalResponseOk {
-                return Ok(None);
-            }
-
-            let application = mac_path_from_url(panel.URL())
-                .ok_or_else(|| io::Error::other("selected application path is unavailable"))?;
-            if !mac_is_application_bundle(&application) {
-                return Err(io::Error::other("selected item is not an application"));
-            }
-            Ok(Some(MacApplicationSelection {
-                application,
-                always_open_with: always_open_with_checkbox
-                    .is_some_and(mac_always_open_with_checkbox_is_checked),
-            }))
+            // The completion block only holds raw pointers, so keep the panel alive until it fires.
+            let _: id = msg_send![panel, retain];
+            let sender = Cell::new(Some(sender));
+            let block = ConcreteBlock::new(move |response: NSModalResponse| {
+                let pool: id = msg_send![class!(NSAutoreleasePool), new];
+                let result = if response == NSModalResponse::NSModalResponseOk {
+                    mac_path_from_url(panel.URL())
+                        .ok_or_else(|| io::Error::other("selected application path is unavailable"))
+                        .and_then(|application| {
+                            if !mac_is_application_bundle(&application) {
+                                return Err(io::Error::other(
+                                    "selected item is not an application",
+                                ));
+                            }
+                            Ok(Some(MacApplicationSelection {
+                                application,
+                                always_open_with: always_open_with_checkbox
+                                    .is_some_and(mac_always_open_with_checkbox_is_checked),
+                            }))
+                        })
+                } else {
+                    Ok(None)
+                };
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+                let _: () = msg_send![panel, release];
+                let _: () = msg_send![pool, drain];
+            });
+            let block = block.copy();
+            let _: () = msg_send![panel, beginWithCompletionHandler: block];
+            Ok(())
         })();
         let _: () = msg_send![pool, drain];
-        result
+        result?;
     }
+    Ok(receiver)
 }
 
 #[cfg(target_os = "macos")]

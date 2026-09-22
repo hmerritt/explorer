@@ -2529,10 +2529,11 @@ dependencies = [
 
 [[package]]
 name = "explorer"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "ar",
  "ashpd 0.11.1",
+ "block",
  "bytes",
  "chrono",
  "cocoa 0.26.0",

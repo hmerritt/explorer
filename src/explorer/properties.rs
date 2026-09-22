@@ -2269,8 +2269,16 @@ impl PropertiesDialog {
         };
 
         let before = snapshot.default_app.clone();
-        let result = crate::explorer::open_with::change_default_application_for_file(&path, window);
-        self.refresh_after_default_app_change(path, before, result, cx);
+        let _ = window;
+        let task = cx.spawn(async move |this, cx| {
+            let result =
+                crate::explorer::open_with::change_default_application_for_file(&path).await;
+            let _ = this.update(cx, |dialog, cx| {
+                dialog.refresh_after_default_app_change(path, before, result, cx);
+            });
+        });
+        self.default_app_task = Some(task);
+        cx.notify();
     }
 
     #[cfg(target_os = "linux")]
