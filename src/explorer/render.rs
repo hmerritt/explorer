@@ -725,7 +725,12 @@ impl ExplorerView {
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     let _ = window;
                     if this.active_dialog_window.is_none() {
-                        match super::remote_dialog::open_site_dialog(cx.entity(), cx) {
+                        match super::remote_dialog::open_site_dialog(
+                            cx.entity(),
+                            &this.path,
+                            &this.sidebar_settings.remote,
+                            cx,
+                        ) {
                             Ok(handle) => this.active_dialog_window = Some(handle),
                             Err(error) => this.set_error_notice(error),
                         }
@@ -10392,6 +10397,44 @@ mod tests {
         cx.run_until_parked();
 
         cx.read_entity(&view, |view, _| assert!(!view.sidebar_auto_hide_expanded));
+    }
+
+    #[gpui::test]
+    fn connect_button_opens_dialog_and_can_reopen_after_close(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+
+        let position = cx
+            .debug_bounds("utility-connect-sftp")
+            .expect("Connect button bounds")
+            .center();
+        assert_eq!(cx.windows().len(), 1);
+
+        cx.simulate_click(position, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 2);
+        let dialog = cx.read_entity(&view, |view, _| {
+            view.active_dialog_window.expect("active Connect dialog")
+        });
+
+        cx.cx.update(|app| {
+            dialog
+                .update(app, |_, window, _| window.remove_window())
+                .expect("close Connect dialog");
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 1);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.active_dialog_window.is_none())
+        });
+
+        cx.simulate_click(position, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 2);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.active_dialog_window.is_some())
+        });
     }
 
     #[gpui::test]

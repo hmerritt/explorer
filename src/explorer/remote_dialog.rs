@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, path::Path};
 
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
@@ -20,6 +20,7 @@ use crate::explorer::{
     text_input::{EditableTextEditKind, EditableTextState},
     view::ExplorerView,
 };
+use crate::settings::RemoteSidebarItem;
 
 const DIALOG_WIDTH: f32 = 430.0;
 const CREDENTIALS_HEIGHT: f32 = 260.0;
@@ -63,28 +64,11 @@ struct RemoteCredentialInput {
 
 pub(super) fn open_site_dialog(
     explorer: Entity<ExplorerView>,
+    path: &Path,
+    remote: &[RemoteSidebarItem],
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let location = super::remote_fs::RemoteLocation::from_provider(&explorer.read(cx).path);
-    let original = location.as_ref().and_then(|location| {
-        explorer
-            .read(cx)
-            .sidebar_settings
-            .remote
-            .iter()
-            .find(|item| {
-                item.endpoint().is_ok_and(|site| site == location.site)
-                    && item.path.trim_end_matches('/') == location.path.trim_end_matches('/')
-            })
-            .cloned()
-    });
-    let name = original
-        .as_ref()
-        .and_then(|item| item.label.clone())
-        .unwrap_or_default();
-    let address = location
-        .map(|loc| loc.address())
-        .unwrap_or_else(|| "sftp://".into());
+    let (original, name, address) = site_dialog_initial_values(path, remote);
     let options = remote_window_options("Connect to SFTP server", 310.0, cx);
     cx.open_window(options, move |window, cx| {
         let name = cx.new(|cx| {
@@ -112,6 +96,30 @@ pub(super) fn open_site_dialog(
     })
     .map(Into::into)
     .map_err(|e| e.to_string())
+}
+
+fn site_dialog_initial_values(
+    path: &Path,
+    remote: &[RemoteSidebarItem],
+) -> (Option<RemoteSidebarItem>, String, String) {
+    let location = super::remote_fs::RemoteLocation::from_provider(path);
+    let original = location.as_ref().and_then(|location| {
+        remote
+            .iter()
+            .find(|item| {
+                item.endpoint().is_ok_and(|site| site == location.site)
+                    && item.path.trim_end_matches('/') == location.path.trim_end_matches('/')
+            })
+            .cloned()
+    });
+    let name = original
+        .as_ref()
+        .and_then(|item| item.label.clone())
+        .unwrap_or_default();
+    let address = location
+        .map(|loc| loc.address())
+        .unwrap_or_else(|| "sftp://".into());
+    (original, name, address)
 }
 
 pub(super) fn open_remote_credentials_dialog(
@@ -1139,6 +1147,31 @@ impl Element for RemoteTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_folder_starts_with_blank_site_name_and_address() {
+        let (original, name, address) = site_dialog_initial_values(Path::new("local-folder"), &[]);
+        assert!(original.is_none());
+        assert!(name.is_empty());
+        assert_eq!(address, "sftp://");
+    }
+
+    #[test]
+    fn saved_sftp_location_prefills_site_name_and_address() {
+        let location =
+            super::super::remote_fs::RemoteLocation::parse("sftp://alice@example.com:2222/team")
+                .unwrap();
+        let saved = RemoteSidebarItem {
+            address: location.site.trim_end_matches('/').to_owned(),
+            path: location.path.clone(),
+            label: Some("Team files".to_owned()),
+        };
+        let (original, name, address) =
+            site_dialog_initial_values(&location.provider_path(), &[saved.clone()]);
+        assert_eq!(original, Some(saved));
+        assert_eq!(name, "Team files");
+        assert_eq!(address, "sftp://alice@example.com:2222/team");
+    }
 
     #[test]
     fn password_display_never_contains_the_password() {
