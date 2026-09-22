@@ -1547,7 +1547,7 @@ fn mac_begin_choose_application(
 
     unsafe {
         let pool: id = msg_send![class!(NSAutoreleasePool), new];
-        let result = (|| {
+        let result: io::Result<()> = (|| {
             let panel = NSOpenPanel::openPanel(nil);
             panel.setCanChooseFiles_(YES);
             panel.setCanChooseDirectories_(NO);
