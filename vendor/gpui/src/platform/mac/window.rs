@@ -136,6 +136,10 @@ unsafe fn build_classes() {
                     handle_view_event as extern "C" fn(&Object, Sel, id),
                 );
                 decl.add_method(
+                    sel!(mouseDownCanMoveWindow),
+                    mouse_down_can_move_window as extern "C" fn(&Object, Sel) -> BOOL,
+                );
+                decl.add_method(
                     sel!(mouseUp:),
                     handle_view_event as extern "C" fn(&Object, Sel, id),
                 );
@@ -422,6 +426,7 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     synthetic_drag_counter: usize,
+    window_move_mouse_down: Option<id>,
     traffic_light_position: Option<Point<Pixels>>,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
@@ -441,6 +446,14 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    fn clear_window_move_mouse_down(&mut self) {
+        if let Some(event) = self.window_move_mouse_down.take() {
+            unsafe {
+                let _: () = msg_send![event, release];
+            }
+        }
+    }
+
     fn move_traffic_light(&self) {
         if let Some(traffic_light_position) = self.traffic_light_position {
             if self.is_fullscreen() {
@@ -726,6 +739,7 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 synthetic_drag_counter: 0,
+                window_move_mouse_down: None,
                 traffic_light_position: titlebar
                     .as_ref()
                     .and_then(|titlebar| titlebar.traffic_light_position),
@@ -952,6 +966,7 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        this.clear_window_move_mouse_down();
         this.renderer.destroy();
         let window = this.native_window;
         this.display_link.take();
@@ -973,6 +988,22 @@ impl Drop for MacWindow {
 impl PlatformWindow for MacWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
+    }
+
+    fn start_window_move(&self) {
+        let (window, mouse_down) = {
+            let mut state = self.0.lock();
+            (state.native_window, state.window_move_mouse_down.take())
+        };
+
+        if let Some(mouse_down) = mouse_down {
+            unsafe {
+                // AppKit needs the original down event, even though GPUI requests the move
+                // only after the pointer has moved over a titlebar drag region.
+                let _: () = msg_send![window, performWindowDragWithEvent: mouse_down];
+                let _: () = msg_send![mouse_down, release];
+            }
+        }
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -1799,6 +1830,16 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
     }
 }
 
+extern "C" fn mouse_down_can_move_window(this: &Object, _: Sel) -> BOOL {
+    let window_state = unsafe { get_window_state(this) };
+    if window_state.lock().transparent_titlebar {
+        // The titlebar shares this view with interactive content such as draggable tabs.
+        NO
+    } else {
+        unsafe { msg_send![super(this, class!(NSView)), mouseDownCanMoveWindow] }
+    }
+}
+
 extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
@@ -1807,6 +1848,26 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let event = unsafe { PlatformInput::from_native(native_event, Some(window_height)) };
 
     if let Some(mut event) = event {
+        if lock.transparent_titlebar {
+            match &event {
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    ..
+                }) => {
+                    lock.clear_window_move_mouse_down();
+                    unsafe {
+                        let _: id = msg_send![native_event, retain];
+                    }
+                    lock.window_move_mouse_down = Some(native_event);
+                }
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    ..
+                }) => lock.clear_window_move_mouse_down(),
+                _ => {}
+            }
+        }
+
         match &mut event {
             PlatformInput::MouseDown(
                 event @ MouseDownEvent {
