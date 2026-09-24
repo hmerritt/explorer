@@ -1,6 +1,113 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use git2::{BranchType, Reference, Repository};
+use git2::{BranchType, Reference, Repository, Status, StatusOptions};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GitEntryMarker {
+    New,
+    Changed,
+}
+
+impl GitEntryMarker {
+    fn combine(self, other: Self) -> Self {
+        if self == Self::Changed || other == Self::Changed {
+            Self::Changed
+        } else {
+            Self::New
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GitEntryStatusSnapshot {
+    pub(super) directory: PathBuf,
+    pub(super) markers: HashMap<PathBuf, GitEntryMarker>,
+}
+
+pub(super) fn scan_git_entry_status(directory: &Path) -> Option<GitEntryStatusSnapshot> {
+    let repo = Repository::discover(directory).ok()?;
+    let workdir = repo.workdir()?;
+    let mut markers = HashMap::new();
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true);
+    let statuses = repo.statuses(Some(&mut options)).ok()?;
+    for entry in statuses.iter() {
+        let status = entry.status();
+        let Some(marker) = marker_for_status(status) else {
+            continue;
+        };
+        let path = workdir.join(path_from_git_bytes(entry.path_bytes()));
+        insert_visible_marker(directory, &path, marker, &mut markers);
+        if status.contains(Status::INDEX_RENAMED) {
+            if let Some(path) = entry
+                .head_to_index()
+                .and_then(|delta| delta.new_file().path().map(|path| workdir.join(path)))
+            {
+                insert_visible_marker(directory, &path, GitEntryMarker::Changed, &mut markers);
+            }
+        }
+        if status.contains(Status::WT_RENAMED) {
+            if let Some(path) = entry
+                .index_to_workdir()
+                .and_then(|delta| delta.new_file().path().map(|path| workdir.join(path)))
+            {
+                insert_visible_marker(directory, &path, GitEntryMarker::Changed, &mut markers);
+            }
+        }
+    }
+    Some(GitEntryStatusSnapshot {
+        directory: directory.to_path_buf(),
+        markers,
+    })
+}
+
+fn marker_for_status(status: Status) -> Option<GitEntryMarker> {
+    if status.is_empty() || status == Status::IGNORED {
+        None
+    } else if status.intersects(Status::WT_NEW | Status::INDEX_NEW) {
+        Some(GitEntryMarker::New)
+    } else {
+        Some(GitEntryMarker::Changed)
+    }
+}
+
+fn insert_visible_marker(
+    directory: &Path,
+    path: &Path,
+    marker: GitEntryMarker,
+    markers: &mut HashMap<PathBuf, GitEntryMarker>,
+) {
+    let Ok(relative) = path.strip_prefix(directory) else {
+        return;
+    };
+    let mut parts = relative.components();
+    let Some(first) = parts.next() else {
+        return;
+    };
+    markers
+        .entry(directory.join(first))
+        .and_modify(|existing| *existing = existing.combine(marker))
+        .or_insert(marker);
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes.to_vec()).into()
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).as_ref())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct GitRepositoryStatus {
@@ -90,6 +197,114 @@ mod tests {
     use super::*;
     use crate::explorer::test_support::TempDir;
     use git2::{Commit, Oid, Signature};
+
+    #[test]
+    fn entry_status_marks_new_changed_and_mixed_folders() {
+        let temp = TempDir::new();
+        let repo = init_test_repo(temp.path());
+        std::fs::create_dir(temp.path().join("mixed")).unwrap();
+        for (name, content) in [
+            (".gitignore", "ignored.txt\n"),
+            ("clean.txt", "clean"),
+            ("edited.txt", "before"),
+            ("staged_edit.txt", "before"),
+            ("mixed/tracked.txt", "before"),
+        ] {
+            std::fs::write(temp.path().join(name), content).unwrap();
+        }
+        commit_worktree_files(
+            &repo,
+            &[
+                ".gitignore",
+                "clean.txt",
+                "edited.txt",
+                "staged_edit.txt",
+                "mixed/tracked.txt",
+            ],
+        );
+
+        std::fs::write(temp.path().join("edited.txt"), "after").unwrap();
+        std::fs::write(temp.path().join("staged_edit.txt"), "after").unwrap();
+        std::fs::write(temp.path().join("new.txt"), "new").unwrap();
+        std::fs::write(temp.path().join("staged_new.txt"), "new").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), "ignored").unwrap();
+        std::fs::create_dir(temp.path().join("only_new")).unwrap();
+        std::fs::write(temp.path().join("only_new/new.txt"), "new").unwrap();
+        std::fs::write(temp.path().join("mixed/tracked.txt"), "after").unwrap();
+        std::fs::write(temp.path().join("mixed/new.txt"), "new").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged_edit.txt")).unwrap();
+        index.add_path(Path::new("staged_new.txt")).unwrap();
+        index.write().unwrap();
+        std::fs::write(temp.path().join("staged_new.txt"), "edited after staging").unwrap();
+
+        let snapshot = scan_git_entry_status(temp.path()).unwrap();
+        let marker = |name: &str| snapshot.markers.get(&temp.path().join(name)).copied();
+        assert_eq!(marker("new.txt"), Some(GitEntryMarker::New));
+        assert_eq!(marker("staged_new.txt"), Some(GitEntryMarker::New));
+        assert_eq!(marker("edited.txt"), Some(GitEntryMarker::Changed));
+        assert_eq!(marker("staged_edit.txt"), Some(GitEntryMarker::Changed));
+        assert_eq!(marker("only_new"), Some(GitEntryMarker::New));
+        assert_eq!(marker("mixed"), Some(GitEntryMarker::Changed));
+        assert_eq!(marker("clean.txt"), None);
+        assert_eq!(marker("ignored.txt"), None);
+
+        let nested = scan_git_entry_status(&temp.path().join("mixed")).unwrap();
+        assert_eq!(
+            nested.markers.get(&temp.path().join("mixed/new.txt")),
+            Some(&GitEntryMarker::New)
+        );
+        assert_eq!(
+            nested.markers.get(&temp.path().join("mixed/tracked.txt")),
+            Some(&GitEntryMarker::Changed)
+        );
+    }
+
+    #[test]
+    fn entry_status_works_before_first_commit() {
+        let temp = TempDir::new();
+        let _repo = init_test_repo(temp.path());
+        std::fs::write(temp.path().join("first.txt"), "first").unwrap();
+
+        let snapshot = scan_git_entry_status(temp.path()).unwrap();
+        assert_eq!(
+            snapshot.markers.get(&temp.path().join("first.txt")),
+            Some(&GitEntryMarker::New)
+        );
+    }
+
+    #[test]
+    fn entry_status_returns_none_outside_repository() {
+        let temp = TempDir::new();
+        assert_eq!(scan_git_entry_status(temp.path()), None);
+    }
+
+    #[test]
+    fn entry_status_marks_deletion_in_parent_folder_and_rename_at_destination() {
+        let temp = TempDir::new();
+        let repo = init_test_repo(temp.path());
+        std::fs::create_dir(temp.path().join("folder")).unwrap();
+        std::fs::write(temp.path().join("folder/deleted.txt"), "deleted").unwrap();
+        std::fs::write(temp.path().join("old.txt"), "renamed").unwrap();
+        commit_worktree_files(&repo, &["folder/deleted.txt", "old.txt"]);
+
+        std::fs::remove_file(temp.path().join("folder/deleted.txt")).unwrap();
+        std::fs::rename(temp.path().join("old.txt"), temp.path().join("new.txt")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.remove_path(Path::new("old.txt")).unwrap();
+        index.add_path(Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+
+        let snapshot = scan_git_entry_status(temp.path()).unwrap();
+        assert_eq!(
+            snapshot.markers.get(&temp.path().join("folder")),
+            Some(&GitEntryMarker::Changed)
+        );
+        assert_eq!(
+            snapshot.markers.get(&temp.path().join("new.txt")),
+            Some(&GitEntryMarker::Changed)
+        );
+    }
 
     #[test]
     fn git_status_returns_none_outside_repository() {
@@ -260,6 +475,18 @@ mod tests {
         let repo = Repository::init(path).expect("init repo");
         repo.set_head("refs/heads/main").expect("set HEAD branch");
         repo
+    }
+
+    fn commit_worktree_files(repo: &Repository, paths: &[&str]) {
+        let mut index = repo.index().unwrap();
+        for path in paths {
+            index.add_path(Path::new(path)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = Signature::now("Explorer Tests", "explorer@example.com").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
     }
 
     fn commit_on_ref(

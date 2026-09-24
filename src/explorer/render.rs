@@ -70,7 +70,7 @@ use crate::explorer::{
     entry::FileEntry,
     filesystem::{NetworkDriveState, drive_root_is_ejectable, wsl_distro_kind_for_path},
     formatting::{format_size, format_timestamp},
-    git_status::{GitDivergence, GitRepositoryStatus},
+    git_status::{GitDivergence, GitEntryMarker, GitRepositoryStatus},
     icons::{
         ARCHIVE_FILE_ICON, COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON,
         EJECT_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON,
@@ -2510,6 +2510,10 @@ impl ExplorerView {
 
     fn render_row(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let entry = self.entries[ix].clone();
+        let git_marker = self
+            .git_entry_status
+            .as_ref()
+            .and_then(|status| status.markers.get(&entry.path).copied());
         let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::Details, cx);
         let is_visually_selected = self.entry_is_visually_selected(ix);
         let is_visually_hovered = self.entry_is_visually_hovered(&entry);
@@ -2670,6 +2674,9 @@ impl ExplorerView {
         for cell in non_name_cells {
             row = row.child(cell);
         }
+        if let Some(marker) = git_marker {
+            row = row.child(git_entry_marker_strip(marker));
+        }
         row.into_any_element()
     }
 
@@ -2711,6 +2718,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
+        let git_marker = self
+            .git_entry_status
+            .as_ref()
+            .and_then(|status| status.markers.get(&entry.path).copied());
         let image_thumbnail = self.image_thumbnail_for_entry(&entry, cx);
         let app_icon = self.native_icon_for_entry(&entry, NativeIconSize::LargeIcons, cx);
         let is_selected = self.entry_is_selected(ix);
@@ -2782,7 +2793,7 @@ impl ExplorerView {
             add_individual_entry_drag(tile, can_start_individual_drag, ix, entity.clone())
         };
 
-        tile.child(
+        let mut tile = tile.child(
             div()
                 .id(("explorer-large-icon-tooltip-target", ix))
                 .debug_selector(move || format!("explorer-large-icon-tooltip-target-{ix}"))
@@ -2794,8 +2805,11 @@ impl ExplorerView {
                 })
                 .child(large_entry_icon(&entry, image_thumbnail, app_icon))
                 .child(div().mt(px(LARGE_ICON_TEXT_TOP_GAP)).child(name)),
-        )
-        .into_any_element()
+        );
+        if let Some(marker) = git_marker {
+            tile = tile.child(git_entry_marker_strip(marker));
+        }
+        tile.into_any_element()
     }
 
     fn render_large_icons(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -7655,6 +7669,21 @@ fn codebase_makeup_segment_corner_radii(
     .clamp_radii_for_quad_size(gpui::size(px(segment.width), height))
 }
 
+fn git_entry_marker_strip(marker: GitEntryMarker) -> Div {
+    let color = match marker {
+        GitEntryMarker::New => 0x289a47,     // 36a646
+        GitEntryMarker::Changed => 0xfcc629, // e69500
+    };
+    div()
+        .debug_selector(|| "git-entry-marker-strip".to_owned())
+        .absolute()
+        .left(px(-1.0))
+        .top(px(-1.0))
+        .bottom(px(-1.0))
+        .w(px(4.0))
+        .bg(rgb(color))
+}
+
 fn render_git_repository_status(status: &GitRepositoryStatus) -> AnyElement {
     div()
         .flex()
@@ -8735,6 +8764,52 @@ mod tests {
         assert!(cx.debug_bounds("explorer-tooltip").is_none());
 
         hover_selector_until_tooltip(cx, "explorer-entry-name-hit-0");
+    }
+
+    #[gpui::test]
+    fn git_marker_fills_left_edge_in_both_view_modes(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        git2::Repository::init(temp.path()).unwrap();
+        let path = temp.path().join("new.txt");
+        fs::write(&path, "new").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.entries = vec![FileEntry::from_path(path.clone()).unwrap()];
+                view.all_entries = view.entries.clone();
+                view.read_error = None;
+                view.git_entry_status = Some(super::super::git_status::GitEntryStatusSnapshot {
+                    directory: temp.path().to_path_buf(),
+                    markers: std::collections::HashMap::from([(
+                        path.clone(),
+                        super::super::git_status::GitEntryMarker::New,
+                    )]),
+                });
+                view.view_mode = FileViewMode::Details;
+                cx.notify();
+            });
+        });
+        run_until_debug_bounds(cx, "git-entry-marker-strip");
+        let row = cx.debug_bounds("explorer-entry-0").unwrap();
+        let strip = cx.debug_bounds("git-entry-marker-strip").unwrap();
+        assert_eq!(strip.size.width, gpui::px(2.0));
+        assert_eq!(strip.size.height, row.size.height);
+        assert_eq!(strip.origin.x, row.origin.x);
+        assert_eq!(strip.origin.y, row.origin.y);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.view_mode = FileViewMode::LargeIcons;
+                cx.notify();
+            });
+        });
+        run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
+        let tile = cx.debug_bounds("explorer-large-icon-entry-0").unwrap();
+        let strip = cx.debug_bounds("git-entry-marker-strip").unwrap();
+        assert_eq!(strip.size.width, gpui::px(2.0));
+        assert_eq!(strip.size.height, tile.size.height);
+        assert_eq!(strip.origin.x, tile.origin.x);
+        assert_eq!(strip.origin.y, tile.origin.y);
     }
 
     #[gpui::test]

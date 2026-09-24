@@ -279,6 +279,7 @@ impl ExplorerView {
         }
         self.sidebar_group_view = None;
         self.path = path;
+        self.clear_git_entry_status();
         self.reset_view_mode_for_navigation();
         self.reset_search_for_navigation();
         self.clear_selection();
@@ -387,6 +388,7 @@ impl ExplorerView {
         self.clear_operation_notice();
         self.codebase_summary = None;
         self.git_status = None;
+        self.clear_git_entry_status();
         self.scroll_to_top();
         self.sidebar_group_view = Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
         self.rebuild_sidebar_group_entries(&[]);

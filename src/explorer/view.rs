@@ -38,7 +38,10 @@ use crate::explorer::{
         path_is_filesystem_root, path_is_remote_drive, path_is_wsl_unc_root,
     },
     folder_size::{FolderSizeCache, FolderSizeCalculation, calculate_folder_sizes},
-    git_status::{GitRepositoryStatus, scan_git_repository_status},
+    git_status::{
+        GitEntryStatusSnapshot, GitRepositoryStatus, scan_git_entry_status,
+        scan_git_repository_status,
+    },
     image_thumbnails::ThumbnailSourcePolicy,
     large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
@@ -62,6 +65,7 @@ use crate::settings::{
 };
 
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+const GIT_ENTRY_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ViewModeSelection {
@@ -226,6 +230,11 @@ pub struct ExplorerView {
     pub(super) git_status: Option<GitRepositoryStatus>,
     pub(super) git_status_generation: u64,
     pub(super) git_status_task: Option<Task<()>>,
+    pub(super) git_entry_status: Option<GitEntryStatusSnapshot>,
+    pub(super) git_entry_status_generation: u64,
+    pub(super) git_entry_status_task: Option<Task<()>>,
+    pub(super) git_entry_status_refresh_pending: bool,
+    pub(super) git_entry_status_poll_task: Option<Task<()>>,
     #[cfg(test)]
     pub(super) drag_payload_build_count: Cell<usize>,
     #[cfg(test)]
@@ -665,6 +674,11 @@ impl ExplorerView {
             git_status: None,
             git_status_generation: 0,
             git_status_task: None,
+            git_entry_status: None,
+            git_entry_status_generation: 0,
+            git_entry_status_task: None,
+            git_entry_status_refresh_pending: false,
+            git_entry_status_poll_task: None,
             #[cfg(test)]
             drag_payload_build_count: Cell::new(0),
             #[cfg(test)]
@@ -1568,7 +1582,96 @@ impl ExplorerView {
         let mut changed = self.schedule_folder_sizes(cx);
         changed |= self.schedule_codebase_summary(cx);
         changed |= self.schedule_git_status(cx);
+        changed |= self.schedule_git_entry_status(cx);
         changed
+    }
+
+    pub(super) fn clear_git_entry_status(&mut self) {
+        self.git_entry_status_generation = self.git_entry_status_generation.wrapping_add(1);
+        self.git_entry_status = None;
+        self.git_entry_status_task = None;
+        self.git_entry_status_refresh_pending = false;
+        self.git_entry_status_poll_task = None;
+    }
+
+    pub(super) fn schedule_git_entry_status(&mut self, cx: &mut Context<Self>) -> bool {
+        let path = self.path.clone();
+        if self.is_sidebar_group_view()
+            || super::remote_fs::is_remote(&path)
+            || crate::explorer::portable_devices::is_portable_path(&path)
+            || path_is_wsl_unc_root(&path)
+        {
+            let changed = self.git_entry_status.is_some();
+            self.clear_git_entry_status();
+            return changed;
+        }
+        if self.git_entry_status_task.is_some() {
+            self.git_entry_status_refresh_pending = true;
+            return false;
+        }
+
+        self.git_entry_status_generation = self.git_entry_status_generation.wrapping_add(1);
+        let generation = self.git_entry_status_generation;
+        let task = cx.spawn(async move |this, cx| {
+            let scan_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { scan_git_entry_status(&scan_path) })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                if explorer.git_entry_status_generation != generation
+                    || explorer.path != path
+                    || explorer.is_sidebar_group_view()
+                {
+                    return;
+                }
+                let changed = explorer.git_entry_status != result;
+                explorer.git_entry_status = result;
+                explorer.git_entry_status_task = None;
+                if explorer.git_entry_status.is_some()
+                    && explorer.git_entry_status_poll_task.is_none()
+                {
+                    explorer.start_git_entry_status_poll(cx);
+                } else if explorer.git_entry_status.is_none() {
+                    explorer.git_entry_status_poll_task = None;
+                }
+                if explorer.git_entry_status_refresh_pending {
+                    explorer.git_entry_status_refresh_pending = false;
+                    explorer.schedule_git_entry_status(cx);
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        });
+        self.git_entry_status_task = Some(task);
+        false
+    }
+
+    fn start_git_entry_status_poll(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        self.git_entry_status_poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(GIT_ENTRY_STATUS_POLL_INTERVAL)
+                    .await;
+                let should_continue = this
+                    .update(cx, |explorer, cx| {
+                        if explorer.path != path
+                            || explorer.is_sidebar_group_view()
+                            || explorer.git_entry_status.is_none()
+                        {
+                            return false;
+                        }
+                        explorer.schedule_git_entry_status(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
     }
 
     pub(super) fn schedule_codebase_summary(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2565,6 +2668,85 @@ fn clear_folder_sizes_in_entries(entries: &mut [FileEntry]) -> bool {
 mod tests {
 
     use super::*;
+    use crate::explorer::test_support::{TempDir, test_view_entity_at_path};
+    use git2::{Repository, Signature};
+
+    #[gpui::test]
+    fn git_entry_status_poll_detects_external_git_and_file_changes(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let repo = Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let file = temp.path().join("file.txt");
+        std::fs::write(&file, "new").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.schedule_git_entry_status(cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.git_entry_status.as_ref().unwrap().markers.get(&file),
+                Some(&super::super::git_status::GitEntryMarker::New)
+            );
+        });
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = Signature::now("Explorer Tests", "explorer@example.com").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .unwrap();
+        cx.executor().advance_clock(GIT_ENTRY_STATUS_POLL_INTERVAL);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(
+                !view
+                    .git_entry_status
+                    .as_ref()
+                    .unwrap()
+                    .markers
+                    .contains_key(&file)
+            );
+        });
+
+        std::fs::write(&file, "edited").unwrap();
+        cx.executor().advance_clock(GIT_ENTRY_STATUS_POLL_INTERVAL);
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.git_entry_status.as_ref().unwrap().markers.get(&file),
+                Some(&super::super::git_status::GitEntryMarker::Changed)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn git_entry_status_discards_scan_after_navigation(cx: &mut gpui::TestAppContext) {
+        let repo_dir = TempDir::new();
+        let destination = TempDir::new();
+        let _repo = Repository::init(repo_dir.path()).unwrap();
+        std::fs::write(repo_dir.path().join("new.txt"), "new").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, repo_dir.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.schedule_git_entry_status(cx);
+                view.navigate_to_directory_with_watcher(
+                    destination.path().to_path_buf(),
+                    crate::explorer::navigation::HistoryMode::Record,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, destination.path());
+            assert!(view.git_entry_status.is_none());
+            assert!(view.git_entry_status_poll_task.is_none());
+        });
+    }
     use crate::explorer::entry::{DirectoryLinkKind, EntryKind, FileEntry};
     use gpui::AppContext;
     use std::path::{Path, PathBuf};
