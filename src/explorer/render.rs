@@ -8792,7 +8792,7 @@ mod tests {
         run_until_debug_bounds(cx, "git-entry-marker-strip");
         let row = cx.debug_bounds("explorer-entry-0").unwrap();
         let strip = cx.debug_bounds("git-entry-marker-strip").unwrap();
-        assert_eq!(strip.size.width, gpui::px(2.0));
+        assert_eq!(strip.size.width, gpui::px(4.0));
         assert_eq!(strip.size.height, row.size.height);
         assert_eq!(strip.origin.x, row.origin.x);
         assert_eq!(strip.origin.y, row.origin.y);
@@ -8806,7 +8806,7 @@ mod tests {
         run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
         let tile = cx.debug_bounds("explorer-large-icon-entry-0").unwrap();
         let strip = cx.debug_bounds("git-entry-marker-strip").unwrap();
-        assert_eq!(strip.size.width, gpui::px(2.0));
+        assert_eq!(strip.size.width, gpui::px(4.0));
         assert_eq!(strip.size.height, tile.size.height);
         assert_eq!(strip.origin.x, tile.origin.x);
         assert_eq!(strip.origin.y, tile.origin.y);
