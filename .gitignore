@@ -2,6 +2,16 @@
 /vendor/**/target/
 /dist
 
+# Website dependencies, generated output, and local configuration
+/website/node_modules/
+/website/dist/
+/website/.netlify/
+/website/.tanstack/
+/website/.env
+/website/.env.*
+!/website/.env.example
+/.netlify/
+
 # Editor and OS files
 .vscode/
 .idea/

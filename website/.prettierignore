@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.netlify/
+.tanstack/
+bun.lock
+src/routeTree.gen.ts

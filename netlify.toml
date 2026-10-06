@@ -1,0 +1,13 @@
+[build]
+  base = "website"
+  command = "bun run check"
+  publish = "dist/client"
+
+[build.environment]
+  BUN_VERSION = "1.4.2"
+  BUN_FLAGS = "--frozen-lockfile"
+  NODE_VERSION = "24"
+
+# The Vite adapter resolves local paths from website/, rather than the Git root.
+[context.dev]
+  base = "."
