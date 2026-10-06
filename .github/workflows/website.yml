@@ -1,0 +1,39 @@
+name: Website
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "website/**"
+      - "netlify.toml"
+      - ".github/workflows/website.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "website/**"
+      - "netlify.toml"
+      - ".github/workflows/website.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Website checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build, typecheck, lint, and check formatting
+        run: bun run check

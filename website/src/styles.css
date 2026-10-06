@@ -1,0 +1,50 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #17212b;
+  background: #f8fafc;
+  font-synthesis: none;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(100%, 42rem);
+  margin: 12vh auto 0;
+  padding: 2rem;
+}
+
+h1 {
+  font-size: clamp(2rem, 6vw, 3rem);
+  line-height: 1.2;
+}
+
+button {
+  padding: 0.6rem 1rem;
+  border: 1px solid #c4ced8;
+  border-radius: 0.375rem;
+  color: inherit;
+  background: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #edf2f7;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 3px;
+}
+
+a {
+  color: #1d4ed8;
+}
