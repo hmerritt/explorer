@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { AnimatedSectionNavigator } from './section-navigator'
 import { REPOSITORY, SITE_URL } from '../lib/releases'
 
 const sections = [
@@ -198,61 +199,7 @@ export function ShareLinks() {
 }
 
 export function SectionNavigator() {
-  const [active, setActive] = useState('explorer')
-  const ruler = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    let frame = 0
-    function update() {
-      cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => {
-        let current = 'explorer'
-        for (const { id } of sections) {
-          const element = document.getElementById(id)
-          if (
-            element &&
-            element.getBoundingClientRect().top <= window.innerHeight * 0.4
-          )
-            current = id
-        }
-        setActive(current)
-        const height =
-          document.documentElement.scrollHeight - window.innerHeight
-        ruler.current?.style.setProperty(
-          '--progress',
-          `${height > 0 ? (window.scrollY / height) * 100 : 0}%`,
-        )
-      })
-    }
-    update()
-    window.addEventListener('scroll', update, { passive: true })
-    window.addEventListener('resize', update)
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener('scroll', update)
-      window.removeEventListener('resize', update)
-    }
-  }, [])
-  return (
-    <>
-      <nav className="section-navigation" aria-label="Page sections">
-        {sections.map(({ id, label }) => (
-          <a
-            key={id}
-            href={`#${id}`}
-            aria-current={id === active ? 'location' : undefined}
-          >
-            {label}
-          </a>
-        ))}
-      </nav>
-      <div className="scroll-ruler" ref={ruler} aria-hidden="true">
-        <span className="ruler-start">0</span>
-        <span className="ruler-middle">50</span>
-        <span className="ruler-end">100</span>
-        <i />
-      </div>
-    </>
-  )
+  return <AnimatedSectionNavigator sections={sections} />
 }
 
 export function Footer() {

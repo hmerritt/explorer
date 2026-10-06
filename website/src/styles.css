@@ -1,9 +1,40 @@
 @font-face {
   font-family: Archivo;
   font-style: normal;
-  font-weight: 400 700;
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
   font-display: swap;
   src: url('/fonts/archivo-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Archivo Fallback';
+  src: local('Arial');
+  ascent-override: 88.96%;
+  descent-override: 21.28%;
+  line-gap-override: 0%;
+  size-adjust: 98.7%;
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/instrument-serif.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/instrument-serif-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Instrument Serif Fallback';
+  src: local('Times New Roman');
+  ascent-override: 117.94%;
+  descent-override: 36.93%;
+  line-gap-override: 0%;
+  size-adjust: 83.94%;
 }
 @font-face {
   font-family: Inter;
@@ -26,6 +57,10 @@
   --muted: #646467;
   --line: #d0cfcc;
   --blue: #2467d1;
+  --font-archivo: 'Archivo', 'Archivo Fallback';
+  --font-display: var(--font-archivo), system-ui, sans-serif;
+  --font-instrument: 'Instrument Serif', 'Instrument Serif Fallback';
+  --font-serif: var(--font-instrument), Georgia, serif;
   --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-family: Inter, system-ui, sans-serif;
   color: var(--ink);
@@ -103,8 +138,11 @@ h2,
 h3,
 .hero-brand,
 .brand {
-  font-family: Archivo, system-ui, sans-serif;
+  font-family: var(--font-display);
   font-weight: 620;
+}
+.font-serif {
+  font-family: var(--font-serif);
 }
 h1,
 h2 {
@@ -245,7 +283,7 @@ h3 {
 .number-tag {
   display: grid;
   place-items: center;
-  height: 26px;
+  padding: 5px 5px;
   min-width: 32px;
   background: var(--blue);
   color: var(--paper);
@@ -668,65 +706,178 @@ pre {
 }
 .section-navigation {
   position: fixed;
-  right: 60px;
-  bottom: 28px;
+  inset: 0;
   z-index: 10;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  font:
-    620 16px/20px Archivo,
-    sans-serif;
+  pointer-events: none;
+  font: 620 34px/1 var(--font-display);
   text-transform: uppercase;
 }
-.section-navigation a {
-  color: #787777;
-  text-shadow:
-    0 0 6px var(--paper),
-    0 0 12px var(--paper);
+.tracker-link {
+  position: absolute;
+  pointer-events: auto;
 }
-.section-navigation a:hover,
-.section-navigation a[aria-current] {
+.tracker-static-label {
+  display: none;
+}
+.tracker-letter {
+  position: absolute;
+  top: 0;
+  left: 0;
+  white-space: pre;
+  will-change: transform;
+  text-shadow:
+    0 0 4px var(--paper),
+    0 0 10px var(--paper);
+}
+.tracker-section:has(a:hover) .tracker-letter {
+  color: #000 !important;
+}
+.tracker-section:focus-within .tracker-letter {
+  color: var(--blue) !important;
+}
+.tracker-measure {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  visibility: hidden;
+  white-space: pre;
+  font-size: 34px;
+  line-height: 1;
+}
+.tracker-pool {
+  position: absolute;
+  right: 0;
+  width: var(--tracker-pool-width, 420px);
+  background: color-mix(in srgb, var(--paper) 80%, transparent);
+  backdrop-filter: blur(9px);
+}
+.tracker-pool--top {
+  top: 49px;
+  mask-image: radial-gradient(100% 100% at 100% 0%, black 38%, transparent 97%);
+}
+.tracker-pool--bottom {
+  bottom: 0;
+  mask-image: radial-gradient(
+    100% 100% at 100% 100%,
+    black 38%,
+    transparent 97%
+  );
+}
+.section-navigation[data-mode='static'] {
+  inset: auto 60px 36px auto;
+  font-size: 16px;
+  line-height: 20px;
+  text-align: right;
+}
+.section-navigation[data-mode='static'] .tracker-link {
+  position: relative;
+  inset: auto !important;
+  width: auto !important;
+  height: auto !important;
+  display: block;
+  color: color-mix(in srgb, var(--ink) 35%, var(--paper));
+}
+.section-navigation[data-mode='static'] .tracker-static-label {
+  display: inline;
+}
+.section-navigation[data-mode='static'] .tracker-letter,
+.section-navigation[data-mode='static'] .tracker-pool--top {
+  display: none;
+}
+.section-navigation[data-mode='static'] .tracker-link[aria-current] {
+  color: #000;
+}
+.section-navigation[data-mode='static'] .tracker-link:hover,
+.section-navigation[data-mode='static'] .tracker-link:focus-visible {
   color: var(--blue);
 }
 .scroll-ruler {
   position: fixed;
-  right: 0;
-  top: 49px;
-  bottom: 16px;
-  width: 24px;
+  inset: 0 0 0 auto;
+  width: 60px;
+  overflow: hidden;
+  clip-path: inset(49px 0 0);
   pointer-events: none;
-  z-index: 10;
-  background: repeating-linear-gradient(
-    to bottom,
-    transparent 0 73px,
-    #989797 73px 74px
-  );
+  z-index: 11;
   font: 400 8px/1 var(--mono);
-  color: #777;
+  color: var(--ink);
 }
-.scroll-ruler span {
+.scroll-ruler[data-ready='false'] {
+  visibility: hidden;
+}
+.ruler-ticks {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+.ruler-tick {
   position: absolute;
   right: 0;
-  padding-right: 12px;
-  background: var(--paper);
+  width: 10px;
 }
-.ruler-start {
-  top: 4px;
-}
-.ruler-middle {
-  top: 50%;
-}
-.ruler-end {
-  bottom: 0;
-}
-.scroll-ruler i {
-  position: absolute;
-  right: 0;
-  top: var(--progress, 0%);
+.ruler-tick i,
+.ruler-needle > i {
+  display: block;
   height: 1px;
-  width: 36px;
-  background: var(--blue);
+  background: currentColor;
+}
+.ruler-tick i {
+  opacity: 0.4;
+}
+.ruler-tick--major {
+  width: 20px;
+}
+.ruler-tick--major i {
+  opacity: 0.8;
+}
+.ruler-tick-label {
+  position: absolute;
+  right: 24px;
+  top: -4px;
+  opacity: 0.5;
+}
+.ruler-needle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 60px;
+  color: var(--blue);
+  will-change: transform;
+}
+.ruler-needle > i {
+  box-shadow: 0 0 5px var(--blue);
+}
+.ruler-readout {
+  position: absolute;
+  right: 2px;
+  top: 4px;
+  display: flex;
+}
+.ruler-readout[data-above='true'] {
+  top: -14px;
+}
+.ruler-digit {
+  height: 1em;
+  overflow: hidden;
+}
+.ruler-digit-strip,
+.ruler-digit-strip > span {
+  display: block;
+}
+.ruler-digit-strip {
+  transition: transform 160ms ease-out;
+}
+.ruler-digit-strip > span {
+  height: 1em;
+}
+.scroll-ruler[data-mode='static'] .ruler-digit-strip {
+  transition: none;
+}
+@media (hover: none), (pointer: coarse), (pointer: none) {
+  .section-navigation,
+  .scroll-ruler {
+    display: none;
+  }
 }
 .not-found {
   max-width: 800px;
@@ -745,11 +896,6 @@ pre {
   text-decoration: underline;
 }
 
-@media (min-width: 1440px) {
-  .section-navigation {
-    right: 40px;
-  }
-}
 @media (max-width: 1023px) {
   h1 {
     font-size: 60px;

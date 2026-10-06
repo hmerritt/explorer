@@ -27,6 +27,16 @@ and Firecrawl branding/content extraction. Reference assets are not reused.
 - Downloads: three bordered columns; release/source area split in two.
 - Fixed right-hand section links and a thin viewport-edge scroll ruler.
 
+The section tracker follows scroll position: upcoming labels queue at the
+bottom-right, rotate letter by letter onto the vertical rail, then flip into a
+top stack. The current heading is 34px; passed/queued labels are 16px and riding
+labels 20px. Motion reverses on upward scrolling without automatically nudging
+the page. The 60px ruler has document-based 1% ticks, labels every 5%, and a blue
+needle with a rolling three-digit percentage. Desktop fine-pointer devices show
+the tracker; reduced motion uses static links and instant digit updates. Anchor
+links retain native navigation. Geometry is refreshed after fonts load and when
+the content or viewport changes.
+
 ## Explorer adaptation
 
 Keep the reference geometry, font families and light palette. Replace the logo,
@@ -40,6 +50,14 @@ At widths below 1024px the display heading is 60px; below 768px 48px; below
 the fixed section navigator, and reduce outer padding to 20px. Responsive values
 are verified against the reference during browser validation.
 
-Self-host open-source Archivo, Inter and Geist Mono fonts with their licenses.
+Self-host open-source Archivo, Inter, Geist Mono and Instrument Serif fonts with
+their licenses. Archivo supports weights 100–900 and widths 62–125%; its
+Arial-based fallback uses the reference's metric overrides (88.96% ascent,
+21.28% descent, zero line gap, 98.7% size adjustment).
+
+Instrument Serif's regular and italic faces are registered with the reference's
+Times New Roman fallback and available through `.font-serif`. PhotoCraft's app
+page currently uses Archivo for every display heading and does not render any
+Instrument Serif text; keep the same placement on Explorer's app page.
 Preserve readable text contrast, keyboard focus, and reduced-motion preferences.
 Screen captures use the isolated README demo fixture; no personal file listings.

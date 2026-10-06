@@ -106,8 +106,8 @@ function Hero({
           height="112"
         />
         <div className="hero-brand">
-          <span className="number-tag">01</span>
           <span>Explorer</span>
+          {/*<span className="number-tag"> [VERSION-NUMBER] </span>*/}
         </div>
         <h1>
           <span className="strikethrough">Windows</span> File Explorer.
