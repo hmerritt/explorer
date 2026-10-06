@@ -10,6 +10,7 @@ import {
   Terminal,
   ButtonLink,
   Arrow,
+  DownloadIcon,
 } from '../components/site'
 import { REPOSITORY, RELEASES_URL } from '../lib/releases'
 import type { Platform, ReleaseAsset, ReleaseInfo } from '../lib/releases'
@@ -109,10 +110,10 @@ function Hero({
           <span>Explorer</span>
         </div>
         <h1>
-          Windows File Explorer.
+          <span className="strikethrough">Windows</span> File Explorer.
           <br />
-          On macOS, Linux
-          <br className="desktop-break" /> and <span>Windows.</span>
+          On <span className="accent">macOS</span>, Linux
+          <br className="desktop-break" /> and Windows.
         </h1>
         <p className="hero-description">
           The familiar file explorer, built in Rust. Tabs, instant previews,
@@ -120,7 +121,7 @@ function Hero({
           source.
         </p>
         <div className="hero-actions">
-          <ButtonLink href={href} primary down>
+          <ButtonLink href={href} primary down download={!href.startsWith('#')}>
             {label}
           </ButtonLink>
           <ButtonLink href={REPOSITORY}>View on GitHub</ButtonLink>
@@ -160,7 +161,9 @@ function Highlights() {
     <section id="highlights" className="frame">
       <SectionBar number="02" label="Highlights" note="File explorer" />
       <div className="section-heading">
-        <h2>What’s inside.</h2>
+        <h2>
+          What’s <span className="accent">inside</span>.
+        </h2>
       </div>
       <ol className="highlights-grid">
         {highlights.map(([title, description], index) => (
@@ -293,7 +296,7 @@ function Downloads({
                       href={asset.url}
                     >
                       {assetLabel(asset)}
-                      <Arrow down />
+                      <DownloadIcon />
                     </a>
                   ))
                 ) : (
@@ -320,9 +323,13 @@ function Downloads({
         <div>
           <span className="label">Release</span>
           <h3>
-            {release.version
-              ? `Version ${release.version}.`
-              : 'Get the latest release.'}
+            {release.version ? (
+              <>
+                Version <span className="accent">{release.version}</span>.
+              </>
+            ) : (
+              'Get the latest release.'
+            )}
           </h3>
           <p>
             Free for every platform. Follow the project on GitHub for updates,
@@ -340,7 +347,9 @@ function Downloads({
         </div>
         <div>
           <span className="label">Build from source</span>
-          <h3>Run it today.</h3>
+          <h3>
+            Run it <span className="accent">today</span>.
+          </h3>
           <p>
             Install <a href="https://rustup.rs/">Rust</a> and your platform’s
             build dependencies, then run:
@@ -368,7 +377,9 @@ function GetStarted() {
       <SectionBar number="05" label="Get started" note="Built in the open" />
       <div className="start-content">
         <span className="label">Open source · Free</span>
-        <h2>Help shape Explorer.</h2>
+        <h2>
+          Help shape <span className="accent">Explorer</span>.
+        </h2>
         <p>
           Found a bug? Have a feature in mind? Report issues, share feedback and
           contribute on GitHub.

@@ -127,6 +127,11 @@ h3 {
   line-height: 1;
   flex-shrink: 0;
 }
+.download-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 .skip-link {
   position: fixed;
   top: -80px;
@@ -142,6 +147,9 @@ h3 {
 .site-header {
   position: fixed;
   inset: 0 0 auto;
+  max-width: 1280px;
+  margin-inline: auto;
+  border-inline: 1px solid var(--line);
   height: 49px;
   z-index: 30;
   display: flex;
@@ -249,8 +257,11 @@ h1 {
   font-size: 72px;
   margin-top: 24px;
 }
-h1 span {
+.accent {
   color: var(--blue);
+}
+.strikethrough {
+  text-decoration: line-through;
 }
 .hero-description {
   max-width: 576px;
