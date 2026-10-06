@@ -98,9 +98,10 @@ impl PlatformAtlas for DirectXAtlas {
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
-        let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
+        let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        let id = tile.texture_id;
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
@@ -113,10 +114,10 @@ impl PlatformAtlas for DirectXAtlas {
         };
 
         if let Some(mut texture) = texture_slot.take() {
+            texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
                 textures.free_list.push(texture.id.index as usize);
-                lock.tiles_by_key.remove(key);
             } else {
                 *texture_slot = Some(texture);
             }
@@ -311,5 +312,100 @@ impl From<etagere::Point> for Point<DevicePixels> {
             x: DevicePixels::from(value.x),
             y: DevicePixels::from(value.y),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+    use windows::Win32::{
+        Foundation::HMODULE,
+        Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_WARP,
+            Direct3D11::{D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice},
+        },
+    };
+
+    fn atlas() -> DirectXAtlas {
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .expect("create software Direct3D device");
+        }
+        DirectXAtlas::new(&device.unwrap(), &context.unwrap())
+    }
+
+    fn key(id: usize) -> AtlasKey {
+        crate::RenderImageParams {
+            image_id: crate::ImageId(id),
+            frame_index: 0,
+        }
+        .into()
+    }
+
+    fn insert(atlas: &DirectXAtlas, id: usize) -> AtlasTile {
+        let bytes = vec![255; 128 * 128 * 4];
+        atlas
+            .get_or_insert_with(&key(id), &mut || {
+                Ok(Some((
+                    Size {
+                        width: DevicePixels(128),
+                        height: DevicePixels(128),
+                    },
+                    Cow::Borrowed(&bytes),
+                )))
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn removed_images_reclaim_atlas_space_while_other_images_remain_live() {
+        let atlas = atlas();
+        let pinned = insert(&atlas, 0);
+        for id in 1..2000 {
+            insert(&atlas, id);
+            atlas.remove(&key(id));
+        }
+        let state = atlas.0.lock();
+        assert_eq!(state.tiles_by_key.len(), 1);
+        assert_eq!(
+            state.polychrome_textures.textures.len(),
+            1,
+            "a live image must not cause retired allocations to fill more textures"
+        );
+        assert_eq!(state.texture(pinned.texture_id).live_atlas_keys, 1);
+    }
+
+    #[test]
+    fn removing_images_twice_is_safe_and_last_removal_releases_texture() {
+        let atlas = atlas();
+        let first = insert(&atlas, 0);
+        insert(&atlas, 1);
+        atlas.remove(&key(0));
+        atlas.remove(&key(0));
+        assert_eq!(atlas.0.lock().texture(first.texture_id).live_atlas_keys, 1);
+        atlas.remove(&key(1));
+        let state = atlas.0.lock();
+        assert!(state.tiles_by_key.is_empty());
+        assert!(
+            state
+                .polychrome_textures
+                .textures
+                .iter()
+                .all(Option::is_none)
+        );
     }
 }

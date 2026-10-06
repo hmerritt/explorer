@@ -86,7 +86,7 @@ use crate::explorer::{
         network_drive_icon_sized, network_group_icon, onedrive_icon, onedrive_icon_sized,
         pinned_group_icon, portable_device_icon, portable_device_icon_sized,
     },
-    image_preview::{AnimatedImageSource, evict_animated_image_source_asset},
+    image_preview::AnimatedImageSource,
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
@@ -1099,6 +1099,7 @@ impl ExplorerView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        self.resource_image_leases.borrow_mut().clear();
         let native_icon_entry = self.context_menu.as_ref()?.native_icon_entry.clone();
         let native_file_icon = native_icon_entry
             .as_ref()
@@ -1168,6 +1169,22 @@ impl ExplorerView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self
+            .animated_hover_image_cache
+            .as_ref()
+            .is_some_and(|(_, path, _)| {
+                !self.image_hover_preview_alt
+                    || self.context_menu.is_some()
+                    || self.mouse_selection_drag.is_some()
+                    || self.active_drop_indicator.is_some()
+                    || self
+                        .image_hover_preview
+                        .as_ref()
+                        .is_none_or(|preview| &preview.entry.path != path)
+            })
+        {
+            self.animated_hover_image_cache = None;
+        }
         if !self.image_hover_preview_alt
             || self.context_menu.is_some()
             || self.mouse_selection_drag.is_some()
@@ -1284,33 +1301,33 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(source) = preview.animated_source.clone() {
-            self.evict_animated_image_source_once(&source, cx);
+            if self
+                .animated_hover_image_cache
+                .as_ref()
+                .is_none_or(|(key, _, _)| key != &source.cache_key)
+            {
+                self.animated_hover_image_cache = Some((
+                    source.cache_key.clone(),
+                    source.path.clone(),
+                    gpui::RetainAllImageCache::new(cx),
+                ));
+            }
+            let cache = self.animated_hover_image_cache.as_ref().unwrap().2.clone();
             return animated_gif_preview_content(
                 &source,
                 preview.image,
                 "image-hover-preview-animated-gif",
                 "image-hover-preview-animated-gif-image",
+                &cache,
             );
         }
 
+        self.animated_hover_image_cache = None;
         gpui::img(preview.image)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
             .into_any_element()
-    }
-
-    fn evict_animated_image_source_once(
-        &mut self,
-        source: &AnimatedImageSource,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .animated_image_asset_evictions
-            .insert(source.cache_key.clone())
-        {
-            evict_animated_image_source_asset(source, cx);
-        }
     }
 
     fn update_image_hover_preview(
@@ -1345,6 +1362,7 @@ impl ExplorerView {
     }
 
     fn clear_image_hover_preview(&mut self) -> bool {
+        self.animated_hover_image_cache = None;
         self.image_hover_preview.take().is_some()
     }
 
@@ -1355,6 +1373,7 @@ impl ExplorerView {
             .is_some_and(|preview| preview.entry.path == entry.path)
         {
             self.image_hover_preview = None;
+            self.animated_hover_image_cache = None;
             return true;
         }
 
@@ -3731,6 +3750,7 @@ impl ExplorerView {
 
 impl Render for ExplorerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rendered_image_leases.borrow_mut().clear();
         let focus_handle = self.focus_handle(cx);
         let key_context =
             if self.is_sidebar_group_view() || self.view_mode == FileViewMode::LargeIcons {
@@ -4408,6 +4428,7 @@ fn animated_gif_preview_content(
     fallback_image: Arc<gpui::RenderImage>,
     wrapper_selector: &'static str,
     image_id: &'static str,
+    cache: &Entity<gpui::RetainAllImageCache>,
 ) -> AnyElement {
     let loading_image = fallback_image.clone();
     let fallback_image_for_error = fallback_image;
@@ -4416,6 +4437,7 @@ fn animated_gif_preview_content(
         .size_full()
         .child(
             gpui::img(source.path.clone())
+                .image_cache(cache)
                 .id(image_id)
                 .size_full()
                 .object_fit(ObjectFit::Contain)
@@ -5278,8 +5300,8 @@ fn render_context_menu_level(
     window: &Window,
     cx: &mut Context<ExplorerView>,
     elements: &mut Vec<AnyElement>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) {
     let menu_width = context_menu_width(items, window);
@@ -5376,8 +5398,8 @@ fn render_context_menu_item(
     path: Vec<usize>,
     hovered_path: &[usize],
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let visually_active = context_menu_item_is_visually_active(item, hovered_path, &path);
@@ -5442,8 +5464,8 @@ fn context_menu_action_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
@@ -5477,8 +5499,8 @@ fn context_menu_submenu_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     context_menu_row_base(
@@ -5504,7 +5526,7 @@ fn context_menu_detail_row(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> AnyElement {
     let id = match label {
@@ -5548,8 +5570,8 @@ fn context_menu_row_base(
     path: Vec<usize>,
     visually_active: bool,
     cx: &mut Context<ExplorerView>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
 ) -> gpui::Stateful<Div> {
     let id = id.to_owned();
@@ -5577,6 +5599,7 @@ fn context_menu_row_base(
                 native_file_icon,
                 native_path_icons,
                 url_icon_paths,
+                cx,
             ))
         })
 }
@@ -5693,9 +5716,10 @@ fn context_menu_separator() -> Div {
 
 fn context_menu_icon_slot(
     icon: Option<ContextMenuIcon>,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
+    cx: &mut Context<ExplorerView>,
 ) -> Div {
     div()
         .flex()
@@ -5706,7 +5730,13 @@ fn context_menu_icon_slot(
         .flex_shrink_0()
         .when_some(
             icon.and_then(|icon| {
-                context_menu_icon_element(icon, native_file_icon, native_path_icons, url_icon_paths)
+                context_menu_icon_element(
+                    icon,
+                    native_file_icon,
+                    native_path_icons,
+                    url_icon_paths,
+                    cx,
+                )
             }),
             |this, icon| this.child(icon),
         )
@@ -5714,9 +5744,10 @@ fn context_menu_icon_slot(
 
 fn context_menu_icon_element(
     icon: ContextMenuIcon,
-    native_file_icon: Option<&Arc<Image>>,
-    native_path_icons: &HashMap<PathBuf, Arc<Image>>,
+    native_file_icon: Option<&Arc<gpui::RenderImage>>,
+    native_path_icons: &HashMap<PathBuf, Arc<gpui::RenderImage>>,
     url_icon_paths: &HashMap<String, PathBuf>,
+    cx: &mut Context<ExplorerView>,
 ) -> Option<AnyElement> {
     Some(match icon {
         ContextMenuIcon::Cut => gpui::img(CUT_ICON.clone())
@@ -5786,21 +5817,25 @@ fn context_menu_icon_element(
             }
         }
         ContextMenuIcon::ImagePath(path) => {
-            context_menu_image_path_icon(path, ContextMenuIconImageFallback::None)
+            context_menu_image_path_icon(path, ContextMenuIconImageFallback::None, cx)
         }
         ContextMenuIcon::ImagePathWithExecutableFallback(path) => {
-            context_menu_image_path_icon(path, ContextMenuIconImageFallback::Executable)
+            context_menu_image_path_icon(path, ContextMenuIconImageFallback::Executable, cx)
         }
         ContextMenuIcon::ImageUrl(url) => url_icon_paths
             .get(&url)
             .map(|path| {
-                context_menu_image_path_icon(path.clone(), ContextMenuIconImageFallback::None)
+                context_menu_image_path_icon(path.clone(), ContextMenuIconImageFallback::None, cx)
             })
             .unwrap_or_else(|| div().into_any_element()),
         ContextMenuIcon::ImageUrlWithExecutableFallback(url) => url_icon_paths
             .get(&url)
             .map(|path| {
-                context_menu_image_path_icon(path.clone(), ContextMenuIconImageFallback::Executable)
+                context_menu_image_path_icon(
+                    path.clone(),
+                    ContextMenuIconImageFallback::Executable,
+                    cx,
+                )
             })
             .unwrap_or_else(|| executable_icon_sized(CONTEXT_MENU_ICON_SIZE).into_any_element()),
         ContextMenuIcon::NativePath(path) => native_path_icons
@@ -5843,8 +5878,10 @@ enum ContextMenuIconImageFallback {
 fn context_menu_image_path_icon(
     path: PathBuf,
     fallback: ContextMenuIconImageFallback,
+    cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
-    gpui::img(path)
+    let owner = cx.entity().downgrade();
+    gpui::img(super::resource_images::source(path.into(), owner, cx))
         .w(px(CONTEXT_MENU_ICON_SIZE))
         .h(px(CONTEXT_MENU_ICON_SIZE))
         .with_fallback(move || match fallback {
@@ -6874,7 +6911,7 @@ fn name_cell_container(name_column_width: f32, manual_width: bool) -> Div {
 fn name_cell_visual(
     ix: usize,
     entry: &FileEntry,
-    app_icon: Option<Arc<Image>>,
+    app_icon: Option<Arc<gpui::RenderImage>>,
     show_file_name_extensions: bool,
     show_full_path: bool,
     widths: DetailsNameWidths,
@@ -7088,7 +7125,7 @@ fn details_name_text(
 
 fn rename_name_cell(
     entry: &FileEntry,
-    app_icon: Option<Arc<Image>>,
+    app_icon: Option<Arc<gpui::RenderImage>>,
     focus_handle: Option<FocusHandle>,
     name_column_width: f32,
     manual_width: bool,
@@ -7168,7 +7205,10 @@ fn rename_name_cell(
     cell.child(entry_icon(entry, app_icon)).child(input)
 }
 
-pub(super) fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> AnyElement {
+pub(super) fn entry_icon(
+    entry: &FileEntry,
+    app_icon: Option<Arc<gpui::RenderImage>>,
+) -> AnyElement {
     if super::remote_fs::is_remote(&entry.path) {
         if entry.uses_directory_shortcut_icon() {
             return directory_shortcut_icon().into_any_element();
@@ -7216,7 +7256,7 @@ pub(super) fn entry_icon(entry: &FileEntry, app_icon: Option<Arc<Image>>) -> Any
 fn large_entry_icon(
     entry: &FileEntry,
     image_thumbnail: Option<Arc<gpui::RenderImage>>,
-    app_icon: Option<Arc<Image>>,
+    app_icon: Option<Arc<gpui::RenderImage>>,
 ) -> AnyElement {
     if let Some(image_thumbnail) = image_thumbnail {
         return gpui::img(image_thumbnail)
@@ -11441,6 +11481,105 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn visible_thumbnail_survives_scene_reuse_and_is_released_after_navigation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let empty = TempDir::new();
+        write_test_png(&temp.path().join("image.png"));
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::LargeIcons);
+        cx.cx.update(|app| {
+            crate::explorer::image_thumbnails::set_memory_limits_for_test(app, 0, 0);
+        });
+        let mut image = None;
+        for _ in 0..20 {
+            cx.run_until_parked();
+            image = cx.read_entity(&view, |view, _| {
+                view.rendered_image_leases
+                    .borrow()
+                    .values()
+                    .next()
+                    .map(std::sync::Arc::downgrade)
+            });
+            if image.is_some() {
+                break;
+            }
+        }
+        let image = image.expect("rendered thumbnail is leased by its view");
+        for _ in 0..3 {
+            cx.cx.update(crate::explorer::image_memory::trim_memory);
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            assert!(image.upgrade().is_some(), "visible pixels remain pinned");
+        }
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate_to_directory_with_watcher(
+                    empty.path().to_path_buf(),
+                    crate::explorer::navigation::HistoryMode::Record,
+                    cx,
+                );
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        cx.cx.update(crate::explorer::image_memory::trim_memory);
+        assert!(image.upgrade().is_none(), "obsolete pixels are released");
+    }
+
+    #[gpui::test]
+    fn repeated_gif_hover_sessions_release_decoded_frames(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("loop.gif");
+        write_test_gif_with_dimensions(&path, 8, 4);
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+
+        for _ in 0..6 {
+            hover_selector(cx, "explorer-entry-0", alt_modifiers());
+            run_until_debug_bounds(cx, "image-hover-preview-animated-gif");
+            let mut decoded = None;
+            for _ in 0..10 {
+                cx.run_until_parked();
+                decoded = cx
+                    .update(|window, app| {
+                        let cache = view
+                            .read(app)
+                            .animated_hover_image_cache
+                            .as_ref()
+                            .unwrap()
+                            .2
+                            .clone();
+                        cache.update(app, |cache, app| {
+                            cache.load(&path.clone().into(), window, app)
+                        })
+                    })
+                    .and_then(Result::ok);
+                if decoded.is_some() {
+                    break;
+                }
+            }
+            let image = decoded.expect("animated GIF decoded");
+            assert_eq!(image.frame_count(), 2);
+            let weak = std::sync::Arc::downgrade(&image);
+            drop(image);
+            cx.simulate_modifiers_change(Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.read_entity(&view, |view, _| view.animated_hover_image_cache.is_none()));
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            assert!(
+                weak.upgrade().is_none(),
+                "decoded frames should leave with the preview (owners: {})",
+                weak.strong_count()
+            );
+        }
     }
 
     #[gpui::test]

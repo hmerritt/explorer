@@ -576,7 +576,11 @@ pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyEl
     image_icon(image, size, size)
 }
 
-pub(super) fn image_icon(image: Arc<Image>, width: f32, height: f32) -> AnyElement {
+pub(super) fn image_icon(
+    image: impl Into<gpui::ImageSource>,
+    width: f32,
+    height: f32,
+) -> AnyElement {
     img(image)
         .w(px(width))
         .h(px(height))

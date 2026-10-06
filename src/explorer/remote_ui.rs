@@ -263,7 +263,7 @@ pub(super) type TransferControlHandler =
 #[derive(Default)]
 pub(super) struct TransferPanelParts {
     pub(super) jobs: Vec<TransferPanelJob>,
-    pub(super) native_icons: HashMap<TransferJobId, Arc<gpui::Image>>,
+    pub(super) native_icons: HashMap<TransferJobId, Arc<gpui::RenderImage>>,
 }
 
 impl TransferPanelParts {
@@ -935,7 +935,7 @@ fn transfer_header_cell(
 
 fn render_transfer_job(
     job: TransferPanelJob,
-    native_icon: Option<Arc<gpui::Image>>,
+    native_icon: Option<Arc<gpui::RenderImage>>,
     on_reveal: TransferRevealHandler,
     on_control: TransferControlHandler,
 ) -> AnyElement {
@@ -965,7 +965,7 @@ fn render_transfer_job(
 
 fn render_transfer_row(
     job: TransferPanelJob,
-    native_icon: Option<Arc<gpui::Image>>,
+    native_icon: Option<Arc<gpui::RenderImage>>,
     on_reveal: TransferRevealHandler,
     on_control: TransferControlHandler,
 ) -> AnyElement {

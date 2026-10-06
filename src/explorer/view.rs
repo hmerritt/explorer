@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeSet, HashMap, VecDeque},
     io,
     path::{Path, PathBuf},
@@ -95,6 +96,9 @@ impl PartialEq<PathBuf> for NavigationLocation {
 pub struct ExplorerView {
     pub(super) path: PathBuf,
     pub(super) entries: Vec<FileEntry>,
+    // GPUI's replayable scene does not own the decoded images it references.
+    pub(super) rendered_image_leases: RefCell<HashMap<gpui::ImageId, Arc<gpui::RenderImage>>>,
+    pub(super) resource_image_leases: RefCell<HashMap<gpui::ImageId, Arc<gpui::RenderImage>>>,
     pub(super) all_entries: Vec<FileEntry>,
     pub(super) directory_load_generation: u64,
     pub(super) directory_load_task: Option<Task<()>>,
@@ -157,7 +161,8 @@ pub struct ExplorerView {
     pub(super) image_hover_preview: Option<ImageHoverPreview>,
     pub(super) image_hover_preview_alt: bool,
     pub(super) media_preview_size: u32,
-    pub(super) animated_image_asset_evictions: BTreeSet<String>,
+    pub(super) animated_hover_image_cache:
+        Option<(String, PathBuf, gpui::Entity<gpui::RetainAllImageCache>)>,
     pub(super) video_hover_preview: Option<VideoHoverPreviewSession>,
     pub(super) video_hover_preview_generation: u64,
     pub(super) text_hover_preview: Option<TextHoverPreviewSession>,
@@ -543,6 +548,8 @@ impl ExplorerView {
         Self {
             path: initial_path,
             entries: Vec::new(),
+            rendered_image_leases: RefCell::new(HashMap::new()),
+            resource_image_leases: RefCell::new(HashMap::new()),
             all_entries: Vec::new(),
             directory_load_generation: 0,
             directory_load_task: None,
@@ -603,7 +610,7 @@ impl ExplorerView {
             image_hover_preview: None,
             image_hover_preview_alt: false,
             media_preview_size: settings.view.media_preview_size,
-            animated_image_asset_evictions: BTreeSet::new(),
+            animated_hover_image_cache: None,
             video_hover_preview: None,
             video_hover_preview_generation: 0,
             text_hover_preview: None,
@@ -2414,6 +2421,9 @@ impl ExplorerView {
     }
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
+        self.rendered_image_leases.borrow_mut().clear();
+        self.resource_image_leases.borrow_mut().clear();
+        self.animated_hover_image_cache = None;
         self.cancel_image_thumbnail_extraction(cx);
         self.cancel_video_hover_preview(cx);
         self.cancel_text_hover_preview();

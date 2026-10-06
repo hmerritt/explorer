@@ -72,6 +72,7 @@ impl ImageThumbnailCache {
 }
 
 pub(crate) fn initialize(cx: &mut App) {
+    super::image_memory::initialize(cx);
     let cache_dir = image_thumbnail_cache_dir();
     let cache_writer = start_image_thumbnail_cache_writer(cache_dir.clone(), cx);
     cx.set_global(ImageThumbnailCache::new(cache_dir, cache_writer));
@@ -82,6 +83,15 @@ pub(super) fn initialize_for_test(cx: &mut App) {
     cx.set_global(ImageThumbnailCache {
         inner: RefCell::new(ImageThumbnailCacheInner::new(None)),
     });
+}
+
+#[cfg(test)]
+pub(super) fn set_memory_limits_for_test(cx: &mut App, bytes: usize, entries: usize) {
+    cx.global::<ImageThumbnailCache>()
+        .inner
+        .borrow_mut()
+        .retention
+        .set_limits(bytes, entries);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,6 +144,8 @@ struct ImageThumbnailCacheInner {
     pending: VecDeque<String>,
     loader_running: bool,
     loader_generation: u64,
+    retention: super::image_memory::ImageRetention,
+    retired_images: Vec<Arc<RenderImage>>,
 }
 
 enum ImageThumbnailState {
@@ -208,6 +220,8 @@ impl ImageThumbnailCacheInner {
             pending: VecDeque::new(),
             loader_running: false,
             loader_generation: 0,
+            retention: super::image_memory::ImageRetention::new(32 * 1024 * 1024, 2048),
+            retired_images: Vec::new(),
         }
     }
 
@@ -221,9 +235,11 @@ impl ImageThumbnailCacheInner {
         &mut self,
         request: ImageThumbnailRequest,
     ) -> (Option<CachedThumbnailImage>, Option<u64>) {
+        self.retention.touch(&request.key);
         if let Some(state) = self.states.get(&request.key) {
             if state.should_retry_for_request(&request) {
                 self.states.remove(&request.key);
+                self.retention.remove(&request.key);
             } else {
                 return (state.thumbnail(), None);
             }
@@ -250,15 +266,18 @@ impl ImageThumbnailCacheInner {
     ) -> (HoverImagePreviewLookup, Option<u64>) {
         let standard_request = standard_request.into();
         let preview_size = request.size;
+        self.retention.touch(&request.key);
         if let Some(state) = self.states.get(&request.key) {
             if state.should_retry_for_request(&request) {
                 self.states.remove(&request.key);
+                self.retention.remove(&request.key);
             } else {
                 return (state.hover_preview(), None);
             }
         }
 
         let loading_thumbnail = standard_request.as_ref().and_then(|request| {
+            self.retention.touch(&request.key);
             self.states
                 .get(&request.key)
                 .and_then(ImageThumbnailState::thumbnail)
@@ -403,7 +422,19 @@ impl ImageThumbnailCacheInner {
             },
         };
 
-        self.states.insert(request.key, state);
+        let bytes = match &state {
+            ImageThumbnailState::Ready(image) => super::image_memory::image_bytes(&image.image),
+            _ => 0,
+        };
+        // Allow the requesting view to receive a freshly loaded image before
+        // trimming it, even when all older entries are still visible.
+        let first_paint = state.thumbnail();
+        self.retention.insert(request.key.clone(), bytes);
+        if let Some(previous) = self.states.insert(request.key, state) {
+            self.retire_state(previous);
+        }
+        self.trim();
+        drop(first_paint);
         true
     }
 
@@ -419,6 +450,50 @@ impl ImageThumbnailCacheInner {
             generation,
             bytes.and_then(cached_thumbnail_image_from_png_bytes),
         )
+    }
+
+    fn retire_state(&mut self, state: ImageThumbnailState) {
+        match state {
+            ImageThumbnailState::Ready(image) => self.retired_images.push(image.image),
+            ImageThumbnailState::Pending {
+                loading_thumbnail: Some(image),
+                ..
+            }
+            | ImageThumbnailState::Loading {
+                loading_thumbnail: Some(image),
+                ..
+            } => {
+                // The standard cache entry owns cleanup of this placeholder.
+                // Queueing another strong reference would pin it indefinitely.
+                if !self.states.values().any(|state| {
+                    matches!(state, ImageThumbnailState::Ready(ready)
+                        if Arc::ptr_eq(&ready.image, &image.image))
+                }) {
+                    self.retired_images.push(image.image);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn ready_thumbnail(&mut self, key: &str) -> Option<CachedThumbnailImage> {
+        self.retention.touch(key);
+        self.states
+            .get(key)
+            .and_then(ImageThumbnailState::thumbnail)
+    }
+
+    fn trim(&mut self) {
+        let states = &self.states;
+        let keys = self.retention.evict(|key| {
+            matches!(states.get(key), Some(ImageThumbnailState::Ready(image))
+                if Arc::strong_count(&image.image) > 1)
+        });
+        for key in keys {
+            if let Some(state) = self.states.remove(&key) {
+                self.retire_state(state);
+            }
+        }
     }
 
     fn cancel_directory(&mut self, directory: &Path) -> Option<u64> {
@@ -445,21 +520,30 @@ impl ImageThumbnailCacheInner {
         });
 
         let mut cancelled_loading = false;
-        self.states.retain(|_, state| match state {
-            ImageThumbnailState::Pending { request, .. }
-                if request.directory == directory && should_cancel(request) =>
-            {
-                false
+        let keys = self
+            .states
+            .iter()
+            .filter_map(|(key, state)| match state {
+                ImageThumbnailState::Pending { request, .. }
+                    if request.directory == directory && should_cancel(request) =>
+                {
+                    Some(key.clone())
+                }
+                ImageThumbnailState::Loading {
+                    request, cancel, ..
+                } if request.directory == directory && should_cancel(request) => {
+                    cancel.store(true, Ordering::Relaxed);
+                    cancelled_loading = true;
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(state) = self.states.remove(&key) {
+                self.retire_state(state);
             }
-            ImageThumbnailState::Loading {
-                request, cancel, ..
-            } if request.directory == directory && should_cancel(request) => {
-                cancel.store(true, Ordering::Relaxed);
-                cancelled_loading = true;
-                false
-            }
-            _ => true,
-        });
+        }
 
         if cancelled_loading {
             self.loader_running = false;
@@ -468,6 +552,18 @@ impl ImageThumbnailCacheInner {
 
         self.start_loader()
     }
+}
+
+pub(super) fn trim_memory(cx: &mut App) {
+    let images = cx
+        .try_global::<ImageThumbnailCache>()
+        .map(|cache| {
+            let mut inner = cache.inner.borrow_mut();
+            inner.trim();
+            std::mem::take(&mut inner.retired_images)
+        })
+        .unwrap_or_default();
+    super::image_memory::retire(images, cx);
 }
 
 impl ImageThumbnailState {
@@ -534,7 +630,7 @@ impl ExplorerView {
             start_image_thumbnail_loader(cx, generation);
         }
 
-        thumbnail.map(|thumbnail| thumbnail.image)
+        thumbnail.map(|thumbnail| self.retain_rendered_image(thumbnail.image))
     }
 
     pub(super) fn hover_image_preview_for_entry(
@@ -564,6 +660,18 @@ impl ExplorerView {
             start_image_thumbnail_loader(cx, generation);
         }
 
+        match &preview {
+            HoverImagePreviewLookup::Ready(image) => {
+                self.retain_rendered_image(image.image.clone());
+            }
+            HoverImagePreviewLookup::Loading {
+                thumbnail: Some(image),
+                ..
+            } => {
+                self.retain_rendered_image(image.image.clone());
+            }
+            _ => {}
+        }
         Some(preview)
     }
 
@@ -580,17 +688,14 @@ impl ExplorerView {
             return None;
         }
 
-        cx.try_global::<ImageThumbnailCache>().and_then(|cache| {
-            cache
-                .inner
-                .borrow()
-                .states
-                .get(&request.key)
-                .and_then(ImageThumbnailState::thumbnail)
-        })
+        cx.try_global::<ImageThumbnailCache>()
+            .and_then(|cache| cache.inner.borrow_mut().ready_thumbnail(&request.key))
     }
 
     pub(super) fn cancel_image_thumbnail_extraction(&mut self, cx: &mut Context<Self>) {
+        self.rendered_image_leases.borrow_mut().clear();
+        self.resource_image_leases.borrow_mut().clear();
+        self.animated_hover_image_cache = None;
         let directory = self.path.clone();
         let loader_generation = cx
             .try_global::<ImageThumbnailCache>()
@@ -775,12 +880,15 @@ fn start_image_thumbnail_loader(cx: &mut Context<ExplorerView>, generation: u64)
 
             let commit_started = timings.now();
             let finished = cx
-                .update_global::<ImageThumbnailCache, _>(|cache, _| {
-                    cache.inner.borrow_mut().finish_prepared_request(
+                .update_global::<ImageThumbnailCache, _>(|cache, cx| {
+                    let finished = cache.inner.borrow_mut().finish_prepared_request(
                         job.request,
                         job.generation,
                         thumbnail.image,
-                    )
+                    );
+                    let images = std::mem::take(&mut cache.inner.borrow_mut().retired_images);
+                    super::image_memory::retire(images, cx);
+                    finished
                 })
                 .unwrap_or(false);
             timings.record_commit(commit_started);
@@ -1875,6 +1983,166 @@ impl StableHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run in separate processes with and without EXPLORER_MEMORY_SOAK_BASELINE
+    /// to compare Windows private bytes / working set for the original retain-all
+    /// policy and the bounded cache. This profiles cache ownership, not the UI.
+    #[test]
+    #[ignore = "manual process-memory comparison"]
+    fn thumbnail_cache_memory_soak() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        if std::env::var_os("EXPLORER_MEMORY_SOAK_BASELINE").is_some() {
+            cache.retention =
+                super::super::image_memory::ImageRetention::new(usize::MAX, usize::MAX);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        for batch in 0..6 {
+            for item in 0..1000 {
+                let request = request(&format!("image-{batch}-{item}"), &format!("folder-{batch}"));
+                let (_, generation) = cache.thumbnail_for_request(request.clone());
+                let generation = generation.unwrap();
+                cache.next_load_job(generation).unwrap();
+                let image = cached_thumbnail_image_from_rgba(image::RgbaImage::from_pixel(
+                    128,
+                    128,
+                    image::Rgba([32, 64, 128, 255]),
+                ));
+                assert!(cache.finish_prepared_request(request, generation, Some(image)));
+                cache.next_load_job(generation);
+                cache.retired_images.clear();
+            }
+            println!(
+                "batch={} entries={} decoded_mib={:.2}",
+                batch + 1,
+                cache.states.len(),
+                cache.retention.retained_bytes() as f64 / (1024.0 * 1024.0)
+            );
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn browsing_thousands_of_thumbnails_bounds_decoded_memory_and_failures() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        for i in 0..5000 {
+            let request = request(&format!("image-{i}"), &format!("folder-{i}"));
+            let (_, generation) = cache.thumbnail_for_request(request.clone());
+            let generation = generation.unwrap();
+            cache.next_load_job(generation).unwrap();
+            let image = cached_thumbnail_image_from_rgba(image::RgbaImage::new(128, 128));
+            assert!(cache.finish_prepared_request(request, generation, Some(image)));
+            cache.next_load_job(generation);
+            cache.retired_images.clear();
+            assert!(cache.retention.retained_bytes() <= 32 * 1024 * 1024);
+            assert!(cache.states.len() <= 2048);
+        }
+        assert!(!cache.states.contains_key("image-0"));
+        for i in 0..5000 {
+            let request = request(&format!("failed-{i}"), "missing");
+            let (_, generation) = cache.thumbnail_for_request(request.clone());
+            let generation = generation.unwrap();
+            cache.next_load_job(generation).unwrap();
+            assert!(cache.finish_prepared_request(request, generation, None));
+            cache.next_load_job(generation);
+            cache.retired_images.clear();
+            assert!(cache.states.len() <= 2048);
+        }
+    }
+
+    #[test]
+    fn evicted_thumbnail_reloads_from_disk_without_reading_its_source() {
+        let temp = TempDir::new();
+        let mut cache = ImageThumbnailCacheInner::new(Some(temp.path().to_path_buf()));
+        let request = ImageThumbnailRequest {
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            path: temp.path().join("unavailable-source.png"),
+            ..request("0123456789abcdef", "remote-folder")
+        };
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            &request.key,
+            &encode_rgba_qoi_bytes(image::RgbaImage::new(4, 2).as_raw(), 4, 2).unwrap()
+        ));
+        cache.retention.set_limits(0, 0);
+        for _ in 0..2 {
+            let (_, generation) = cache.thumbnail_for_request(request.clone());
+            let generation = generation.unwrap();
+            let job = cache.next_load_job(generation).unwrap();
+            let loaded = load_or_create_thumbnail_with_timings(
+                &job.request,
+                job.cache_dir.as_deref(),
+                &job.cancel,
+                false,
+            );
+            assert_eq!(loaded.outcome, ImageThumbnailLoadOutcome::CacheHit);
+            assert!(cache.finish_prepared_request(request.clone(), generation, loaded.image));
+            cache.next_load_job(generation);
+            cache.trim();
+            cache.retired_images.clear();
+            assert!(!cache.states.contains_key(&request.key));
+            assert!(
+                thumbnail_file_path(Some(temp.path()), &request.key)
+                    .unwrap()
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn thumbnail_shared_by_panes_is_kept_until_last_consumer_releases_it() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let request = request("shared", "folder");
+        let (_, generation) = cache.thumbnail_for_request(request.clone());
+        let generation = generation.unwrap();
+        cache.next_load_job(generation).unwrap();
+        cache.finish_request(request.clone(), generation, Some(one_pixel_png_bytes()));
+        let first_pane = cache.thumbnail_for_request(request.clone()).0.unwrap();
+        let second_pane = first_pane.clone();
+        let dialog = first_pane.clone();
+        let weak = Arc::downgrade(&first_pane.image);
+        cache.retention = super::super::image_memory::ImageRetention::new(0, 0);
+        cache.retention.insert(request.key.clone(), 4);
+        cache.trim();
+        assert!(cache.states.contains_key(&request.key));
+        drop(first_pane);
+        drop(second_pane);
+        cache.trim();
+        assert!(cache.states.contains_key(&request.key));
+        drop(dialog);
+        cache.trim();
+        assert!(!cache.states.contains_key(&request.key));
+        cache.retired_images.clear();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn finishing_hover_placeholder_does_not_permanently_pin_standard_thumbnail() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let standard = request("standard", "folder");
+        let (_, generation) = cache.thumbnail_for_request(standard.clone());
+        let generation = generation.unwrap();
+        cache.next_load_job(generation).unwrap();
+        cache.finish_request(standard.clone(), generation, Some(one_pixel_png_bytes()));
+        cache.next_load_job(generation);
+        let hover = ImageThumbnailRequest {
+            usage: ImageThumbnailUsage::HoverPreview,
+            key: "hover".into(),
+            ..standard.clone()
+        };
+        let (_, generation) = cache.hover_preview_for_request(hover.clone(), standard.clone());
+        let generation = generation.unwrap();
+        cache.next_load_job(generation).unwrap();
+        cache.finish_request(hover, generation, Some(one_pixel_png_bytes()));
+        assert!(cache.retired_images.is_empty());
+        let image = cache
+            .states
+            .get(&standard.key)
+            .unwrap()
+            .thumbnail()
+            .unwrap();
+        assert_eq!(Arc::strong_count(&image.image), 2);
+    }
     use crate::explorer::{entry::FileEntry, test_support::TempDir};
     use std::io::Cursor;
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 use super::thumbnail_io::{BufferedSource, SourceReader, pool};
-use gpui::{App, RenderImage};
+use gpui::RenderImage;
 #[cfg(any(test, feature = "benchmarks"))]
 use image::ImageEncoder;
 use image::{ImageDecoder, ImageReader};
@@ -213,11 +213,6 @@ pub(super) fn animated_gif_source_for_path(
         path: path.to_path_buf(),
         cache_key,
     })
-}
-
-pub(super) fn evict_animated_image_source_asset(source: &AnimatedImageSource, cx: &mut App) {
-    let resource: gpui::Resource = source.path.clone().into();
-    cx.remove_asset::<gpui::ImgResourceLoader>(&resource);
 }
 
 #[cfg(test)]

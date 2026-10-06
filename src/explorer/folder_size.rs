@@ -39,13 +39,11 @@ impl FolderSizeCache {
     }
 
     fn get_at(&self, path: &Path, now: Instant) -> Option<u64> {
-        let cached = self.entries.borrow().get(path).copied()?;
-        if now.saturating_duration_since(cached.calculated_at) < FOLDER_SIZE_CACHE_TTL {
-            Some(cached.size)
-        } else {
-            self.entries.borrow_mut().remove(path);
-            None
-        }
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|_, value| {
+            now.saturating_duration_since(value.calculated_at) < FOLDER_SIZE_CACHE_TTL
+        });
+        entries.get(path).map(|cached| cached.size)
     }
 
     pub(super) fn insert(&self, path: PathBuf, size: u64) {
@@ -53,7 +51,20 @@ impl FolderSizeCache {
     }
 
     fn insert_at(&self, path: PathBuf, size: u64, calculated_at: Instant) {
-        self.entries.borrow_mut().insert(
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|_, value| {
+            calculated_at.saturating_duration_since(value.calculated_at) < FOLDER_SIZE_CACHE_TTL
+        });
+        if !entries.contains_key(&path) && entries.len() >= 4096 {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, value)| value.calculated_at)
+                .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(
             path,
             CachedFolderSize {
                 size,
@@ -495,6 +506,32 @@ mod tests {
             Some(42)
         );
         assert_eq!(cache.get_at(&path, now + FOLDER_SIZE_CACHE_TTL), None);
+    }
+
+    #[test]
+    fn folder_size_cache_bounds_entries_and_prunes_unvisited_expired_folders() {
+        let cache = FolderSizeCache::new();
+        let now = Instant::now();
+        for i in 0..5000 {
+            cache.insert_at(
+                PathBuf::from(format!("folder-{i}")),
+                i,
+                now + Duration::from_millis(i),
+            );
+        }
+        assert_eq!(cache.entries.borrow().len(), 4096);
+        assert!(!cache.entries.borrow().contains_key(Path::new("folder-0")));
+        cache.insert_at(
+            PathBuf::from("new"),
+            1,
+            now + FOLDER_SIZE_CACHE_TTL + Duration::from_secs(5),
+        );
+        assert_eq!(cache.entries.borrow().len(), 1);
+        assert_eq!(
+            cache.get_at(Path::new("unvisited"), now + FOLDER_SIZE_CACHE_TTL * 3),
+            None
+        );
+        assert!(cache.entries.borrow().is_empty());
     }
 
     #[test]

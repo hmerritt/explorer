@@ -678,6 +678,7 @@ fn property_image_preview_copy_payload(preview: &PropertyImagePreview) -> Proper
 }
 
 pub(super) struct PropertiesDialog {
+    native_icon_leases: RefCell<HashMap<gpui::ImageId, Arc<RenderImage>>>,
     target: PropertyTarget,
     explorer: WeakEntity<ExplorerView>,
     date_format: String,
@@ -829,6 +830,7 @@ impl PropertiesDialog {
             code_state: PropertyCodeState::NotStarted,
             code_generation: 0,
             details_render_cache_key: None,
+            native_icon_leases: RefCell::new(HashMap::new()),
             details_render_cache: Vec::new(),
             details_scroll_handle: ScrollHandle::new(),
             details_scrollbar_hovered: false,
@@ -2576,6 +2578,7 @@ impl PropertiesDialog {
 
 impl Render for PropertiesDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.native_icon_leases.borrow_mut().clear();
         div()
             .font(self.font.clone())
             .key_context("ExplorerDialog PropertiesDialog")
@@ -3268,13 +3271,22 @@ impl PropertiesDialog {
             })
     }
 
-    fn native_icon_for_path(&self, path: &Path, cx: &mut Context<Self>) -> Option<Arc<Image>> {
+    fn native_icon_for_path(
+        &self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         self.explorer
             .update(cx, |explorer, cx| {
-                explorer.native_icon_for_path(path, NativeIconSize::Details, cx)
+                explorer.native_icon_for_path_unleased(path, NativeIconSize::Details, cx)
             })
             .ok()
             .flatten()
+            .inspect(|image| {
+                self.native_icon_leases
+                    .borrow_mut()
+                    .insert(image.id, image.clone());
+            })
     }
 
     fn render_attributes_row(
@@ -5553,13 +5565,11 @@ impl FileChecksumCache {
     }
 
     fn get_at(&self, key: &FileChecksumCacheKey, now: Instant) -> Option<FileChecksums> {
-        let cached = self.entries.borrow().get(key).cloned()?;
-        if now.saturating_duration_since(cached.calculated_at) < FILE_CHECKSUM_CACHE_TTL {
-            Some(cached.checksums)
-        } else {
-            self.entries.borrow_mut().remove(key);
-            None
-        }
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|_, value| {
+            now.saturating_duration_since(value.calculated_at) < FILE_CHECKSUM_CACHE_TTL
+        });
+        entries.get(key).map(|cached| cached.checksums.clone())
     }
 
     fn insert(&self, key: FileChecksumCacheKey, checksums: FileChecksums) {
@@ -5572,7 +5582,20 @@ impl FileChecksumCache {
         checksums: FileChecksums,
         calculated_at: Instant,
     ) {
-        self.entries.borrow_mut().insert(
+        let mut entries = self.entries.borrow_mut();
+        entries.retain(|_, value| {
+            calculated_at.saturating_duration_since(value.calculated_at) < FILE_CHECKSUM_CACHE_TTL
+        });
+        if !entries.contains_key(&key) && entries.len() >= 4096 {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, value)| value.calculated_at)
+                .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(
             key,
             CachedFileChecksums {
                 checksums,
@@ -14270,6 +14293,41 @@ mod tests {
             Some(checksums)
         );
         assert_eq!(cache.get_at(&key, now + FILE_CHECKSUM_CACHE_TTL), None);
+    }
+
+    #[test]
+    fn checksum_cache_bounds_entries_and_prunes_unvisited_expired_files() {
+        let cache = FileChecksumCache::new();
+        let now = Instant::now();
+        let checksums = FileChecksums {
+            crc32: "crc".into(),
+            sha256: "sha".into(),
+        };
+        for i in 0..5000 {
+            cache.insert_at(
+                FileChecksumCacheKey {
+                    path: format!("file-{i}").into(),
+                    size: i,
+                    modified: None,
+                },
+                checksums.clone(),
+                now + Duration::from_millis(i),
+            );
+        }
+        assert_eq!(cache.entries.borrow().len(), 4096);
+        let key = FileChecksumCacheKey {
+            path: "new".into(),
+            size: 1,
+            modified: None,
+        };
+        cache.insert_at(
+            key.clone(),
+            checksums,
+            now + FILE_CHECKSUM_CACHE_TTL + Duration::from_secs(5),
+        );
+        assert_eq!(cache.entries.borrow().len(), 1);
+        assert_eq!(cache.get_at(&key, now + FILE_CHECKSUM_CACHE_TTL * 3), None);
+        assert!(cache.entries.borrow().is_empty());
     }
 
     #[test]

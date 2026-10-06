@@ -9,7 +9,7 @@ use std::{
 };
 
 use futures::AsyncReadExt;
-use gpui::{App, BorrowAppContext, Context, Global, Image};
+use gpui::{App, BorrowAppContext, Context, Global, RenderImage};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -90,6 +90,7 @@ impl UrlIconCache {
 }
 
 pub(crate) fn initialize(cx: &mut App) {
+    super::image_memory::initialize(cx);
     cx.set_global(NativeIconCache::new());
     cx.set_global(UrlIconCache::new());
 }
@@ -142,6 +143,8 @@ struct NativeIconCacheInner {
     loader_running: bool,
     next_load_id: u64,
     store: DiskIconStore,
+    retention: super::image_memory::ImageRetention,
+    retired_images: Vec<Arc<RenderImage>>,
 }
 
 enum NativeIconState {
@@ -151,10 +154,10 @@ enum NativeIconState {
     },
     Loading {
         load_id: u64,
-        icon: Option<Arc<Image>>,
+        icon: Option<Arc<RenderImage>>,
     },
-    Ready(Arc<Image>),
-    Failed(Option<Arc<Image>>),
+    Ready(Arc<RenderImage>),
+    Failed(Option<Arc<RenderImage>>),
 }
 
 struct NativeIconLoadJob {
@@ -170,6 +173,7 @@ struct UrlIconCacheInner {
     states: HashMap<String, UrlIconState>,
     pending: VecDeque<String>,
     loader_running: bool,
+    retention: super::image_memory::ImageRetention,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,10 +196,13 @@ impl NativeIconCacheInner {
             loader_running: false,
             next_load_id: 0,
             store,
+            retention: super::image_memory::ImageRetention::new(8 * 1024 * 1024, 512),
+            retired_images: Vec::new(),
         }
     }
 
-    fn icon_for_request(&mut self, request: NativeIconRequest) -> (Option<Arc<Image>>, bool) {
+    fn icon_for_request(&mut self, request: NativeIconRequest) -> (Option<Arc<RenderImage>>, bool) {
+        self.retention.touch(&request.key);
         if let Some(state) = self.states.get(&request.key) {
             return (state.icon(), false);
         }
@@ -253,10 +260,20 @@ impl NativeIconCacheInner {
         None
     }
 
+    #[cfg(test)]
     fn publish_stale_icon(&mut self, key: &str, load_id: u64, bytes: Vec<u8>) -> bool {
-        let Some(icon) = valid_png_bytes(bytes).map(image_from_png_bytes) else {
+        let Some(icon) = image_from_png_bytes(bytes) else {
             return false;
         };
+        self.publish_prepared_stale_icon(key, load_id, icon)
+    }
+
+    fn publish_prepared_stale_icon(
+        &mut self,
+        key: &str,
+        load_id: u64,
+        icon: Arc<RenderImage>,
+    ) -> bool {
         let Some(NativeIconState::Loading {
             load_id: current_load_id,
             icon: current_icon,
@@ -278,11 +295,22 @@ impl NativeIconCacheInner {
         true
     }
 
+    #[cfg(test)]
     fn finish_request(
         &mut self,
         request: NativeIconRequest,
         load_id: u64,
         bytes: Option<Vec<u8>>,
+    ) -> bool {
+        let prepared = prepare_native_icon(request.size, bytes);
+        self.finish_prepared_request(request, load_id, prepared)
+    }
+
+    fn finish_prepared_request(
+        &mut self,
+        request: NativeIconRequest,
+        load_id: u64,
+        prepared: Option<(Vec<u8>, Arc<RenderImage>)>,
     ) -> bool {
         let stale_icon = match self.states.remove(&request.key) {
             Some(NativeIconState::Loading {
@@ -295,18 +323,42 @@ impl NativeIconCacheInner {
             }
             None => return false,
         };
-
-        let state =
-            match bytes.and_then(|bytes| normalize_native_icon_png_bytes(request.size, bytes)) {
-                Some(bytes) => {
-                    self.store.write_mapping(&request.key, &bytes);
-                    NativeIconState::Ready(image_from_png_bytes(bytes))
+        let state = match prepared {
+            Some((bytes, icon)) => {
+                self.store.write_mapping(&request.key, &bytes);
+                if let Some(stale) = stale_icon {
+                    self.retired_images.push(stale);
                 }
-                None => NativeIconState::Failed(stale_icon),
-            };
-
+                NativeIconState::Ready(icon)
+            }
+            None => NativeIconState::Failed(stale_icon),
+        };
+        let bytes = state
+            .icon_ref()
+            .map_or(0, |icon| super::image_memory::image_bytes(icon));
+        let first_paint = state.icon();
+        self.retention.insert(request.key.clone(), bytes);
         self.states.insert(request.key, state);
+        self.trim();
+        drop(first_paint);
         true
+    }
+
+    fn trim(&mut self) {
+        let states = &self.states;
+        let keys = self.retention.evict(|key| {
+            states
+                .get(key)
+                .and_then(NativeIconState::icon_ref)
+                .is_some_and(|icon| Arc::strong_count(icon) > 1)
+        });
+        for key in keys {
+            if let Some(state) = self.states.remove(&key) {
+                if let Some(icon) = state.icon() {
+                    self.retired_images.push(icon);
+                }
+            }
+        }
     }
 
     fn invalidate_requests(&mut self, requests: &[NativeIconRequest]) -> bool {
@@ -324,7 +376,13 @@ impl NativeIconCacheInner {
         changed |= self.pending.len() != before_pending_len;
 
         for key in &keys {
-            changed |= self.states.remove(key).is_some();
+            self.retention.remove(key);
+            if let Some(state) = self.states.remove(key) {
+                if let Some(icon) = state.icon() {
+                    self.retired_images.push(icon);
+                }
+                changed = true;
+            }
         }
         changed |= self.store.remove_mappings(keys.iter().map(String::as_str));
 
@@ -339,10 +397,12 @@ impl UrlIconCacheInner {
             states: HashMap::new(),
             pending: VecDeque::new(),
             loader_running: false,
+            retention: super::image_memory::ImageRetention::new(0, 512),
         }
     }
 
     fn icon_path_for_url(&mut self, url: &str) -> (Option<PathBuf>, bool) {
+        self.retention.touch(url);
         match self.states.get(url) {
             Some(UrlIconState::Ready(path)) if path.is_file() => {
                 return (Some(path.clone()), false);
@@ -356,8 +416,7 @@ impl UrlIconCacheInner {
         }
 
         if let Some(path) = existing_url_icon_file_path(self.cache_dir.as_deref(), url) {
-            self.states
-                .insert(url.to_owned(), UrlIconState::Ready(path.clone()));
+            self.complete(url.to_owned(), UrlIconState::Ready(path.clone()));
             return (Some(path), false);
         }
 
@@ -365,6 +424,7 @@ impl UrlIconCacheInner {
             return (None, false);
         }
 
+        self.retention.remove(url);
         self.states.insert(url.to_owned(), UrlIconState::Pending);
         self.pending.push_back(url.to_owned());
         let should_start_loader = !self.loader_running;
@@ -376,7 +436,7 @@ impl UrlIconCacheInner {
         loop {
             let url = self.pending.pop_front()?;
             let Some(path) = preferred_url_icon_file_path(self.cache_dir.as_deref(), &url) else {
-                self.states.insert(
+                self.complete(
                     url,
                     UrlIconState::Failed {
                         retry_after: Instant::now() + URL_ICON_RETRY_INTERVAL,
@@ -394,16 +454,47 @@ impl UrlIconCacheInner {
             .unwrap_or_else(|| UrlIconState::Failed {
                 retry_after: Instant::now() + URL_ICON_RETRY_INTERVAL,
             });
-        self.states.insert(url, state);
+        self.complete(url, state);
 
         if self.pending.is_empty() {
             self.loader_running = false;
         }
     }
+
+    fn complete(&mut self, url: String, state: UrlIconState) {
+        self.retention.insert(url.clone(), 0);
+        self.states.insert(url, state);
+        for key in self.retention.evict(|_| false) {
+            self.states.remove(&key);
+        }
+    }
+}
+
+pub(super) fn trim_memory(cx: &mut App) {
+    let images = cx
+        .try_global::<NativeIconCache>()
+        .map(|cache| {
+            let mut inner = cache.inner.borrow_mut();
+            inner.trim();
+            std::mem::take(&mut inner.retired_images)
+        })
+        .unwrap_or_default();
+    super::image_memory::retire(images, cx);
 }
 
 impl NativeIconState {
-    fn icon(&self) -> Option<Arc<Image>> {
+    fn icon_ref(&self) -> Option<&Arc<RenderImage>> {
+        match self {
+            Self::Ready(icon)
+            | Self::Loading {
+                icon: Some(icon), ..
+            }
+            | Self::Failed(Some(icon)) => Some(icon),
+            _ => None,
+        }
+    }
+
+    fn icon(&self) -> Option<Arc<RenderImage>> {
         match self {
             Self::Ready(icon) => Some(icon.clone()),
             Self::Loading {
@@ -442,8 +533,9 @@ impl ExplorerView {
         entry: &FileEntry,
         size: NativeIconSize,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         self.native_icon_for_request(native_icon_request_for_entry(entry, size), cx)
+            .map(|image| self.retain_rendered_image(image))
     }
 
     pub(super) fn native_icon_for_path(
@@ -451,8 +543,25 @@ impl ExplorerView {
         path: &Path,
         size: NativeIconSize,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
+        self.native_icon_for_path_unleased(path, size, cx)
+            .map(|image| self.retain_rendered_image(image))
+    }
+
+    pub(super) fn native_icon_for_path_unleased(
+        &mut self,
+        path: &Path,
+        size: NativeIconSize,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<RenderImage>> {
         self.native_icon_for_request(native_icon_request_for_path(path, size), cx)
+    }
+
+    pub(super) fn retain_rendered_image(&self, image: Arc<RenderImage>) -> Arc<RenderImage> {
+        self.rendered_image_leases
+            .borrow_mut()
+            .insert(image.id, image.clone());
+        image
     }
 
     pub(super) fn cached_url_icon_path(
@@ -476,7 +585,7 @@ impl ExplorerView {
         &mut self,
         request: Option<NativeIconRequest>,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<Image>> {
+    ) -> Option<Arc<RenderImage>> {
         if !self.resolve_icons {
             return None;
         }
@@ -524,6 +633,7 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
                 let stale_read_started = timings.now();
                 let stale_task = cx.background_executor().spawn(async move {
                     read_cached_icon_by_hash(cache_dir.as_deref(), &stale_hash)
+                        .and_then(image_from_png_bytes)
                 });
 
                 let stale_bytes = stale_task.await;
@@ -538,7 +648,7 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
                             cache
                                 .inner
                                 .borrow_mut()
-                                .publish_stale_icon(&key, load_id, bytes)
+                                .publish_prepared_stale_icon(&key, load_id, bytes)
                         })
                         .ok()
                         .unwrap_or(false);
@@ -548,19 +658,21 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
 
             let request = job.request.clone();
             let platform_extract_started = timings.now();
-            let load_task = cx
-                .background_executor()
-                .spawn(async move { load_platform_icon_png_bytes(&request) });
+            let load_task = cx.background_executor().spawn(async move {
+                prepare_native_icon(request.size, load_platform_icon_png_bytes(&request))
+            });
             let icon = load_task.await;
             let fresh_ok = icon.is_some();
             timings.record_platform_extract(platform_extract_started, fresh_ok);
 
             let fresh_commit_started = timings.now();
-            let _committed = cx.update_global::<NativeIconCache, _>(|cache, _| {
+            let _committed = cx.update_global::<NativeIconCache, _>(|cache, cx| {
                 cache
                     .inner
                     .borrow_mut()
-                    .finish_request(job.request, job.load_id, icon);
+                    .finish_prepared_request(job.request, job.load_id, icon);
+                let images = std::mem::take(&mut cache.inner.borrow_mut().retired_images);
+                super::image_memory::retire(images, cx);
             });
             timings.record_fresh_commit(fresh_commit_started);
             timings.record_request_total(request_started);
@@ -1878,8 +1990,23 @@ unsafe fn png_from_ns_image(icon: cocoa::base::id, size: NativeIconSize) -> Opti
     valid_png_bytes(bytes)
 }
 
-fn image_from_png_bytes(bytes: Vec<u8>) -> Arc<Image> {
-    Arc::new(Image::from_bytes(gpui::ImageFormat::Png, bytes))
+fn prepare_native_icon(
+    size: NativeIconSize,
+    bytes: Option<Vec<u8>>,
+) -> Option<(Vec<u8>, Arc<RenderImage>)> {
+    let bytes = normalize_native_icon_png_bytes(size, bytes?)?;
+    let image = image_from_png_bytes(bytes.clone())?;
+    Some((bytes, image))
+}
+
+fn image_from_png_bytes(bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
+    let mut image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    for pixel in image.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
 }
 
 fn valid_png_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
@@ -2351,6 +2478,65 @@ impl StableHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browsing_thousands_of_native_icons_bounds_pixels_and_failed_states() {
+        let mut cache = cache_with_dir(None);
+        for i in 0..3000 {
+            let request = sized_test_request(&format!("icon-{i}"), NativeIconSize::LargeIcons);
+            let job = start_load_job(&mut cache, request.clone());
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+                image::RgbaImage::new(128, 128),
+            )]));
+            assert!(cache.finish_prepared_request(request, job.load_id, Some((Vec::new(), image))));
+            cache.retired_images.clear();
+            assert!(cache.retention.retained_bytes() <= 8 * 1024 * 1024);
+            assert!(cache.states.len() <= 512);
+        }
+        for i in 0..3000 {
+            let request = test_request(&format!("failed-{i}"));
+            let job = start_load_job(&mut cache, request.clone());
+            assert!(cache.finish_prepared_request(request, job.load_id, None));
+            cache.retired_images.clear();
+            assert!(cache.states.len() <= 512);
+        }
+    }
+
+    #[test]
+    fn icon_eviction_preserves_disk_mapping_and_reloads_stale_icon() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cache = cache_with_dir(Some(temp.path().to_owned()));
+        let request = test_request("disk-icon");
+        let job = start_load_job(&mut cache, request.clone());
+        assert!(cache.finish_request(request.clone(), job.load_id, Some(one_pixel_png_bytes())));
+        cache.retention = super::super::image_memory::ImageRetention::new(0, 0);
+        cache.retention.insert(request.key.clone(), 4096);
+        cache.trim();
+        cache.retired_images.clear();
+        assert!(!cache.states.contains_key(&request.key));
+        let job = start_load_job(&mut cache, request);
+        let hash = job.stale_hash.unwrap();
+        let bytes = read_cached_icon_by_hash(job.cache_dir.as_deref(), &hash).unwrap();
+        assert!(cache.publish_stale_icon(&job.request.key, job.load_id, bytes));
+    }
+
+    #[test]
+    fn invalidating_shared_icon_defers_releasing_its_last_consumer() {
+        let mut cache = cache_with_dir(None);
+        let request = test_request("shared");
+        let job = start_load_job(&mut cache, request.clone());
+        cache.finish_request(request.clone(), job.load_id, Some(one_pixel_png_bytes()));
+        let window = cache.icon_for_request(request.clone()).0.unwrap();
+        let dialog = window.clone();
+        let weak = Arc::downgrade(&window);
+        cache.invalidate_requests(&[request]);
+        assert!(cache.states.is_empty());
+        drop(window);
+        assert!(weak.upgrade().is_some());
+        drop(dialog);
+        cache.retired_images.clear();
+        assert!(weak.upgrade().is_none());
+    }
     #[test]
     fn remote_files_share_local_file_type_icon_requests() {
         for size in [NativeIconSize::Details, NativeIconSize::LargeIcons] {
