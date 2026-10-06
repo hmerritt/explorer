@@ -1,6 +1,6 @@
 # Explorer website
 
-A minimal TanStack Start React website for Explorer, deployed to Netlify. The
+A TanStack Start React download website for Explorer, deployed to Netlify. The
 website is independent of the Rust desktop app: all JavaScript dependencies,
 source, and tooling live in this directory.
 
@@ -30,9 +30,36 @@ retain the `website` base directory.
 Edge Functions emulation is disabled because this starter uses Node serverless
 functions for SSR and has no edge functions. Deno is not required for development.
 
-The homepage is server rendered. Its counter starts at zero and increments in the
-browser, providing a small check that hydration works. Unknown paths return a 404
-with a link back to the homepage.
+The homepage is server rendered, including feature copy and current downloads.
+After hydration the main download action recognizes desktop operating systems;
+macOS and Linux visitors choose their architecture in the download section.
+Unknown paths return a 404 with a link back to the homepage.
+
+## Design, media and release data
+
+`DESIGN.md` records the measured PhotoCraft reference and Explorer adaptations.
+The page uses local Archivo, Inter and Geist Mono fonts; their OFL licenses ship
+alongside the fonts in `public/fonts/`. The site has one light theme.
+
+The homepage loader uses an internal TanStack server function to request the
+latest stable GitHub release. No separate public release API is maintained.
+The server-only service has a five-second timeout, deduplicates concurrent
+requests and caches successful metadata for one hour per server instance.
+Failed refreshes retain the last successful release and retry after a minute;
+cold failures link to GitHub releases. Only published Mac ZIPs, Linux tarballs
+and Windows installer/portable downloads are shown. No API secret is required.
+
+The icon comes from `assets/explorer.png`. The four screenshots in
+`public/images/` are actual Explorer captures using the isolated README demo
+fixture: overview, large icons, image viewer and image properties. PNGs are
+retained for full-size links; the page uses optimized WebP versions.
+`scripts/prepare-images.py` regenerates those WebPs and the 1200 × 630 social
+card from the captures (requires Python and Pillow). The capture dimensions are
+recorded in the page to reserve layout space. Below-the-fold gallery images are
+loaded lazily. Do not substitute generated mockups or personal file listings.
+
+The default public URL for sharing and social metadata is
+`https://hmerritt-explorer.netlify.app`, defined in `src/lib/releases.ts`.
 
 ## Commands
 
@@ -44,7 +71,8 @@ with a link back to the homepage.
 | `bun run lint`         | Run ESLint, treating warnings as failures.                     |
 | `bun run format`       | Format website source and configuration with Prettier.         |
 | `bun run format:check` | Check formatting without modifying files.                      |
-| `bun run check`        | Build, typecheck, lint, then check formatting.                 |
+| `bun run test`         | Test release handling, caching, failures and platform CTAs.    |
+| `bun run check`        | Test, build, typecheck, lint, then check formatting.           |
 
 Commit `bun.lock` when changing dependencies. The generated
 `src/routeTree.gen.ts` is also committed, so standalone type checking works after
@@ -95,8 +123,8 @@ To connect the repository:
 4. Verify the first pull-request preview, then the production build after the
    website changes are merged into `master`.
 
-Use the generated HTTPS `netlify.app` URL for this initial milestone. Custom
-domains and the marketing page are later additions.
+Use the generated HTTPS `netlify.app` URL. Custom domains are a later addition;
+update the public URL constant when one is configured.
 
 See the official [TanStack Start hosting guide](https://tanstack.com/start/latest/docs/framework/react/guide/hosting#netlify-official-partner)
 and [Netlify's TanStack Start guide](https://docs.netlify.com/build/frameworks/framework-setup-guides/tanstack-start/).
@@ -105,9 +133,14 @@ and [Netlify's TanStack Start guide](https://docs.netlify.com/build/frameworks/f
 
 For both the preview and production deployment:
 
-- Confirm HTTP 200 and `Hello, Explorer!` in the raw HTML, before JavaScript runs.
+- Confirm HTTP 200 and the Explorer headline, highlights and download links in
+  raw HTML before JavaScript runs. The initial hero action is generic.
 - Confirm stylesheet and JavaScript requests succeed.
-- Click the counter and check the browser console for hydration errors.
+- Confirm the desktop platform CTA updates after hydration without console errors.
+- Check the mobile menu (including keyboard/Escape), section anchors, copy
+  feedback, full-size image links and the six supported release asset links.
+- Compare the layout at desktop, tablet and phone widths; confirm no horizontal
+  overflow, readable screenshot captions and visible keyboard focus.
 - Request an unknown path and confirm HTTP 404.
 - Check build logs for the website base directory, Bun version, frozen dependency
   installation, successful checks, and the generated serverless function.

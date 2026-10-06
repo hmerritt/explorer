@@ -13,7 +13,8 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
-    "check": "bun run build && bun run typecheck && bun run lint && bun run format:check"
+    "test": "node --test tests/*.test.ts",
+    "check": "bun run test && bun run build && bun run typecheck && bun run lint && bun run format:check"
   },
   "dependencies": {
     "@tanstack/react-router": "1.170.41",
