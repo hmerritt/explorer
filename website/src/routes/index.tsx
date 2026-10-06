@@ -11,6 +11,7 @@ import {
   ButtonLink,
   Arrow,
   DownloadIcon,
+  GitHubIcon,
 } from '../components/site'
 import { REPOSITORY, RELEASES_URL } from '../lib/releases'
 import type { Platform, ReleaseAsset, ReleaseInfo } from '../lib/releases'
@@ -124,7 +125,9 @@ function Hero({
           <ButtonLink href={href} primary down download={!href.startsWith('#')}>
             {label}
           </ButtonLink>
-          <ButtonLink href={REPOSITORY}>View on GitHub</ButtonLink>
+          <ButtonLink href={REPOSITORY} icon={<GitHubIcon />}>
+            View on GitHub
+          </ButtonLink>
         </div>
         <a className="other-downloads label" href="#get-it">
           Other platforms and downloads <Arrow down />
@@ -144,7 +147,7 @@ function Hero({
           aria-label="View the Explorer overview screenshot at full size"
         >
           <img
-            src="/images/overview.webp"
+            src="/images/overview.png"
             alt="Explorer’s details view with demo folders, a pinned sidebar and familiar file controls"
             width="1202"
             height="822"

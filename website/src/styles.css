@@ -165,7 +165,8 @@ h3 {
   line-height: 1;
   flex-shrink: 0;
 }
-.download-icon {
+.download-icon,
+.github-icon {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
@@ -354,22 +355,26 @@ h1 {
   color: var(--blue);
 }
 .platform-label {
-  color: var(--muted);
-  margin-top: 32px;
+  color: rgba(16, 16, 20, 0.42);
+  margin-top: 24px;
 }
 .share-links {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   margin-top: 24px;
 }
 .share-links > span:first-child {
-  padding: 9px 12px;
   color: var(--muted);
 }
+.share-links > span:first-child,
 .share-links > a,
 .share-links button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   padding: 9px 12px;
   border: 1px solid var(--line);
   background: transparent;
@@ -377,8 +382,13 @@ h1 {
   letter-spacing: inherit;
   text-transform: inherit;
 }
-.share-links > a + a {
-  border-left: 0;
+.share-links > :not(:last-child) {
+  margin-right: -1px;
+}
+.copy-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 .share-links a:hover,
 .share-links button:hover {
@@ -486,16 +496,21 @@ h1 {
 .full-size {
   position: absolute;
   right: 16px;
-  top: 16px;
+  bottom: 16px;
   display: inline-flex;
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
   background: var(--paper);
   border: 1px solid var(--line);
-  transition: background 150ms;
+  opacity: 0;
+  transition:
+    opacity 150ms,
+    background 150ms;
 }
-.gallery-image:hover .full-size {
+.gallery-image:hover .full-size,
+.gallery-image:focus-visible .full-size {
+  opacity: 1;
   background: white;
 }
 .gallery-grid .image-caption {
@@ -1047,6 +1062,7 @@ pre {
     row-gap: 8px;
     font-size: 10px;
   }
+  .share-links > span:first-child,
   .share-links > a,
   .share-links button {
     padding-inline: 8px;
